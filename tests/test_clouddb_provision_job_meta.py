@@ -56,6 +56,8 @@ class _CloudDatabase:
     # db_id); on the real model those are SQLAlchemy column descriptors.
     id = ""
     cloud = ""
+    # The model's column default; the apply path reads it through _ps_ineligible_reason.
+    source = "provisioned"
 
     def __init__(self, **kw):
         self.__dict__.update(kw)

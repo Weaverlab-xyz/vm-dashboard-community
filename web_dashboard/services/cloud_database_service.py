@@ -67,6 +67,9 @@ _IMPLEMENTED = {
     # SQL/Flexible-Server engines; reached over a generic PRA tcp tunnel (no SSH
     # jump-host managed-user path — that's AWS-only, gated on cloud=="aws").
     ("oracle", "oci"),
+    # AWS RDS for Oracle — SE2 license-included, single-tenant CDB (one PDB), so
+    # Entitle's PDB-only Oracle connector can manage it.
+    ("oracle", "aws"),
 }
 _PROVIDER = {
     ("postgres", "aws"): "rds",
@@ -79,6 +82,7 @@ _PROVIDER = {
     ("sqlserver", "gcp"): "cloudsql",
     ("sqlserver", "azure"): "sql_database",
     ("oracle", "oci"): "autonomous",
+    ("oracle", "aws"): "rds",
 }
 
 # SQL Server managed offerings that CAN satisfy Entitle's Microsoft SQL Server
@@ -161,6 +165,7 @@ _TEMPLATE_DIRS = {
     ("sqlserver", "gcp"): os.path.join(_REPO_ROOT, "terraform", "db_gcp_sqlserver"),
     ("sqlserver", "azure"): os.path.join(_REPO_ROOT, "terraform", "db_azure_sqlserver"),
     ("oracle", "oci"): os.path.join(_REPO_ROOT, "terraform", "db_oci_autonomous"),
+    ("oracle", "aws"): os.path.join(_REPO_ROOT, "terraform", "db_aws_oracle"),
 }
 _DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
 
@@ -236,6 +241,14 @@ def _oracle_db_name(db_id: str) -> str:
     return ("adb" + re.sub(r"[^a-z0-9]", "", db_id.lower()))[:14]
 
 
+def _oracle_rds_db_name(db_id: str) -> str:
+    """RDS for Oracle ``db_name`` — the PDB on a CDB instance, the SID otherwise:
+    <=8 alphanumerics, letter-led, stored upper-case by Oracle. Derived from the row
+    id (``ORA`` + 5 hex) rather than the operator's name, which rarely fits 8 chars;
+    the module upper-cases it, so the row holds the same spelling."""
+    return ("ORA" + re.sub(r"[^a-z0-9]", "", db_id.lower()))[:8].upper()
+
+
 def connection_db_name(row, tf_variables: Optional[dict] = None) -> str:
     """The database an admin session actually opens against this row — what the
     Databases page and the Connection modal show, and what every admin-session
@@ -265,9 +278,12 @@ def connection_db_name(row, tf_variables: Optional[dict] = None) -> str:
         # master is only the fallback — the same asymmetry _registered_connection_vars
         # already has. A provisioned one is always reached through master.
         return (row.db_name or "master") if registered else "master"
-    # Oracle's ADB name is derived from the row id, so it stays resolvable even for a
-    # row the backfill could not reach. Never invent one for a registered Oracle row.
+    # A provisioned Oracle name is derived from the row id (the ADB db_name on OCI, the
+    # PDB on RDS), so it stays resolvable even for a row the backfill could not reach.
+    # Never invent one for a registered Oracle row.
     if engine == "oracle" and not row.db_name and not registered:
+        if (row.cloud or "") == "aws":
+            return _oracle_rds_db_name(row.id)
         return _oracle_db_name(row.id)
     # A MongoDB session authenticates against an auth database (authSource), not a
     # catalog it opens; "admin" is the server default for both a self-hosted mongod
@@ -390,6 +406,32 @@ def _build_tf_variables(
             "master_password": master_password,
             "instance_class": sqlserver_class,
             "allocated_storage": opts.get("allocated_storage", 20),
+            "db_subnet_group_name": opts.get("db_subnet_group_name")
+                or _aws["db_subnet_group_name"],
+            "vpc_security_group_ids": _aws_db_security_groups(_aws, opts),
+            "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
+        }
+
+    if (engine, cloud) == ("oracle", "aws"):
+        # RDS for Oracle, SE2 license-included. The default engine is oracle-se2-cdb
+        # (single-tenant): db_name becomes the one PDB and the service a client and
+        # Entitle connect to. Like SQL Server it needs >= 2 GiB, so the AWS form's
+        # *.micro default is bumped to db.t3.small. No parameter group: there is no
+        # server-side TLS to relax (the tcp tunnel forwards bytes), and the sandbox DB
+        # SG must admit 1521 from the Gateway SG (setup-aws.sh does since this landed).
+        oracle_class = opts.get("instance_class") or "db.t3.small"
+        if oracle_class.endswith(".micro"):
+            oracle_class = "db.t3.small"
+        _aws = resolve_region("aws", region)
+        return {
+            "region": region,
+            "identifier": f"clouddb-{db_id[:8]}",
+            "engine": opts.get("oracle_engine") or "oracle-se2-cdb",
+            "db_name": _oracle_rds_db_name(db_id),
+            "master_username": master_username,
+            "master_password": master_password,
+            "instance_class": oracle_class,
+            "allocated_storage": max(int(opts.get("allocated_storage") or 20), 20),
             "db_subnet_group_name": opts.get("db_subnet_group_name")
                 or _aws["db_subnet_group_name"],
             "vpc_security_group_ids": _aws_db_security_groups(_aws, opts),
@@ -687,9 +729,10 @@ def provision(
     db.refresh(row)
 
     # Mint the admin master credential and stash it via the encrypted config
-    # store — never returned in plaintext after this point. OCI Autonomous DB
-    # rejects the default token_urlsafe(24) (32 chars > ADB's 30-char cap, and no
-    # guaranteed upper/lower/digit mix), so use the complexity generator there.
+    # store — never returned in plaintext after this point. Oracle rejects the
+    # default token_urlsafe(24) on both clouds: 32 chars is over the 30-char cap of
+    # OCI Autonomous DB and RDS for Oracle alike, and ADB also wants a guaranteed
+    # upper/lower/digit mix — so use the complexity generator for every Oracle.
     if engine == "oracle":
         from . import cloud_db_sql_service as _sql
         master_password = _sql.generate_password(24)  # 24 chars, guaranteed upper/lower/digit/symbol
@@ -1372,6 +1415,12 @@ _PS_ONBOARDING_CLOUDS = ("aws", "azure", "gcp")
 # audience known? — which _ps_db_onboarding_enabled answers, not this function.
 _PS_ONBOARDING_ENGINES: dict = {}
 
+# Engines NO cloud's plugin set covers: the dbssm / dbazure / dbgcp plugins and the
+# managed-user SQL builders (cloud_db_sql_service) are postgres/mysql/sqlserver only.
+# Oracle and MongoDB onboard through Password Safe's native platforms instead — a
+# separate slice; see docs/design/oracle-mongodb-engines.md.
+_PS_PLUGINLESS_ENGINES = {"oracle": "Oracle", "mongodb": "MongoDB"}
+
 # Which plugin channel drives each GCP engine. These are the plugin's own recommended
 # defaults: postgres/mysql on data-api (zero infrastructure, and under IAM database auth
 # zero stored secrets), sqlserver on cloud-run (no IAM database auth exists for it, so
@@ -1433,6 +1482,12 @@ def _ps_ineligible_reason(row: CloudDatabase) -> Optional[str]:
                 f"Systems Manager, Azure Run Command, or the GCP Cloud SQL Data API. "
                 f"{(row.cloud or 'this cloud').upper()} has none of them, so there is no "
                 f"supported path for it yet.")
+    if (row.engine or "") in _PS_PLUGINLESS_ENGINES:
+        label = _PS_PLUGINLESS_ENGINES[row.engine]
+        return (f"Password Safe onboarding drives a per-engine plugin (SSM, Run Command "
+                f"or Cloud SQL), and there is none for {label}. Onboarding through "
+                f"Password Safe's native {label} platform is planned; until then, "
+                f"onboard it in Password Safe directly.")
     engines = _PS_ONBOARDING_ENGINES.get(row.cloud or "")
     if engines and (row.engine or "") not in engines:
         return (f"{(row.cloud or '').upper()} Password Safe onboarding covers "
@@ -3924,7 +3979,11 @@ async def run_provision_apply(
         _ps_job = db.query(Job).filter(Job.id == job_id).first()
         _ps_choice = _ps_onboarding_opted((_ps_job.metadata_dict or {}) if _ps_job else {})
         onboard_ctx = None
-        if row.private_host and _ps_choice and _ps_db_onboarding_enabled(row, db):
+        # _ps_ineligible_reason too: the button and the API pre-flight consult it, and
+        # without it here an engine no plugin covers (Oracle on RDS) would reach the SQL
+        # builders, fail, and log a fallback warning on every provision.
+        if (row.private_host and _ps_choice and _ps_ineligible_reason(row) is None
+                and _ps_db_onboarding_enabled(row, db)):
             try:
                 if row.cloud == "azure":
                     onboard_ctx = await _create_db_managed_user_azure(

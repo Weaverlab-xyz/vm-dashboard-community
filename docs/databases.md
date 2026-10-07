@@ -39,7 +39,7 @@ differs by cloud/engine:
 
 | Cloud | Provisioning | L1 PRA | L2 Password Safe | L3 Entitle |
 |---|---|---|---|---|
-| **AWS** | postgres / mysql / sqlserver (RDS) | ✅ tunnel | ✅ `dbssm` | ✅ register + JIT |
+| **AWS** | postgres / mysql / sqlserver / oracle (RDS) | ✅ tunnel | ✅ `dbssm` (not oracle) | ✅ register + JIT |
 | **Azure** | postgres / mysql (Flexible Server) + sqlserver (SQL DB + Private Endpoint) | ✅ tunnel | ✅ `dbazure` | ✅ register + JIT |
 | **GCP** | postgres / mysql / sqlserver (Cloud SQL, private IP) | ✅ tunnel | ⚠️ `dbgcp` — sqlserver via Cloud Run; postgres / mysql inert until the Data API channel ships | ✅ postgres / mysql (via forwarder) |
 | **OCI** | ⚠️ **oracle only** (Autonomous DB) — read the caveats² | ✅ tunnel¹ | ❌ | ⚠️ register (Oracle connector, unverified live) |
@@ -341,7 +341,7 @@ Engines: postgres / mysql / sqlserver. Sandbox: [`scripts/sandbox/Linux/setup-aw
 (RDS needs ≥2) → the RDS **DB subnet group** `dashboard-sandbox-db`; a Postgres
 **parameter group** with `rds.force_ssl=0` (`clouddb-nossl-pg16`); a MySQL-8.4
 **parameter group** with `require_secure_transport=0` (`clouddb-nossl-mysql84`); a **DB
-security group** allowing 5432/3306/1433 *from the gateway SG only*; the `bt-jumpoint`
+security group** allowing 5432/3306/1433/1521 *from the gateway SG only*; the `bt-jumpoint`
 ECS cluster + `ecsInstanceRole` + `ecsTaskExecutionRole`; and RDS/ECS/PassRole
 permissions on the scoped dashboard IAM user.
 
@@ -349,6 +349,19 @@ permissions on the scoped dashboard IAM user.
 rejected by the PRA MySQL tunnel; 8.4 defaults to `caching_sha2_password`). SQL Server
 (`sqlserver-ex`) has **no `db_name`** — you connect to `master` and create databases
 afterward — and its instance class is bumped to `db.t3.small` (needs ≥2 GiB).
+
+**Oracle (RDS):** Standard Edition 2, **license-included** (the Oracle licence is in the
+hourly price — no BYOL). The default engine is `oracle-se2-cdb`, a single-tenant container
+database: RDS creates one PDB named after the row id (`ORA` + 5 hex characters — Oracle
+names are capped at 8) and a CDB it calls `RDSCDB`, and the PDB is the service name you and
+Entitle connect to. That matters because **Entitle's Oracle connector manages PDBs only**;
+`oracle_engine = "oracle-se2"` (non-CDB) is accepted but can't be registered in Entitle.
+`db.t3.small` minimum, 20 GiB storage minimum, port 1521, and creation takes **20–40
+minutes** (the module allows 90). There is no parameter group: the PRA tunnel is a raw TCP
+port forward, so nothing server-side needs relaxing. The DB security group must admit
+**1521** — `setup-aws.sh` / `Setup-AwsSandbox.ps1` add it, and re-running either against an
+existing sandbox adds the rule in place. Password Safe onboarding is not offered for Oracle
+yet (no plugin covers it; native-platform onboarding is a later slice).
 
 **Gateway host:** an **ECS-on-EC2** container instance the dashboard launches on demand
 (kicked early so its ~2-min boot overlaps the RDS apply) and terminates when the last
@@ -544,7 +557,7 @@ The account model is **per engine**:
 | **PostgreSQL** | **Ephemeral (JIT) accounts** — *proven* | Entitle mints a short-lived role per grant. The connector config uses `user` (not `username`) + a required `options{}` block, no top-level `database`. |
 | **SQL Server** | Ephemeral accounts | **Only on Entitle-viable providers** — Azure SQL Managed Instance / AWS RDS Custom. Managed Cloud SQL / RDS-standard / Azure SQL Database are refused (`_entitle_viable`) because the connector needs sysadmin/CONTROL SERVER they can't grant. Requires a `version` field (default `2019`, `entitle_sqlserver_version`). |
 | **MySQL** | **Persistent roles** (not ephemeral) | Entitle's MySQL connector assigns persistent roles rather than minting accounts. |
-| **Oracle** | Ephemeral accounts — *not yet proven live* | Entitle's "Oracle Database" connector. Its config says `username` (not `user`) and needs `service_name`, which must name a **PDB** — Entitle manages pluggable databases only. Autonomous DB sends `protocol = "tcps"` (its no-wallet listener is TLS-only). The connector wants a SYSDBA or DBA-role account. |
+| **Oracle** | Ephemeral accounts — *not yet proven live* | Entitle's "Oracle Database" connector. Its config says `username` (not `user`) and needs `service_name`, which must name a **PDB** — Entitle manages pluggable databases only. Autonomous DB sends `protocol = "tcps"` (its no-wallet listener is TLS-only). The connector wants a SYSDBA or DBA-role account. On **RDS** the default `oracle-se2-cdb` engine makes the service a PDB, and the master user is expected (not yet verified live) to carry the DBA role it needs. |
 | **MongoDB** | — | Refused: Entitle has no database-login MongoDB connector. Its only Mongo integration is **Atlas MongoDB**, configured with an Atlas Admin API key, which arrives with Atlas provisioning. |
 
 **Reachability.** Because dashboard DBs are private, Entitle reaches them through the

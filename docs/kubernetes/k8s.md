@@ -57,7 +57,7 @@ the stable egress IP). Notable specifics:
   reach IMDS for node-role creds (otherwise CrashLoopBackOff).
 - **EBS CSI** addon is opt-in (`enable_ebs_csi`); needed for stateful workloads / a Rancher
   plane.
-- **VPC-peers back to the sandbox VPC** and opens the DB SG (5432/3306/1433) + VM SG (22) so
+- **VPC-peers back to the sandbox VPC** and opens the DB SG (5432/3306/1433/1521) + VM SG (22) so
   the cluster can reach sandbox DBs/VMs directly. **Decommission clusters before running the
   sandbox rollback** — rollback refuses while an active peering exists.
 

@@ -141,6 +141,51 @@ def test_sqlserver_aws_bumps_micro_class():
     assert _build("sqlserver", "aws", opts={"instance_class": "db.m5.large"})["instance_class"] == "db.m5.large"
 
 
+def test_oracle_aws_is_implemented_as_rds():
+    assert ("oracle", "aws") in svc._IMPLEMENTED
+    assert svc._PROVIDER[("oracle", "aws")] == "rds"
+    assert svc.template_dir("oracle", "aws").endswith(os.path.join("terraform", "db_aws_oracle"))
+
+
+def test_oracle_aws_defaults_to_the_entitle_compatible_cdb():
+    # Entitle's Oracle connector manages PDBs only; the CDB engine makes db_name a PDB.
+    tf = _build("oracle", "aws")
+    assert tf["engine"] == "oracle-se2-cdb"
+    assert _build("oracle", "aws", opts={"oracle_engine": "oracle-se2"})["engine"] == "oracle-se2"
+
+
+def test_oracle_aws_db_name_is_a_valid_oracle_name_from_the_row_id():
+    # <=8 alphanumerics, letter-led — the operator's name ("appdb") is NOT used.
+    tf = _build("oracle", "aws")
+    assert tf["db_name"] == "ORAABCDE"
+    assert tf["db_name"] == svc._oracle_rds_db_name("abcdef0123456789")
+    for db_id in ("0123-4567-89ab", "ffffffffffffffff", "a"):
+        name = svc._oracle_rds_db_name(db_id)
+        assert name[0].isalpha() and name.isalnum() and 1 <= len(name) <= 8, name
+        assert name == name.upper() and name != "RDSCDB"
+
+
+def test_oracle_aws_bumps_micro_and_keeps_the_storage_floor():
+    assert _build("oracle", "aws")["instance_class"] == "db.t3.small"
+    assert _build("oracle", "aws", opts={"instance_class": "db.t3.micro"})["instance_class"] == "db.t3.small"
+    assert _build("oracle", "aws", opts={"instance_class": "db.m5.large"})["instance_class"] == "db.m5.large"
+    assert _build("oracle", "aws", opts={"allocated_storage": 5})["allocated_storage"] == 20
+    assert _build("oracle", "aws", opts={"allocated_storage": 100})["allocated_storage"] == 100
+
+
+def test_oracle_aws_vars_are_all_declared_by_the_module():
+    # terraform refuses a -var the module does not declare, at apply time, in a
+    # background job — catch a builder/module drift here instead.
+    import re
+    with open(os.path.join(_ROOT, "terraform", "db_aws_oracle", "main.tf"), encoding="utf-8") as fh:
+        declared = set(re.findall(r'^variable "([^"]+)"', fh.read(), re.M))
+    tf = _build("oracle", "aws")
+    assert set(tf) <= declared, set(tf) - declared
+    # ...and every module variable without a default is supplied.
+    assert {"region", "identifier", "db_name", "master_username", "master_password",
+            "db_subnet_group_name"} <= set(tf)
+
+
 # ── GCP branches ─────────────────────────────────────────────────────────────
 
 def test_postgres_gcp_uses_tier_and_project():
