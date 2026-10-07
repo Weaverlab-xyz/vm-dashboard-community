@@ -172,6 +172,7 @@ COPY terraform/db_gcp_sqlserver/ ./terraform/db_gcp_sqlserver/
 COPY terraform/db_azure_sqlserver/ ./terraform/db_azure_sqlserver/
 COPY terraform/db_oci_autonomous/ ./terraform/db_oci_autonomous/
 COPY terraform/db_aws_oracle/ ./terraform/db_aws_oracle/
+COPY terraform/db_atlas_mongodb/ ./terraform/db_atlas_mongodb/
 # Managed-Kubernetes provisioning modules (driven by k8s_service, §1.1a): EKS
 # (hashicorp/aws), AKS (hashicorp/azurerm ~> 3.0), GKE (hashicorp/google ~> 5.0),
 # OKE (oracle/oci ~> 5.0) — all four providers are already in the pre-cache init
@@ -362,12 +363,12 @@ RUN export TF_PLUGIN_CACHE_DIR="${TF_PROVIDER_MIRROR_DIR}" \
     && rm /tmp/terraform.zip \
     && mkdir -p "${TF_PLUGIN_CACHE_DIR}" \
     && mkdir -p /tmp/tf_provider_init \
-    && printf 'terraform {\n  required_providers {\n    sra = { source = "beyondtrust/sra", version = "~> 1.0" }\n    passwordsafe = { source = "BeyondTrust/passwordsafe", version = "~> 1.0" }\n    entitle = { source = "entitleio/entitle", version = "~> 3.0" }\n    aws = { source = "hashicorp/aws", version = "~> 5.0" }\n    azurerm = { source = "hashicorp/azurerm", version = "~> 3.0" }\n    google = { source = "hashicorp/google", version = "~> 5.0" }\n    oci = { source = "oracle/oci", version = "~> 5.0" }\n  }\n}\n' \
+    && printf 'terraform {\n  required_providers {\n    sra = { source = "beyondtrust/sra", version = "~> 1.0" }\n    passwordsafe = { source = "BeyondTrust/passwordsafe", version = "~> 1.0" }\n    entitle = { source = "entitleio/entitle", version = "~> 3.0" }\n    aws = { source = "hashicorp/aws", version = "~> 5.0" }\n    azurerm = { source = "hashicorp/azurerm", version = "~> 3.0" }\n    google = { source = "hashicorp/google", version = "~> 5.0" }\n    oci = { source = "oracle/oci", version = "~> 5.0" }\n    mongodbatlas = { source = "mongodb/mongodbatlas", version = "~> 2.19" }\n  }\n}\n' \
        > /tmp/tf_provider_init/main.tf \
     && for attempt in 1 2 3 4 5 6 7 8; do \
            TF_REGISTRY_CLIENT_TIMEOUT=30 terraform -chdir=/tmp/tf_provider_init init && break; \
            if [ "$attempt" = 8 ]; then \
-               echo "terraform init failed to cache providers (sra/passwordsafe/entitle/aws/azurerm/google/oci) after 8 attempts" >&2; \
+               echo "terraform init failed to cache providers (sra/passwordsafe/entitle/aws/azurerm/google/oci/mongodbatlas) after 8 attempts" >&2; \
                exit 1; \
            fi; \
            echo "terraform init attempt $attempt failed (transient registry error); retrying in $((attempt * 5))s..." >&2; \

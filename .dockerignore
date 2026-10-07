@@ -31,6 +31,7 @@ terraform/*
 !terraform/db_azure_sqlserver
 !terraform/db_oci_autonomous
 !terraform/db_aws_oracle
+!terraform/db_atlas_mongodb
 !terraform/k8s_cluster
 # Cloud Functions modules — driven by cloud_function_service.
 !terraform/cloud_function

@@ -4,8 +4,14 @@
 
 Status: **slice 1** (engine plumbing, the raw-TCP tunnel, Entitle payloads) and **slice 2**
 (AWS RDS for Oracle — `terraform/db_aws_oracle`, SE2 license-included, single-tenant CDB so
-the one PDB is what Entitle manages) landed. Later slices: MongoDB Atlas, Password Safe
-native onboarding, Configuration Management (Ansible). Oracle on Azure / GCP (Oracle Database@Azure,
+the one PDB is what Entitle manages) landed. **Slice 3** adds MongoDB Atlas
+(`terraform/db_atlas_mongodb`: one Atlas project per cluster, public endpoint locked to the
+gateway's egress /32, Flex or dedicated) and Entitle's Atlas MongoDB integration. Later slices:
+Password Safe native onboarding, Configuration Management (Ansible).
+
+Re-checked 2026-10-07: `beyondtrust/sra` **v1.4.0** (2026-09-25, the latest) still validates
+`tunnel_type` as `OneOf("tcp", "mssql")`, and nothing on its `main` mentions MongoDB or
+Oracle. Oracle on Azure / GCP (Oracle Database@Azure,
 Oracle Database@Google Cloud, Autonomous tier) is deferred.
 
 ## Why

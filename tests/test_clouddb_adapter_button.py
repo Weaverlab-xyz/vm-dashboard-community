@@ -310,7 +310,7 @@ def test_the_ui_and_the_service_cannot_disagree_about_which_engine_is_ephemeral(
     assert '"mysql": False' in svc, "MySQL's connector assigns standing roles"
     clouddb = _read(os.path.join(_ROOT, "web_dashboard", "services",
                                  "cloud_database_service.py"))
-    assert '"entitle_mints": _entitle_connector_mints(r.engine)' in clouddb
+    assert '"entitle_mints": _entitle_connector_mints(r.engine, r.provider)' in clouddb
 
 
 def test_the_confirm_does_not_promise_jit_for_a_standing_connector():

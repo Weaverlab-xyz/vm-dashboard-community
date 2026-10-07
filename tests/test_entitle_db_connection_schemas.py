@@ -97,6 +97,32 @@ def test_oracle_registers_with_ephemeral_accounts():
     assert "allow_creating_accounts = true" in hcl
 
 
+def test_atlas_integration_is_api_key_scoped_to_the_clusters_project():
+    # docs.beyondtrust.com/entitle/docs/configuring-mongodb-atlas-api-key
+    hcl = ers._generate_atlas_hcl(name="clouddb-abc", project_id="65aa00000000000000000001",
+                                  public_key="pubkey1")
+    assert 'application = { name = "atlas mongodb" }' in hcl
+    assert 'public_key  = "pubkey1"' in hcl
+    assert "private_key = var.atlas_private_key" in hcl
+    assert 'project_id  = "65aa00000000000000000001"' in hcl
+    assert "connect_to_clusters      = true" in hcl
+    assert "allow_creating_accounts = true" in hcl
+    # Atlas is SaaS reachable from Entitle's cloud: no agent block.
+    assert "agent_token" not in hcl
+    # The private key never lands in the HCL on disk.
+    assert 'variable "atlas_private_key" { sensitive = true }' in hcl
+
+
+def test_atlas_registration_needs_its_own_key():
+    import asyncio
+    try:
+        asyncio.run(ers.register_atlas(name="clouddb-abc", project_id="p1"))
+    except ers.EntitleRegistrationError as exc:
+        assert "Atlas API key" in str(exc)
+    else:
+        raise AssertionError("registered Atlas with no Entitle Atlas key configured")
+
+
 def test_mints_table():
     assert ers.db_connector_mints("postgres") is True
     assert ers.db_connector_mints("sqlserver") is True

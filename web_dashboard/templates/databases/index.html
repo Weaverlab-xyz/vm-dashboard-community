@@ -636,7 +636,7 @@
             <input type="text" x-model="form.master_username" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="dbadmin">
           </div>
           <!-- AWS instance class -->
-          <div x-show="form.cloud === 'aws'">
+          <div x-show="form.cloud === 'aws' && !isAtlas()">
             <label class="block text-sm font-medium text-gray-700 mb-1">Instance class</label>
             <select x-model="form.instance_class" :disabled="loadingOptions"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -646,7 +646,7 @@
             </select>
           </div>
           <!-- GCP Cloud SQL tier -->
-          <div x-show="form.cloud === 'gcp'" x-cloak>
+          <div x-show="form.cloud === 'gcp' && !isAtlas()" x-cloak>
             <label class="block text-sm font-medium text-gray-700 mb-1">Machine tier</label>
             <select x-model="form.tier" :disabled="loadingOptions"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -656,13 +656,24 @@
             </select>
           </div>
           <!-- Azure Flexible Server SKU -->
-          <div x-show="form.cloud === 'azure'" x-cloak>
+          <div x-show="form.cloud === 'azure' && !isAtlas()" x-cloak>
             <label class="block text-sm font-medium text-gray-700 mb-1">SKU</label>
             <select x-model="form.sku_name" :disabled="loadingOptions"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
               <template x-for="c in options.instance_classes || []" :key="c">
                 <option :value="c" x-text="c"></option>
               </template>
+            </select>
+          </div>
+          <!-- MongoDB Atlas cluster tier -->
+          <div x-show="isAtlas()" x-cloak>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Cluster tier</label>
+            <select x-model="form.atlas_tier"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="FLEX">Flex (shared)</option>
+              <option value="M10">M10 (dedicated)</option>
+              <option value="M20">M20 (dedicated)</option>
+              <option value="M30">M30 (dedicated)</option>
             </select>
           </div>
           <!-- OCI Autonomous DB workload -->
@@ -676,7 +687,7 @@
           </div>
         </div>
         <!-- AWS: storage + DB subnet group -->
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3" x-show="form.cloud === 'aws'">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3" x-show="form.cloud === 'aws' && !isAtlas()">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Storage (GB)</label>
             <input type="number" min="20" x-model.number="form.allocated_storage" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="20">
@@ -697,7 +708,7 @@
           </div>
         </div>
         <!-- AWS: VPC security groups -->
-        <div x-show="form.cloud === 'aws'">
+        <div x-show="form.cloud === 'aws' && !isAtlas()">
           <label class="block text-sm font-medium text-gray-700 mb-1">VPC security groups</label>
           <div class="border border-gray-300 rounded-lg max-h-36 overflow-y-auto p-2 space-y-1">
             <p x-show="(options.security_groups || []).length === 0"
@@ -730,7 +741,7 @@
           </p>
         </div>
         <!-- GCP: storage + private network -->
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3" x-show="form.cloud === 'gcp'" x-cloak>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3" x-show="form.cloud === 'gcp' && !isAtlas()" x-cloak>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Disk size (GB)</label>
             <input type="number" min="10" x-model.number="form.disk_size" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="20">
@@ -742,7 +753,7 @@
           </div>
         </div>
         <!-- Azure: storage -->
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3" x-show="form.cloud === 'azure'" x-cloak>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3" x-show="form.cloud === 'azure' && !isAtlas()" x-cloak>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Storage (GB)</label>
             <input type="number" min="32" step="32" x-model.number="form.storage_gb" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="32">
@@ -751,6 +762,15 @@
           <div class="flex items-end">
             <p class="text-xs text-gray-400 pb-2">The delegated subnet + private DNS zone come from the configured <code>azure_db_*</code> sandbox settings.</p>
           </div>
+        </div>
+        <!-- MongoDB Atlas: where it lands and how it is reached -->
+        <div x-show="isAtlas()" x-cloak
+             class="bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 text-xs text-emerald-800">
+          Creates a <strong>MongoDB Atlas</strong> cluster in its own Atlas project, on
+          <span class="uppercase" x-text="form.cloud"></span> in this region beside the PRA gateway.
+          Its endpoint is public but admits only the gateway's egress IP. Flex costs roughly
+          $8&ndash;30 a month; dedicated M10+ starts around $57. The tunnel reaches one replica-set
+          member, so connect with <code>directConnection=true</code>.
         </div>
         <!-- OCI: free-tier note + beyond-free-tier gate -->
         <div x-show="form.cloud === 'oci'" x-cloak class="space-y-3">
@@ -959,6 +979,7 @@ function databasesPage() {
             tier: 'db-f1-micro', disk_size: null, private_network: '',
             sku_name: 'B_Standard_B1ms', storage_gb: 32,
             oci_db_workload: 'OLTP', oci_beyond_free: false, oci_cpu_core_count: 1, oci_data_storage_tbs: 1, oci_subnet_ocid: '',
+            atlas_tier: 'FLEX',
             jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '',
             // Optional. '' means untagged = creator-scoped; submitProvision omits it
             // entirely when blank rather than sending an empty string.
@@ -1313,7 +1334,14 @@ function databasesPage() {
       ];
       // RDS for Oracle (SE2, license-included). Mirrors _IMPLEMENTED's ("oracle", "aws").
       if (this.form.cloud === 'aws') sql.push({ value: 'oracle', label: 'Oracle (RDS SE2)' });
+      // MongoDB Atlas on the chosen cloud — _IMPLEMENTED's ("mongodb", aws|azure|gcp).
+      sql.push({ value: 'mongodb', label: 'MongoDB (Atlas)' });
       return sql;
+    },
+
+    // An Atlas cluster: none of the cloud's own sizing/network fields apply to it.
+    isAtlas() {
+      return this.form.engine === 'mongodb' && ['aws', 'azure', 'gcp'].includes(this.form.cloud);
     },
 
     onCloudChange() {
@@ -1346,7 +1374,9 @@ function databasesPage() {
           engine: this.form.engine, cloud: this.form.cloud, region: this.form.region, name: this.form.name,
           master_username: this.form.master_username || 'dbadmin',
         };
-        if (this.form.cloud === 'gcp') {
+        if (this.isAtlas()) {
+          body.atlas_tier = this.form.atlas_tier || 'FLEX';
+        } else if (this.form.cloud === 'gcp') {
           if (this.form.tier) body.tier = this.form.tier;
           if (this.form.disk_size) body.disk_size = this.form.disk_size;
           if (this.form.private_network) body.private_network = this.form.private_network;
@@ -1455,6 +1485,11 @@ function databasesPage() {
     },
 
     entitleConnectorHint(d) {
+      if (d.provider === 'atlas') {
+        return `Register this cluster's Atlas project with Entitle's Atlas MongoDB integration, `
+          + `using the Atlas API key under Settings → Entitle. Users request just-in-time `
+          + `(ephemeral) database users, which Atlas creates.`;
+      }
       const base = `Register this database with Entitle's own ${d.engine} connector, reached `
         + `through the shared Entitle agent.`;
       return this.entitleIsEphemeral(d)
@@ -1465,7 +1500,11 @@ function databasesPage() {
     },
 
     async entitleRegister(d) {
-      const how = this.entitleIsEphemeral(d)
+      const how = d.provider === 'atlas'
+        ? `Entitle reaches the cluster's Atlas project with the Atlas API key under Settings → Entitle, `
+          + `and creates JIT (ephemeral) database users. Entitle's IPs must be on the key's API `
+          + `access list and on the cluster's access list (Databases → extra access CIDRs).`
+        : this.entitleIsEphemeral(d)
         ? `Entitle connects through the shared agent and mints JIT (ephemeral) accounts on the database.`
         : `Entitle connects through the shared agent and assigns STANDING roles to accounts that `
           + `already exist — its ${d.engine} connector cannot mint one. If you want just-in-time `

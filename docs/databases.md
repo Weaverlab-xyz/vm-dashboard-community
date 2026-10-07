@@ -39,14 +39,15 @@ differs by cloud/engine:
 
 | Cloud | Provisioning | L1 PRA | L2 Password Safe | L3 Entitle |
 |---|---|---|---|---|
-| **AWS** | postgres / mysql / sqlserver / oracle (RDS) | ✅ tunnel | ✅ `dbssm` (not oracle) | ✅ register + JIT |
-| **Azure** | postgres / mysql (Flexible Server) + sqlserver (SQL DB + Private Endpoint) | ✅ tunnel | ✅ `dbazure` | ✅ register + JIT |
-| **GCP** | postgres / mysql / sqlserver (Cloud SQL, private IP) | ✅ tunnel | ⚠️ `dbgcp` — sqlserver via Cloud Run; postgres / mysql inert until the Data API channel ships | ✅ postgres / mysql (via forwarder) |
+| **AWS** | postgres / mysql / sqlserver / oracle (RDS) + mongodb (Atlas) | ✅ tunnel | ✅ `dbssm` (not oracle / mongodb) | ✅ register + JIT |
+| **Azure** | postgres / mysql (Flexible Server) + sqlserver (SQL DB + Private Endpoint) + mongodb (Atlas) | ✅ tunnel | ✅ `dbazure` | ✅ register + JIT |
+| **GCP** | postgres / mysql / sqlserver (Cloud SQL, private IP) + mongodb (Atlas) | ✅ tunnel | ⚠️ `dbgcp` — sqlserver via Cloud Run; postgres / mysql inert until the Data API channel ships | ✅ postgres / mysql (via forwarder) |
 | **OCI** | ⚠️ **oracle only** (Autonomous DB) — read the caveats² | ✅ tunnel¹ | ❌ | ⚠️ register (Oracle connector, unverified live) |
 
-**MongoDB** is a registered-only engine today: it can be [registered](#registering-an-existing-database)
-and tunnelled, but nothing provisions it yet (MongoDB Atlas is planned). Entitle has no
-database-login connector for it — see [Layer 3](#layer-3--entitle-just-in-time-access).
+**MongoDB** is provisioned on **MongoDB Atlas**, on whichever of AWS / Azure / GCP the row
+names, and can also be [registered](#registering-an-existing-database) when self-hosted. See
+[MongoDB Atlas](#mongodb-atlas). Entitle covers Atlas clusters only — see
+[Layer 3](#layer-3--entitle-just-in-time-access).
 
 ¹ OCI has no dashboard-provisioned gateway — you supply your own (see the OCI section).
 ² The OCI module only started shipping in the image recently and has **never completed a live
@@ -518,6 +519,54 @@ OCI has no per-region config sets.
 **stand up your own Gateway in the OCI public subnet** and point `bt_jumpoint_name` at it
 → provision (default = free-tier public ADB).
 
+### MongoDB Atlas
+
+An Atlas row keeps `cloud` = the **backing provider** (AWS, Azure or GCP) and is marked by
+`provider = "atlas"`. The cluster runs in that cloud and region, beside the PRA gateway that
+reaches it, so it reuses the per-region config and the gateway host every other row uses.
+
+**One Atlas project per cluster.** Atlas IP access lists and database users are
+*project*-scoped. With two clusters in one project, both would share the gateway's access-list
+entry, and decommissioning either would cut the other off. A project of its own makes
+everything in it that cluster's alone: decommission removes it all, and Entitle's integration
+is scoped to it. Projects are free. This is why the dashboard needs an **organization**, not a
+project.
+
+**Reachability — read this.** Flex clusters have **no private endpoint**. The endpoint is
+public and the project access list admits only the **gateway's egress /32**, which the
+dashboard reads from the gateway it ensures *before* the apply (no gateway or no egress IP =
+the provision is refused before anything billable exists). TLS and the database user's
+password apply on top, and the PRA tunnel is still the only path users are given. This is the
+same exception free-tier OCI Autonomous DB has. PrivateLink on a dedicated tier is not built.
+
+**Tiers:** **Flex** (default; shared, roughly $8–30 a month) or a dedicated size — **M10**,
+M20, M30 from the form (M10 starts around $57 a month). Atlas is billed by MongoDB, outside the
+cloud cost tooling. Creation takes about 7–10 minutes.
+
+**Connecting.** The tunnel is a raw TCP forward to **one** replica-set member (the first host
+of the `mongodb://` seed list), so connect with `directConnection=true`, and
+`tlsAllowInvalidHostnames=true` because 127.0.0.1 is never the certificate's name. On a
+dedicated cluster that member can be a secondary: reads need
+`readPreference=secondaryPreferred`, and writes need the primary. PRA 26.3's MongoDB tunnel
+lifts this once the `beyondtrust/sra` provider exposes it.
+
+**Admin user:** the form's admin username, created as an Atlas database user with
+`atlasAdmin` on `admin`, scoped to the cluster. Atlas manages database users only through its
+Admin API, so Password Safe onboarding is not offered.
+
+**Config keys** (Settings → Databases → MongoDB Atlas):
+
+| Key | Default | Notes |
+|---|---|---|
+| `atlas_org_id` | — | Organization the per-cluster projects are created in |
+| `atlas_client_id` / `atlas_client_secret` | — | Atlas **service account** (OAuth client credentials) with **Organization Project Creator**; passed to Terraform as `MONGODB_ATLAS_CLIENT_ID` / `_SECRET`, never as variables |
+| `atlas_default_tier` | `FLEX` | Used when the form sends no tier |
+| `atlas_extra_access_cidrs` | — | CSV added to every cluster's access list — e.g. Entitle's egress IPs |
+
+Azure and GCP region ids map to Atlas's own names (`eastus2` → `US_EAST_2`, `us-central1` →
+`CENTRAL_US`); a region with no known mapping is refused unless the API call passes
+`atlas_region`.
+
 ---
 
 ## Layer 2 — Password Safe (AWS + Azure + GCP)
@@ -558,7 +607,7 @@ The account model is **per engine**:
 | **SQL Server** | Ephemeral accounts | **Only on Entitle-viable providers** — Azure SQL Managed Instance / AWS RDS Custom. Managed Cloud SQL / RDS-standard / Azure SQL Database are refused (`_entitle_viable`) because the connector needs sysadmin/CONTROL SERVER they can't grant. Requires a `version` field (default `2019`, `entitle_sqlserver_version`). |
 | **MySQL** | **Persistent roles** (not ephemeral) | Entitle's MySQL connector assigns persistent roles rather than minting accounts. |
 | **Oracle** | Ephemeral accounts — *not yet proven live* | Entitle's "Oracle Database" connector. Its config says `username` (not `user`) and needs `service_name`, which must name a **PDB** — Entitle manages pluggable databases only. Autonomous DB sends `protocol = "tcps"` (its no-wallet listener is TLS-only). The connector wants a SYSDBA or DBA-role account. On **RDS** the default `oracle-se2-cdb` engine makes the service a PDB, and the master user is expected (not yet verified live) to carry the DBA role it needs. |
-| **MongoDB** | — | Refused: Entitle has no database-login MongoDB connector. Its only Mongo integration is **Atlas MongoDB**, configured with an Atlas Admin API key, which arrives with Atlas provisioning. |
+| **MongoDB (Atlas)** | Ephemeral database users — *not yet proven live* | Entitle's **Atlas MongoDB** integration, an API-key integration scoped to the cluster's own Atlas project: `public_key` / `private_key` / `project_id` plus `options.connect_to_clusters`. It uses a **separate** Atlas programmatic API key with Organization Owner (Settings → Entitle → Atlas MongoDB connector), not the provisioning service account. Entitle's egress IPs must be on that key's API access list (set once in Atlas) and on each cluster's access list (`atlas_extra_access_cidrs`). No Entitle agent is used. Self-hosted MongoDB is refused: there is no database-login Mongo connector. |
 
 **Reachability.** Because dashboard DBs are private, Entitle reaches them through the
 **shared Entitle agent** (`entitle_agent_token_name`; provisioned on Kubernetes, one per
