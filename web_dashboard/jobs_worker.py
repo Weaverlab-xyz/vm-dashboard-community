@@ -75,7 +75,7 @@ HANDLED_TYPES = (
     "spirelab_attr_probe",
     "workload_k8s_token", "workload_cloud_credential",
     "ansible_cloud_run", "ansible_local", "epml_sync",
-    "windows_arc_join",
+    "windows_arc_join", "windows_hybrid_check",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     "packer_aws_build", "packer_azure_build", "packer_gcp_build", "packer_oci_build",
     "aws_export_image", "gcp_export_image", "azure_export_image", "oci_export_image",
@@ -217,6 +217,7 @@ LIGHT_TYPES = (
     "image_promote_gcp", "image_promote_oci",
     "gateway_deploy", "gateway_teardown",              # pure cloud SDK (jumpoint_host_service)
     "epml_sync",                                       # HTTP download + storage upload
+    "windows_hybrid_check",                            # Graph polls, up to 90 minutes asleep
     "expiry_sweep",                                    # pure DB, sub-second
     # Pure DB as well, and sub-second: two indexed queries and a bounded UPDATE. It also
     # must not queue behind anything — it is the guard that stops a job running OUTSIDE
@@ -698,6 +699,9 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             from .services import clouddb_dbops_service
             await clouddb_dbops_service.run_deploy(
                 db, region=meta["region"], job_id=job_id)
+        elif job_type == "windows_hybrid_check":
+            from .services import hybrid_join_service
+            await hybrid_join_service.run(db, job_id=job_id, meta=meta)
         elif job_type == "windows_arc_join":
             from .services import windows_arc_service
             await windows_arc_service.run(db, job_id=job_id, meta=meta)

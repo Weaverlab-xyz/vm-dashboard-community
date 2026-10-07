@@ -360,6 +360,22 @@ async def _windows_public_key(region: str, secret_name: str, result: dict) -> st
     return key
 
 
+def _queue_hybrid_check(db, job_id: str, vm_name: str, region: str, instance_id: str) -> None:
+    """Queue the check that a just-joined server became Entra hybrid joined. A queueing
+    failure is recorded on the deploy, never raised."""
+    from ..services import hybrid_join_service
+    row = db.query(Job).filter(Job.id == job_id).first()
+    try:
+        hybrid_join_service.queue_check(
+            db, deploy_job_id=job_id, cloud="aws", instance_name=vm_name, region=region,
+            instance_id=instance_id,
+            created_by=(row.created_by if row is not None else "") or "system",
+            workgroup=getattr(row, "workgroup", None))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("hybrid check not queued for %s: %s", job_id, e)
+        job_service.update_metadata(db, job_id, {"entra_error": f"hybrid check not queued: {e}"})
+
+
 def _queue_arc_join(db, job_id: str, vm_name: str, target: str) -> None:
     """Queue the Arc Entra join of a just-deployed Windows server. AFTER completion: the
     onboarding play finds the server's SSH key and administrator on this completed job.
@@ -447,6 +463,7 @@ async def _run_deploy(
         win_ssh = win_rdp = False
         win_user_data = ""
         arc_join = False
+        hybrid_check = False
         if is_windows:
             public_key = ""
             os_type = "windows"
@@ -479,6 +496,18 @@ async def _run_deploy(
                         db, _meta["ad_directory_id"], "aws", _aws_region)
                 except domain_join_service.DomainJoinError as e:
                     result["ad_join_error"] = str(e)
+            # Entra hybrid join: the domain join above, into a synced OU, then a follow-up
+            # check that Entra Connect brought the device into Entra (hybrid_join_service).
+            if (_meta.get("entra_join_mode") or "") == "hybrid":
+                from ..services import hybrid_join_service
+                hybrid_problem, hybrid_ou = hybrid_join_service.deploy_check(
+                    db, is_windows=True, ad_directory_id=_meta.get("ad_directory_id") or "")
+                if hybrid_problem:
+                    result["entra_error"] = hybrid_problem
+                elif ad_row is not None:
+                    hybrid_check = True
+                    if hybrid_ou and not _meta.get("ad_ou"):
+                        _meta["ad_ou"] = hybrid_ou
             # Entra join through Azure Arc: decided now so a choice that cannot work is a
             # warning on a working server; performed by a follow-up job once this one has
             # completed (windows_arc_service).
@@ -698,6 +727,8 @@ async def _run_deploy(
             admin_password = ""
 
         job_service.set_completed(db, job_id, result)
+        if hybrid_check and result.get("ad_joined"):
+            _queue_hybrid_check(db, job_id, instance_name, _aws_region, instance_id)
         if arc_join:
             _queue_arc_join(db, job_id, instance_name,
                             result.get("private_ip") or result.get("public_ip") or hostname)

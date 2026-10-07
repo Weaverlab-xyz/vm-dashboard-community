@@ -1052,7 +1052,7 @@
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <option value="">Don't join</option>
               <template x-for="d in adDirs" :key="d.id">
-                <option :value="d.id" x-text="d.name + ' (' + d.provider_label + ')'"></option>
+                <option :value="d.id" x-text="d.name + ' (' + d.provider_label + ')' + (d.entra_hybrid ? ' · Entra hybrid' : '')"></option>
               </template>
             </select>
             <input x-show="deployForm.ad_directory_id" x-model="deployForm.ad_ou"
@@ -1065,21 +1065,28 @@
             </p>
           </div>
           {% endif %}
-          {% if windows_ssh_enabled %}
-          <!-- Entra ID join through Azure Arc (Windows Server 2025+; not with an AD join) -->
+          {% if windows_ssh_enabled or directories_enabled %}
+          <!-- Entra ID: join through Azure Arc, or hybrid join through an on-prem AD -->
           <div class="mb-4">
             <label class="block text-sm font-medium text-gray-700 mb-1">Microsoft Entra ID <span class="text-gray-400 font-normal">(Windows only)</span></label>
             <select x-model="deployForm.entra_join_mode"
                     @change="if (deployForm.entra_join_mode === 'arc') deployForm.ad_directory_id = ''"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <option value="">Don't join</option>
+              {% if windows_ssh_enabled %}
               <option value="arc">Entra join through Azure Arc (Windows Server 2025+)</option>
+              {% endif %}
+              {% if directories_enabled %}
+              <option value="hybrid">Hybrid join, through the Active Directory picked above</option>
+              {% endif %}
             </select>
             <p class="mt-1 text-xs text-gray-400">
               After the deploy, a follow-up job onboards the server to Azure Arc over OpenSSH and
               installs AADLoginForWindows, so Entra users with Virtual Machine Administrator/User
               Login can RDP in. Needs Windows Server 2025 or later with Desktop Experience and
               outbound 443 to Azure. A server joins Entra ID or an AD domain, not both.
+    Hybrid join: the server joins the on-prem domain picked above, into its synced OU,
+    and Entra Connect brings it into Entra ID; a follow-up check watches for it.
             </p>
           </div>
           {% endif %}
@@ -1424,7 +1431,7 @@
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <option value="">Don't join</option>
               <template x-for="d in adDirs" :key="d.id">
-                <option :value="d.id" x-text="d.name + ' (' + d.provider_label + ')'"></option>
+                <option :value="d.id" x-text="d.name + ' (' + d.provider_label + ')' + (d.entra_hybrid ? ' · Entra hybrid' : '')"></option>
               </template>
             </select>
             <input x-show="deployForm.ad_directory_id" x-model="deployForm.ad_ou"
@@ -1437,21 +1444,28 @@
             </p>
           </div>
           {% endif %}
-          {% if windows_ssh_enabled %}
-          <!-- Entra ID join through Azure Arc (Windows Server 2025+; not with an AD join) -->
+          {% if windows_ssh_enabled or directories_enabled %}
+          <!-- Entra ID: join through Azure Arc, or hybrid join through an on-prem AD -->
           <div class="mb-4">
             <label class="block text-sm font-medium text-gray-700 mb-1">Microsoft Entra ID <span class="text-gray-400 font-normal">(Windows only)</span></label>
             <select x-model="deployForm.entra_join_mode"
                     @change="if (deployForm.entra_join_mode === 'arc') deployForm.ad_directory_id = ''"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <option value="">Don't join</option>
+              {% if windows_ssh_enabled %}
               <option value="arc">Entra join through Azure Arc (Windows Server 2025+)</option>
+              {% endif %}
+              {% if directories_enabled %}
+              <option value="hybrid">Hybrid join, through the Active Directory picked above</option>
+              {% endif %}
             </select>
             <p class="mt-1 text-xs text-gray-400">
               After the deploy, a follow-up job onboards the server to Azure Arc over OpenSSH and
               installs AADLoginForWindows, so Entra users with Virtual Machine Administrator/User
               Login can RDP in. Needs Windows Server 2025 or later with Desktop Experience and
               outbound 443 to Azure. A server joins Entra ID or an AD domain, not both.
+    Hybrid join: the server joins the on-prem domain picked above, into its synced OU,
+    and Entra Connect brings it into Entra ID; a follow-up check watches for it.
             </p>
           </div>
           {% endif %}

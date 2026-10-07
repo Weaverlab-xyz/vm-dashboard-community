@@ -922,6 +922,10 @@ Entra identities as well, synchronise that AD with Entra ID (Entra Connect or Cl
 A server joins an AD domain or Entra ID through Arc, not both: picking one clears the other
 on the form.
 
+If Entra Connect syncs that domain with hybrid join configured, pick **Hybrid join** under
+**Microsoft Entra ID** as well: the server is then also Entra hybrid joined, and a follow-up
+check confirms it. See [Hybrid Entra join](directories.md#hybrid-entra-join).
+
 ### Not yet supported
 
 - **OCI Windows.** OCI returns a Windows password through its initial-credentials API, with

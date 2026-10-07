@@ -210,6 +210,9 @@ def to_dict(row: ManagedDirectory) -> dict:
         # The account NAME only, so the page can say who the playbooks bind as.
         "bind_account": (_managed_ref_or_none(row) or {}).get("account_name"),
         "linked_directory_id": row.linked_directory_id,
+        # On-prem AD only: declared synced to Entra ID for hybrid join (hybrid_join_service).
+        "entra_hybrid": bool(_options(row).get("entra_hybrid")) if row.provider == "onprem_ad" else False,
+        "hybrid_ou": (_options(row).get("hybrid_ou") or "") if row.provider == "onprem_ad" else "",
         # Cloud identity providers. The credential's KIND only, never the ref itself.
         "endpoint": row.endpoint, "tenant_id": row.tenant_id, "client_id": row.client_id,
         "auth_mode": row.auth_mode, "writes_enabled": bool(row.writes_enabled),
