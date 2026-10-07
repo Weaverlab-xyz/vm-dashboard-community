@@ -469,7 +469,7 @@ def test_the_sql_module_is_safe_to_ship_into_a_function():
             assert node.level == 0, "a relative import cannot be vendored"
             if node.module:
                 imported.add(node.module.split(".")[0])
-    assert imported <= {"re", "secrets", "string"}, f"non-stdlib imports: {imported}"
+    assert imported <= {"base64", "re", "secrets", "string"}, f"non-stdlib imports: {imported}"
 
 
 def test_the_packager_ships_the_real_sql_module_not_a_copy():

@@ -39,7 +39,7 @@ differs by cloud/engine:
 
 | Cloud | Provisioning | L1 PRA | L2 Password Safe | L3 Entitle |
 |---|---|---|---|---|
-| **AWS** | postgres / mysql / sqlserver / oracle (RDS) + mongodb (Atlas) | ✅ tunnel | ✅ `dbssm` (not oracle / mongodb) | ✅ register + JIT |
+| **AWS** | postgres / mysql / sqlserver / oracle (RDS) + mongodb (Atlas) | ✅ tunnel | ✅ `dbssm`; oracle on the native platform (not mongodb) | ✅ register + JIT |
 | **Azure** | postgres / mysql (Flexible Server) + sqlserver (SQL DB + Private Endpoint) + mongodb (Atlas) | ✅ tunnel | ✅ `dbazure` | ✅ register + JIT |
 | **GCP** | postgres / mysql / sqlserver (Cloud SQL, private IP) + mongodb (Atlas) | ✅ tunnel | ⚠️ `dbgcp` — sqlserver via Cloud Run; postgres / mysql inert until the Data API channel ships | ✅ postgres / mysql (via forwarder) |
 | **OCI** | ⚠️ **oracle only** (Autonomous DB) — read the caveats² | ✅ tunnel¹ | ❌ | ⚠️ register (Oracle connector, unverified live) |
@@ -361,8 +361,8 @@ Entitle connect to. That matters because **Entitle's Oracle connector manages PD
 minutes** (the module allows 90). There is no parameter group: the PRA tunnel is a raw TCP
 port forward, so nothing server-side needs relaxing. The DB security group must admit
 **1521** — `setup-aws.sh` / `Setup-AwsSandbox.ps1` add it, and re-running either against an
-existing sandbox adds the rule in place. Password Safe onboarding is not offered for Oracle
-yet (no plugin covers it; native-platform onboarding is a later slice).
+existing sandbox adds the rule in place. Password Safe onboarding uses the native Oracle
+platform — see [Oracle on RDS: the native platform](#oracle-on-rds-the-native-platform).
 
 **Gateway host:** an **ECS-on-EC2** container instance the dashboard launches on demand
 (kicked early so its ~2-min boot overlaps the RDS apply) and terminates when the last
@@ -583,6 +583,38 @@ The mechanism, the functional-account rules and the per-cloud setup are two page
 |---|---|
 | AWS (`dbssm`) and Azure (`dbazure`), plus the shared model | [Password Safe rotation (AWS + Azure)](integrations/beyondtrust/databases/password-safe.md) |
 | GCP (`dbgcp`, Cloud SQL Data API) | [Password Safe rotation for Cloud SQL](integrations/beyondtrust/databases/password-safe-gcp.md) |
+
+### Oracle on RDS: the native platform
+
+Oracle uses **no plugin**. It onboards on Password Safe's own **Oracle** platform, and the
+**Resource Broker serving the asset's workgroup** connects to the listener itself — so that
+broker must be able to reach the database on **1521**. The dashboard creates the Password
+Safe objects; the network path from the broker is yours.
+
+1. **Managed user.** Over SSM to the shared gateway host, the dashboard runs sqlplus (Oracle's
+   Instant Client image, `ghcr.io/oracle/oraclelinux9-instantclient:23`, overridable with
+   `clouddb_db_client_image_oracle`) and creates or resets `psafe_<id>` with `CREATE SESSION`
+   only.
+2. **Functional account.** The RDS master user, minted on the Oracle platform per database
+   (`create` mode). In `reference` mode, `clouddb_ps_functional_account_native_oracle` names
+   an account you created on that platform.
+3. **Objects.** An **asset** (the endpoint's DNS name and the IP it resolves to — an RDS
+   endpoint resolves to its private address from anywhere), a **database** on it (platform,
+   the PDB service name, port 1521), a **managed system** over that database, and the
+   **managed account** — which rotates itself (`use_own_credentials`), so the functional
+   account never alters anyone else. A failed apply rolls back what it created.
+4. **PRA Vault sync** works as for every other engine: the tunnel's vaulted credential is the
+   managed user, mirrored on the PRA Vault platform.
+
+| Key | Default | Notes |
+|---|---|---|
+| `clouddb_ps_native_workgroup` | — | Workgroup whose Resource Broker reaches the DB; blank → `clouddb_ps_workgroup` |
+| `clouddb_ps_platform_native_oracle` | `Oracle` | The built-in platform's name in your tenant |
+| `clouddb_ps_functional_account_native_oracle` | — | `reference` mode only |
+
+**Not covered:** OCI Autonomous DB (no way here to run SQL on it to create the managed user)
+and **MongoDB Atlas** (Atlas changes database users only through its Admin API, which no
+Password Safe platform uses; a custom plugin is the path).
 
 ## Layer 3 — Entitle (just-in-time access)
 

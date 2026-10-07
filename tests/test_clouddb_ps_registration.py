@@ -398,19 +398,36 @@ def test_gcp_sql_server_is_eligible_now_that_cloud_run_exists():
         assert svc._ps_ineligible_reason(_row(cloud="gcp", engine=engine)) is None, engine
 
 
-def test_engines_no_plugin_covers_are_refused_on_every_cloud():
-    """No dbssm / dbazure / dbgcp plugin and no managed-user SQL builder exists for
-    Oracle or MongoDB, so an RDS Oracle row used to sail through the cloud gate and fail
-    inside the managed-user step on every provision. Refused structurally instead —
-    and the apply path consults this function, not only the button."""
+def test_mongodb_is_refused_on_every_cloud_and_oracle_only_off_rds():
+    """MongoDB (Atlas) users change only through the Atlas Admin API, so no Password Safe
+    platform can rotate them. Oracle onboards on the NATIVE platform, but only on RDS —
+    the one place the dashboard can run SQL to create the managed user. The apply path
+    consults this function too, not only the button."""
     _reset()
     for cloud in ("aws", "azure", "gcp"):
-        for engine in ("oracle", "mongodb"):
-            reason = svc._ps_ineligible_reason(_row(cloud=cloud, engine=engine))
-            assert reason and "plugin" in reason, (cloud, engine, reason)
+        reason = svc._ps_ineligible_reason(_row(cloud=cloud, engine="mongodb", provider="atlas"))
+        assert reason and "Atlas" in reason, (cloud, reason)
+    assert svc._ps_ineligible_reason(_row(cloud="aws", engine="oracle", provider="rds")) is None
+    reason = svc._ps_ineligible_reason(_row(cloud="oci", engine="oracle", provider="autonomous"))
+    assert reason, reason   # refused (OCI has no transport at all, so the cloud check wins)
     src = open(os.path.join(_ROOT, "web_dashboard", "services",
                             "cloud_database_service.py"), encoding="utf-8").read()
     assert "_ps_choice and _ps_ineligible_reason(row) is None" in src
+
+
+def test_oracle_onboards_natively_and_skips_the_plugin_machinery():
+    """The native branch runs BEFORE any plugin address or functional-account shape is
+    built, and the SSM jump-host prep (plugin key drop) is skipped for it — a native
+    engine has no plugin to make ready, and its absent key material is no warning."""
+    _reset()
+    assert "oracle" in svc._PS_NATIVE_ENGINES
+    body = _body("async def _onboard_ps_managed_systems(", "async def _ps_onboard_post_hoc")
+    native = body.index("if engine in _PS_NATIVE_ENGINES:")
+    assert native < body.index('fa_label, db_method = "ssm", "dbssm"')
+    assert native < body.index("register_managed_system(")
+    create = _body("async def _create_db_managed_user(", "def _run_detail(")
+    assert "prep = [] if engine in _PS_NATIVE_ENGINES else _ssm_jump_prep_commands(" in create
+    assert "if engine not in _PS_NATIVE_ENGINES and not (" in create
 
 
 def test_the_row_the_page_reads_carries_the_same_verdict():

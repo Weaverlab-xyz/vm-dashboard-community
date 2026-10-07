@@ -483,10 +483,64 @@ def test_rejects_unsafe_identifier_and_value():
 
 def test_rejects_unsupported_engine():
     try:
-        sql.onboard_commands("oracle", **_COMMON)
+        sql.onboard_commands("cassandra", **_COMMON)
         raise AssertionError("expected CloudDbSqlError for unsupported engine")
     except sql.CloudDbSqlError:
         pass
+
+
+def _oracle_script(cmd: str) -> str:
+    import base64
+    return base64.b64decode(cmd.split()[1]).decode()
+
+
+def test_oracle_onboard_creates_or_resets_and_proves_success():
+    """sqlplus exits 0 after a failed CONNECT (SP2-0640 is not a SQL error), so success
+    is a marker the last statement prints, and the pipeline's status is grep's."""
+    cmd = sql.onboard_commands("oracle", host="db.example", port=1521, database="ORAABCDE",
+                               admin_user="dbadmin", admin_password="Adm1n#pw",
+                               managed_user="psafe_abc123", managed_password="Mgd-Pw_1")[0]
+    assert "ghcr.io/oracle/oraclelinux9-instantclient:23 sqlplus -S /nolog" in cmd
+    assert cmd.endswith("| tee /dev/stderr | grep -q DASHBOARD_SQL_OK")
+    # The password is in the decoded script, never on sqlplus's argv.
+    assert "Adm1n#pw" not in cmd
+    script = _oracle_script(cmd)
+    assert script.startswith("WHENEVER SQLERROR EXIT FAILURE\n")
+    assert "DEFINE OFF" in script
+    assert 'CONNECT dbadmin/"Adm1n#pw"@//db.example:1521/ORAABCDE' in script
+    assert "WHERE username = 'PSAFE_ABC123'" in script
+    assert 'CREATE USER psafe_abc123 IDENTIFIED BY "Mgd-Pw_1"' in script
+    assert 'ALTER USER psafe_abc123 IDENTIFIED BY "Mgd-Pw_1" ACCOUNT UNLOCK' in script
+    assert "GRANT CREATE SESSION TO psafe_abc123;" in script
+    # The marker is joined at run time, so a failing line sqlplus echoes cannot hold it.
+    assert "DASHBOARD_SQL_OK" not in script
+    assert script.rstrip().endswith("EXIT")
+
+
+def test_oracle_onboard_refuses_unsafe_values_like_every_engine():
+    for bad in ({"managed_user": "x; DROP"}, {"managed_password": 'pw"; x'}):
+        args = dict(host="db.example", port=1521, database="ORAABCDE", admin_user="dbadmin",
+                    admin_password="Adm1n#pw", managed_user="psafe_abc123",
+                    managed_password="Mgd-Pw_1")
+        args.update(bad)
+        try:
+            sql.onboard_commands("oracle", **args)
+        except sql.CloudDbSqlError:
+            continue
+        raise AssertionError(f"accepted {bad}")
+
+
+def test_oracle_is_onboard_only_never_a_grant_plan_engine():
+    # The grant builders fall through to SQL Server for an engine they do not branch
+    # on, so admitting Oracle there would hand it T-SQL.
+    assert "oracle" in sql.ONBOARD_ENGINES
+    assert "oracle" not in sql.VALID_ENGINES
+    try:
+        sql.grant_plan("oracle", username="jit_a_1", password="Pw-1", database="appdb",
+                       role="read")
+    except sql.CloudDbSqlError:
+        return
+    raise AssertionError("an Oracle grant plan was built")
 
 
 if __name__ == "__main__":

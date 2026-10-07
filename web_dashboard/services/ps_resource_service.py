@@ -1849,6 +1849,139 @@ def _apply_hcl_sync(hcl: str, tf_vars: dict, tenant: Optional[dict] = None) -> d
         }
 
 
+# ── Native database onboarding (asset -> database -> managed system) ─────────
+#
+# The engines Password Safe manages with its OWN platform (Oracle today) rather than a
+# cloud-transport custom plugin. Password Safe — through the Resource Broker serving the
+# asset's workgroup — connects to the listener itself, so the address is just the host,
+# and the instance (Oracle's service name) lives on a Database object. That is why this
+# is not passwordsafe_managed_system_by_workgroup: that resource has no instance field,
+# and a native database platform needs one. Reachability is the operator's: the
+# workgroup's Resource Broker must reach host:port.
+
+def _generate_native_db_hcl(*, name: str, workgroup_id: str, host_name: str,
+                            ip_address: str, port: int, platform_id: int,
+                            instance_name: str, functional_account_id: int,
+                            managed_account_name: str,
+                            use_own_credentials: bool = True) -> str:
+    """HCL for one natively-managed database: the asset (the host), the database (the
+    platform + instance + port on it), the managed system over that database, and the
+    managed account. The account attaches by ``managed_system_name``, read back from the
+    managed-system resource rather than spelled here, because the provider attaches BY
+    NAME and Password Safe derives that name itself.
+
+    ``use_own_credentials`` defaults on: the dashboard's managed user holds CREATE
+    SESSION only and rotates ITSELF (ALTER USER on your own account needs no privilege),
+    so the functional account never needs ALTER USER on other users."""
+    label = _safe_name(name)
+    header = _provider_header('variable "ps_account_password"    { sensitive = true }\n')
+    acct_lines = [
+        _line("system_name",
+              f"passwordsafe_managed_system_by_database.{label}.managed_system_name"),
+        _line("account_name", json.dumps(managed_account_name)),
+        _line("password", "var.ps_account_password"),
+        _line("auto_management_flag", "true"),
+        _line("api_enabled", "true"),
+    ]
+    if use_own_credentials:
+        acct_lines.append(_line("use_own_credentials", "true"))
+    acct_block = "\n".join(acct_lines)
+    return header + f"""
+resource "passwordsafe_asset_by_workgroup_id" {json.dumps(label)} {{
+  work_group_id = {json.dumps(str(workgroup_id))}
+  ip_address    = {json.dumps(ip_address)}
+  asset_name    = {json.dumps(name)}
+  dns_name      = {json.dumps(host_name)}
+  description   = "Auto-onboarded by Infrastructure Management Dashboard"
+}}
+
+resource "passwordsafe_database" {json.dumps(label)} {{
+  asset_id      = tostring(passwordsafe_asset_by_workgroup_id.{label}.asset_id)
+  platform_id   = {int(platform_id)}
+  instance_name = {json.dumps(instance_name)}
+  port          = {int(port)}
+}}
+
+resource "passwordsafe_managed_system_by_database" {json.dumps(label)} {{
+  database_id           = tostring(passwordsafe_database.{label}.database_id)
+  functional_account_id = {int(functional_account_id)}
+  auto_management_flag  = true
+  description           = "Auto-onboarded by Infrastructure Management Dashboard"
+}}
+
+resource "passwordsafe_managed_account" {json.dumps(label)} {{
+{acct_block}
+}}
+
+output "managed_system_id" {{
+  value = passwordsafe_managed_system_by_database.{label}.managed_system_id
+}}
+
+output "managed_account_id" {{
+  value = passwordsafe_managed_account.{label}.id
+}}
+"""
+
+
+def _apply_native_db_sync(hcl: str, tf_vars: dict, tenant: Optional[dict] = None) -> dict:
+    """:func:`_apply_hcl_sync`, plus a rollback. Four resources are created in order, so a
+    failure on the third leaves an asset and a database in the customer's Password Safe —
+    and a failed apply returns no state for teardown to find. Destroy what this
+    workspace made, then raise."""
+    env = _tf_env(tf_vars, tenant)
+    with tempfile.TemporaryDirectory(prefix="ps_native_tf_") as work_dir:
+        Path(work_dir, "main.tf").write_text(hcl)
+        init = _run_tf(["init", "-upgrade=false"], work_dir, env, timeout=60)
+        if init.returncode != 0:
+            raise PSResourceError(
+                f"terraform init failed: {init.stderr.strip() or init.stdout.strip()}")
+        apply = _run_tf(["apply", "-auto-approve"], work_dir, env, timeout=180)
+        if apply.returncode != 0:
+            cleanup = _run_tf(["destroy", "-auto-approve"], work_dir, env, timeout=180)
+            note = ("" if cleanup.returncode == 0 else
+                    " — and rolling back the partial onboarding ALSO failed, so an asset "
+                    "or database may be left in Password Safe for manual removal")
+            raise PSResourceError(
+                f"terraform apply failed: {apply.stderr.strip() or apply.stdout.strip()}{note}")
+        out = _run_tf(["output", "-json"], work_dir, env, timeout=30)
+        outputs: dict = {}
+        if out.returncode == 0 and out.stdout.strip():
+            try:
+                outputs = {k: v.get("value") for k, v in json.loads(out.stdout).items()}
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        state_path = Path(work_dir, "terraform.tfstate")
+        tf_state_json = state_path.read_text() if state_path.exists() else None
+        return {
+            "managed_system_id": str(outputs.get("managed_system_id") or "") or None,
+            "managed_account_id": str(outputs.get("managed_account_id") or "") or None,
+            "tf_state_json": _scrub_state(tf_state_json),
+        }
+
+
+async def register_native_database(*, name: str, workgroup_id: str, host_name: str,
+                                   ip_address: str, port: int, platform_id: int,
+                                   instance_name: str, functional_account_id: int,
+                                   managed_account_name: str, managed_password: str,
+                                   use_own_credentials: bool = True,
+                                   tenant: Optional[dict] = None) -> dict:
+    """Onboard a database on a NATIVE Password Safe platform. Returns the same
+    ``{managed_system_id, managed_account_id, tf_state_json}`` as
+    :func:`register_managed_system`, so :func:`deregister` tears it down the same way.
+    The password rides a sensitive TF_VAR and is scrubbed from the returned state."""
+    if not ip_address:
+        raise PSResourceError("a native database asset needs an IP address")
+    if not instance_name:
+        raise PSResourceError("a native database needs an instance (service) name")
+    hcl = _generate_native_db_hcl(
+        name=name, workgroup_id=workgroup_id, host_name=host_name, ip_address=ip_address,
+        port=port, platform_id=platform_id, instance_name=instance_name,
+        functional_account_id=functional_account_id,
+        managed_account_name=managed_account_name, use_own_credentials=use_own_credentials)
+    return await asyncio.to_thread(
+        _apply_native_db_sync, hcl, {"ps_account_password": managed_password}, tenant)
+
+
 def _destroy_sync(tf_state_json: str, tenant: Optional[dict] = None) -> None:
     """Off-board: restore stored state + provider-only config and destroy (the
     managed account, then the managed system)."""

@@ -34,6 +34,14 @@ import string
 
 VALID_ENGINES = ("postgres", "mysql", "sqlserver")
 
+# Engines the Password Safe MANAGED-USER builders (onboard_commands /
+# teardown_commands) serve. Wider than VALID_ENGINES on purpose: VALID_ENGINES also
+# gates the ephemeral grant plans below, whose builders branch mysql -> postgres ->
+# "otherwise SQL Server", so admitting Oracle there would hand it T-SQL. Oracle is
+# onboarded natively (Password Safe's own Oracle platform) and needs only the
+# create-the-managed-user step.
+ONBOARD_ENGINES = VALID_ENGINES + ("oracle",)
+
 # Per-engine defaults. The client image is overridable via settings so an
 # air-gapped/mirrored registry can be pointed at instead of Docker Hub / MCR.
 #
@@ -49,6 +57,9 @@ _ENGINE = {
     "postgres":  {"image": "postgres:16", "port": 5432},
     "mysql":     {"image": "mysql:8.4",   "port": 3306},
     "sqlserver": {"image": "",            "port": 1433},
+    # Oracle's own Instant Client image on GHCR (github.com/oracle/docker-images): it
+    # carries sqlplus and needs no registry login, unlike container-registry.oracle.com.
+    "oracle":    {"image": "ghcr.io/oracle/oraclelinux9-instantclient:23", "port": 1521},
 }
 
 # Where both clouds' jump-host prep installs the `mssql-tools18` package, and the
@@ -84,7 +95,7 @@ _SAFE_VALUE_RE = re.compile(r"^[A-Za-z0-9#\-_.]+$")
 # fnruntime/dispatch.py, which now records the driver code and detail).
 #
 # 63 was right for exactly one engine and silently wrong for the one being used.
-_MAX_IDENT = {"postgres": 63, "mysql": 32, "sqlserver": 128}
+_MAX_IDENT = {"postgres": 63, "mysql": 32, "sqlserver": 128, "oracle": 128}
 
 # What to assume when the engine is not known. The SMALLEST limit, never the
 # largest: a name that is too short is ugly, a name that is too long does not exist.
@@ -252,6 +263,34 @@ def _mssql_onboard_sql(managed: str, managed_pw: str, flavor: str = "") -> list:
     return statements
 
 
+def _oracle_onboard_sql(managed: str, managed_pw: str, flavor: str = "") -> list:
+    # Oracle has no CREATE USER IF NOT EXISTS, so the branch is a PL/SQL block over
+    # ALL_USERS (readable by any session — DBA_USERS needs a catalog role the RDS master
+    # may not hold). The name is unquoted, so Oracle stores it upper-cased; the
+    # password is double-quoted, which keeps its case and admits the generator's
+    # `#-_`. ACCOUNT UNLOCK on the reset path: a user left by an earlier attempt may
+    # have been locked by failed logins. CREATE SESSION is the only grant — the account
+    # exists to be rotated (ALTER USER on itself needs no privilege), not to read data.
+    upper = managed.upper()
+    return [
+        "DECLARE n NUMBER; BEGIN "
+        f"SELECT COUNT(*) INTO n FROM all_users WHERE username = '{upper}'; "
+        f"IF n = 0 THEN EXECUTE IMMEDIATE 'CREATE USER {managed} IDENTIFIED BY \"{managed_pw}\"'; "
+        f"ELSE EXECUTE IMMEDIATE 'ALTER USER {managed} IDENTIFIED BY \"{managed_pw}\" ACCOUNT UNLOCK'; "
+        "END IF; END;\n/",
+        f"GRANT CREATE SESSION TO {managed};",
+    ]
+
+
+def _oracle_teardown_sql(managed: str, flavor: str = "") -> list:
+    upper = managed.upper()
+    return [
+        "DECLARE n NUMBER; BEGIN "
+        f"SELECT COUNT(*) INTO n FROM all_users WHERE username = '{upper}'; "
+        f"IF n > 0 THEN EXECUTE IMMEDIATE 'DROP USER {managed} CASCADE'; END IF; END;\n/",
+    ]
+
+
 def _pg_teardown_sql(managed: str, flavor: str = "") -> list:
     return [f'DROP ROLE IF EXISTS "{managed}";']
 
@@ -396,14 +435,59 @@ def _mssql_command(*, host, port, database, admin_user, admin_password, image, s
     return " ".join([f"SQLCMDPASSWORD='{admin_password}'", SQLCMD_PATH] + args)
 
 
-_ONBOARD_SQL = {"postgres": _pg_onboard_sql, "mysql": _mysql_onboard_sql, "sqlserver": _mssql_onboard_sql}
-_TEARDOWN_SQL = {"postgres": _pg_teardown_sql, "mysql": _mysql_teardown_sql, "sqlserver": _mssql_teardown_sql}
-_COMMAND = {"postgres": _pg_command, "mysql": _mysql_command, "sqlserver": _mssql_command}
+# Printed only when every statement before it succeeded. Built by concatenation so
+# sqlplus's echo of a FAILING line (it reprints the statement on an ORA- error) can
+# never contain the joined token.
+_ORACLE_OK = "DASHBOARD_SQL_OK"
+
+
+def _oracle_command(*, host, port, database, admin_user, admin_password, image, statements) -> str:
+    """sqlplus from the Instant Client image, fed a script on stdin.
+
+    The script travels base64-encoded and is decoded on the jump host, because PL/SQL
+    is full of single quotes and the SSM command is one shell line — the other
+    builders' quote-the-statement approach cannot carry it. The admin password is in
+    the script (CONNECT), not on sqlplus's argv.
+
+    Success is PROVEN, not inferred from the exit code. WHENEVER SQLERROR covers SQL
+    errors, but a failed CONNECT leaves sqlplus "not connected" (SP2-0640), which is
+    not a SQL error: every later statement is refused and sqlplus still exits 0. So the
+    last statement prints a marker and the pipeline's status is grep's — no marker, no
+    success. ``tee /dev/stderr`` keeps sqlplus's output in the result's stderr, which
+    is what _run_detail reports on failure.
+
+    The connect descriptor is plain TCP: RDS for Oracle's listener speaks TLS only
+    when an SSL option group is attached, which the dashboard's module does not do."""
+    import base64
+    service = _ident(database) if database else "ORCL"
+    script = "\n".join(
+        ["WHENEVER SQLERROR EXIT FAILURE", "WHENEVER OSERROR EXIT FAILURE",
+         "SET HEADING OFF FEEDBACK OFF DEFINE OFF",
+         f'CONNECT {admin_user}/"{admin_password}"@//{host}:{int(port)}/{service}']
+        + list(statements)
+        + [f"SELECT '{_ORACLE_OK[:10]}' || '{_ORACLE_OK[10:]}' FROM dual;", "EXIT"]) + "\n"
+    b64 = base64.b64encode(script.encode()).decode()
+    return (f"echo {b64} | base64 -d | docker run -i --rm {image} sqlplus -S /nolog "
+            f"| tee /dev/stderr | grep -q {_ORACLE_OK}")
+
+
+_ONBOARD_SQL = {"postgres": _pg_onboard_sql, "mysql": _mysql_onboard_sql,
+                "sqlserver": _mssql_onboard_sql, "oracle": _oracle_onboard_sql}
+_TEARDOWN_SQL = {"postgres": _pg_teardown_sql, "mysql": _mysql_teardown_sql,
+                 "sqlserver": _mssql_teardown_sql, "oracle": _oracle_teardown_sql}
+_COMMAND = {"postgres": _pg_command, "mysql": _mysql_command, "sqlserver": _mssql_command,
+            "oracle": _oracle_command}
 
 
 def _check_engine(engine: str) -> None:
     if engine not in VALID_ENGINES:
         raise CloudDbSqlError(f"unsupported engine {engine!r} (supported: {', '.join(VALID_ENGINES)})")
+
+
+def _check_onboard_engine(engine: str) -> None:
+    if engine not in ONBOARD_ENGINES:
+        raise CloudDbSqlError(
+            f"unsupported engine {engine!r} (supported: {', '.join(ONBOARD_ENGINES)})")
 
 
 def onboard_commands(engine: str, *, host: str, port: int, database: str,
@@ -418,7 +502,7 @@ def onboard_commands(engine: str, *, host: str, port: int, database: str,
     cloud and get it from ``cloud_db_adapter_service.flavor_for``. Only SQL Server reads
     it, and only to decide whether the login also needs a contained USER in master —
     everything the statements say is otherwise flavor-independent."""
-    _check_engine(engine)
+    _check_onboard_engine(engine)
     managed = _ident(managed_user)
     mpw = _value(managed_password)
     _value(admin_password)
@@ -437,7 +521,7 @@ def teardown_commands(engine: str, *, host: str, port: int, database: str,
 
     ``flavor`` as in :func:`onboard_commands`, and it has to match what onboarding was
     given: on Azure SQL there is a contained user to remove before the login."""
-    _check_engine(engine)
+    _check_onboard_engine(engine)
     managed = _ident(managed_user)
     _value(admin_password)
     image = resolve_client_image(engine, client_image)

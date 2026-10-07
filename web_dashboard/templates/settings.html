@@ -2131,6 +2131,35 @@
                          placeholder="Default Workgroup">
                 </div>
               </div>
+              <!-- Native-platform onboarding (Oracle on RDS) -->
+              <div class="pt-3 border-t border-gray-100">
+                <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Oracle (native platform)</p>
+                <p class="text-xs text-gray-500 mb-2">
+                  Oracle on RDS onboards on Password Safe's own <strong>Oracle</strong> platform, with
+                  no plugin. The Resource Broker serving this workgroup connects to the listener
+                  itself, so it must be able to reach the database on port 1521.
+                </p>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-gray-400 font-normal">(blank = the one above)</span></label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_native_workgroup"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="(clouddb_ps_workgroup)">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Oracle platform</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_platform_native_oracle"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="Oracle">
+                  </div>
+                  <div x-show="panelCfg.clouddb_ps_functional_account_mode === 'reference'">
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Oracle Functional Account</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_functional_account_native_oracle"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="oracle-fa">
+                  </div>
+                </div>
+              </div>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3" x-show="panelCfg.clouddb_ps_functional_account_mode === 'reference'">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">PRA Vault Functional Account</label>
@@ -2229,6 +2258,12 @@
                   <input type="text" x-model="panelCfg.clouddb_db_client_image_sqlserver"
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                          placeholder="(blank — native sqlcmd)">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">sqlplus Client Image</label>
+                  <input type="text" x-model="panelCfg.clouddb_db_client_image_oracle"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="ghcr.io/oracle/oraclelinux9-instantclient:23">
                 </div>
               </div>
               <p class="text-xs text-gray-400">
