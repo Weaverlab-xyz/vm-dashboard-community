@@ -58,15 +58,19 @@ def _install_stubs():
 
 
 _install_stubs()
+# Probe the one third-party dependency the stubs leave real; the first-party import
+# below stays UNGUARDED so a broken module fails this file instead of skipping it
+# (tests/test_import_guard_narrowness.py).
 try:
-    from web_dashboard.services import cloud_database_service as svc
-except Exception as exc:  # pragma: no cover
+    import sqlalchemy  # noqa: F401
+except ModuleNotFoundError as exc:  # pragma: no cover
     try:
         import pytest
-        pytest.skip(f"cloud_database_service import unavailable: {exc}", allow_module_level=True)
+        pytest.skip(f"sqlalchemy unavailable: {exc}", allow_module_level=True)
     except ModuleNotFoundError:
         print(f"SKIP: {exc}")
         sys.exit(0)
+from web_dashboard.services import cloud_database_service as svc  # noqa: E402
 
 
 def _build(cloud="aws", region="us-east-1", **opts):
