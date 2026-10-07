@@ -428,6 +428,28 @@
                        placeholder="Entra group object ids, comma-separated">
               </div>
             </div>
+            <p class="text-xs text-gray-400 mt-4 mb-3">Windows servers on <strong>AWS and GCP</strong> can be Entra joined
+              through Azure Arc (Windows Server 2025+ with Desktop Experience): they are onboarded as Arc machines in
+              this subscription and get the same login groups. The dashboard's service principal needs
+              <em>Azure Connected Machine Onboarding</em> (or Contributor) on the Arc resource group.</p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label class="flex items-center gap-2 text-sm text-gray-700 sm:col-span-2">
+                <input type="checkbox" x-model="form.azure.windows_arc_entra_default" class="rounded text-blue-600">
+                Entra join AWS/GCP Windows servers through Azure Arc by default
+              </label>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Arc resource group</label>
+                <input type="text" x-model="form.azure.arc_resource_group"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="blank = the Azure resource group">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Arc region</label>
+                <input type="text" x-model="form.azure.arc_location"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="blank = the Azure location">
+              </div>
+            </div>
           </div>
 
           <div class="border-t border-gray-100 pt-4">
@@ -1071,6 +1093,7 @@ function wizard() {
                   azure_aci_docker_deploy_key: '',
                   azure_windows_entra_join: false, azure_windows_entra_intune_enroll: false,
                   azure_entra_vm_admin_group_ids: '', azure_entra_vm_user_group_ids: '',
+                  windows_arc_entra_default: false, arc_resource_group: '', arc_location: '',
                   azure_oauth_client_id: '', azure_oauth_client_secret: '', azure_oauth_tenant_id: '' },
       gcp:      { gcp_project_id: '', gcp_region: 'us-central1', gcp_zone: 'us-central1-a',
                   gcp_service_account_json: '', gcp_network: 'default', gcp_subnetwork: '',
@@ -1420,7 +1443,8 @@ function wizard() {
                                     'azure_aci_jumpoint_image',
                                     'azure_acr_username', 'azure_acr_password',
                                     'azure_aci_docker_deploy_key',
-                                    'azure_entra_vm_admin_group_ids', 'azure_entra_vm_user_group_ids'];
+                                    'azure_entra_vm_admin_group_ids', 'azure_entra_vm_user_group_ids',
+                                    'arc_resource_group', 'arc_location'];
             for (const f of advancedFields) {
               if (cfg[f]) { this.form.azure[f] = cfg[f]; this.showAzureAdvanced = true; }
             }
@@ -1430,7 +1454,7 @@ function wizard() {
               this.form.azure.azure_oauth_tenant_id  = cfg.azure_oauth_tenant_id || '';
               this.showOAuth = true;
             }
-            for (const f of ['azure_windows_entra_join', 'azure_windows_entra_intune_enroll']) {
+            for (const f of ['azure_windows_entra_join', 'azure_windows_entra_intune_enroll', 'windows_arc_entra_default']) {
               if (cfg[f] === '1' || cfg[f] === 'true' || cfg[f] === true) { this.form.azure[f] = true; this.showAzureAdvanced = true; }
             }
             // GCP non-secret fields

@@ -1250,6 +1250,12 @@ class Settings(BaseSettings):
     azure_windows_entra_intune_enroll: bool = False
     azure_entra_vm_admin_group_ids: str = ""
     azure_entra_vm_user_group_ids: str = ""
+    # Windows servers on AWS and GCP: Entra join through Azure Arc (windows_arc_service).
+    # Arc machines land in this resource group / region (blank = the Azure defaults), and
+    # get the same login groups as above. The default is the deploy form's initial choice.
+    windows_arc_entra_default: bool = False
+    arc_resource_group: str = ""
+    arc_location: str = ""
     # Where a Windows VM's administrator password is written (services/windows_admin_secret).
     # Blank = automatic: Password Safe, else the global external secrets backend, else the
     # cloud's own vault. "database" is refused — it is never kept in the dashboard DB.

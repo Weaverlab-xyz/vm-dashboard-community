@@ -667,9 +667,9 @@ doc. A separate **machine-identity JIT** track (the AWS `elevate()` wrapping of
 Windows builds on **AWS, Azure and GCP** follow a different path from Linux after the VM
 exists: no SSH key and no Entitle SSH integration. In their place is the local
 administrator password, a PRA **Shell Jump over OpenSSH** (with an RDP jump only if you ask
-for one), and a domain identity: an Entra ID join on Azure, or an
-[Active Directory join](directories.md) on AWS, GCP and Azure (Entra Domain Services). An
-Azure VM gets one or the other, not both.
+for one), and an identity: an Entra ID join (directly on Azure, through Azure Arc on AWS and
+GCP), or an [Active Directory join](directories.md) on AWS, GCP and Azure (Entra Domain
+Services). A server gets one or the other, not both.
 
 ### Where the administrator password goes
 
@@ -842,9 +842,71 @@ local administrator as break-glass. For just-in-time access, an Entitle Azure in
 can grant *Virtual Machine Administrator Login* on the VM for a limited time. That is the
 Windows counterpart of the Linux SSH ephemeral accounts.
 
+### Entra ID join on AWS and GCP (Azure Arc)
+
+Windows Server can be Entra joined directly only on Azure. On AWS and GCP it gets there
+through **Azure Arc**: the server is onboarded as an Arc-enabled server, a
+`Microsoft.HybridCompute/machines` resource in your Azure subscription, and the same
+**AADLoginForWindows** extension an Azure VM uses is installed on that resource. The server
+ends up Entra joined, with no domain controller anywhere.
+
+Pick **Entra join through Azure Arc** under **Microsoft Entra ID** on the AWS or GCP deploy
+form. The default comes from `windows_arc_entra_default`. Once the deploy has completed, a
+follow-up job (`windows_arc_join`):
+
+1. checks that the subscription can hold an Arc machine, and refuses with the command that
+   fixes it when it cannot. It runs none of these commands itself:
+   - the `Microsoft.HybridCompute`, `Microsoft.GuestConfiguration` and
+     `Microsoft.HybridConnectivity` resource providers must be registered
+     (`az provider register --namespace …`);
+   - the Arc resource group must exist (`arc_resource_group`, blank = `azure_resource_group`);
+2. runs the built-in `arc-onboard-windows.yml` play on the server over OpenSSH, on the
+   cloud's Config Management runner. The play checks the OS, installs the Connected Machine
+   agent and runs `azcmagent connect`;
+3. installs AADLoginForWindows on the Arc machine;
+4. grants the groups in `azure_entra_vm_admin_group_ids` / `azure_entra_vm_user_group_ids`
+   **Virtual Machine Administrator / User Login** on it, exactly as on Azure.
+
+Requirements:
+
+- **Windows Server 2025 or later, with Desktop Experience.** The play stops on anything
+  older, or on Server Core, and says so.
+- **OpenSSH for Windows** on (`windows_ssh_enabled`), because the play runs over it.
+- **Outbound 443** from the server to the Azure Arc endpoints and to
+  `login.microsoftonline.com`, `enterpriseregistration.windows.net` and `pas.windows.net`.
+- The dashboard's Azure identity needs **Azure Connected Machine Onboarding** (or
+  Contributor) on the Arc resource group, plus roleAssignments/write there for step 4.
+- For an ECS or Cloud Run runner, a way to deliver a credential to the task:
+  collect-from-dashboard, or the ephemeral Secrets Manager copy
+  (`ansible_cloud_ephemeral_secrets_enabled`).
+
+**The onboarding credential.** `azcmagent connect` is given an ARM access token for the
+dashboard's own Azure identity:
+
+- it is minted when the job runs and lasts about an hour;
+- it reaches the server only through the runner's secret channel, the same one a Password
+  Safe checkout uses, and is scrubbed from the job's output;
+- it is never put in instance metadata, never sent as a Systems Manager parameter, and
+  never written to either job.
+
+It does appear briefly on the guest's `azcmagent` command line, so a server with
+command-line process auditing records it. Rotate nothing afterwards: it expires on its own.
+
+**Signing in.** Use an Entra account that holds one of the two login roles. The RDP client
+must be Entra joined, hybrid joined or registered in the same tenant. Alternatively, use
+*Use a web account to sign in* with the server's hostname (not its IP). Conditional Access
+is not supported on Arc-joined servers.
+
+**Destroy** removes the login role assignments the job created, then deletes the Arc
+machine. The Entra **device object** is left for you to remove: it is named by the guest's
+hostname, which is not unique, so deleting one by name could remove the wrong device.
+Entra's stale-device cleanup also takes it.
+
+A failure at any step is a warning on the deploy job (`entra_error`); the server and its
+local administrator are unaffected.
+
 ### Active Directory join (AWS and GCP)
 
-Microsoft supports Entra join and Entra RDP sign-in for Windows Server only on Azure VMs.
 On AWS and GCP, a Windows server can instead join a managed Active Directory at deploy:
 pick one under **Join Active Directory** on the deploy form. Directories are built or
 registered on the [Managed Active Directory](directories.md) page, which also covers
@@ -857,6 +919,12 @@ what each cloud requires.
 
 A failed join is a warning on the job, not a failed deploy. To have users sign in with
 Entra identities as well, synchronise that AD with Entra ID (Entra Connect or Cloud Sync).
+A server joins an AD domain or Entra ID through Arc, not both: picking one clears the other
+on the form.
+
+If Entra Connect syncs that domain with hybrid join configured, pick **Hybrid join** under
+**Microsoft Entra ID** as well: the server is then also Entra hybrid joined, and a follow-up
+check confirms it. See [Hybrid Entra join](directories.md#hybrid-entra-join).
 
 ### Not yet supported
 

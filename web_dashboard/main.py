@@ -1720,6 +1720,8 @@ def _windows_access_ctx() -> dict:
     return {
         "windows_ssh_enabled": config_service.get_bool("windows_ssh_enabled", True),
         "windows_rdp_default": config_service.get_bool("windows_rdp_default", False),
+        # The deploy form's initial Entra choice on AWS/GCP (windows_arc_service).
+        "windows_arc_entra_default": config_service.get_bool("windows_arc_entra_default", False),
     }
 
 

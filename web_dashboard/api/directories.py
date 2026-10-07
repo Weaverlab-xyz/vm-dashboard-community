@@ -546,6 +546,7 @@ async def ps_import(req: PSDirectoryImportRequest, db: Session = Depends(get_db)
 @router.get("/joinable")
 def joinable(cloud: str = Query(...), region: str = "", db: Session = Depends(get_db),
              user: User = Depends(get_current_user)):
+    from ..services import hybrid_join_service
     cloud = (cloud or "").lower()
     if cloud not in ("aws", "gcp", "azure"):
         raise HTTPException(status_code=400, detail="joinable covers aws, gcp and azure")
@@ -557,7 +558,9 @@ def joinable(cloud: str = Query(...), region: str = "", db: Session = Depends(ge
                              "region": r.region, "vpc_id": r.vpc_id,
                              "networks": directory_service._jl(r.networks),
                              # Azure joins need a pinned account; the others need none.
-                             "join_ready": r.cloud != "azure" or bool(r.credentials_ref)}
+                             "join_ready": r.cloud != "azure" or bool(r.credentials_ref),
+                             # Whether a server joined here can be Entra hybrid joined.
+                             "entra_hybrid": hybrid_join_service.settings_for(db, r)["entra_hybrid"]}
                             for r in rows]}
 
 
@@ -892,4 +895,27 @@ def set_join_account(directory_id: str, req: JoinAccountRequest, db: Session = D
     job_service.log_audit(db, user.username, "directory_join_account", details={
         "directory": row.name, "account_name": row.admin_username or "",
         "cleared": not req.join_account})
+    return directory_service.to_dict(row)
+
+
+class HybridJoinRequest(BaseModel):
+    entra_hybrid: bool
+    hybrid_ou: str = ""
+
+
+@router.put("/{directory_id}/hybrid")
+def set_hybrid_join(directory_id: str, req: HybridJoinRequest, db: Session = Depends(get_db),
+                    user: User = Depends(require_explicit_permission("directories", "write"))):
+    """Declare that Entra Connect syncs this on-prem domain with hybrid join configured,
+    and the OU (in its sync scope) servers should join. Only a declaration: nothing in
+    Entra Connect or the domain is changed."""
+    from ..services import hybrid_join_service
+    row = _row_or_404(db, directory_id, user)
+    try:
+        row = hybrid_join_service.set_settings(db, row, entra_hybrid=req.entra_hybrid,
+                                               hybrid_ou=req.hybrid_ou)
+    except hybrid_join_service.HybridError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    job_service.log_audit(db, user.username, "directory_hybrid_join", details={
+        "directory": row.name, "entra_hybrid": req.entra_hybrid, "hybrid_ou": req.hybrid_ou})
     return directory_service.to_dict(row)

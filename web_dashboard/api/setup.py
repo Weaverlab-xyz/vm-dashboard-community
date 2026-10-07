@@ -78,6 +78,10 @@ class AzureSetup(BaseModel):
     azure_windows_entra_intune_enroll: bool = False
     azure_entra_vm_admin_group_ids: str = ""
     azure_entra_vm_user_group_ids: str = ""
+    # AWS/GCP Windows servers: Entra join through Azure Arc
+    windows_arc_entra_default: bool = False
+    arc_resource_group: str = ""
+    arc_location: str = ""
 
 
 class AzureRegionConfig(BaseModel):

@@ -1,0 +1,104 @@
+# Onboard a Windows server to Azure Arc, so it can be Microsoft Entra joined
+# Target: the Windows server itself, over OpenSSH (PowerShell), from the cloud's
+# Config-Management runner. The dashboard runs this automatically after an AWS or GCP
+# Windows deploy that chose "Entra join via Azure Arc" (services/windows_arc_service).
+#
+# The dashboard writes the arc_* vars below into the play. arc_access_token is an ARM
+# access token for the dashboard's Azure identity, minted for this run (about an hour),
+# delivered through the runner's secret channel and scrubbed from the output.
+#
+# Entra sign-in through Arc needs Windows Server 2025 or later with Desktop Experience,
+# and outbound 443 to the Azure Arc and Entra endpoints. The last line is always a
+# VMDASH-ARC: sentinel the dashboard reads — CONNECTED, UNSUPPORTED or FAILED.
+- name: Onboard to Azure Arc
+  hosts: all
+  gather_facts: false
+  vars:
+    arc_subscription_id: ""
+    arc_tenant_id: ""
+    arc_resource_group: ""
+    arc_location: ""
+    arc_resource_name: ""
+    arc_tags: ""
+    arc_msi_url: https://aka.ms/AzureConnectedMachineAgent
+    arc_exe: C:\Program Files\AzureConnectedMachineAgent\azcmagent.exe
+  tasks:
+    - name: Fail early if required vars are missing
+      ansible.builtin.assert:
+        that:
+          - arc_subscription_id | length > 0
+          - arc_tenant_id | length > 0
+          - arc_resource_group | length > 0
+          - arc_location | length > 0
+          - arc_resource_name | length > 0
+          - arc_access_token is defined and arc_access_token | length > 0
+        fail_msg: The dashboard sets the arc_* vars and the token; run it from there.
+
+    - name: Check the OS can use Entra sign-in through Arc
+      ansible.windows.win_shell: |
+        $v = [Environment]::OSVersion.Version
+        $type = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').InstallationType
+        if ($v.Build -lt 26100 -or $type -eq 'Server Core') {
+          Write-Output "UNSUPPORTED build=$($v.Build) type=$type"
+        } else {
+          Write-Output "OK build=$($v.Build) type=$type"
+        }
+      register: arc_os
+
+    - name: Report an unsupported OS
+      ansible.builtin.debug:
+        msg: "VMDASH-ARC:{{ arc_os.stdout | trim }}"
+      when: arc_os.stdout is search('UNSUPPORTED')
+
+    - name: Stop on an unsupported OS
+      ansible.builtin.meta: end_play
+      when: arc_os.stdout is search('UNSUPPORTED')
+
+    - name: Install the Connected Machine agent
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        if (Test-Path '{{ arc_exe }}') { Write-Output 'present'; exit 0 }
+        $msi = Join-Path $env:WINDIR 'Temp\AzureConnectedMachineAgent.msi'
+        Invoke-WebRequest -UseBasicParsing -Uri '{{ arc_msi_url }}' -OutFile $msi
+        $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+          '/i', $msi, '/qn', '/l*v', (Join-Path $env:WINDIR 'Temp\azcmagent-install.log'))
+        if ($p.ExitCode -ne 0) { throw "msiexec exited $($p.ExitCode)" }
+        Write-Output 'installed'
+      register: arc_install
+
+    - name: Read the agent's state
+      ansible.windows.win_shell: |
+        $s = & '{{ arc_exe }}' show -j | ConvertFrom-Json
+        Write-Output $s.status
+      register: arc_state
+      failed_when: false
+
+    - name: Connect to Azure Arc
+      ansible.windows.win_shell: |
+        & '{{ arc_exe }}' connect `
+          --access-token '{{ arc_access_token }}' `
+          --subscription-id '{{ arc_subscription_id }}' `
+          --tenant-id '{{ arc_tenant_id }}' `
+          --resource-group '{{ arc_resource_group }}' `
+          --location '{{ arc_location }}' `
+          --resource-name '{{ arc_resource_name }}' `
+          --tags '{{ arc_tags }}' `
+          --cloud AzureCloud
+        exit $LASTEXITCODE
+      register: arc_connect
+      failed_when: false
+      no_log: true              # the command line carries the access token
+      when: arc_state.stdout | trim != 'Connected'
+
+    - name: Read the agent's state again
+      ansible.windows.win_shell: |
+        $s = & '{{ arc_exe }}' show -j | ConvertFrom-Json
+        Write-Output "$($s.status) host=$env:COMPUTERNAME"
+      register: arc_final
+      failed_when: false
+
+    - name: Report the result
+      ansible.builtin.debug:
+        msg: >-
+          VMDASH-ARC:{{ 'CONNECTED' if arc_final.stdout is search('^Connected') else 'FAILED' }}
+          {{ arc_final.stdout | trim }} connect_rc={{ arc_connect.rc | default('skipped') }}

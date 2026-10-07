@@ -515,6 +515,57 @@ turns off **Join to Microsoft Entra ID**.
 **Reset admin password** is not offered: reset an admin's password in Entra, or rotate the
 join account in Password Safe.
 
+## Hybrid Entra join
+
+If **Entra Connect** synchronises your on-premises domain to Entra ID with hybrid join
+configured, an AWS or GCP Windows server joined to that domain can become **Microsoft Entra
+hybrid joined**. It is then both domain joined and known to Entra ID, with no domain
+controller in the cloud. The domain join is the one this page already sets up, through an
+[AD Connector](#extending-to-aws-an-ad-connector) on AWS or a
+[DNS link](#extending-to-gcp-a-dns-link) on GCP, over your VPN.
+
+**Declare the domain.** **Hybrid join** on the on-prem AD row records two things:
+
+- that Entra Connect syncs this domain for hybrid join;
+- the OU servers should join. It must be in Entra Connect's sync scope, or the computer
+  object never reaches Entra ID.
+
+The AD Connector and DNS link that extend the domain inherit both. This is only a
+declaration: nothing in Entra Connect, the service connection point or the sync scope is
+changed from here. The AD picker on the deploy forms marks these directories
+*Entra hybrid*.
+
+**Deploy.** On the AWS or GCP deploy form, pick the AD Connector or DNS link under **Join
+Active Directory** and **Hybrid join** under **Microsoft Entra ID**. The server joins the
+domain as before, into the declared OU unless the deploy names another. A follow-up job
+(`windows_hybrid_check`) then checks Microsoft Graph for a device of the server's name with
+`trustType` `ServerAd`, every 5 minutes for up to 90 minutes. The result is recorded on the
+deploy job as `entra_hybrid_state`:
+
+| State | Meaning |
+|---|---|
+| `joined` | Entra ID has the device as hybrid joined (`entra_device_id`) |
+| `pending` | It had not appeared when the check gave up. The note says what to check |
+| `unverifiable` | The dashboard's Azure identity cannot read devices: grant it the Graph application permission **Device.Read.All** |
+
+A hybrid join that is not confirmed is never a failed deploy: the server is domain joined
+either way.
+
+**What has to be true on your side:**
+
+- Entra Connect 1.1.819 or later, with **hybrid join configured**, which creates the
+  service connection point in the forest;
+- the OU in Entra Connect's **sync scope**, and the default device attributes synced;
+- the server reaching `enterpriseregistration.windows.net`, `login.microsoftonline.com` and
+  `device.login.microsoftonline.com` on 443;
+- patience: a sync cycle runs about every 30 minutes, and the server's device-registration
+  task registers it after the computer object syncs.
+
+**Destroy** does not remove the server's computer object from AD, so the synced device stays
+in Entra ID until it is deleted on-premises. Run
+[`ad-remove-computer.yml`](../../examples/playbooks/directory/) through the domain's remote
+agent to remove it.
+
 ## Settings
 
 All on the **Directories** panel (Settings → Preview features → Directories → Configure):

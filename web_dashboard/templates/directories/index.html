@@ -76,6 +76,8 @@
             <td class="px-4 py-3">
               <div class="font-mono text-gray-800" x-text="d.name"></div>
               <div class="text-xs text-gray-400" x-text="d.source === 'registered' ? 'registered' : 'built here'"></div>
+              <div x-show="d.entra_hybrid" class="text-xs text-blue-600"
+                   x-text="'Entra hybrid join' + (d.hybrid_ou ? ' · ' + d.hybrid_ou : '')"></div>
             </td>
             <td class="px-4 py-3 text-gray-600" x-text="d.provider_label + (d.edition ? ' · ' + d.edition : '')"></td>
             <td class="px-4 py-3 text-xs text-gray-600">
@@ -138,6 +140,8 @@
               <button x-show="d.cloud === 'local' && d.provider === 'onprem_ad' && d.status === 'available'"
                       @click="openExtend(d, 'gcp')"
                       class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Extend to GCP</button>
+              <button x-show="d.cloud === 'local' && d.provider === 'onprem_ad'" @click="openHybrid(d)"
+                      class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Hybrid join</button>
               <button x-show="d.cloud === 'local' && d.provider === 'onprem_ad' && d.status === 'available'"
                       @click="openLink(d)"
                       class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Connect GCP network (VyOS)</button>
@@ -879,6 +883,35 @@
     </div>
   </div>
 
+  <!-- Declare an on-prem domain synced to Entra ID for hybrid join -->
+  <div x-show="hy.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="hy.open = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-3 max-h-[90vh] overflow-y-auto">
+      <h3 class="text-lg font-semibold text-gray-800" x-text="'Entra hybrid join for ' + (hy.dir?.name || '')"></h3>
+      <p class="text-xs text-gray-500">Tick this when <strong>Entra Connect</strong> synchronises this domain with
+        hybrid join configured (the service connection point). AWS and GCP Windows servers joined to it through
+        its AD Connector or DNS link can then pick <em>Hybrid join</em>: they join the OU below, and a follow-up
+        check watches for the device in Entra ID. Nothing in Entra Connect or the domain is changed from here.</p>
+      <label class="flex items-center gap-2 text-sm text-gray-700">
+        <input type="checkbox" x-model="hy.entra_hybrid" class="rounded text-blue-600">
+        Entra Connect syncs this domain for hybrid join
+      </label>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">OU in Entra Connect's sync scope</label>
+        <input x-model="hy.hybrid_ou" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+               :placeholder="'OU=Cloud Servers,' + (hy.dir?.base_dn || 'DC=corp,DC=example,DC=com')">
+        <p class="text-[11px] text-gray-400 mt-1">Servers join here unless the deploy names another OU. A computer
+          outside the sync scope never reaches Entra ID.</p>
+      </div>
+      <div x-show="hy.error" class="text-sm text-red-600" x-text="hy.error"></div>
+      <div class="flex justify-end gap-2">
+        <button @click="hy.open = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+        <button @click="saveHybrid()" :disabled="hy.saving"
+                class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg">Save</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Admin password -->
   <div x-show="pw.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
        @click.self="pw.open = false">
@@ -915,6 +948,7 @@ function directoriesPage() {
     br: { open: false, items: [], members: [], userGroups: [], addResults: [] },
     ent: { open: false, items: [] },
     ja: { open: false, systems: [] },
+    hy: { open: false },
     agents: [],
 
     async init() {
@@ -1387,6 +1421,23 @@ function directoriesPage() {
         await this.load();
       } catch (e) { j.error = e.message; }
       finally { j.saving = false; }
+    },
+
+    openHybrid(d) {
+      this.hy = { open: true, dir: d, entra_hybrid: !!d.entra_hybrid, hybrid_ou: d.hybrid_ou || '',
+                  saving: false, error: '' };
+    },
+    async saveHybrid() {
+      const h = this.hy;
+      h.saving = true; h.error = '';
+      try {
+        await API.put(`/api/directories/${h.dir.id}/hybrid`,
+                      { entra_hybrid: !!h.entra_hybrid, hybrid_ou: (h.hybrid_ou || '').trim() });
+        h.open = false;
+        this.note(h.dir.name + (h.entra_hybrid ? ': hybrid join on' : ': hybrid join off'));
+        await this.load();
+      } catch (e) { h.error = e.message; }
+      finally { h.saving = false; }
     },
 
     async showPassword(d) {
