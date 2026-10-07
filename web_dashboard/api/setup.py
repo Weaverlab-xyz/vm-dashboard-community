@@ -1006,6 +1006,11 @@ class PasswordSafeFeatureConfig(BaseModel):
     clouddb_ps_platform_sqlserver: str = "mssql SSM Custom Plugin"
     clouddb_ps_pravault_platform: str = "PRA Vault Username Password"
     clouddb_ps_workgroup: str = ""                 # blank → falls back to passwordsafe_workgroup
+    # Native-platform onboarding (Oracle on RDS): Password Safe's own platform, reached by
+    # the Resource Broker serving this workgroup — which must reach the DB listener.
+    clouddb_ps_native_workgroup: str = ""          # blank → clouddb_ps_workgroup
+    clouddb_ps_platform_native_oracle: str = ""    # blank → "Oracle"
+    clouddb_ps_functional_account_native_oracle: str = ""  # reference mode only
     # Functional account source — "create" mints one per database (legacy), "reference"
     # resolves an operator-created account by name and never creates or deletes it
     # (VM/k8s parity). See config.py for the full semantics. One account per engine per
@@ -1045,6 +1050,7 @@ class PasswordSafeFeatureConfig(BaseModel):
     clouddb_db_client_image_postgres: str = "postgres:16"
     clouddb_db_client_image_mysql: str = "mysql:8.4"
     clouddb_db_client_image_sqlserver: str = ""      # blank → native sqlcmd on the jump host
+    clouddb_db_client_image_oracle: str = ""         # blank → ghcr.io/oracle/oraclelinux9-instantclient:23
     clouddb_ps_ssm_iam_username: str = ""           # informational; mode = key-pair presence
     clouddb_ps_ssm_access_key_id: str = ""          # both set → IAM mode; either blank → EC2
     clouddb_ps_ssm_secret_access_key: str = ""      # encrypted at rest

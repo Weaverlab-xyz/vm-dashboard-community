@@ -96,6 +96,8 @@ passwordsafe_gcp_registration_method passwordsafe_gcp_change_password_on_registe
 bt_api_host bt_client_id bt_client_secret bt_jump_group_name bt_jumpoint_name
 clouddb_ps_onboarding_enabled clouddb_ps_platform_postgres clouddb_ps_platform_mysql
 clouddb_ps_platform_sqlserver clouddb_ps_pravault_platform clouddb_ps_workgroup
+clouddb_ps_native_workgroup clouddb_ps_platform_native_oracle
+clouddb_ps_functional_account_native_oracle clouddb_db_client_image_oracle
 clouddb_ps_functional_account_mode clouddb_ps_functional_account_postgres
 clouddb_ps_functional_account_mode_postgres clouddb_ps_functional_account_mode_mysql
 clouddb_ps_functional_account_mode_sqlserver
@@ -227,6 +229,13 @@ windows_ssh_enabled windows_rdp_default
 # have to be findable here for a second reason — all three deploy guards refuse by name
 # and send the operator to "Settings → Integrations → Privileged Remote Access", so a key
 # declared and unbound would make the remedy a dead end.
+
+# ADDED since the split, deliberately: `clouddb_ps_native_workgroup`,
+# `clouddb_ps_platform_native_oracle`, `clouddb_ps_functional_account_native_oracle` and
+# `clouddb_db_client_image_oracle` — Oracle on RDS onboards on Password Safe's NATIVE
+# Oracle platform (no plugin), and these name its workgroup, platform, referenced
+# functional account and the sqlplus image that creates the managed user. On the Password
+# Safe panel beside the plugin platforms they parallel.
 
 # ADDED since the split, deliberately: `windows_ssh_enabled` and `windows_rdp_default`.
 # A Windows server build used to get a Remote RDP jump and nothing else; it now switches

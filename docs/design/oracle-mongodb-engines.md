@@ -6,8 +6,12 @@ Status: **slice 1** (engine plumbing, the raw-TCP tunnel, Entitle payloads) and 
 (AWS RDS for Oracle — `terraform/db_aws_oracle`, SE2 license-included, single-tenant CDB so
 the one PDB is what Entitle manages) landed. **Slice 3** adds MongoDB Atlas
 (`terraform/db_atlas_mongodb`: one Atlas project per cluster, public endpoint locked to the
-gateway's egress /32, Flex or dedicated) and Entitle's Atlas MongoDB integration. Later slices:
-Password Safe native onboarding, Configuration Management (Ansible).
+gateway's egress /32, Flex or dedicated) and Entitle's Atlas MongoDB integration. **Slice 4**
+onboards RDS Oracle on Password Safe's native Oracle platform (asset -> database -> managed
+system, via `passwordsafe_managed_system_by_database`; the by-workgroup resource has no
+instance field) with a self-rotating `psafe_<id>` created by sqlplus over SSM. MongoDB Atlas
+stays out of Password Safe: its users change only through the Atlas Admin API. Remaining:
+Configuration Management (Ansible).
 
 Re-checked 2026-10-07: `beyondtrust/sra` **v1.4.0** (2026-09-25, the latest) still validates
 `tunnel_type` as `OneOf("tcp", "mssql")`, and nothing on its `main` mentions MongoDB or
@@ -76,6 +80,23 @@ MongoDB was absent everywhere.
 * Atlas database users can only be changed through the Atlas Admin API, so the Password
   Safe native MongoDB platform is unlikely to be able to rotate an Atlas user. That makes
   Atlas the first consumer of the custom-plugin hook.
+
+## Password Safe reachability: native now, a custom plugin next
+
+Native onboarding works only where the **Resource Broker** serving the asset's workgroup
+can reach the listener. Two network shapes, and the dashboard creates neither path:
+
+* a **public** endpoint: allow-list the broker's public IP on the database (for Atlas, put it
+  in `atlas_extra_access_cidrs`);
+* a **private** endpoint (RDS Oracle, which stays private by decision, 2026-10-07): the
+  broker has to sit in or route into the VPC.
+
+The planned answer for private endpoints is a **custom plugin** that reaches the database
+through a cloud control plane — an API, AWS SSM or Azure Run Command — the same pattern as
+the `dbssm` / `dbazure` / `dbgcp` plugins. When it exists, onboarding switches from the
+native path to the plugin path whenever its platform is configured (a
+`clouddb_ps_platform_<cloud>_oracle` key), and the plugin's address grammar gets a validator
+in `ps_resource_service` beside the others. Until then `_PS_NATIVE_ENGINES` is the only route.
 
 ## Where the swap happens when the provider ships
 

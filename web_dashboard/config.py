@@ -595,6 +595,14 @@ class Settings(BaseSettings):
     clouddb_ps_platform_sqlserver: str = "mssql SSM Custom Plugin"
     clouddb_ps_pravault_platform: str = "PRA Vault Username Password"
     clouddb_ps_workgroup: str = ""                 # blank → falls back to passwordsafe_workgroup
+    # Native-platform DB onboarding (Oracle on RDS). No plugin: Password Safe's own Oracle
+    # platform, through the Resource Broker serving this workgroup, connects to the
+    # listener itself — so that broker must reach host:1521. Blank workgroup → the one
+    # above; blank platform → "Oracle". The functional account name is read only in
+    # "reference" mode (see clouddb_ps_functional_account_mode).
+    clouddb_ps_native_workgroup: str = ""
+    clouddb_ps_platform_native_oracle: str = ""
+    clouddb_ps_functional_account_native_oracle: str = ""
     # Where the DB plugin's functional account comes from. Two modes, and they are
     # opposites — the mode is an explicit choice, never inferred from a blank field,
     # because this feature already has enough silent fallbacks:
@@ -712,6 +720,7 @@ class Settings(BaseSettings):
     clouddb_db_client_image_postgres: str = "postgres:16"
     clouddb_db_client_image_mysql: str = "mysql:8.4"
     clouddb_db_client_image_sqlserver: str = ""
+    clouddb_db_client_image_oracle: str = ""  # blank → the Instant Client image (sqlplus) in cloud_db_sql_service
     # AWS credentials packed into the Password Safe functional account for SSM
     # SendCommand. The plugin parses username "<EC2|IAM>:<dbAdminUser>" and password
     # "<AKID>:<secret>:<dbAdminPassword>" (always three parts). The mode is selected by

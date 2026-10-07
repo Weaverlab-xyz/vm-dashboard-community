@@ -1555,11 +1555,14 @@ _PS_ONBOARDING_CLOUDS = ("aws", "azure", "gcp")
 # audience known? — which _ps_db_onboarding_enabled answers, not this function.
 _PS_ONBOARDING_ENGINES: dict = {}
 
-# Engines NO cloud's plugin set covers: the dbssm / dbazure / dbgcp plugins and the
-# managed-user SQL builders (cloud_db_sql_service) are postgres/mysql/sqlserver only.
-# Oracle and MongoDB onboard through Password Safe's native platforms instead — a
-# separate slice; see docs/design/oracle-mongodb-engines.md.
-_PS_PLUGINLESS_ENGINES = {"oracle": "Oracle", "mongodb": "MongoDB"}
+# Engines Password Safe onboarding cannot serve at all, each with its reason. Oracle is
+# NOT here: it onboards on Password Safe's native platform (_PS_NATIVE_ENGINES), on RDS.
+_PS_PLUGINLESS_ENGINES = {
+    "mongodb": ("Password Safe cannot rotate a MongoDB Atlas database user: Atlas changes "
+                "database users only through its Admin API, which Password Safe's native "
+                "MongoDB platform does not use. A custom plugin calling the Atlas API is "
+                "the path; until one exists, Atlas users are not onboarded."),
+}
 
 # Which plugin channel drives each GCP engine. These are the plugin's own recommended
 # defaults: postgres/mysql on data-api (zero infrastructure, and under IAM database auth
@@ -1623,11 +1626,12 @@ def _ps_ineligible_reason(row: CloudDatabase) -> Optional[str]:
                 f"{(row.cloud or 'this cloud').upper()} has none of them, so there is no "
                 f"supported path for it yet.")
     if (row.engine or "") in _PS_PLUGINLESS_ENGINES:
-        label = _PS_PLUGINLESS_ENGINES[row.engine]
-        return (f"Password Safe onboarding drives a per-engine plugin (SSM, Run Command "
-                f"or Cloud SQL), and there is none for {label}. Onboarding through "
-                f"Password Safe's native {label} platform is planned; until then, "
-                f"onboard it in Password Safe directly.")
+        return _PS_PLUGINLESS_ENGINES[row.engine]
+    if (row.engine or "") == "oracle" and (row.provider or "") != "rds":
+        return ("Password Safe onboarding for Oracle covers AWS RDS only: creating the "
+                "rotatable managed user needs a way to run SQL on the database, and only "
+                "AWS has one here (SSM to the gateway host). Onboard this Autonomous "
+                "Database in Password Safe directly.")
     engines = _PS_ONBOARDING_ENGINES.get(row.cloud or "")
     if engines and (row.engine or "") not in engines:
         return (f"{(row.cloud or '').upper()} Password Safe onboarding covers "
@@ -1811,13 +1815,15 @@ async def _create_db_managed_user(db: Session, *, row: CloudDatabase,
     # The warning is driven by the CONFIG, not by an empty command list: prep is no
     # longer key material alone (SQL Server installs the native client), so "nothing
     # to send" and "no key material to send" stopped being the same condition.
-    if not (_cfg("clouddb_ps_ssm_plugin_private_key")
+    if engine not in _PS_NATIVE_ENGINES and not (
+            _cfg("clouddb_ps_ssm_plugin_private_key")
             and _cfg("clouddb_ps_ssm_key_directory")):
         logger.warning("clouddb: clouddb_ps_ssm_plugin_private_key / "
                        "clouddb_ps_ssm_key_directory is blank — NOT staging plugin key "
                        "material on the jump host; the first AWS rotation will fail to "
                        "decrypt unless you placed it there by hand")
-    prep = _ssm_jump_prep_commands(engine, image)
+    # A native engine has no SSM plugin to make ready: the client image is all it runs.
+    prep = [] if engine in _PS_NATIVE_ENGINES else _ssm_jump_prep_commands(engine, image)
     if prep:
         # Longer timeout when the engine's client is a package install (SQL Server
         # pulls Microsoft's RHEL feed); the key drop alone is five instant commands.
@@ -3265,6 +3271,94 @@ async def _admit_instance_to_dbops(db: Session, *, row: CloudDatabase,
             f"instance to FN_DBOPS_ALLOWED_INSTANCES on the function.")
 
 
+# Engines onboarded on Password Safe's NATIVE platform for the engine (asset ->
+# database -> managed system), rather than a cloud-transport custom plugin. Password
+# Safe reaches the listener itself, through the Resource Broker serving the asset's
+# workgroup — which the operator provides (clouddb_ps_native_workgroup).
+_PS_NATIVE_ENGINES = ("oracle",)
+_PS_NATIVE_PLATFORM_DEFAULTS = {"oracle": "Oracle"}
+
+
+def _ps_native_workgroup_name() -> str:
+    return (_cfg("clouddb_ps_native_workgroup") or _cfg("clouddb_ps_workgroup")
+            or _cfg("passwordsafe_workgroup"))
+
+
+async def _resolve_host_ip(host: str) -> str:
+    """The IPv4 address an endpoint name resolves to. A native asset REQUIRES one, and
+    an RDS endpoint's name resolves to the instance's private address even from outside
+    its VPC. Refuses rather than guessing: a placeholder IP on a native asset is an
+    address Password Safe would actually try."""
+    import asyncio
+    import ipaddress
+    import socket
+    try:
+        ipaddress.IPv4Address(host)
+        return host
+    except ValueError:
+        pass
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(
+            host, None, family=socket.AF_INET, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise CloudDatabaseError(
+            f"could not resolve {host!r} to an IP address for the Password Safe asset: "
+            f"{exc}") from exc
+    if not infos:
+        raise CloudDatabaseError(f"{host!r} resolved to no IPv4 address")
+    return infos[0][4][0]
+
+
+async def _register_ps_native_db(db: Session, *, row: CloudDatabase, name: str,
+                                 engine: str, ctx: dict, stash: dict,
+                                 log_job_id: str) -> tuple:
+    """Register the database on Password Safe's native ``engine`` platform and return
+    ``(registration, fa_mode)``.
+
+    The functional account is the database's admin — the RDS master user, which holds
+    the privileges Password Safe's Oracle platform needs to verify the account. In
+    "create" mode the dashboard mints it on the native platform per database; in
+    "reference" mode the operator's own account is used (clouddb_ps_functional_account_
+    native_<engine>) and must sit on that platform. The managed account is the
+    dashboard's dedicated user, which rotates itself (use_own_credentials), so the
+    functional account never alters anyone else."""
+    from . import ps_api_service, ps_resource_service
+    fa_mode = _ps_fa_mode(engine, row.cloud)
+    platform_name = (_cfg(f"clouddb_ps_platform_native_{engine}")
+                     or _PS_NATIVE_PLATFORM_DEFAULTS[engine])
+    platform_id = await ps_api_service.get_platform_id(platform_name)
+    admin_password = ""
+    if fa_mode != _FA_MODE_REFERENCE:
+        admin_password = config_service.get(f"clouddb/{row.id}/admin") or ""
+        if not admin_password:
+            raise CloudDatabaseError(
+                "no admin credential is stored for this database, so there is nothing to "
+                "mint the Password Safe functional account from")
+    fa_id, fa_platform_id, fa_owned = await _resolve_db_functional_account(
+        mode=fa_mode, config_key=f"clouddb_ps_functional_account_native_{engine}",
+        platform_id=platform_id, platform_tokens=(platform_name.lower(),),
+        label=platform_name,
+        create={"account_name": ctx["admin_username"],
+                "display_name": f"{name}-{engine}-fa", "password": admin_password,
+                "description": f"Cloud-DB functional account for dashboard database "
+                               f"{name} (db_id={row.id})"})
+    stash["ps_db_functional_account_id" if fa_owned
+          else "ps_db_functional_account_ref"] = fa_id
+    workgroup_id = await ps_api_service.get_workgroup_id(_ps_native_workgroup_name())
+    ip = await _resolve_host_ip(row.private_host)
+    job_service.append_job_log(
+        db, log_job_id,
+        f"Password Safe: onboarding on the native {platform_name} platform in workgroup "
+        f"{_ps_native_workgroup_name()!r} — its Resource Broker must reach "
+        f"{row.private_host}:{ctx['port']} for verification and rotation to work.")
+    reg = await ps_resource_service.register_native_database(
+        name=f"{name}-db", workgroup_id=workgroup_id, host_name=row.private_host,
+        ip_address=ip, port=ctx["port"], platform_id=fa_platform_id,
+        instance_name=ctx["db_name"], functional_account_id=fa_id,
+        managed_account_name=ctx["managed_user"], managed_password=ctx["managed_pw"])
+    return reg, fa_mode
+
+
 async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id: str,
                                       engine: str, tf_variables: dict, ctx: dict,
                                       log_job_id: Optional[str] = None) -> None:
@@ -3315,6 +3409,17 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
         # why the principals this onboarding creates outlive it).
         "ps_db_fa_db_user": ctx.get("fa_db_user", ""),
     }
+
+    if engine in _PS_NATIVE_ENGINES:
+        # Password Safe's OWN platform for the engine: no plugin, no transport, no
+        # packed address. The workgroup's Resource Broker connects to the listener.
+        reg, fa_mode = await _register_ps_native_db(
+            db, row=row, name=name, engine=engine, ctx=ctx, stash=stash,
+            log_job_id=log_job_id)
+        _record_ps_db_registration(db, row, job_id, stash, reg)
+        await _onboard_ps_pravault(db, row=row, job_id=job_id, name=name,
+                                   workgroup_id=workgroup_id, fa_mode=fa_mode, stash=stash)
+        return
 
     # ── DB managed system (cloud-specific custom plugin) ──
     # Per-engine: SQL Server on Cloud SQL has no IAM database authentication, so it runs
@@ -3645,6 +3750,17 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
         workgroup_id=workgroup_id, managed_account_name=ctx["managed_user"],
         method=db_method, dns_name=dns_name,
         use_own_credentials=self_rotate)
+    _record_ps_db_registration(db, row, job_id, stash, reg)
+    await _onboard_ps_pravault(db, row=row, job_id=job_id, name=name,
+                               workgroup_id=workgroup_id, fa_mode=fa_mode, stash=stash)
+
+
+def _record_ps_db_registration(db: Session, row: CloudDatabase, job_id: str,
+                               stash: dict, reg: dict) -> None:
+    """Record the DB managed system + account a registration just created — on the
+    provisioning job's metadata AND the row — the moment they exist. Shared by the
+    plugin and native paths, so teardown and the page's "onboarded" badge read the
+    same keys whichever created them."""
     stash["ps_db_registration_tf_state"] = reg.get("tf_state_json")
     stash["ps_db_system_id"] = reg.get("managed_system_id")
     stash["ps_db_account_id"] = reg.get("managed_account_id")
@@ -3660,6 +3776,14 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
     logger.info("clouddb: onboarded DB managed system db_id=%s system_id=%s account_id=%s",
                 row.id, reg.get("managed_system_id"), reg.get("managed_account_id"))
 
+
+async def _onboard_ps_pravault(db: Session, *, row: CloudDatabase, job_id: str,
+                               name: str, workgroup_id, fa_mode: str, stash: dict) -> None:
+    """The second half of DB onboarding: a "PRA Vault Username Password" managed system
+    over the vaulted credential the tunnel injects, so Password Safe propagates each
+    rotation into it — only when the tunnel minted a vault account. Shared by the plugin
+    and native paths; stashes on ``job_id`` like the DB half."""
+    from . import ps_api_service, ps_resource_service
     # ── PRA Vault managed system (pravault) — only if the tunnel minted a vault account ──
     job = db.query(Job).filter(Job.id == job_id).first()
     vault_account_name = (job.metadata_dict or {}).get("vault_account_name") if job else None
