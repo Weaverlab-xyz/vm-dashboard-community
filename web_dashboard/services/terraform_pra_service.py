@@ -559,14 +559,43 @@ _DB_TUNNEL_RESOURCE = {
     "postgres": "sra_postgresql_tunnel_jump",
     "mysql": "sra_my_sql_tunnel_jump",   # schema-identical to the postgres jump (verified vs cached provider)
     "sqlserver": "sra_protocol_tunnel_jump",   # generic protocol tunnel; needs tunnel_type (emitted below)
-    "oracle": "sra_protocol_tunnel_jump",       # OCI Autonomous DB — generic TCP tunnel to the TLS listener
+    "oracle": "sra_protocol_tunnel_jump",       # generic TCP tunnel to the SQL*Net listener
+    "mongodb": "sra_protocol_tunnel_jump",      # generic TCP tunnel to one mongod (directConnection)
 }
-_DB_RESOURCE_ENGINE = {v: k for k, v in _DB_TUNNEL_RESOURCE.items()}
+# Several engines share the generic resource, so the resource type alone cannot name
+# the engine back — the destroy path disambiguates by the state's tunnel_type
+# (_engine_from_tunnel_state). This map only resolves the dedicated resources.
+_DB_RESOURCE_ENGINE = {v: k for k, v in _DB_TUNNEL_RESOURCE.items()
+                       if v != "sra_protocol_tunnel_jump"}
 
 # tunnel_type for the GENERIC sra_protocol_tunnel_jump (the dedicated postgres/
-# mysql resources don't take one). SQL Server is TDS-aware ("mssql"); Oracle
-# SQL*Net has no dedicated PRA type, so it rides a raw TCP tunnel ("tcp").
-_DB_TUNNEL_TYPE = {"sqlserver": "mssql", "oracle": "tcp"}
+# mysql resources don't take one). SQL Server is TDS-aware ("mssql"). Oracle and
+# MongoDB have no PRA type the sra provider accepts yet — its validator is
+# OneOf("tcp","mssql"), see docs/notes/sra-provider-k8s-tunnel-bug.md — so they ride
+# a raw TCP tunnel. PRA 26.3 ships dedicated Oracle/MongoDB tunnels; when the
+# provider grows resources for them, THIS table and _DB_TUNNEL_RESOURCE are the
+# whole swap.
+_DB_TUNNEL_TYPE = {"sqlserver": "mssql", "oracle": "tcp", "mongodb": "tcp"}
+# Listener fallback for a tcp tunnel whose caller passed no port. A copy of the tcp
+# engines' entries in cloud_database_service._DEFAULT_PORTS — this module stays
+# importable without the app (its tests stub web_dashboard.config only).
+_DB_DEFAULT_PORTS = {"oracle": 1521, "mongodb": 27017}
+
+
+def _engine_from_tunnel_state(resource_type: str, attrs: dict) -> Optional[str]:
+    """The engine a stored DB-tunnel resource was generated for, or None if the
+    resource is not a DB tunnel. The generic resource is shared, so its tunnel_type
+    decides: ``mssql`` is SQL Server, anything else is a raw TCP engine (which of
+    them does not matter to the HCL — they generate identically)."""
+    if resource_type in _DB_RESOURCE_ENGINE:
+        return _DB_RESOURCE_ENGINE[resource_type]
+    if resource_type == "sra_protocol_tunnel_jump":
+        return "sqlserver" if (attrs.get("tunnel_type") or "") == "mssql" else "oracle"
+    return None
+
+
+def _is_db_tunnel_resource(resource_type: str) -> bool:
+    return resource_type in set(_DB_TUNNEL_RESOURCE.values())
 
 
 def _generate_db_tunnel_hcl(
@@ -581,11 +610,20 @@ def _generate_db_tunnel_hcl(
     vault_account_name: str = "",
     vault_username: str = "",
     vault_account_group_id: Optional[int] = None,
+    port: int = 0,
 ) -> str:
     """Return the Terraform HCL for one DB protocol-tunnel jump.
 
     Required resource fields: name, hostname, jump_group_id, jumpoint_id.
     username / database are optional and emitted only when provided.
+
+    A raw ``tcp`` tunnel (Oracle, MongoDB) is a port forward, not a protocol-aware
+    tunnel: PRA needs ``tunnel_definitions`` ("local;remote") and a loopback
+    ``tunnel_listen_address`` — the same shape the k8s API tunnel uses
+    (:func:`_generate_api_tunnel_hcl`) — and has no use for username/database, which
+    only the protocol-aware tunnels log in with. ``port`` is the engine's listener
+    (falls back to its default); the rep's local listener uses the same number, so
+    a client's usual connect string works against 127.0.0.1 unchanged.
 
     When ``vault_account_name`` is set, a Vault username/password account is
     also emitted, associated to the tunnel jump for credential injection. The
@@ -605,15 +643,25 @@ def _generate_db_tunnel_hcl(
             f"(supported: {', '.join(sorted(_DB_TUNNEL_RESOURCE))})"
         )
     safe_name = re.sub(r"[^a-z0-9_]", "_", name.lower())
+    tunnel_type = (_DB_TUNNEL_TYPE.get(engine, "tcp")
+                   if resource_type == "sra_protocol_tunnel_jump" else "")
     extra = ""
-    if username:
-        extra += f"  username      = {json.dumps(username)}\n"
-    if database:
-        extra += f"  database      = {json.dumps(database)}\n"
-    # The generic sra_protocol_tunnel_jump (sqlserver / oracle) requires an
+    if tunnel_type != "tcp":
+        if username:
+            extra += f"  username      = {json.dumps(username)}\n"
+        if database:
+            extra += f"  database      = {json.dumps(database)}\n"
+    # The generic sra_protocol_tunnel_jump (sqlserver / oracle / mongodb) requires an
     # explicit tunnel_type; the dedicated postgres/mysql resources don't take one.
-    if resource_type == "sra_protocol_tunnel_jump":
-        extra += f'  tunnel_type   = "{_DB_TUNNEL_TYPE.get(engine, "tcp")}"\n'
+    if tunnel_type:
+        extra += f'  tunnel_type   = "{tunnel_type}"\n'
+    if tunnel_type == "tcp":
+        listen = int(port or _DB_DEFAULT_PORTS.get(engine, 0))
+        if listen <= 0:
+            raise TerraformPRAError(
+                f"a tcp DB tunnel for engine {engine!r} needs a port")
+        extra += (f'  tunnel_definitions    = "{listen};{listen}"\n'
+                  f'  tunnel_listen_address = "127.0.0.1"\n')
 
     var_block = ""
     vault_block = ""
@@ -736,7 +784,7 @@ def _scrub_tf_state(tf_state_json: str) -> Optional[str]:
 def _provision_db_tunnel_sync(
     engine, name, hostname, jump_group_name, jumpoint_name, username, database, tag,
     admin_password="", vault_account_name="", vault_account_group_id=None,
-    client_secret="",
+    client_secret="", port=0,
 ) -> dict:
     want_vault = bool(vault_account_name and admin_password)
     # A per-DB PRA credential overrides the configured bt_client_secret for this
@@ -748,7 +796,8 @@ def _provision_db_tunnel_sync(
                                     jumpoint_name, username, database, tag,
                                     vault_account_name=vault_account_name if want_vault else "",
                                     vault_username=username,
-                                    vault_account_group_id=vault_account_group_id)
+                                    vault_account_group_id=vault_account_group_id,
+                                    port=port)
         )
         init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
         if init.returncode != 0:
@@ -775,7 +824,8 @@ def _provision_db_tunnel_sync(
                     work_dir, timeout=30)
             Path(work_dir, "main.tf").write_text(
                 _generate_db_tunnel_hcl(engine, name, hostname, jump_group_name,
-                                        jumpoint_name, username, database, tag)
+                                        jumpoint_name, username, database, tag,
+                                        port=port)
             )
             apply = _run_tf(["apply", "-auto-approve", "-refresh=false"], work_dir,
                             timeout=120, extra_env=_cred_env or None)
@@ -851,7 +901,7 @@ def _remove_db_tunnel_sync(tf_state_json: str) -> None:
         raise TerraformPRAError(f"tf_state_json is not valid JSON: {e}") from e
 
     res = next((r for r in state.get("resources", [])
-                if r.get("type") in _DB_RESOURCE_ENGINE), None)
+                if _is_db_tunnel_resource(r.get("type", ""))), None)
     if res is None or not res.get("instances"):
         # No tunnel in state — but other sra resources (e.g. the vault account
         # after a partial cleanup) may remain. Destroy whatever the state holds
@@ -865,21 +915,25 @@ def _remove_db_tunnel_sync(tf_state_json: str) -> None:
         else:
             logger.warning("No sra DB tunnel resource in Terraform state — nothing to destroy")
         return
-    engine = _DB_RESOURCE_ENGINE[res["type"]]
     instances = res.get("instances", [])
     attrs = instances[0].get("attributes", {})
+    engine = _engine_from_tunnel_state(res["type"], attrs)
     name     = attrs.get("name", "unknown")
     hostname = attrs.get("hostname", "")
     username = attrs.get("username", "") or ""
     database = attrs.get("database", "") or ""
     tag      = attrs.get("tag", "") or ""
+    # A tcp tunnel's config needs its port back: "1521;1521" -> 1521.
+    local_def = (attrs.get("tunnel_definitions") or "").split(";")[0].strip()
+    tcp_port = int(local_def) if local_def.isdigit() else 0
     jump_group_name = _cfg("bt_jump_group_name")
     jumpoint_name   = _cfg("bt_jumpoint_name")
 
     with tempfile.TemporaryDirectory(prefix="pra_db_tf_destroy_") as work_dir:
         Path(work_dir, "main.tf").write_text(
             _generate_db_tunnel_hcl(engine, name, hostname, jump_group_name,
-                                    jumpoint_name, username, database, tag)
+                                    jumpoint_name, username, database, tag,
+                                    port=tcp_port)
         )
         Path(work_dir, "terraform.tfstate").write_text(tf_state_json)
         init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
@@ -902,6 +956,7 @@ async def provision_db_tunnel(
     vault_account_name: str = "",
     vault_account_group_id: Optional[int] = None,
     client_secret: str = "",
+    port: int = 0,
 ) -> dict:
     """Provision a BeyondTrust PRA protocol-tunnel jump for a managed database.
 
@@ -922,6 +977,7 @@ async def provision_db_tunnel(
         _provision_db_tunnel_sync, engine, name, hostname, jump_group_name,
         jumpoint_name, username, database, tag,
         admin_password, vault_account_name, vault_account_group_id, client_secret,
+        port,
     )
 
 

@@ -55,8 +55,9 @@ MAX_CANDIDATES = 500
 # Mirrors cloud_database_service.VALID_ENGINES / _DEFAULT_PORTS. Duplicated rather
 # than imported because this module is stdlib-only on purpose; the values are a
 # stable part of the product, and a test pins them against the service's copy.
-VALID_ENGINES = ("postgres", "mysql", "sqlserver", "oracle")
-_DEFAULT_PORTS = {"postgres": 5432, "mysql": 3306, "sqlserver": 1433, "oracle": 1521}
+VALID_ENGINES = ("postgres", "mysql", "sqlserver", "oracle", "mongodb")
+_DEFAULT_PORTS = {"postgres": 5432, "mysql": 3306, "sqlserver": 1433, "oracle": 1521,
+                  "mongodb": 27017}
 
 # Platform name → engine. Substring needles, checked against both Name and
 # ShortName, lowercased, FIRST HIT WINS — so the order of this tuple is behaviour,
@@ -69,11 +70,14 @@ _DEFAULT_PORTS = {"postgres": 5432, "mysql": 3306, "sqlserver": 1433, "oracle": 
 #     PostgreSQL and MySQL into sqlserver.
 #   * "mariadb" resolves to mysql, matching the remap the databases page already
 #     applies in openFromQuery().
+#   * MongoDB is a bare "mongo" needle — it covers "MongoDB" and "MongoDB Atlas",
+#     and no SQL platform name contains it.
 _ENGINE_RULES = (
     ("sqlserver", ("ms sql", "mssql", "sql server", "sqlserver")),
     ("postgres",  ("postgresql", "postgres", "psql", "greenplum")),
     ("mysql",     ("mariadb", "mysql")),
     ("oracle",    ("oracle", "oradb")),
+    ("mongodb",   ("mongo",)),
 )
 
 # Ineligibility copy. Kept as constants so the API, the tests and the docs quote
@@ -84,7 +88,7 @@ REASON_DASHBOARD_MANAGED = (
     "it is already managed here")
 REASON_NO_ENGINE = (
     "platform {platform!r} isn't a database engine the dashboard supports "
-    "(postgres, mysql, sqlserver, oracle)")
+    "(postgres, mysql, sqlserver, oracle, mongodb)")
 REASON_NO_HOST = (
     "the managed system has no DNS name, host name or IP address — the runner "
     "would have nowhere to connect")

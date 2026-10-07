@@ -289,6 +289,7 @@
               <option value="mysql">MySQL</option>
               <option value="sqlserver">SQL Server</option>
               <option value="oracle">Oracle</option>
+              <option value="mongodb">MongoDB</option>
             </select>
           </div>
           <div>
@@ -892,6 +893,17 @@
           The PRA tunnel hands your client cleartext on 127.0.0.1, so disable client encryption:
           <code>sqlcmd -S 127.0.0.1,&lt;port&gt; -U … -P … -d master -No -C</code>
         </p>
+        <p class="text-xs text-gray-400" x-show="conn?.engine === 'oracle'" x-cloak>
+          A raw TCP tunnel: PRA forwards the listener to 127.0.0.1 on the same port, and
+          the database's own TLS (if any) passes straight through. Connect to the service:
+          <code>sqlplus …@//127.0.0.1:&lt;port&gt;/&lt;service&gt;</code>
+          (Autonomous DB's listener is TLS-only — use a <code>tcps://</code> descriptor).
+        </p>
+        <p class="text-xs text-gray-400" x-show="conn?.engine === 'mongodb'" x-cloak>
+          A raw TCP tunnel to one server, so connect directly (not via SRV) and, since
+          127.0.0.1 is never the name on the server's certificate, relax hostname checks:
+          <code>mongosh "mongodb://127.0.0.1:&lt;port&gt;/?directConnection=true&amp;tls=true&amp;tlsAllowInvalidHostnames=true&amp;authSource=&lt;database&gt;"</code>
+        </p>
       </div>
       <div class="px-6 py-4 border-t border-gray-100 flex justify-end">
         <button @click="conn = null" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Close</button>
@@ -1018,12 +1030,12 @@ function databasesPage() {
       if (!q.get('register')) return;
       this.openRegister();
       // mariadb is probed as its own engine but registered as mysql — the tunnel and the
-      // Config Management play are the same, and 'mariadb' is not one of the four values
+      // Config Management play are the same, and 'mariadb' is not one of the values
       // the select offers. Anything else is ignored rather than assigned, so a stray
       // query param cannot leave the dropdown showing a value the API would reject.
       const engine = (q.get('engine') || '').trim().toLowerCase();
-      const mapped = engine === 'mariadb' ? 'mysql' : engine;
-      if (['postgres', 'mysql', 'sqlserver', 'oracle'].includes(mapped)) {
+      const mapped = engine === 'mariadb' ? 'mysql' : engine === 'mongo' ? 'mongodb' : engine;
+      if (['postgres', 'mysql', 'sqlserver', 'oracle', 'mongodb'].includes(mapped)) {
         this.reg.engine = mapped;
       }
       if (q.get('host')) this.reg.host = q.get('host');
@@ -1426,12 +1438,13 @@ function databasesPage() {
       }
     },
 
-    // Whether Entitle's own connector for this engine MINTS accounts, mirroring
-    // `allow_creating = engine != "mysql"` in entitle_registration_service. Not cosmetic:
-    // it is the difference between a grant that hands the requester a fresh credential
-    // and one that needs the account to already exist.
+    // Whether Entitle's own connector for this engine MINTS accounts — d.entitle_mints is
+    // serialized from _DB_ALLOW_CREATING_ACCOUNTS in entitle_registration_service, the
+    // same table that sets allow_creating_accounts. Not cosmetic: it is the difference
+    // between a grant that hands the requester a fresh credential and one that needs the
+    // account to already exist.
     entitleIsEphemeral(d) {
-      return d.engine !== 'mysql';
+      return !!d.entitle_mints;
     },
 
     entitleConnectorHint(d) {

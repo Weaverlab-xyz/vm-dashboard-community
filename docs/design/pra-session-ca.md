@@ -439,9 +439,10 @@ doing backend TLS. (Product behaviour, not verified here.)
 **It is excluded for a provisioning reason.** PRA has a MongoDB tunnel, but the
 `beyondtrust/sra` Terraform provider ships no resource for it, and this repo brokers DB
 tunnels with the provider and **never `btapi`** — stated in both
-`cloud_database_service.py:18-20` and `database.py:1342-1343`, which is why
-`VALID_ENGINES` is `{postgres, mysql, sqlserver, oracle}`. So MongoDB waits on a provider
-resource, not on a product capability and not on anything in this design.
+`cloud_database_service.py` and `database.py`. MongoDB is now a registerable engine riding
+the provider's generic `tcp` tunnel (see [oracle-mongodb-engines.md](oracle-mongodb-engines.md)),
+but a raw port forward cannot carry x.509 identity, so for this design MongoDB still waits on
+a provider resource — not on a product capability and not on anything in this design.
 
 **It may also be the one engine where a *managed* service works.** MongoDB Atlas supports
 self-managed X.509 authentication with an operator-supplied CA — unlike RDS, Cloud SQL and

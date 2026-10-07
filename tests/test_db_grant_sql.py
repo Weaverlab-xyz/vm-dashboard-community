@@ -212,7 +212,7 @@ def test_unknown_role_engine_and_flavor_are_refused():
     else:
         raise AssertionError("accepted an unknown flavor")
     try:
-        sql.grant_plan("mongodb", username="jit_a_1", password="Pw-1",
+        sql.grant_plan("cassandra", username="jit_a_1", password="Pw-1",
                        database="appdb", role="read")
     except sql.CloudDbSqlError:
         pass
