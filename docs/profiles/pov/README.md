@@ -66,6 +66,7 @@ form on the POV list page.
 | [Running POVs on a public cloud](public-cloud.md) | One cloud at a time, what gets created, what it costs, and the per-provider differences. |
 | [The Gateway and the Resource Broker](gateway-and-broker.md) | The outbound-dialling Gateway that brokers sessions in, and the Resource Broker that lets Password Safe reach the guests. |
 | [Wiring a POV's VMs into PRA, Password Safe and Entitle](wiring.md) | Jump items, vaulted accounts and just-in-time grants, per POV and per tenant. |
+| [Demo cells in a POV](demo-cells.md) | Carry the OT simulator or a VyOS network device into a POV as a guest with a cell role. |
 | [What the customer sees](customer-access.md) | The use-case checklist, the ephemeral accessor login, and the share link. |
 | [Keeping a POV true, and reaping it](lifecycle.md) | Reconciling against the platform, and the auto-delete timer. |
 

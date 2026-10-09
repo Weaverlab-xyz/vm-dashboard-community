@@ -73,8 +73,8 @@ from sqlalchemy.orm import Session
 from ..database import PovEnvironment, PovEnvironmentVM
 from .pra_tenant_api import PRATenantError
 from . import (bt_tenant_service, config_service, entitle_registration_service,
-               job_service, pov_functional_account, pov_gateway, pov_vendor_access,
-               pra_vendor_api, ps_api_service, ps_resource_service,
+               job_service, pov_cell_roles, pov_functional_account, pov_gateway,
+               pov_vendor_access, pra_vendor_api, ps_api_service, ps_resource_service,
                terraform_pra_service)
 
 logger = logging.getLogger(__name__)
@@ -758,6 +758,10 @@ async def register_vm_entitle(db: Session, env: PovEnvironment, vm: PovEnvironme
         return (f"{vm.name}: skipped Entitle — the SSH ephemeral-accounts app mints "
                 f"accounts over SSH, which this guest does not answer.")
 
+    role_reason = pov_cell_roles.entitle_skip_reason(vm)
+    if role_reason:
+        return f"{vm.name}: skipped Entitle — {role_reason}."
+
     label = f"{env.name}-{vm.name}"
     try:
         result = await entitle_registration_service.register_ssh_host(
@@ -914,6 +918,14 @@ async def run_env_wireup(job_id: str, meta: dict) -> None:
             else:
                 wired += 1
 
+            # What the guest's demo-cell role adds (an OT simulator's HMI Web Jump and
+            # protocol tunnels). Same tenant, Gateway and Jump Group as the line above,
+            # and independent of it: a role item does not need the shell jump to exist.
+            if vm.cell_role and not wireable(vm):
+                for cell_line in await pov_cell_roles.wire_extras(
+                        db, env, vm, tenant=tenant, gateway=gateway, tag=JUMP_TAG):
+                    job_service.append_job_log(db, job_id, cell_line)
+
             # Independent of the jump item's outcome, and only when the VM is reachable
             # at all — `wireable` is the same precondition both halves need.
             if ps and not wireable(vm):
@@ -996,7 +1008,7 @@ async def run_env_jump_group_move(job_id: str, meta: dict) -> None:
         rows = (db.query(PovEnvironmentVM)
                   .filter(PovEnvironmentVM.environment_id == env.id)
                   .order_by(PovEnvironmentVM.name).all())
-        wired = [r for r in rows if r.pra_jump_tf_state]
+        wired = [r for r in rows if r.pra_jump_tf_state or pov_cell_roles.has_artifacts(r)]
         if not wired:
             job_service.set_failed(
                 db, job_id,
@@ -1055,6 +1067,10 @@ async def run_env_jump_group_move(job_id: str, meta: dict) -> None:
                 f"Rebuilding {vm.name}…")
             line = await wire_vm(db, env, vm, tenant=tenant, gateway=gateway)
             job_service.append_job_log(db, job_id, line)
+            if vm.cell_role and not wireable(vm):
+                for cell_line in await pov_cell_roles.wire_extras(
+                        db, env, vm, tenant=tenant, gateway=gateway, tag=JUMP_TAG):
+                    job_service.append_job_log(db, job_id, cell_line)
             if "FAILED" in line or "skipped" in line:
                 failed += 1
             else:
@@ -1103,6 +1119,16 @@ async def unwire_jump_items(db: Session, env: PovEnvironment, rows: list, *,
     """
     removed = problems = 0
     for vm in rows:
+        # A demo-cell role's items first, and counted with the jump items: they live in
+        # the same Jump Group, so a Jump Group move or teardown that left them behind
+        # would leave a vendor scoped to the old group still reaching the HMI.
+        if pov_cell_roles.has_artifacts(vm):
+            cell_removed, cell_problems = await pov_cell_roles.unwire_extras(
+                db, env, vm, tenant=tenant)
+            removed += cell_removed
+            problems += cell_problems
+        if not vm.pra_jump_tf_state:
+            continue
         windows = vm.guest_os == "windows"
         try:
             if windows:
@@ -1145,7 +1171,7 @@ async def teardown(db: Session, env: PovEnvironment) -> str:
         clear_entitle_key(env)
         lines.append("Cleared the stored Entitle SSH key.")
 
-    wired = [r for r in rows if r.pra_jump_tf_state]
+    wired = [r for r in rows if r.pra_jump_tf_state or pov_cell_roles.has_artifacts(r)]
     if not wired:
         lines.append("No PRA jump items to remove.")
         lines.append(await _teardown_jump_group(db, env, problems=0))
@@ -1333,6 +1359,20 @@ async def _teardown_password_safe(db: Session, env: PovEnvironment, rows: list) 
 
 # ── what the UI shows ────────────────────────────────────────────────────────
 
+def _cell_counts(rows: list, *, wired_only: bool) -> dict:
+    """``{role: n}`` over ``rows``; with ``wired_only``, only guests whose role is done."""
+    out: dict = {}
+    for row in rows:
+        if not row.cell_role:
+            continue
+        if wired_only:
+            state = pov_cell_roles.describe(row)
+            if not (row.pra_jump_id and state["cell_wired"] == state["cell_items"]):
+                continue
+        out[row.cell_role] = out.get(row.cell_role, 0) + 1
+    return out
+
+
 def describe(db: Session, env: PovEnvironment) -> dict:
     """The wire-up's state for one POV row — counts, not a per-VM list.
 
@@ -1357,6 +1397,11 @@ def describe(db: Session, env: PovEnvironment) -> dict:
         "onboarded_count": sum(1 for r in rows if r.ps_managed_system_id),
         "entitle_count": sum(1 for r in rows if r.entitle_integration_id),
         "wiring_error_count": sum(1 for r in rows if r.wiring_error),
+        # Demo-cell roles, per role: how many guests play it, and how many of those are
+        # fully wired (the base jump item plus every item the role adds). What the cell
+        # cards in `pov_cards` resolve against.
+        "cell_role_counts": _cell_counts(rows, wired_only=False),
+        "cell_wired_counts": _cell_counts(rows, wired_only=True),
         "wireup_ready": bool(env.gateway_name and env.pra_tenant_id and rows),
         # Reported separately from `wireup_ready` because the two halves are independent:
         # a POV with no Password Safe tenant still wires into PRA.

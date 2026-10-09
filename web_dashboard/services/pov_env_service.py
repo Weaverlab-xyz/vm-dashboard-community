@@ -309,6 +309,10 @@ async def refresh_vms(db: Session, env: PovEnvironment) -> int:
             db.delete(row)
 
     db.commit()
+    # A cloud template's demo-cell roles, onto the rows that do not have an answer yet.
+    # After the commit so a new row exists to seed; never over an operator's answer.
+    from . import pov_cell_roles
+    pov_cell_roles.seed_from_template(db, env)
     return len(seen)
 
 

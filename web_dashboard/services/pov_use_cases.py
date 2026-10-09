@@ -39,7 +39,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovUseCaseProgress
-from . import pov_cards, pov_runbooks, pov_wireup
+from . import pov_cards, pov_cell_roles, pov_runbooks, pov_wireup
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,14 @@ def products_for(db: Session, env: PovEnvironment, wireup: dict | None = None) -
         "wired": bool(state.get("wired_count")),
         "onboarded": bool(state.get("onboarded_count")),
         "entitle_wired": bool(state.get("entitle_count")),
+        # The demo-cell roles, on the same two halves: does a guest play it, and is one
+        # of those guests wired. `pov_cards.card_state` reads these through
+        # `cell_key` rather than by spelling the keys a second time.
+        **{pov_cards.cell_key(role): bool((state.get("cell_role_counts") or {}).get(role))
+           for role in pov_cell_roles.VALID_CELL_ROLES},
+        **{pov_cards.cell_key(role, wired=True):
+           bool((state.get("cell_wired_counts") or {}).get(role))
+           for role in pov_cell_roles.VALID_CELL_ROLES},
     }
 
 

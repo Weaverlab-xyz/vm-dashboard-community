@@ -244,6 +244,17 @@
                       <option value="linux">linux</option>
                       <option value="windows">windows</option>
                     </select>
+                    <!-- The guest's demo-cell role (services/pov_cell_roles). Under the OS
+                         rather than a column of its own: it is the same kind of answer --
+                         what this guest IS -- and most POVs leave it blank. -->
+                    <select x-model="vm.cell_role" @change="saveVmCellRole(vm)"
+                            :title="cellRoleTitle(vm)"
+                            class="mt-1 w-28 text-xs border rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-purple-400"
+                            :class="vm.cell_role ? 'border-purple-300 bg-purple-50 text-gray-900' : 'border-gray-300 text-gray-600'">
+                      <option value="">no cell role</option>
+                      <option value="ot-sim">OT simulator</option>
+                      <option value="vyos">VyOS device</option>
+                    </select>
                   </td>
                   <td class="px-4 py-2 text-gray-600" x-text="vm.runstate || '—'"></td>
                   <td class="px-4 py-2 text-gray-600" x-text="vm.private_ip || '—'"></td>
@@ -1530,6 +1541,41 @@
           this.notice = data.note || '';
         } catch (e) {
           this.error = 'Could not reach the dashboard to save that OS.';
+        }
+      },
+
+      // What the role adds, and how much of it the last Wire up built. Counts only -- the
+      // items' Terraform state never leaves the server.
+      cellRoleTitle(vm) {
+        if (!vm.cell_role) {
+          return 'An ordinary target. Pick a cell role when this guest runs the OT '
+               + 'simulator or VyOS image, then press Wire up.';
+        }
+        const label = vm.cell_label || vm.cell_role;
+        if (!vm.cell_items) return label + '. Adds no PRA items of its own.';
+        return label + ': ' + (vm.cell_wired || 0) + ' of ' + vm.cell_items
+             + ' extra PRA items built.';
+      },
+
+      async saveVmCellRole(vm) {
+        this.error = ''; this.notice = '';
+        try {
+          const res = await this.apiFetch(
+            `/api/pov/managed/${this.envId}/vms/${encodeURIComponent(vm.id)}/cell-role`,
+            { method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ cell_role: vm.cell_role || '' }) });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            this.error = data.detail || `Could not save (${res.status}).`;
+            // Re-read so the select shows what is actually stored, not the refused pick.
+            await this.loadEnv();
+            return;
+          }
+          this.env = data.environment || this.env;
+          this.notice = data.note || '';
+        } catch (e) {
+          this.error = 'Could not reach the dashboard to save that cell role.';
         }
       },
 

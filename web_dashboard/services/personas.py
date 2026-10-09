@@ -183,6 +183,13 @@ class UseCase:
     # through different readers and a card carrying both would be answering a question
     # nobody asked it.
     requires_products: tuple = ()
+    # POV-only too, and a different axis from the products: the demo-cell ROLES
+    # (``pov_cell_roles.VALID_CELL_ROLES``) a guest in the POV must play for the card to
+    # be runnable at all. A POV with no OT simulator guest cannot show a PLC tunnel
+    # whatever it is wired into, so such a card is out of scope there -- the same answer
+    # a missing product gives, and for the same reason it is not a refusal. Never decides
+    # the group: that stays the first product.
+    requires_cell_roles: tuple = ()
 
 
 @dataclass(frozen=True)

@@ -3722,6 +3722,36 @@ class PovEnvironmentVM(Base):
     # rule, it gives an operator the only way to END the blank that rule leaves behind.
     os_family_override = Column(String(16), nullable=True)
 
+    # What this guest IS in a demo-cell sense, when it is one: "ot-sim" | "vyos" | NULL.
+    # See services/pov_cell_roles.py. NULL is the normal state and means "an ordinary
+    # target", so this backfills to today's wire-up exactly.
+    #
+    # On the VM row rather than read through from the template, because a Skytap POV has
+    # no dashboard-side template to read it from — an operator says it per guest, the way
+    # `os_family_override` is said. A cloud POV seeds it from its template VM of the same
+    # name (`pov_cell_roles.seed_from_template`), once, and never overwrites an answer.
+    cell_role = Column(String(32), nullable=True)
+    # The PRA items a cell role adds beyond the base jump item, each with its own
+    # Terraform state, as a JSON object keyed by item ("hmi", "tunnel:modbus", ...).
+    # JSON rather than a column per item because the set differs per role and grows with
+    # the protocol list; nothing filters on it. Written the moment each item exists, for
+    # the reason every other artifact column here is.
+    cell_artifacts = Column(Text, nullable=True)
+
+    @property
+    def cell_artifacts_dict(self) -> dict:
+        if not self.cell_artifacts:
+            return {}
+        try:
+            value = json.loads(self.cell_artifacts)
+        except Exception:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @cell_artifacts_dict.setter
+    def cell_artifacts_dict(self, value: dict):
+        self.cell_artifacts = json.dumps(value) if value else None
+
     @property
     def guest_os(self) -> str:
         """"linux" | "windows" | "" — the operator's answer first, else the platform's.
@@ -4121,6 +4151,12 @@ class PovCloudTemplateVM(Base):
     # it LAST so its enrolment code is minted against a boot that is about to happen
     # rather than one that already timed out.
     role = Column(String(16), nullable=False, default="target")
+
+    # A demo-cell role this VM plays, when it plays one: "ot-sim" | "vyos" | NULL. A
+    # SEPARATE field from `role` on purpose — `role` decides build order and where the
+    # agent lands, and a cell VM is still an ordinary target in both senses. Copied onto
+    # the POV's VM row at refresh; see PovEnvironmentVM.cell_role.
+    cell_role = Column(String(32), nullable=True)
 
     # "linux" | "windows". Required here, unlike PovEnvironmentVM where blank means "the
     # platform would not say" — the person writing a template knows, and the wire-up sends
@@ -4872,6 +4908,12 @@ def init_db():
             # NULL backfills to "believe the platform", so no existing POV changes
             # behaviour when this lands. See PovEnvironmentVM.os_family_override.
             "ALTER TABLE pov_environment_vms ADD COLUMN os_family_override VARCHAR(16)",
+            # Demo-cell roles on a POV. NULL backfills to "an ordinary target", so no
+            # existing POV or template changes behaviour when this lands. See
+            # PovEnvironmentVM.cell_role.
+            "ALTER TABLE pov_environment_vms ADD COLUMN cell_role VARCHAR(32)",
+            "ALTER TABLE pov_environment_vms ADD COLUMN cell_artifacts TEXT",
+            "ALTER TABLE pov_cloud_template_vms ADD COLUMN cell_role VARCHAR(32)",
             # The functional account a CA's identities onboard against, and — only when
             # the dashboard minted it — its id. Both backfill to NULL, which is right
             # for every CA built before this: their account was made by hand, so

@@ -1063,7 +1063,7 @@ output "tunnel_jump_id" {{
 
 def _provision_api_tunnel_sync(name, hostname, jump_group_name, jumpoint_name,
                                tunnel_definitions, tag="Kubernetes", client_secret="",
-                               comments="") -> dict:
+                               comments="", tenant=None) -> dict:
     # A per-cluster PRA credential overrides the configured bt_client_secret for
     # this apply only (the sensitive TF_VAR the provider block reads).
     _cred_env = {"TF_VAR_bt_client_secret": client_secret} if client_secret else {}
@@ -1071,19 +1071,19 @@ def _provision_api_tunnel_sync(name, hostname, jump_group_name, jumpoint_name,
         Path(work_dir, "main.tf").write_text(
             _generate_api_tunnel_hcl(name, hostname, jump_group_name, jumpoint_name,
                                      tunnel_definitions, tag, comments))
-        init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
+        init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60, tenant=tenant)
         if init.returncode != 0:
             raise TerraformPRAError(
                 f"terraform init failed: {init.stderr.strip() or init.stdout.strip()}")
         apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120,
-                        extra_env=_cred_env or None)
+                        extra_env=_cred_env or None, tenant=tenant)
         if apply.returncode != 0:
             _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir, timeout=120,
-                    extra_env=_cred_env or None)
+                    extra_env=_cred_env or None, tenant=tenant)
             raise TerraformPRAError(
                 f"terraform apply failed: {apply.stderr.strip() or apply.stdout.strip()}")
 
-        out = _run_tf(["output", "-json"], work_dir, timeout=30)
+        out = _run_tf(["output", "-json"], work_dir, timeout=30, tenant=tenant)
         tunnel_jump_id: Optional[str] = None
         if out.returncode == 0 and out.stdout.strip():
             try:
@@ -1111,6 +1111,7 @@ async def provision_api_tunnel(
     tag: str = "Kubernetes",
     client_secret: str = "",
     comments: str = "",
+    tenant: Optional[dict] = None,
 ) -> dict:
     """Provision a generic tunnel_type="tcp" PRA protocol-tunnel jump to a k8s
     API server, with a pinned local listen port. The Jump Group + Jumpoint must
@@ -1120,18 +1121,23 @@ async def provision_api_tunnel(
     ``comments`` is what a rep SEES on the jump item in the PRA console, so a
     caller that is not the k8s tunnel should say what it actually is — the
     default used to be hardcoded, which labelled every OT cell tunnel a "k8s
-    API tunnel" in front of the customer."""
+    API tunnel" in front of the customer.
+
+    ``tenant`` overrides the PRA credentials for every subcommand (see :func:`_tf_env`);
+    a POV passes its own tenant here, and the matching ``remove_api_tunnel`` must get
+    the same one."""
     tunnel_definitions = f"{int(local_port)};{int(remote_port)}"
     return await asyncio.to_thread(
         _provision_api_tunnel_sync, name, hostname, jump_group_name, jumpoint_name,
-        tunnel_definitions, tag, client_secret, comments)
+        tunnel_definitions, tag, client_secret, comments, tenant)
 
 
-async def remove_api_tunnel(tf_state_json: str) -> None:
+async def remove_api_tunnel(tf_state_json: str, tenant: Optional[dict] = None) -> None:
     """Destroy a previously provisioned k8s API TCP tunnel using its stored state.
     The state holds a single sra_protocol_tunnel_jump, so a provider-only destroy
-    is sufficient (no engine-specific re-derivation)."""
-    await asyncio.to_thread(_destroy_state_only_sync, tf_state_json)
+    is sufficient (no engine-specific re-derivation). ``tenant`` must be the SAME one
+    it was created against; see :func:`remove_jump`."""
+    await asyncio.to_thread(_destroy_state_only_sync, tf_state_json, tenant)
 
 
 # ── Web Jump (Rancher management UI) ──────────────────────────────────────────
@@ -1235,7 +1241,7 @@ def _provision_web_jump_sync(name, url, jump_group_name, jumpoint_name,
                              tag="rancher", verify_certificate=False, client_secret="",
                              admin_password="", vault_account_name="",
                              vault_username="admin", vault_account_group_id=None,
-                             comments="") -> dict:
+                             comments="", tenant=None) -> dict:
     _cred_env = {}
     if client_secret:
         _cred_env["TF_VAR_bt_client_secret"] = client_secret
@@ -1250,11 +1256,12 @@ def _provision_web_jump_sync(name, url, jump_group_name, jumpoint_name,
                 vault_username=vault_username, vault_account_group_id=vault_account_group_id,
                 comments=comments))
         _write(want_vault)
-        init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
+        init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60, tenant=tenant)
         if init.returncode != 0:
             raise TerraformPRAError(
                 f"terraform init failed: {init.stderr.strip() or init.stdout.strip()}")
-        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120, extra_env=_cred_env or None)
+        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120,
+                        extra_env=_cred_env or None, tenant=tenant)
         if apply.returncode != 0 and want_vault:
             # Best-effort vault: the Web Jump itself may be fine but the Vault
             # account failed (e.g. the OAuth client lacks Vault Account Management,
@@ -1264,16 +1271,20 @@ def _provision_web_jump_sync(name, url, jump_group_name, jumpoint_name,
                            "(the OAuth client likely lacks Vault Account Management). Err: %s",
                            (apply.stderr or apply.stdout or "").strip()[-300:])
             _run_tf(["state", "rm", "sra_vault_username_password_account.rancher_admin"],
-                    work_dir, timeout=30)
+                    work_dir, timeout=30, tenant=tenant)
             _write(False)
             want_vault = False
             apply = _run_tf(["apply", "-auto-approve", "-refresh=false"], work_dir, timeout=120,
-                            extra_env=_cred_env or None)
+                            extra_env=_cred_env or None, tenant=tenant)
         if apply.returncode != 0:
-            _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir, timeout=120)
+            # The same credentials as the apply. Without them this rollback authenticated
+            # with the configured secret rather than the per-call one, so a half-created
+            # item behind a per-cluster (or per-POV) credential was never rolled back.
+            _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir, timeout=120,
+                    extra_env=_cred_env or None, tenant=tenant)
             raise TerraformPRAError(
                 f"terraform apply failed: {apply.stderr.strip() or apply.stdout.strip()}")
-        out = _run_tf(["output", "-json"], work_dir, timeout=30)
+        out = _run_tf(["output", "-json"], work_dir, timeout=30, tenant=tenant)
         web_jump_id: Optional[str] = None
         vault_account_id: Optional[str] = None
         if out.returncode == 0 and out.stdout.strip():
@@ -1298,23 +1309,26 @@ async def provision_web_jump(
     tag: str = "rancher", verify_certificate: bool = False, client_secret: str = "",
     admin_password: str = "", vault_account_name: str = "", vault_username: str = "admin",
     vault_account_group_id=None, comments: str = "",
+    tenant: Optional[dict] = None,
 ) -> dict:
     """Provision a PRA Web Jump to a web UI (the central Rancher). The Jump Group +
     Jumpoint must already exist. When ``admin_password`` + ``vault_account_name`` are
     given, ALSO vault the credential (username/password) into ``vault_account_group_id``
     for injection. Returns {web_jump_id, vault_account_id, jump_group_name,
-    tf_state_json} — stash tf_state_json for remove_web_jump."""
+    tf_state_json} — stash tf_state_json for remove_web_jump. ``tenant`` overrides the
+    PRA credentials (see :func:`_tf_env`)."""
     return await asyncio.to_thread(
         _provision_web_jump_sync, name, url, jump_group_name, jumpoint_name,
         tag, verify_certificate, client_secret,
         admin_password, vault_account_name, vault_username, vault_account_group_id,
-        comments)
+        comments, tenant)
 
 
-async def remove_web_jump(tf_state_json: str) -> None:
+async def remove_web_jump(tf_state_json: str, tenant: Optional[dict] = None) -> None:
     """Destroy a previously provisioned Web Jump using its stored state
-    (provider-only state destroy; the web jump carries no secrets)."""
-    await asyncio.to_thread(_destroy_state_only_sync, tf_state_json)
+    (provider-only state destroy; the web jump carries no secrets). ``tenant`` must
+    be the SAME one it was created against; see :func:`remove_jump`."""
+    await asyncio.to_thread(_destroy_state_only_sync, tf_state_json, tenant)
 
 
 def web_jump_url_from_state(tf_state_json: str) -> str:

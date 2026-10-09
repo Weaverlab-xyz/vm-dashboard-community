@@ -325,6 +325,11 @@ def test_a_tenant_without_its_artifact_is_needs_wiring_and_says_what_to_run():
     from web_dashboard.services import pov_cards as C
     mix = {"pra": True, "password_safe": True, "entitle": True,
            "wired": False, "onboarded": False, "entitle_wired": False}
+    # Every cell-role guest present and none wired: the same "there, not wired" answer
+    # for the demo-cell cards as the tenants give for the product ones.
+    for role in _cell_roles():
+        mix[C.cell_key(role)] = True
+        mix[C.cell_key(role, wired=True)] = False
     seen = 0
     for g in C.catalog(_ENV, mix):
         for c in g["use_cases"]:
@@ -356,11 +361,47 @@ def test_a_ready_card_targets_this_pov_and_only_this_pov():
     from web_dashboard.services import pov_cards as C
     mix = {k: True for k in ("pra", "password_safe", "entitle",
                              "wired", "onboarded", "entitle_wired")}
+    for role in _cell_roles():
+        mix[C.cell_key(role)] = mix[C.cell_key(role, wired=True)] = True
     for g in C.catalog(_ENV, mix):
         for c in g["use_cases"]:
             assert c["state"] == "ready", f"{c['id']} is {c['state']} on a fully wired POV"
             assert c["target"].startswith(f"/pov/{_ENV}#"), \
                 f"{c['id']} targets {c['target']!r}"
+
+
+def _cell_roles():
+    from web_dashboard.services import pov_cell_roles
+    return pov_cell_roles.VALID_CELL_ROLES
+
+
+def test_a_cell_card_is_out_of_scope_without_its_guest_even_fully_wired():
+    """A POV with no OT simulator guest cannot show a PLC tunnel whatever it is wired
+    into. That is the evaluation's shape, not a step owed, so it must read out_of_scope
+    -- never needs_wiring, which would send an SE to a Wire up button that cannot help."""
+    from web_dashboard.services import pov_cards as C
+    cells = [(g, c) for g, c in _all_pov_cards() if c.requires_cell_roles]
+    assert cells, "no POV card requires a cell role; this rule is untested"
+    mix = {k: True for k in ("pra", "password_safe", "entitle",
+                             "wired", "onboarded", "entitle_wired")}
+    for g, c in cells:
+        state, needs = C.card_state(c, mix)
+        assert state == "out_of_scope", f"{g}/{c.id} is {state} with no cell guest"
+        assert needs and "guest" in needs[0], f"{g}/{c.id} does not name the guest: {needs}"
+        # And the guest present but its items not built is the actionable state.
+        with_guest = dict(mix)
+        for role in c.requires_cell_roles:
+            with_guest[C.cell_key(role)] = True
+        state, _needs = C.card_state(c, with_guest)
+        assert state == "needs_wiring", f"{g}/{c.id} is {state} with an unwired guest"
+
+
+def test_every_required_cell_role_is_a_real_role():
+    from web_dashboard.services import pov_cards as C
+    for g, c in _all_pov_cards():
+        for role in c.requires_cell_roles:
+            assert role in _cell_roles(), f"{g}/{c.id} requires cell role {role!r}"
+            assert role in C._CELL_ABSENT and role in C._CELL_REMEDY,                 f"cell role {role!r} has no absent/remedy copy"
 
 
 def test_find_card_is_the_allowlist_and_refuses_a_demo_id():
