@@ -348,6 +348,92 @@ def skip_reason(cmeta: dict, bmeta: Optional[dict] = None) -> str:
     return ""
 
 
+# ── What a run is given ──────────────────────────────────────────────────────
+# The variables of the two plays, built in one place for both callers: the OT demo
+# cell's `ansible_local` runs below, and a POV's `agent_ansible` runs through its broker
+# agent (services/pov_ot_adapter.py). ``owner_id`` keys every minted credential and
+# Secret name -- a cell's job id here, a POV environment's id there.
+
+def deploy_spec(owner_id: str, cmeta: dict, workload: str = "", *,
+                dry_run: Optional[bool] = None) -> dict:
+    """``extra_vars`` and ``secret_vars`` for ``openfaas-function-deploy.yml``.
+
+    ``cmeta`` is the cell-shaped record ``workload_env`` reads (``instance_name``,
+    ``ot_hmi_url``, ``ot_web_jump_name``). ``dry_run`` overrides the install-wide
+    ``ot_faas_dry_run`` for this deploy only; ``None`` keeps it. Mints the bearer.
+    """
+    package_b64, package_sha, name = build_package(workload)
+    bearer = ensure_bearer(owner_id)
+    if not bearer:
+        raise OTFaasError("the function's bearer could not be minted or read back.")
+
+    # One Secret per credential, each named after the variable it backs, so OpenFaaS
+    # mounts it as a single FILE at /var/openfaas/secrets/<name> rather than as a
+    # directory of keys — which is what fnruntime.secretref's file channel reads.
+    #
+    # The gate's secret is always there; a workload's own credentials are whatever it
+    # declares AND the operator has actually set. Every one of them contributes both a
+    # Secret and a `*_FILE` pointer, derived from the same helper, so a name can never
+    # be right in one place and wrong in the other.
+    env = {
+        "FN_CLOUD": "openfaas",
+        "FN_WORKLOAD": name,
+        "FN_NAME": FUNCTION_NAME,
+    }
+    env.update(workload_env(name, owner_id, cmeta))
+    if dry_run is not None and "FN_FUXA_DRY_RUN" in env:
+        env["FN_FUXA_DRY_RUN"] = "1" if dry_run else "0"
+
+    secret_vars = {"otfn_bearer": bearer_config_key(owner_id)}
+    secrets_map = {secret_name(owner_id, SHARED_SECRET_ENV): "otfn_bearer"}
+    env[SHARED_SECRET_ENV + SECRET_FILE_SUFFIX] = secret_file_path(
+        owner_id, SHARED_SECRET_ENV)
+    for index, (env_var, config_key) in enumerate(
+            sorted(workload_secrets(name, owner_id).items())):
+        # The ansible variable is positional rather than named after the credential:
+        # extra_vars is persisted to the job row, and a variable called
+        # `otfn_fuxa_password` would put the credential's PURPOSE in the database even
+        # though its value stays out.
+        var = f"otfn_secret_{index}"
+        secret_vars[var] = config_key
+        secrets_map[secret_name(owner_id, env_var)] = var
+        env[env_var + SECRET_FILE_SUFFIX] = secret_file_path(owner_id, env_var)
+
+    return {
+        "workload": name,
+        "package_sha256": package_sha,
+        "package_b64_bytes": len(package_b64),
+        "extra_vars": {
+            "otfn_name": FUNCTION_NAME,
+            "otfn_namespace": NAMESPACE,
+            "otfn_image": FUNCTION_IMAGE,
+            "otfn_pkg_b64": package_b64,
+            "otfn_pkg_sha256": package_sha,
+            "otfn_env": env,
+            # The NAMES of the bound variables, never their values — extra_vars is
+            # persisted to the job row. Same discipline as epml_token_var.
+            "otfn_secrets": secrets_map,
+            # Prove the function answers through the gateway before the run is called a
+            # success. From a POD, because the caller will be one.
+            "otfn_probe": True,
+        },
+        "secret_vars": secret_vars,
+    }
+
+
+def rotate_spec(owner_id: str, hmi_url: str) -> dict:
+    """``extra_vars`` and ``secret_vars`` for ``fuxa-admin-rotate.yml``. Mints the
+    password, so the value the play converges on is decided before it runs."""
+    ensure_fuxa_admin_password(owner_id)
+    return {
+        "extra_vars": {"fuxa_url": hmi_url,
+                       "fuxa_admin_user": _cfg("ot_faas_fuxa_user") or "admin"},
+        # By reference, like every other credential here: the job row carries the
+        # config key and the runner resolves it at run time.
+        "secret_vars": {"fuxa_new_password": fuxa_admin_config_key(owner_id)},
+    }
+
+
 # ── Deploying the function onto the broker ───────────────────────────────────
 
 async def queue_deploy(db, parent_id: str, child_id: str, cmeta: dict, *,
@@ -370,40 +456,8 @@ async def queue_deploy(db, parent_id: str, child_id: str, cmeta: dict, *,
         return f"adapter deploy already queued (job {cmeta['ot_faas_job_id']})"
 
     broker_ip = (bmeta.get("private_ip") or "").strip()
-    package_b64, package_sha, name = build_package(workload)
-    bearer = ensure_bearer(child_id)
-    if not bearer:
-        raise OTFaasError("the function's bearer could not be minted or read back.")
-
-    # One Secret per credential, each named after the variable it backs, so OpenFaaS
-    # mounts it as a single FILE at /var/openfaas/secrets/<name> rather than as a
-    # directory of keys — which is what fnruntime.secretref's file channel reads.
-    #
-    # The gate's secret is always there; a workload's own credentials are whatever it
-    # declares AND the operator has actually set. Every one of them contributes both a
-    # Secret and a `*_FILE` pointer, derived from the same helper, so a name can never
-    # be right in one place and wrong in the other.
-    env = {
-        "FN_CLOUD": "openfaas",
-        "FN_WORKLOAD": name,
-        "FN_NAME": FUNCTION_NAME,
-    }
-    env.update(workload_env(name, child_id, cmeta))
-
-    secret_vars = {"otfn_bearer": bearer_config_key(child_id)}
-    secrets_map = {secret_name(child_id, SHARED_SECRET_ENV): "otfn_bearer"}
-    env[SHARED_SECRET_ENV + SECRET_FILE_SUFFIX] = secret_file_path(
-        child_id, SHARED_SECRET_ENV)
-    for index, (env_var, config_key) in enumerate(
-            sorted(workload_secrets(name, child_id).items())):
-        # The ansible variable is positional rather than named after the credential:
-        # extra_vars is persisted to the job row, and a variable called
-        # `otfn_fuxa_password` would put the credential's PURPOSE in the database even
-        # though its value stays out.
-        var = f"otfn_secret_{index}"
-        secret_vars[var] = config_key
-        secrets_map[secret_name(child_id, env_var)] = var
-        env[env_var + SECRET_FILE_SUFFIX] = secret_file_path(child_id, env_var)
+    spec = deploy_spec(child_id, cmeta, workload)
+    name, package_sha = spec["workload"], spec["package_sha256"]
 
     parent = job_service.get_job(db, parent_id)
     payload = SimpleNamespace(
@@ -411,21 +465,8 @@ async def queue_deploy(db, parent_id: str, child_id: str, cmeta: dict, *,
         target=broker_ip,
         cloud=cloud,
         ansible_user="",
-        extra_vars={
-            "otfn_name": FUNCTION_NAME,
-            "otfn_namespace": NAMESPACE,
-            "otfn_image": FUNCTION_IMAGE,
-            "otfn_pkg_b64": package_b64,
-            "otfn_pkg_sha256": package_sha,
-            "otfn_env": env,
-            # The NAMES of the bound variables, never their values — extra_vars is
-            # persisted to the job row. Same discipline as epml_token_var.
-            "otfn_secrets": secrets_map,
-            # Prove the function answers through the gateway before the run is called a
-            # success. From a POD, because the caller will be one.
-            "otfn_probe": True,
-        },
-        secret_vars=secret_vars,
+        extra_vars=spec["extra_vars"],
+        secret_vars=spec["secret_vars"],
         secret_become_source="",
         secret_ssh_key_source="",
         managed_account=None,
@@ -462,7 +503,7 @@ async def queue_deploy(db, parent_id: str, child_id: str, cmeta: dict, *,
                                     "Deploying the Entitle adapter on the plant's "
                                     "function runtime…")
     return (f"adapter deploy queued as job {job.id} ({name}, "
-            f"{len(package_b64)} b64 bytes)")
+            f"{spec['package_b64_bytes']} b64 bytes)")
 
 
 async def queue_fuxa_rotate(db, parent_id: str, child_id: str, cmeta: dict, *,
@@ -492,18 +533,15 @@ async def queue_fuxa_rotate(db, parent_id: str, child_id: str, cmeta: dict, *,
         return ("HMI password rotation skipped: the DMZ broker reported no private "
                 "address, and it is the only host that can reach the cell")
 
-    ensure_fuxa_admin_password(child_id)
+    spec = rotate_spec(child_id, hmi_url)
     parent = job_service.get_job(db, parent_id) if parent_id else None
     payload = SimpleNamespace(
         asset=FUXA_ROTATE_PLAYBOOK,
         target=broker_ip,
         cloud=cloud,
         ansible_user="",
-        extra_vars={"fuxa_url": hmi_url,
-                    "fuxa_admin_user": _cfg("ot_faas_fuxa_user") or "admin"},
-        # By reference, like every other credential here: the job row carries the
-        # config key and the runner resolves it at run time.
-        secret_vars={"fuxa_new_password": fuxa_admin_config_key(child_id)},
+        extra_vars=spec["extra_vars"],
+        secret_vars=spec["secret_vars"],
         secret_become_source="",
         secret_ssh_key_source="",
         managed_account=None,
@@ -676,6 +714,11 @@ async def destroy(vm_job_id: str, cmeta: dict) -> str:
     # pointing at a function nobody can call.
     _clear_stash(vm_job_id)
     return ""
+
+
+def clear_stash(vm_job_id: str) -> None:
+    """Public spelling of :func:`_clear_stash`, for the POV adapter's teardown."""
+    _clear_stash(vm_job_id)
 
 
 def _clear_stash(vm_job_id: str) -> None:

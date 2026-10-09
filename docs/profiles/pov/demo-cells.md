@@ -33,8 +33,9 @@ kind of thing:
 |---|---|
 | `ot-sim`, the OT simulator | A **Web Jump** to the FUXA HMI on port 1881. One **PRA protocol tunnel** each for Modbus TCP (502), OPC UA (4840), Siemens S7comm (102) and EtherNet/IP (44818). |
 | `vyos`, the network device | No extra items, because the Shell Jump is the demo. The guest is **left out of Entitle**: VyOS rebuilds its user accounts from its own config on every commit, so an account Entitle created over SSH would vanish the first time anyone changed the device. |
+| `ot-broker`, the plant's DMZ broker | No extra items. It is the host for [the OT HMI adapter](#just-in-time-hmi-access-through-entitle) and for the POV's Entitle agent. |
 
-Both roles need a Linux guest. A role cannot be set on the broker VM, because the agent, the
+Every role needs a Linux guest. A role cannot be set on the broker VM, because the agent, the
 Gateway and the Resource Broker all run there.
 
 All of these items go into the POV's own Jump Group, behind the POV's own Gateway. A vendor
@@ -72,18 +73,51 @@ The guest has to actually be the cell:
   at closed ports.
 - **VyOS.** Bake `vyos-cell` from a VyOS image you supply, as described in
   [provisioners/net/README.md](../../../provisioners/net/README.md).
+- **OT DMZ broker.** Bake the same `ot-sim` provisioner with `OT_ROLE=broker`. That image
+  carries k3s, the Entitle agent chart and the OpenFaaS runtime the adapter runs on.
 
 For a cloud POV, promote the image into the POV's cloud and region, then reference it from
 the template VM. A **Skytap** POV runs no user-data, so the image has to be baked into a
 Skytap template guest. Installing it after boot is not an option.
 
+## Just-in-time HMI access through Entitle
+
+The demo cell's DMZ broker runs an Entitle adapter for the FUXA HMI. An Entitle grant
+creates an HMI user that exists only for the grant, and hands the requester the PRA Web
+Jump that reaches the HMI. A POV carries this as the **OT HMI access through Entitle** step
+on the **Setup** tab, shown only on a POV with an `ot-sim` guest and an Entitle tenant.
+
+Before pressing it you need:
+
+1. A guest with the `ot-broker` role. Name it `entitle` in the template, and the Entitle
+   agent step installs onto it without being told.
+2. The **Entitle agent** installed on that same guest. The adapter's address resolves only
+   inside that guest's k3s, and Entitle reaches it through the agent.
+3. **Wire up** run, so the HMI Web Jump exists. The grant hands the requester that Web Jump.
+4. The two plays staged in your storage backend under their own names:
+   `fuxa-admin-rotate.yml` and `openfaas-function-deploy.yml`, from
+   [examples/playbooks/ot/](../../../examples/playbooks/ot/README.md). This is the same
+   requirement the demo cell has.
+
+**Deploy adapter** queues two runs on the POV's broker agent, against the `ot-broker`
+guest. The first rotates the HMI's admin password off FUXA's seeded default. The second
+deploys the adapter, holding that password. It then registers the adapter in the POV's
+Entitle tenant as an agent-brokered integration.
+
+It deploys in **dry run**. Each grant reports what it would do without touching the HMI.
+When the dry run looks right, press **Go live** on the same step to redeploy with real
+grants. Pressing either again is safe: the password and the adapter's credential are
+minted once, and the integration is registered once.
+
+Destroying the POV removes the integration from the Entitle tenant before it removes the
+agent token, and deletes the adapter's stored credentials. If the Entitle tenant cannot be
+reached, the destroy log names the integration to delete by hand.
+
 ## What does not carry over, and why
 
-- **The Purdue-zone firewall and the DMZ broker.** A POV's network is a single address
-  range today. The story still holds without them: the plant is reachable only through the
-  POV's Gateway. Multi-zone POV templates are planned for a later release.
-- **The Entitle plant agent and the FUXA function adapter.** These depend on the DMZ broker
-  above.
+- **The Purdue-zone firewall.** A POV's network is a single address range today. The story
+  still holds without it: the plant is reachable only through the POV's Gateway. Multi-zone
+  POV templates are planned for a later release.
 - **The PRA Vault checkout the demo cell builds for its admin account.** A POV already
   brings Password Safe accounts into PRA through its
   [Password Safe credentials in PRA](wiring.md) step. A second path would create a second
@@ -98,6 +132,10 @@ The POV's **Use cases** tab includes three PRA cards that need a guest with a ce
 - **Operate the plant HMI through a recorded Web Jump** (`ot-sim`).
 - **Reach a PLC over Modbus or OPC UA, brokered** (`ot-sim`).
 - **Make an emergency firewall change on a network device** (`vyos`).
+
+The **Entitle** group adds **Just-in-time access to the plant HMI**, which needs both an
+`ot-sim` and an `ot-broker` guest. Whether its adapter is deployed is the setup step's to
+say.
 
 On a POV with no such guest these cards show as **out of scope**, the same as a product the
 POV does not include. They do not count against the POV's progress.

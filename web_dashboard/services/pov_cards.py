@@ -92,10 +92,12 @@ _PRODUCT_REMEDY = {
 _CELL_ABSENT = {
     "ot-sim": "an OT simulator guest (cell role ot-sim)",
     "vyos": "a VyOS network-device guest (cell role vyos)",
+    "ot-broker": "an OT DMZ broker guest (cell role ot-broker)",
 }
 _CELL_REMEDY = {
     "ot-sim": "the OT simulator's HMI Web Jump and protocol tunnels — run the wire-up",
     "vyos": "the network device's jump item — run the wire-up",
+    "ot-broker": "the OT DMZ broker's jump item — run the wire-up",
 }
 
 
@@ -496,6 +498,21 @@ _ENTITLE_CARDS = (
         minutes=12,
         docs="design/entitle-user-jit",
         requires_products=("entitle",),
+    ),
+    # The OT demo cell's DMZ broker story, on a POV: services/pov_ot_adapter. Ready means
+    # the guests are there and wired; whether the adapter itself is registered is the
+    # "OT HMI access through Entitle" setup step's to say.
+    UseCase(
+        id="pov-ot-jit-hmi-access",
+        title="Just-in-time access to the plant HMI",
+        summary="Request HMI access in Entitle, get a user that exists only for the "
+                "grant plus the PRA Web Jump that reaches it, and watch the user vanish "
+                "when the grant ends — the adapter runs inside the plant, beside the agent.",
+        target="#overview",
+        minutes=15,
+        docs="profiles/pov/demo-cells",
+        requires_products=("entitle",),
+        requires_cell_roles=("ot-sim", "ot-broker"),
     ),
 )
 

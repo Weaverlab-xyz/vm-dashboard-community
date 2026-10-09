@@ -255,6 +255,33 @@ def _wireup(p: dict):
     return READY, "", "wireup"
 
 
+def _ot_adapter(p: dict):
+    """The OT DMZ broker's Entitle adapter -- only on a POV with an OT simulator guest.
+
+    Judged on the registration, the artifact this dashboard records, never on the deploy
+    job: the deploy is queued on the broker agent and the step is done when Entitle holds
+    an integration for it.
+    """
+    roles = p.get("cell_role_counts") or {}
+    if not roles.get("ot-sim"):
+        return SKIPPED, "this POV has no OT simulator guest", ""
+    if not p.get("entitle_tenant_id"):
+        return SKIPPED, _no_tenant("Entitle"), ""
+    if p.get("ot_adapter_registered"):
+        mode = "dry run" if p.get("ot_adapter_dry_run", True) else "live HMI grants"
+        return DONE, f"registered ({mode})", ""
+    missing = []
+    if not roles.get("ot-broker"):
+        missing.append("a guest with the ot-broker cell role")
+    if not p.get("entitle_agent_installed"):
+        missing.append("the Entitle agent, installed on that guest")
+    if not (p.get("cell_wired_counts") or {}).get("ot-sim"):
+        missing.append("the HMI Web Jump (run Wire up)")
+    if missing:
+        return BLOCKED, "needs " + _join(missing), "ot_adapter"
+    return READY, "", "ot_adapter"
+
+
 def _pra_ps(p: dict):
     """PRA can inject this POV's Password Safe credentials — judged on the stored COUNTS
     from ``pov_pra_ps_link``, never on whether a call returned.
@@ -306,6 +333,7 @@ STEPS = (
     ("entitle_agent",   "Entitle agent",                     _entitle_agent),
     ("wireup",          "VMs wired into PRA / PS / Entitle", _wireup),
     ("pra_ps",          "Password Safe credentials in PRA",  _pra_ps),
+    ("ot_adapter",      "OT HMI access through Entitle",     _ot_adapter),
     ("share",           "Customer share link",               _share),
 )
 
@@ -325,6 +353,7 @@ NEEDS = {
     "entitle_agent":   ("broker",),
     "wireup":          ("gateway", "guest_os"),
     "pra_ps":          ("wireup",),
+    "ot_adapter":      ("entitle_agent", "wireup"),
     "share":           ("environment",),
 }
 

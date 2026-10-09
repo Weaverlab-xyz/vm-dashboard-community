@@ -75,6 +75,7 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         pov_platform_cache,
                         pov_reconcile,
                         pov_cloud_cost, pov_entitle_agent, pov_guest_step,
+                        pov_ot_adapter,
                         pov_pra_ps_link, pov_ps_config, pov_resource_broker,
                         pov_setup_steps,
                         suspend_schedule, pov_share, spend_policy, pov_summary,
@@ -244,6 +245,7 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
     out.update(pov_gateway.describe(_db_of(env), env))
     out.update(pov_resource_broker.describe(_db_of(env), env))
     out.update(pov_entitle_agent.describe(_db_of(env), env))
+    out.update(pov_ot_adapter.describe(env))
     out.update(pov_guest_step.describe(_db_of(env), env))
     out.update(pov_ps_config.describe(env))
     out.update(pov_pra_ps_link.describe(env))
@@ -1561,6 +1563,37 @@ async def entitle_agent(env_id: str, payload: EntitleAgentRequest,
         # operator does next: press Broker, name a tenant, name a Linux host.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"job_id": job.id,
+            "environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+
+class OTAdapterRequest(BaseModel):
+    """Deploy the OT HMI's Entitle adapter. See ``services/pov_ot_adapter``.
+
+    ``dry_run`` defaults ON, the adapter's own default: grants report what they would do
+    without touching the HMI. Press again with it off to grant for real.
+    """
+    dry_run: bool = True
+
+
+@router.post("/managed/{env_id}/ot-adapter", status_code=202, dependencies=_POV_WRITE_OWN)
+async def ot_adapter(env_id: str, payload: OTAdapterRequest,
+                     db: Session = Depends(get_db),
+                     current_user: User = Depends(get_current_user)):
+    """Rotate the OT simulator's HMI password, deploy the Entitle adapter onto the OT DMZ
+    broker guest, and register it in this POV's Entitle tenant."""
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    ok, why = pov_env_service.may_act_on(env)
+    if not ok:
+        raise HTTPException(status_code=409, detail=why)
+    try:
+        note = await pov_ot_adapter.queue(
+            db, env, dry_run=payload.dry_run,
+            created_by=getattr(current_user, "username", None) or "")
+    except pov_ot_adapter.OTAdapterError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"note": note,
             "environment": _serialize(env, broker=pov_broker.describe(db, env))}
 
 
