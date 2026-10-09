@@ -232,9 +232,11 @@ the on-premises case.
 The registerable set is deliberately wider than the provisionable one — **provisioning
 needs a Terraform module, registering needs only somewhere to reach.** Any of `local`,
 `aws`, `azure`, `gcp` or `oci` may be registered, and engines are **postgres / mysql /
-sqlserver / oracle / mongodb**. Configuration Management runs cover postgres / mysql / sqlserver;
-the `ansible-cloud` runner image ships no Oracle or MongoDB client yet, and no Ansible runner resolves
-for `oci` at all, so an OCI row registers and lists but can't be a run target.
+sqlserver / oracle / mongodb**, and Configuration Management runs cover all five — the
+`ansible-cloud` runner image carries `python-oracledb` (thin mode) and `community.mongodb`
+over `pymongo`; see the [database samples](../examples/playbooks/README.md#databases-database).
+No Ansible runner resolves for `oci` at all, so an OCI row registers and lists but can't be
+a run target.
 
 **How to register.** **Databases** page → **Register existing**, or
 `POST /api/databases/register` (permission `cloud_database:write`). To register several
@@ -549,6 +551,12 @@ of the `mongodb://` seed list), so connect with `directConnection=true`, and
 dedicated cluster that member can be a secondary: reads need
 `readPreference=secondaryPreferred`, and writes need the primary. PRA 26.3's MongoDB tunnel
 lifts this once the `beyondtrust/sra` provider exposes it.
+
+**Configuration Management:** a run connects from the runner, not the tunnel, so the
+runner's egress IP must be in `atlas_extra_access_cidrs`. The play gets `db_tls`,
+`db_auth_source` and the cluster's `db_replica_set`, so the driver finds the primary on a
+dedicated tier too. Atlas refuses `createUser` over the wire, so the user sample stops on an
+Atlas target; the database sample works there.
 
 **Admin user:** the form's admin username, created as an Atlas database user with
 `atlasAdmin` on `admin`, scoped to the cluster. Atlas manages database users only through its

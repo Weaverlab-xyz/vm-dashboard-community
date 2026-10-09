@@ -76,12 +76,17 @@ RUN curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o /usr/local/bin/ku
 # FreeTDS headers above when a wheel isn't available for the target arch.
 # beyondtrust-bips-library backs the beyondtrust.secrets_safe lookup plugin (below)
 # — it pulls requests/urllib3/cryptography/Cerberus, all pure-python or manylinux wheels.
+# oracledb runs in THIN mode (pure Python, no Instant Client); it is what the Oracle
+# sample drives directly, since there is no official Oracle Database collection.
+# pymongo backs community.mongodb.
 RUN pip install --no-cache-dir \
         "ansible-core>=2.16" \
         "kubernetes>=29.0.0" \
         "psycopg2-binary>=2.9" \
         "PyMySQL>=1.1" \
         "pymssql>=2.2" \
+        "oracledb>=2.0" \
+        "pymongo>=4.6" \
         "python-ldap>=3.4" \
         "pywinrm>=0.4.3" \
         "requests-ntlm>=1.2" \
@@ -96,6 +101,7 @@ RUN ansible-galaxy collection install \
         community.postgresql \
         community.mysql \
         community.general \
+        "community.mongodb:>=1.7.0" \
         microsoft.ad \
         beyondtrust.secrets_safe \
         beyondtrust.password_safe \
@@ -104,11 +110,13 @@ RUN ansible-galaxy collection install \
 
 # Fail the build early if a client lib can't import or a module can't be resolved
 # on the collections path — a broken image should never reach a runner.
-RUN python -c "import kubernetes, psycopg2, pymysql, pymssql, ldap, winrm; print('client libs OK')" \
+RUN python -c "import kubernetes, psycopg2, pymysql, pymssql, oracledb, pymongo, ldap, winrm; print('client libs OK')" \
  && ansible-doc kubernetes.core.k8s_info      >/dev/null \
  && ansible-doc community.postgresql.postgresql_db >/dev/null \
  && ansible-doc community.mysql.mysql_db      >/dev/null \
  && ansible-doc community.general.mssql_db    >/dev/null \
+ && ansible-doc community.mongodb.mongodb_user >/dev/null \
+ && ansible-doc community.mongodb.mongodb_index >/dev/null \
  && ansible-doc community.general.ldap_entry  >/dev/null \
  && ansible-doc microsoft.ad.user             >/dev/null \
  && ansible-doc beyondtrust.secrets_safe.secrets_safe_lookup >/dev/null \
