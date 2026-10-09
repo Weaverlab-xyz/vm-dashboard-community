@@ -186,7 +186,7 @@ def test_one_bad_row_blocks_the_whole_batch():
 
 
 def test_database_with_an_unsupported_engine_is_refused():
-    items = [_db("clouddb:d1", "oracle d1", engine="oracle")]
+    items = [_db("clouddb:d1", "cassandra d1", engine="cassandra")]
     _expect_error(items, ["clouddb:d1"], "not supported for Ansible runs")
 
 

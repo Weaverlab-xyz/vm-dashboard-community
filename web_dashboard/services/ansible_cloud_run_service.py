@@ -38,8 +38,10 @@ from .ansible_localhost_cmd import build_local_docker_argv
 
 logger = logging.getLogger(__name__)
 
-# DB engines the ansible-cloud image ships collections + client libs for.
-ANSIBLE_DB_ENGINES = ("postgres", "mysql", "sqlserver")
+# DB engines the ansible-cloud image ships collections + client libs for. Oracle has no
+# official collection — its sample drives python-oracledb (thin mode) directly; MongoDB uses
+# community.mongodb over pymongo.
+ANSIBLE_DB_ENGINES = ("postgres", "mysql", "sqlserver", "oracle", "mongodb")
 
 # The cloud's native transient runner (the default when no per-cloud override).
 _CLOUD_NATIVE_RUNNER = {"aws": "ecs", "azure": "aci", "gcp": "gcp"}

@@ -1,0 +1,94 @@
+# Create a MongoDB database user — SELF-HOSTED MongoDB only.
+# Target: a registered MongoDB database. Admin connection vars (db_login_*) are auto-injected,
+# plus db_auth_source / db_tls / db_replica_set. Supply the new user's password via a
+# Secrets-Management secret (run form → "Use a secret", mapped to target_user_password).
+#
+# NOT for MongoDB Atlas: Atlas refuses user management over the wire (createUser is denied;
+# database users change only through the Atlas Admin API or UI), so the play stops early on
+# an Atlas target rather than failing deep inside the module. Use
+# mongodb-create-database.yml for data on Atlas.
+#
+# extra_vars:
+#   target_user: appuser                      # required
+#   target_user_password: <secret>            # bind via "Use a secret" (recommended)
+#   target_database: appdb                    # database the roles apply to (default: admin)
+#   target_roles: [readWrite]                 # role names on target_database
+#
+# OPTIONAL — fetch the user's password from BeyondTrust Password Safe instead:
+#   target_user_password_secret: app-secrets/appuser-password
+- name: Create a MongoDB user
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    target_user: ""
+    target_user_password: ""
+    target_database: admin
+    target_roles: ["readWrite"]
+    # Optional Password Safe source for the password above (blank = don't use it).
+    target_user_password_secret: ""
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true          # set false only for a self-signed Password Safe
+  tasks:
+    - name: Refuse an Atlas target (Atlas manages users only through its Admin API)
+      ansible.builtin.assert:
+        that:
+          - db_provider | default('') != 'atlas'
+        fail_msg: >-
+          This is a MongoDB Atlas cluster. Atlas denies createUser over the wire — add
+          database users in the Atlas UI or Admin API instead.
+
+    # Fetched into its OWN fact, never onto target_user_password: extra vars outrank
+    # set_fact, so writing back to that name would be silently ignored whenever the
+    # password was also supplied as an extra var / "Use a secret" binding.
+    - name: Fetch the user password from Password Safe
+      ansible.builtin.set_fact:
+        _ps_target_user_password: "{{ lookup('beyondtrust.secrets_safe.secrets_safe_lookup',
+          api_url=ps_api_url,
+          api_version='3.1',
+          retrieval_type='SECRET',
+          client_id=ps_client_id,
+          client_secret=ps_client_secret,
+          secret_list=target_user_password_secret,
+          decrypt=True,
+          verify_ca=ps_verify_ca,
+          wantlist=False) }}"
+      no_log: true
+      when: target_user_password_secret | length > 0
+
+    - name: Resolve the effective password (Password Safe wins when a path was given)
+      ansible.builtin.set_fact:
+        _user_password: "{{ _ps_target_user_password | default(target_user_password, true) }}"
+      no_log: true
+
+    - name: Validate required vars
+      ansible.builtin.assert:
+        that:
+          - target_user | length > 0
+          - _user_password | length > 0
+        fail_msg: >-
+          Set target_user, and a password — either target_user_password (bind it via
+          'Use a secret') or target_user_password_secret (a Password Safe path).
+
+    - name: Ensure the user exists
+      community.mongodb.mongodb_user:
+        name: "{{ target_user }}"
+        password: "{{ _user_password }}"
+        database: "{{ target_database }}"
+        roles: "{{ target_roles }}"
+        update_password: always
+        state: present
+        login_host: "{{ db_login_host }}"
+        login_port: "{{ db_login_port }}"
+        login_user: "{{ db_login_user }}"
+        login_password: "{{ db_login_password }}"
+        login_database: "{{ db_auth_source | default('admin') }}"
+        tls: "{{ db_tls | default(false) | bool }}"
+        replica_set: "{{ db_replica_set | default(omit, true) }}"
+        # Atlas restricts the commands the module's "is auth enabled?" probe runs.
+        atlas_auth: "{{ db_provider | default('') == 'atlas' }}"
+        # The version gate refuses pairs its table does not list; Atlas runs current majors.
+        strict_compatibility: false
+      no_log: true   # the user password is a secret

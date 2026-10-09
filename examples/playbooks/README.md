@@ -44,6 +44,8 @@ mid-run; leave it blank and the play behaves exactly as before:
 | `windows/win-create-local-admin.yml` | `new_admin_password_secret` |
 | `database/postgres-create-role.yml` | `target_role_password_secret` |
 | `database/mysql-create-user.yml` | `target_user_password_secret` |
+| `database/oracle-create-user.yml` | `target_user_password_secret` |
+| `database/mongodb-create-user.yml` | `target_user_password_secret` |
 | `ot/entitle-agent-install.yml` | `entitle_agent_token_secret` |
 | `portainer/*.yml` | `portainer_pat_secret` |
 | `directory/ad-user.yml` | `ad_user_password_secret` |
@@ -456,7 +458,8 @@ order to run them in and the two traps they encode.
 ## Databases (`database/`)
 
 Localhost plays using `community.postgresql` / `community.mysql` / `community.general`
-(mssql). Pick a provisioned **or registered** database as the target (Config Management →
+(mssql) / `community.mongodb`, and `python-oracledb` for Oracle (there is no official Oracle
+Database collection, so that sample drives the driver directly). Pick a provisioned **or registered** database as the target (Config Management →
 target kind **Databases**). The dashboard resolves the admin credential server-side — from
 the provisioning job for a database it built, or a just-in-time Password Safe
 managed-account checkout for a registered one — and injects
@@ -475,6 +478,15 @@ Secrets-Management secret via **Use a secret** (mapped to `target_role_password`
 | `mysql-create-database.yml` | Create a MySQL database (`target_db_name`) |
 | `mysql-create-user.yml` | Create a MySQL user (`target_user` + secret pw) |
 | `sqlserver-create-database.yml` | Create a SQL Server database (`target_db_name`) |
+| `oracle-create-user.yml` | Create or reset an Oracle user (`target_user` + secret pw, `target_user_grants`); `db_name` is the PDB service |
+| `mongodb-create-database.yml` | Create a MongoDB database + collection by creating an index (`target_db_name`) — works on Atlas |
+| `mongodb-create-user.yml` | Create a MongoDB user (`target_user` + secret pw, `target_roles`) — **self-hosted only**; refuses Atlas |
+
+MongoDB targets also get `db_auth_source`, `db_tls` and `db_replica_set` (and `db_provider`)
+alongside the `db_login_*` vars. **Atlas:** the run connects from the Config Management
+runner, not the PRA tunnel, so the runner's egress IP must be on the cluster's access list
+(Settings → Databases → MongoDB Atlas → extra access CIDRs); and Atlas denies `createUser`
+over the wire, so users are made in Atlas, not by a play.
 
 ## Portainer (`portainer/`)
 

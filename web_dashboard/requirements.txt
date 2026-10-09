@@ -11,7 +11,12 @@ psycopg2-binary==2.9.9
 gunicorn==21.2.0
 
 # Data validation
-pydantic>=2.7.2,<3.0.0
+# Upper bound is load-bearing: pydantic 2.14.0 (2026-10) removed the private
+# pydantic._internal._typing_extra.eval_type_backport, which mcp 1.x's FastMCP imports at
+# module level — so `import mcp.server` (api/mcp_server.py) fails and takes the whole app
+# down with it. 2.13.5 is the last version CI ran green on. Lift together with an mcp that
+# no longer imports it.
+pydantic>=2.7.2,<2.14
 pydantic-settings>=2.6.1
 
 # Authentication

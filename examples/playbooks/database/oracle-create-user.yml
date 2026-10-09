@@ -1,0 +1,113 @@
+# Create (or reset) an Oracle database user.
+# Target: an Oracle database (provisioned on AWS RDS, or registered). Admin connection vars
+# (db_login_*) are auto-injected; db_name is the service name — the PDB on an RDS
+# oracle-se2-cdb instance. Supply the new user's password via a Secrets-Management secret
+# (run form → "Use a secret", mapped to target_user_password) so it's never in plaintext.
+#
+# There is no official Oracle Database collection, so this drives python-oracledb (thin
+# mode — no Instant Client) from the runner's own interpreter. The values travel as
+# environment variables, never on a command line.
+#
+# extra_vars:
+#   target_user: appuser                # required — letters, digits, _ $ #; letter first
+#   target_user_password: <secret>      # bind via "Use a secret" (recommended)
+#   target_user_grants: [CREATE SESSION] # system privileges to grant (default: CREATE SESSION)
+#   oracle_tls: false                   # true for a TLS-only listener (e.g. Autonomous DB)
+#
+# OPTIONAL — fetch the user's password from BeyondTrust Password Safe instead, by setting a
+# SECRET path (folder/title):
+#   target_user_password_secret: app-secrets/appuser-password
+- name: Create an Oracle user
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    target_user: ""
+    target_user_password: ""
+    target_user_grants: ["CREATE SESSION"]
+    oracle_tls: false
+    # Optional Password Safe source for the password above (blank = don't use it).
+    target_user_password_secret: ""
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true          # set false only for a self-signed Password Safe
+  tasks:
+    # Fetched into its OWN fact, never onto target_user_password: extra vars outrank
+    # set_fact, so writing back to that name would be silently ignored whenever the
+    # password was also supplied as an extra var / "Use a secret" binding.
+    - name: Fetch the user password from Password Safe
+      ansible.builtin.set_fact:
+        _ps_target_user_password: "{{ lookup('beyondtrust.secrets_safe.secrets_safe_lookup',
+          api_url=ps_api_url,
+          api_version='3.1',
+          retrieval_type='SECRET',
+          client_id=ps_client_id,
+          client_secret=ps_client_secret,
+          secret_list=target_user_password_secret,
+          decrypt=True,
+          verify_ca=ps_verify_ca,
+          wantlist=False) }}"
+      no_log: true
+      when: target_user_password_secret | length > 0
+
+    - name: Resolve the effective password (Password Safe wins when a path was given)
+      ansible.builtin.set_fact:
+        _user_password: "{{ _ps_target_user_password | default(target_user_password, true) }}"
+      no_log: true
+
+    - name: Validate required vars
+      ansible.builtin.assert:
+        that:
+          - target_user is match('^[A-Za-z][A-Za-z0-9_$#]{0,127}$')
+          - _user_password | length > 0
+          - '"\"" not in _user_password'
+          - db_name | default('') | length > 0
+        fail_msg: >-
+          Set target_user (letters, digits, _ $ #; letter first) and a password without a
+          double quote — either target_user_password (bind it via 'Use a secret') or
+          target_user_password_secret (a Password Safe path). db_name (the service name)
+          comes from the target database.
+
+    # Oracle has no CREATE USER IF NOT EXISTS: look the user up in ALL_USERS (readable by
+    # any session) and CREATE or ALTER. DDL takes no bind variables, so the name is
+    # validated above and the password is double-quoted (and checked to hold no quote).
+    - name: Ensure the user exists with this password
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - -c
+          - |
+            import os, re, oracledb
+            e = os.environ
+            user, pw = e["ORA_NEW_USER"], e["ORA_NEW_PASSWORD"]
+            assert re.fullmatch(r"[A-Za-z][A-Za-z0-9_$#]{0,127}", user) and '"' not in pw
+            proto = "tcps" if e["ORA_TLS"].lower() == "true" else "tcp"
+            dsn = f"{proto}://{e['ORA_HOST']}:{e['ORA_PORT']}/{e['ORA_SERVICE']}"
+            with oracledb.connect(user=e["ORA_USER"], password=e["ORA_PASSWORD"], dsn=dsn) as c:
+                cur = c.cursor()
+                cur.execute("SELECT COUNT(*) FROM all_users WHERE username = :u", u=user.upper())
+                exists = cur.fetchone()[0] > 0
+                verb = "ALTER" if exists else "CREATE"
+                cur.execute(f'{verb} USER {user} IDENTIFIED BY "{pw}"')
+                for grant in [g.strip() for g in e["ORA_GRANTS"].split(",") if g.strip()]:
+                    assert re.fullmatch(r"[A-Z ]+", grant.upper()), grant
+                    cur.execute(f"GRANT {grant} TO {user}")
+            print("UPDATED" if exists else "CREATED")
+      environment:
+        ORA_HOST: "{{ db_login_host }}"
+        ORA_PORT: "{{ db_login_port }}"
+        ORA_SERVICE: "{{ db_name }}"
+        ORA_USER: "{{ db_login_user }}"
+        ORA_PASSWORD: "{{ db_login_password }}"
+        ORA_TLS: "{{ oracle_tls | string }}"
+        ORA_NEW_USER: "{{ target_user }}"
+        ORA_NEW_PASSWORD: "{{ _user_password }}"
+        ORA_GRANTS: "{{ target_user_grants | join(',') }}"
+      register: _oracle_user
+      changed_when: true
+      no_log: true   # the environment carries both passwords
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "Oracle user {{ target_user | upper }}: {{ _oracle_user.stdout | default('done') }}"

@@ -186,6 +186,14 @@ output "port" {
   description = "MongoDB port"
 }
 
+# The replica set's name, from the seed list. A Config Management run connects from the
+# runner rather than through the tunnel, and with this set the driver discovers the
+# primary from the first member — so writes work on a dedicated cluster, not only Flex.
+output "replica_set" {
+  value       = try(regex("replicaSet=([^&]+)", local.standard)[0], "")
+  description = "Replica set name (for drivers that discover the primary)"
+}
+
 output "srv" {
   value       = mongodbatlas_advanced_cluster.this.connection_strings.standard_srv
   description = "mongodb+srv:// string (for clients that reach Atlas directly)"

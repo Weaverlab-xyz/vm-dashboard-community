@@ -4248,11 +4248,13 @@ async def run_provision_apply(
         row.private_host = str(outputs.get("private_host") or "")
         if outputs.get("project_id"):
             # The Atlas cluster's own project — what Entitle's Atlas integration is
-            # scoped to, and which a post-hoc Register reads back from here.
+            # scoped to, and which a post-hoc Register reads back from here — and its
+            # replica set, which a Config Management run needs to find the primary.
             _pj = db.query(Job).filter(Job.id == job_id).first()
             if _pj is not None:
                 _pm = _pj.metadata_dict or {}
                 _pm["atlas_project_id"] = str(outputs.get("project_id"))
+                _pm["atlas_replica_set"] = str(outputs.get("replica_set") or "")
                 _pj.metadata_dict = _pm
         if outputs.get("port"):
             row.port = int(outputs["port"])
@@ -5111,6 +5113,24 @@ def managed_account_ref(row) -> dict:
     return json.loads(raw[len(_MANAGED_REF_PREFIX):])
 
 
+def _engine_connection_vars(row, prov_meta: Optional[dict] = None) -> dict:
+    """The keys only some engines need, merged into the engine-independent set.
+
+    MongoDB authenticates against an auth database rather than opening a catalog, and an
+    Atlas cluster additionally requires TLS and wants its replica set named so the
+    driver can find the primary. Nothing is added for the SQL engines, whose plays (and
+    whose tests) pin the exact six keys."""
+    if (row.engine or "") != "mongodb":
+        return {}
+    atlas = _is_atlas(row)
+    return {
+        "db_provider": row.provider or "",
+        "db_auth_source": connection_db_name(row) or "admin",
+        "db_tls": atlas,
+        "db_replica_set": ((prov_meta or {}).get("atlas_replica_set") or "") if atlas else "",
+    }
+
+
 async def _registered_connection_vars(row) -> dict:
     """Connection vars for a registered database, credential checked out just-in-time.
 
@@ -5147,6 +5167,7 @@ async def _registered_connection_vars(row) -> dict:
         "db_login_user": ma.ssh_login_user(ref.get("account_name") or ""),
         "db_login_password": credential,
         "db_name": db_name,
+        **_engine_connection_vars(row),
     }
 
 
@@ -5200,6 +5221,7 @@ async def _ps_onboarded_connection_vars(db: Session, row) -> dict:
         "db_login_user": _managed_user_name(row.id),
         "db_login_password": credential,
         "db_name": connection_db_name(row, tfv),
+        **_engine_connection_vars(row, prov_job.metadata_dict if prov_job else None),
     }
 
 
@@ -5269,6 +5291,7 @@ async def ansible_connection_vars(db: Session, db_id: str) -> dict:
         "db_login_user": admin_username,
         "db_login_password": admin_password,
         "db_name": db_name,
+        **_engine_connection_vars(row, prov_job.metadata_dict if prov_job else None),
     }
 
 

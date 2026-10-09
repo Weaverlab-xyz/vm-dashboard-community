@@ -10,8 +10,12 @@ gateway's egress /32, Flex or dedicated) and Entitle's Atlas MongoDB integration
 onboards RDS Oracle on Password Safe's native Oracle platform (asset -> database -> managed
 system, via `passwordsafe_managed_system_by_database`; the by-workgroup resource has no
 instance field) with a self-rotating `psafe_<id>` created by sqlplus over SSM. MongoDB Atlas
-stays out of Password Safe: its users change only through the Atlas Admin API. Remaining:
-Configuration Management (Ansible).
+stays out of Password Safe: its users change only through the Atlas Admin API. **Slice 5**
+makes both Configuration Management targets: `python-oracledb` + `pymongo` +
+`community.mongodb` in the runner image, Mongo-only connection vars (`db_auth_source`,
+`db_tls`, `db_replica_set` — the Atlas module now outputs the replica set) and three
+samples. All five slices are in; what remains is live validation, the dedicated PRA 26.3
+tunnels once the provider ships them, and the private-IP custom plugin.
 
 Re-checked 2026-10-07: `beyondtrust/sra` **v1.4.0** (2026-09-25, the latest) still validates
 `tunnel_type` as `OneOf("tcp", "mssql")`, and nothing on its `main` mentions MongoDB or

@@ -1,0 +1,56 @@
+# Create a MongoDB database (and collection) by creating an index in it.
+# Target: a MongoDB database — an Atlas cluster or a registered self-hosted one. Admin
+# connection vars (db_login_*) plus db_auth_source / db_tls / db_replica_set are
+# auto-injected.
+#
+# MongoDB has no CREATE DATABASE: a database exists once something is written to it, and
+# creating an index creates its collection (and so the database) as a side effect. That is
+# why this is an index — it is idempotent, and it is DDL Atlas's admin user is allowed.
+#
+# Atlas: the play connects from the Config Management runner, not through the PRA tunnel,
+# so the runner's egress IP must be on the cluster's access list (Settings → Databases →
+# MongoDB Atlas → extra access CIDRs). With db_replica_set set the driver discovers the
+# primary, so writes work on a dedicated (M10+) cluster as well as Flex.
+#
+# extra_vars:
+#   target_db_name: appdb         # required
+#   target_collection: items      # collection to create (default: items)
+#   target_index_keys: {created_at: 1}   # index key spec (default: {created_at: 1})
+- name: Create a MongoDB database
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    target_db_name: ""
+    target_collection: items
+    target_index_keys:
+      created_at: 1
+  tasks:
+    - name: Validate required vars
+      ansible.builtin.assert:
+        that:
+          - target_db_name | length > 0
+          - target_collection | length > 0
+        fail_msg: Set target_db_name (and optionally target_collection / target_index_keys).
+
+    - name: Ensure the collection and its index exist
+      community.mongodb.mongodb_index:
+        indexes:
+          - database: "{{ target_db_name }}"
+            collection: "{{ target_collection }}"
+            keys: "{{ target_index_keys }}"
+            options:
+              name: "{{ target_collection }}_dashboard_idx"
+            state: present
+        login_host: "{{ db_login_host }}"
+        login_port: "{{ db_login_port }}"
+        login_user: "{{ db_login_user }}"
+        login_password: "{{ db_login_password }}"
+        login_database: "{{ db_auth_source | default('admin') }}"
+        tls: "{{ db_tls | default(false) | bool }}"
+        replica_set: "{{ db_replica_set | default(omit, true) }}"
+        # Atlas restricts the commands the module's "is auth enabled?" probe runs.
+        atlas_auth: "{{ db_provider | default('') == 'atlas' }}"
+        # The version gate refuses pairs its table does not list; Atlas runs current majors.
+        strict_compatibility: false
+      no_log: true   # the module args carry the admin password

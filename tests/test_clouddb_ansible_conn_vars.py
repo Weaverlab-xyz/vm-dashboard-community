@@ -330,6 +330,49 @@ def test_missing_credential_raises():
     raise AssertionError("expected CloudDatabaseError when no admin credential is resolvable")
 
 
+
+# ── engine-specific keys (MongoDB) ───────────────────────────────────────────
+
+def test_an_atlas_row_adds_tls_auth_source_and_its_replica_set():
+    """A Config Management run reaches Atlas from the runner, not the tunnel: TLS is
+    mandatory there, the session authenticates against admin, and the replica set's name
+    lets the driver find the primary from the one member host the row records."""
+    CONF.clear()
+    CONF["clouddb/db-mg/admin"] = "atlas-pw"
+    row = _CloudDatabase(id="db-mg", engine="mongodb", cloud="aws", provider="atlas",
+                         private_host="ac-1-shard-00-00.x.mongodb.net", port=27017)
+    svc._provision_job_for = lambda _db, _id: types.SimpleNamespace(metadata_dict={
+        "tf_variables": {"master_username": "dbadmin"},
+        "atlas_replica_set": "atlas-abc-shard-0"})
+    out = asyncio.run(svc.ansible_connection_vars(_FakeDB(row), "db-mg"))
+    assert out["db_engine"] == "mongodb"
+    assert out["db_login_user"] == "dbadmin"
+    assert out["db_name"] == "admin"
+    assert out["db_auth_source"] == "admin"
+    assert out["db_tls"] is True
+    assert out["db_replica_set"] == "atlas-abc-shard-0"
+    assert out["db_provider"] == "atlas"
+
+
+def test_the_sql_engines_keep_exactly_their_six_keys():
+    # The Mongo keys are additive and engine-scoped: a Postgres play sees no new vars.
+    CONF.clear()
+    CONF["clouddb/db-pg2/admin"] = "pw"
+    row = _CloudDatabase(id="db-pg2", engine="postgres", cloud="aws",
+                         private_host="pg.internal", port=5432)
+    out = _run(_FakeDB(row), "db-pg2", {"master_username": "dbadmin", "db_name": "appdb"})
+    assert set(out) == {"db_engine", "db_login_host", "db_login_port",
+                        "db_login_user", "db_login_password", "db_name"}
+
+
+def test_a_non_atlas_mongodb_row_is_not_forced_onto_tls():
+    row = _CloudDatabase(id="db-m2", engine="mongodb", cloud="local", provider="registered",
+                         db_name="appauth")
+    extra = svc._engine_connection_vars(row)
+    assert extra["db_tls"] is False
+    assert extra["db_replica_set"] == ""
+    assert extra["db_auth_source"] == "appauth"
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
