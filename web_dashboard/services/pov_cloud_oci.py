@@ -225,9 +225,88 @@ async def verify() -> tuple[bool, str]:
     return True, f"Connected to OCI in {region} (first availability domain {ad})."
 
 
+# ── Purdue zones ─────────────────────────────────────────────────────────────
+
+_OCI_PROTOCOL = {"all": "all", "tcp": "6", "udp": "17"}
+
+
+def zone_security_rules(rules: list) -> tuple:
+    """``(ingress, egress)`` as plain dicts, one per port. Pure.
+
+    An OCI security list allows only what it lists, in both directions, so a zone with no
+    internet egress needs no written deny: its egress list simply names no outside
+    destination. Each dict maps onto ``IngressSecurityRule`` / ``EgressSecurityRule``
+    with an optional TCP or UDP destination port.
+    """
+    ingress, egress = [], []
+    for rule in rules:
+        proto = _OCI_PROTOCOL[rule["protocol"]]
+        ports = (rule.get("ports") or [None]) if proto != "all" else [None]
+        for port in ports:
+            entry = {"protocol": proto, "peer": rule["peer"], "port": port,
+                     "description": rule["why"][:255]}
+            (ingress if rule["direction"] == "ingress" else egress).append(entry)
+    return ingress, egress
+
+
+def _port_options(oci, proto: str, port):
+    if port is None:
+        return {}
+    rng = oci.core.models.PortRange(min=int(port), max=int(port))
+    if proto == "6":
+        return {"tcp_options": oci.core.models.TcpOptions(destination_port_range=rng)}
+    return {"udp_options": oci.core.models.UdpOptions(destination_port_range=rng)}
+
+
+def _create_zones_sync(oci, vnet, compartment: str, env_id: str, vcn_id: str,
+                       internet_route_id: str, zones: list, tags: dict) -> dict:
+    """A security list, and a subnet, per Purdue zone. Returns ``{zone: {...}}``.
+
+    A zone with no public addresses gets its own route table with no rules, and a subnet
+    that prohibits public addresses: no route out, rather than a route the security list
+    happens to refuse.
+    """
+    built = {}
+    for zone in zones:
+        name = zone["name"]
+        ztags = {**tags, env.TAG_ZONE: name}
+        ingress, egress = zone_security_rules(zone["rules"])
+        security = vnet.create_security_list(oci.core.models.CreateSecurityListDetails(
+            compartment_id=compartment, vcn_id=vcn_id,
+            display_name=f"{env_id}-{name}-sl", freeform_tags=ztags,
+            ingress_security_rules=[oci.core.models.IngressSecurityRule(
+                source=r["peer"], source_type="CIDR_BLOCK", protocol=r["protocol"],
+                description=r["description"], **_port_options(oci, r["protocol"], r["port"]))
+                for r in ingress],
+            egress_security_rules=[oci.core.models.EgressSecurityRule(
+                destination=r["peer"], destination_type="CIDR_BLOCK",
+                protocol=r["protocol"], description=r["description"],
+                **_port_options(oci, r["protocol"], r["port"]))
+                for r in egress])).data
+
+        route_id = internet_route_id
+        if not zone["public_ip"]:
+            route_id = vnet.create_route_table(oci.core.models.CreateRouteTableDetails(
+                compartment_id=compartment, vcn_id=vcn_id,
+                display_name=f"{env_id}-{name}-rt", freeform_tags=ztags,
+                route_rules=[])).data.id
+
+        subnet = vnet.create_subnet(oci.core.models.CreateSubnetDetails(
+            compartment_id=compartment, vcn_id=vcn_id, cidr_block=zone["cidr"],
+            display_name=f"{env_id}-{name}", route_table_id=route_id,
+            security_list_ids=[security.id], freeform_tags=ztags,
+            prohibit_public_ip_on_vnic=not zone["public_ip"])).data
+        oci.wait_until(vnet, vnet.get_subnet(subnet.id), "lifecycle_state", "AVAILABLE")
+        built[name] = {"subnet_id": subnet.id, "subnet_cidr": zone["cidr"],
+                       "security_list_id": security.id,
+                       "public_ip": bool(zone["public_ip"])}
+    return built
+
+
 # ── create ───────────────────────────────────────────────────────────────────
 
-def _create_network_sync(compartment: str, env_id: str, cidr: str, sub_cidr: str) -> dict:
+def _create_network_sync(compartment: str, env_id: str, cidr: str, sub_cidr: str,
+                         zones: list | None = None) -> dict:
     import oci
 
     _compute, vnet, _identity = _clients()
@@ -249,6 +328,15 @@ def _create_network_sync(compartment: str, env_id: str, cidr: str, sub_cidr: str
         route_rules=[oci.core.models.RouteRule(
             destination="0.0.0.0/0", destination_type="CIDR_BLOCK",
             network_entity_id=gateway.id)])).data
+
+    if zones:
+        built = _create_zones_sync(oci, vnet, compartment, env_id, vcn.id, route.id,
+                                   zones, tags)
+        first = built.get("enterprise") or next(iter(built.values()))
+        return {"compartment": compartment, "vcn_id": vcn.id,
+                "subnet_id": first["subnet_id"], "subnet_cidr": first["subnet_cidr"],
+                "internet_gateway_id": gateway.id, "route_table_id": route.id,
+                "zones": built}
 
     # Our OWN security list, and the default is never attached. **Every VCN gets a default
     # security list that allows SSH from 0.0.0.0/0** — a POV placed on it would be a
@@ -284,6 +372,7 @@ def _create_vms_sync(compartment: str, env_id: str, specs: list, net: dict) -> l
     for spec in specs:
         name = spec["name"]
         role = spec.get("role") or "target"
+        where = {**net, **env.placement(net, spec)}
         shape, ocpus, memory = parse_shape(spec["instance_type"])
         tags = dict(env.base_tags(env_id))
         tags[env.TAG_NAME] = name
@@ -306,11 +395,12 @@ def _create_vms_sync(compartment: str, env_id: str, specs: list, net: dict) -> l
                 boot_volume_size_in_gbs=int(spec.get("disk_gb")
                                             or env.DEFAULT_DISK_GB)),
             create_vnic_details=oci.core.models.CreateVnicDetails(
-                subnet_id=net["subnet_id"],
+                subnet_id=where["subnet_id"],
                 # A public address for egress, and no NAT gateway — the same arithmetic
                 # as the other three drivers. Safe only because the security list above
-                # admits nothing from outside the POV's own subnet.
-                assign_public_ip=True,
+                # admits nothing from outside the POV's own subnet. None for a Purdue
+                # plant guest, whose subnet refuses one anyway.
+                assign_public_ip=bool(where.get("public_ip", True)),
                 freeform_tags=tags))
         if ocpus:
             # A Flex shape is refused outright without this, and the error names
@@ -324,9 +414,10 @@ def _create_vms_sync(compartment: str, env_id: str, specs: list, net: dict) -> l
     return created
 
 
-async def create_network(env_id: str, region: str, cidr: str, sub_cidr: str) -> dict:
+async def create_network(env_id: str, region: str, cidr: str, sub_cidr: str,
+                         zones: list | None = None) -> dict:
     return await oci_service._to_thread(_create_network_sync, _compartment(env_id),
-                                        env_id, cidr, sub_cidr)
+                                        env_id, cidr, sub_cidr, zones)
 
 
 async def create_vms(env_id: str, region: str, specs: list, net: dict) -> list:
@@ -487,12 +578,23 @@ async def read_network(env_id: str, region: str) -> dict:
 
     def _read():
         _compute, vnet, _identity = _clients()
-        for subnet in (vnet.list_subnets(compartment_id=compartment).data or []):
-            if (dict(subnet.freeform_tags or {}).get(env.TAG_ENVIRONMENT)) == env_id:
-                return {"compartment": compartment, "subnet_id": subnet.id,
-                        "subnet_cidr": subnet.cidr_block or "",
-                        "vcn_id": subnet.vcn_id}
-        return {}
+        mine = [s for s in (vnet.list_subnets(compartment_id=compartment).data or [])
+                if (dict(s.freeform_tags or {}).get(env.TAG_ENVIRONMENT)) == env_id]
+        if not mine:
+            return {}
+        zones = {}
+        for subnet in mine:
+            zone = dict(subnet.freeform_tags or {}).get(env.TAG_ZONE)
+            if zone:
+                zones[zone] = {"subnet_id": subnet.id,
+                               "subnet_cidr": subnet.cidr_block or "",
+                               "public_ip": not bool(subnet.prohibit_public_ip_on_vnic)}
+        first = (zones.get("enterprise") or
+                 {"subnet_id": mine[0].id, "subnet_cidr": mine[0].cidr_block or ""})
+        out = {"compartment": compartment, "vcn_id": mine[0].vcn_id, **first}
+        if zones:
+            out["zones"] = zones
+        return out
 
     return await oci_service._to_thread(_read)
 

@@ -300,14 +300,104 @@ def _next_free_ip(network, net: dict, rg: str) -> str:
 
 # ── create ───────────────────────────────────────────────────────────────────
 
+# NSG priorities for a zone's rules. Allows count up from 1000; the zone's final denies
+# sit at 4000, below every allow and above Azure's own defaults (65000+), which is what
+# overrides AllowVnetInBound and, for a zone with no internet egress,
+# AllowInternetOutBound.
+_ZONE_ALLOW_PRIORITY = 1000
+_ZONE_DENY_PRIORITY = 4000
+
+
+def zone_security_rules(rules: list, *, internet_egress: bool) -> list:
+    """``pov_zones`` rules as NSG security rules, plus the zone's default denies.
+
+    Pure, so a test can read exactly what an NSG would hold.
+    """
+    out = []
+    priority = {"Inbound": _ZONE_ALLOW_PRIORITY, "Outbound": _ZONE_ALLOW_PRIORITY}
+    for index, rule in enumerate(rules):
+        direction = "Inbound" if rule["direction"] == "ingress" else "Outbound"
+        body = {
+            "name": f"pov-zone-{rule['direction']}-{index}",
+            "priority": priority[direction],
+            "direction": direction,
+            "access": "Allow",
+            "protocol": {"all": "*", "tcp": "Tcp", "udp": "Udp"}[rule["protocol"]],
+            "source_port_range": "*",
+            "source_address_prefix": rule["peer"] if direction == "Inbound" else "*",
+            "destination_address_prefix": rule["peer"] if direction == "Outbound" else "*",
+            "description": rule["why"][:140],
+        }
+        ports = rule.get("ports") or []
+        if ports and rule["protocol"] != "all":
+            body["destination_port_ranges"] = [str(p) for p in ports]
+        else:
+            body["destination_port_range"] = "*"
+        out.append(body)
+        priority[direction] += 10
+    deny = {"access": "Deny", "protocol": "*", "source_port_range": "*",
+            "destination_port_range": "*", "source_address_prefix": "*",
+            "destination_address_prefix": "*", "priority": _ZONE_DENY_PRIORITY}
+    out.append({**deny, "name": "pov-zone-deny-inbound", "direction": "Inbound",
+                "description": "everything the zone's rules do not allow"})
+    if not internet_egress:
+        out.append({**deny, "name": "pov-zone-deny-outbound", "direction": "Outbound",
+                    "description": "no egress beyond the zone's rules"})
+    return out
+
+
+def _create_zoned_network_sync(network, env_id: str, region: str, cidr: str,
+                               zones: list, tags: dict) -> dict:
+    """One VNet, one subnet per Purdue zone named after it, one NSG per subnet.
+
+    NSGs on the SUBNET, as the unzoned network has its one: a VM added later lands under
+    its zone's rules without anything having to remember to attach them, and the
+    resource-group delete takes them all.
+    """
+    subnets, nsg_ids = [], {}
+    for zone in zones:
+        nsg = network.network_security_groups.begin_create_or_update(
+            env_id, f"{env_id}-{zone['name']}-nsg", {
+                "location": region,
+                "tags": {**tags, env.TAG_ZONE: zone["name"]},
+                "security_rules": zone_security_rules(
+                    zone["rules"], internet_egress=zone["internet_egress"]),
+            }).result()
+        nsg_ids[zone["name"]] = nsg.id
+        subnets.append({"name": zone["name"], "address_prefix": zone["cidr"],
+                        "network_security_group": {"id": nsg.id}})
+
+    vnet = network.virtual_networks.begin_create_or_update(
+        env_id, f"{env_id}-vnet", {
+            "location": region, "tags": tags,
+            "address_space": {"address_prefixes": [cidr]},
+            "subnets": subnets,
+        }).result()
+
+    by_name = {s.name: s for s in vnet.subnets or []}
+    built = {}
+    for zone in zones:
+        sub = by_name[zone["name"]]
+        built[zone["name"]] = {"subnet_id": sub.id, "subnet_cidr": zone["cidr"],
+                               "nsg_id": nsg_ids[zone["name"]],
+                               "public_ip": bool(zone["public_ip"])}
+    first = built.get("enterprise") or next(iter(built.values()))
+    return {"resource_group": env_id, "location": region,
+            "subnet_id": first["subnet_id"], "subnet_cidr": first["subnet_cidr"],
+            "nsg_id": first["nsg_id"], "vnet_id": vnet.id, "zones": built}
+
+
 def _create_network_sync(resource, network, env_id: str, region: str, cidr: str,
-                         sub_cidr: str) -> dict:
+                         sub_cidr: str, zones: list | None = None) -> dict:
     tags = _tags(env_id, env_id)
 
     # The resource group IS the environment. Named for the POV, so the teardown is one
     # call and an operator looking at the Azure portal sees the POV's name rather than a
     # tag they have to go and read.
     resource.resource_groups.create_or_update(env_id, {"location": region, "tags": tags})
+
+    if zones:
+        return _create_zoned_network_sync(network, env_id, region, cidr, zones, tags)
 
     nsg = network.network_security_groups.begin_create_or_update(
         env_id, f"{env_id}-nsg",
@@ -354,34 +444,41 @@ def _create_vms_sync(compute, network, env_id: str, region: str, specs: list,
         role = spec.get("role") or "target"
         tags = _tags(env_id, name, role)
         windows = spec.get("os_family") == "windows"
+        where = {**net, **env.placement(net, spec)}
 
-        pip = network.public_ip_addresses.begin_create_or_update(
-            rg, f"{name}-pip", {
-                "location": region,
-                "tags": tags,
-                # Standard SKU is the only one left — Basic retired in September 2025 —
-                # and a Standard address must be statically allocated. That is also what
-                # keeps a suspended POV's address across a deallocate.
-                "sku": {"name": "Standard"},
-                "public_ip_allocation_method": "Static",
-            }).result()
+        # A Purdue plant guest gets no public address at all: the zone's story is that
+        # nothing routes to it, and a public IP would be the counterexample on screen.
+        pip = None
+        if where.get("public_ip", True):
+            pip = network.public_ip_addresses.begin_create_or_update(
+                rg, f"{name}-pip", {
+                    "location": region,
+                    "tags": tags,
+                    # Standard SKU is the only one left — Basic retired in September 2025 —
+                    # and a Standard address must be statically allocated. That is also
+                    # what keeps a suspended POV's address across a deallocate.
+                    "sku": {"name": "Standard"},
+                    "public_ip_allocation_method": "Static",
+                }).result()
 
+        ip_config = {
+            "name": "ipconfig1",
+            "subnet": {"id": where["subnet_id"]},
+            # STATIC, and this is the line that matters. A deallocated VM with a dynamic
+            # private address can come back on a different one, and the POV wire-up has
+            # written the old one into a PRA jump item, a Password Safe managed system and
+            # an Entitle integration. Every scheduled suspend would silently invalidate
+            # all three.
+            "private_ip_allocation_method": "Static",
+            "private_ip_address": _next_free_ip(network, where, rg),
+        }
+        if pip is not None:
+            ip_config["public_ip_address"] = {"id": pip.id}
         nic = network.network_interfaces.begin_create_or_update(
             rg, f"{name}-nic", {
                 "location": region,
                 "tags": tags,
-                "ip_configurations": [{
-                    "name": "ipconfig1",
-                    "subnet": {"id": net["subnet_id"]},
-                    # STATIC, and this is the line that matters. A deallocated VM with a
-                    # dynamic private address can come back on a different one, and the
-                    # POV wire-up has written the old one into a PRA jump item, a Password
-                    # Safe managed system and an Entitle integration. Every scheduled
-                    # suspend would silently invalidate all three.
-                    "private_ip_allocation_method": "Static",
-                    "private_ip_address": _next_free_ip(network, net, rg),
-                    "public_ip_address": {"id": pip.id},
-                }],
+                "ip_configurations": [ip_config],
             }).result()
 
         if windows:
@@ -423,10 +520,11 @@ def _create_vms_sync(compute, network, env_id: str, region: str, specs: list,
     return created
 
 
-async def create_network(env_id: str, region: str, cidr: str, sub_cidr: str) -> dict:
+async def create_network(env_id: str, region: str, cidr: str, sub_cidr: str,
+                         zones: list | None = None) -> dict:
     resource, _compute, network, _sub = await _clients()
     return await azure_service._to_thread(
-        _create_network_sync, resource, network, env_id, region, cidr, sub_cidr)
+        _create_network_sync, resource, network, env_id, region, cidr, sub_cidr, zones)
 
 
 async def create_vms(env_id: str, region: str, specs: list, net: dict) -> list:
@@ -564,12 +662,26 @@ async def read_network(env_id: str, region: str) -> dict:
     _resource, _compute, network, _sub = await _clients()
 
     def _read():
+        from . import pov_zones
         for vnet in network.virtual_networks.list(env_id):
-            for subnet in vnet.subnets or []:
-                return {"resource_group": env_id, "location": vnet.location,
-                        "subnet_id": subnet.id,
-                        "subnet_cidr": subnet.address_prefix or "",
-                        "vnet_id": vnet.id}
+            subs = list(vnet.subnets or [])
+            if not subs:
+                continue
+            base = {"resource_group": env_id, "location": vnet.location,
+                    "vnet_id": vnet.id}
+            zoned = {s.name: s for s in subs if s.name in pov_zones.ZONES}
+            if zoned:
+                # Subnets named after their zones: the map create_vms places by, with the
+                # plant's no-public-address rule read off the layout rather than stored.
+                zones = {name: {"subnet_id": s.id,
+                                "subnet_cidr": s.address_prefix or "",
+                                "public_ip": name != pov_zones.PLANT}
+                         for name, s in zoned.items()}
+                first = zones.get(pov_zones.ENTERPRISE) or next(iter(zones.values()))
+                return {**base, **first, "zones": zones}
+            subnet = subs[0]
+            return {**base, "subnet_id": subnet.id,
+                    "subnet_cidr": subnet.address_prefix or ""}
         return {}
 
     return await azure_service._to_thread(_read)

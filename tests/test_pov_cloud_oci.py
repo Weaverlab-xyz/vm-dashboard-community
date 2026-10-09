@@ -132,7 +132,8 @@ def test_no_nat_gateway_is_created():
     POV's own subnet."""
     for fn in ("_create_network_sync", "_create_vms_sync"):
         assert "nat_gateway" not in _code(fn).lower(), f"{fn} creates a NAT gateway"
-    assert "assign_public_ip=True" in _code("_create_vms_sync")
+    # A public address unless a Purdue zone says otherwise (the plant gets none).
+    assert 'assign_public_ip=bool(where.get("public_ip", True))' in _code("_create_vms_sync")
 
 
 # ── shapes ───────────────────────────────────────────────────────────────────

@@ -4122,6 +4122,12 @@ class PovCloudTemplate(Base):
     # per-POV network is also what makes the tag-scoped teardown exact.
     network_cidr = Column(String(64), nullable=True)
 
+    # Purdue zones: three subnets (enterprise, DMZ, plant) instead of one, each guest
+    # placed by its cell role, with the flows between them limited. See
+    # services/pov_zones.py. NULL/False builds the single subnet every template built
+    # before this, so it backfills to today's topology.
+    purdue_zones = Column(Boolean, nullable=True)
+
     # Provenance for the bake slice. Only a link; nothing keys on it.
     source_environment_id = Column(String(36), nullable=True)
 
@@ -4914,6 +4920,9 @@ def init_db():
             "ALTER TABLE pov_environment_vms ADD COLUMN cell_role VARCHAR(32)",
             "ALTER TABLE pov_environment_vms ADD COLUMN cell_artifacts TEXT",
             "ALTER TABLE pov_cloud_template_vms ADD COLUMN cell_role VARCHAR(32)",
+            # Purdue zones on a cloud template. NULL backfills to the single subnet every
+            # existing template builds. See PovCloudTemplate.purdue_zones.
+            "ALTER TABLE pov_cloud_templates ADD COLUMN purdue_zones BOOLEAN",
             # The functional account a CA's identities onboard against, and — only when
             # the dashboard minted it — its id. Both backfill to NULL, which is right
             # for every CA built before this: their account was made by hand, so

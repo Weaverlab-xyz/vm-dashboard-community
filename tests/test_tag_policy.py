@@ -382,7 +382,7 @@ def test_a_removal_alone_needs_no_key_validation():
 # that holds the key. Pure text inspection, so this needs no cloud SDK.
 _OWNERS = {
     "unmanaged_vms.py": ("MANAGED_TAGS", "WORKGROUP_TAG_KEYS"),
-    "pov_cloud_env.py": ("TAG_ENVIRONMENT", "TAG_MANAGED_BY", "TAG_ROLE"),
+    "pov_cloud_env.py": ("TAG_ENVIRONMENT", "TAG_MANAGED_BY", "TAG_ROLE", "TAG_ZONE"),
     "vdesktop_service.py": ("POOL_TAG",),
     "ephemeral_secrets.py": ("TAG_KEY",),
     "cost_service.py": ("_MANAGED_TAG_KEY",),

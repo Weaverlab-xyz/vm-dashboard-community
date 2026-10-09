@@ -351,6 +351,9 @@
                 <span x-text="t.vm_count + (t.vm_count === 1 ? ' VM' : ' VMs')"></span>
                 · <span x-text="t.region || 'default region'"></span>
                 · <span x-text="t.effective_network_cidr"></span>
+                <template x-if="t.purdue_zones">
+                  <span> · Purdue zones</span>
+                </template>
                 <template x-if="t.broker_vm_name">
                   <span> · broker <span class="font-mono" x-text="t.broker_vm_name"></span></span>
                 </template>
@@ -399,6 +402,21 @@
           </p>
         </div>
       </div>
+      <!-- Purdue zones: three subnets placed by cell role (services/pov_zones.py). -->
+      <label class="mt-3 inline-flex items-start gap-2 text-sm text-gray-700">
+        <input type="checkbox" x-model="cloudForm.purdue_zones" class="mt-0.5 rounded border-gray-300">
+        <span>
+          <span class="font-medium">Purdue zones</span>
+          <span class="block text-xs text-gray-400">
+            Builds enterprise, DMZ and plant subnets instead of one. A VM's zone follows
+            its cell role: OT simulator in the plant, OT DMZ broker in the DMZ, everything
+            else in enterprise. The plant gets no internet and no public address. Needs a
+            /22 or larger network. See
+            <a href="/docs/profiles/pov/demo-cells" class="text-blue-600 hover:underline">Demo
+            cells in a POV</a>.
+          </span>
+        </span>
+      </label>
 
       <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mt-5 mb-2">VMs</p>
       <div class="space-y-2">
@@ -808,7 +826,8 @@ function templatesPage() {
     newCloudTemplate() {
       this.cloudError = '';
       this.cloudForm = { id: '', name: '', description: '', region: '',
-                         network_cidr: '', vms: [this.blankCloudVm()] };
+                         network_cidr: '', purdue_zones: false,
+                         vms: [this.blankCloudVm()] };
     },
 
     editCloudTemplate(t) {
@@ -818,6 +837,7 @@ function templatesPage() {
       this.cloudForm = {
         id: t.id, name: t.name, description: t.description || '',
         region: t.region || '', network_cidr: t.network_cidr || '',
+        purdue_zones: !!t.purdue_zones,
         vms: (t.vms || []).map(v => ({ ...v })),
       };
     },
@@ -848,6 +868,7 @@ function templatesPage() {
       const payload = {
         name: f.name, description: f.description, region: f.region,
         network_cidr: f.network_cidr,
+        purdue_zones: !!f.purdue_zones,
         vms: f.vms.map(v => ({
           name: v.name, role: v.role, os_family: v.os_family,
           cell_role: v.cell_role || '',

@@ -107,7 +107,86 @@ async def verify() -> tuple[bool, str]:
 
 # ── create ───────────────────────────────────────────────────────────────────
 
-def _create_network_sync(env_id: str, region: str, cidr: str, sub_cidr: str) -> dict:
+# What EC2 accepts in a security-group rule description. Anything else (an apostrophe,
+# an em dash) fails the whole AuthorizeSecurityGroup* call with InvalidParameterValue.
+_SG_DESCRIPTION_OK = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ._-:/()#,@[]+=&;{}!$*")
+
+
+def _sg_description(text: str) -> str:
+    return "".join(c for c in (text or "") if c in _SG_DESCRIPTION_OK)[:255]
+
+
+def _ip_permission(rule: dict, *, egress: bool) -> dict:
+    """One ``pov_zones`` rule as an EC2 ``IpPermission``. Peers are CIDRs, never group
+    references, so the zone groups never depend on each other and the tag-scoped
+    teardown can delete them in any order."""
+    perm = {"IpProtocol": "-1" if rule["protocol"] == "all" else rule["protocol"],
+            "IpRanges": [{"CidrIp": rule["peer"], "Description": _sg_description(rule["why"])}]}
+    ports = rule.get("ports") or []
+    if ports and rule["protocol"] != "all":
+        perm["FromPort"] = perm["ToPort"] = ports[0]
+    return perm
+
+
+def _zone_permissions(rules: list, direction: str) -> list:
+    """Expand multi-port rules: an IpPermission carries one port range, not a list."""
+    out = []
+    for rule in rules:
+        if rule["direction"] != direction:
+            continue
+        ports = rule.get("ports") or []
+        if rule["protocol"] == "all" or not ports:
+            out.append(_ip_permission(rule, egress=direction == "egress"))
+            continue
+        for port in ports:
+            out.append(_ip_permission({**rule, "ports": [port]},
+                                      egress=direction == "egress"))
+    return out
+
+
+def _create_zones_sync(ec2, env_id: str, vpc_id: str, zones: list) -> dict:
+    """One subnet and one security group per Purdue zone. Returns ``{zone: {...}}``.
+
+    Every group starts by losing AWS's default allow-all egress, then gets exactly the
+    zone's rules, so enterprise's open egress is a rule this code wrote rather than one
+    it forgot to remove. All of it shares the VPC's main route table: a plant subnet still
+    has a route to the internet gateway, but no public address and no egress rule to use
+    it.
+    """
+    out = {}
+    for zone in zones:
+        name = zone["name"]
+        spec = _tag_spec("subnet", env_id, f"{env_id}-{name}")
+        spec["Tags"].append({"Key": env.TAG_ZONE, "Value": name})
+        subnet = ec2.create_subnet(VpcId=vpc_id, CidrBlock=zone["cidr"],
+                                   TagSpecifications=[spec])
+        subnet_id = subnet["Subnet"]["SubnetId"]
+        ec2.modify_subnet_attribute(SubnetId=subnet_id,
+                                    MapPublicIpOnLaunch={"Value": bool(zone["public_ip"])})
+
+        sg_spec = _tag_spec("security-group", env_id, f"{env_id}-{name}-sg")
+        sg_spec["Tags"].append({"Key": env.TAG_ZONE, "Value": name})
+        sg = ec2.create_security_group(
+            GroupName=f"{env_id}-{name}-sg", VpcId=vpc_id,
+            Description=f"POV environment {env_id} - Purdue {name} zone",
+            TagSpecifications=[sg_spec])
+        sg_id = sg["GroupId"]
+        ec2.revoke_security_group_egress(
+            GroupId=sg_id,
+            IpPermissions=[{"IpProtocol": "-1", "IpRanges": [{"CidrIp": "0.0.0.0/0"}]}])
+        ingress = _zone_permissions(zone["rules"], "ingress")
+        egress = _zone_permissions(zone["rules"], "egress")
+        if ingress:
+            ec2.authorize_security_group_ingress(GroupId=sg_id, IpPermissions=ingress)
+        if egress:
+            ec2.authorize_security_group_egress(GroupId=sg_id, IpPermissions=egress)
+        out[name] = {"subnet_id": subnet_id, "security_group_id": sg_id}
+    return out
+
+
+def _create_network_sync(env_id: str, region: str, cidr: str, sub_cidr: str,
+                         zones: list | None = None) -> dict:
     ec2 = aws_service._get_ec2(region)
 
     vpc = ec2.create_vpc(CidrBlock=cidr,
@@ -116,6 +195,9 @@ def _create_network_sync(env_id: str, region: str, cidr: str, sub_cidr: str) -> 
     # Without this the guests have no resolvable names, which breaks the Ansible
     # inventory the config-management path builds from them.
     ec2.modify_vpc_attribute(VpcId=vpc_id, EnableDnsHostnames={"Value": True})
+
+    if zones:
+        return _create_zoned_network_sync(ec2, env_id, vpc_id, zones)
 
     subnet = ec2.create_subnet(
         VpcId=vpc_id, CidrBlock=sub_cidr,
@@ -158,9 +240,40 @@ def _create_network_sync(env_id: str, region: str, cidr: str, sub_cidr: str) -> 
             "internet_gateway_id": igw_id, "route_table_id": rt_id}
 
 
-async def create_network(env_id: str, region: str, cidr: str, sub_cidr: str) -> dict:
+def _internet_route_sync(ec2, env_id: str, vpc_id: str) -> tuple:
+    """The internet gateway and the main route table's default route. Returns their ids."""
+    igw = ec2.create_internet_gateway(
+        TagSpecifications=[_tag_spec("internet-gateway", env_id, f"{env_id}-igw")])
+    igw_id = igw["InternetGateway"]["InternetGatewayId"]
+    ec2.attach_internet_gateway(InternetGatewayId=igw_id, VpcId=vpc_id)
+    rts = ec2.describe_route_tables(
+        Filters=[{"Name": "vpc-id", "Values": [vpc_id]}])["RouteTables"]
+    rt_id = rts[0]["RouteTableId"]
+    ec2.create_route(RouteTableId=rt_id, DestinationCidrBlock="0.0.0.0/0",
+                     GatewayId=igw_id)
+    ec2.create_tags(Resources=[rt_id],
+                    Tags=_tag_spec("route-table", env_id, f"{env_id}-rt")["Tags"])
+    return igw_id, rt_id
+
+
+def _create_zoned_network_sync(ec2, env_id: str, vpc_id: str, zones: list) -> dict:
+    """The Purdue-zoned variant: the internet route, then a subnet and group per zone.
+
+    The top-level ``subnet_id`` / ``security_group_id`` are the enterprise zone's, so a
+    caller that knows nothing about zones still lands a VM somewhere sensible.
+    """
+    igw_id, rt_id = _internet_route_sync(ec2, env_id, vpc_id)
+    built = _create_zones_sync(ec2, env_id, vpc_id, zones)
+    first = built.get("enterprise") or next(iter(built.values()))
+    return {"vpc_id": vpc_id, "subnet_id": first["subnet_id"],
+            "security_group_id": first["security_group_id"],
+            "internet_gateway_id": igw_id, "route_table_id": rt_id, "zones": built}
+
+
+async def create_network(env_id: str, region: str, cidr: str, sub_cidr: str,
+                         zones: list | None = None) -> dict:
     return await aws_service._to_thread(_create_network_sync, env_id, region, cidr,
-                                        sub_cidr)
+                                        sub_cidr, zones)
 
 
 def _root_device(ec2, image_id: str) -> tuple:
@@ -190,6 +303,7 @@ def _create_vms_sync(env_id: str, region: str, specs: list, network: dict) -> li
     ec2 = aws_service._get_ec2(region)
     created = []
     for spec in specs:
+        where = {**network, **env.placement(network, spec)}
         image_id = spec["image_id"]
         device, minimum = _root_device(ec2, image_id)
         size = max(int(spec.get("disk_gb") or env.DEFAULT_DISK_GB), minimum)
@@ -198,8 +312,8 @@ def _create_vms_sync(env_id: str, region: str, specs: list, network: dict) -> li
             "InstanceType": spec["instance_type"],
             "MinCount": 1,
             "MaxCount": 1,
-            "SubnetId": network["subnet_id"],
-            "SecurityGroupIds": [network["security_group_id"]],
+            "SubnetId": where["subnet_id"],
+            "SecurityGroupIds": [where["security_group_id"]],
             "BlockDeviceMappings": [{
                 "DeviceName": device,
                 "Ebs": {"VolumeSize": size, "VolumeType": "gp3",
@@ -408,6 +522,23 @@ def _read_network_sync(env_id: str, region: str) -> dict:
     groups = ec2.describe_security_groups(Filters=filters).get("SecurityGroups") or []
     if not subnets or not groups:
         return {}
+
+    def _zone(resource: dict) -> str:
+        return next((t["Value"] for t in resource.get("Tags") or []
+                     if t.get("Key") == env.TAG_ZONE), "")
+
+    sub_by_zone = {_zone(s): s for s in subnets if _zone(s)}
+    sg_by_zone = {_zone(g): g for g in groups if _zone(g)}
+    if sub_by_zone:
+        # A zoned environment: the map create_vms places by, and the enterprise zone as
+        # the default so a zone-unaware caller still gets the broker's subnet.
+        zones = {z: {"subnet_id": sub_by_zone[z]["SubnetId"],
+                     "security_group_id": sg_by_zone[z]["GroupId"]}
+                 for z in sub_by_zone if z in sg_by_zone}
+        first = zones.get("enterprise") or next(iter(zones.values()), None)
+        if first is None:
+            return {}
+        return {**first, "vpc_id": subnets[0].get("VpcId") or "", "zones": zones}
     return {"subnet_id": subnets[0]["SubnetId"],
             "security_group_id": groups[0]["GroupId"],
             "vpc_id": subnets[0].get("VpcId") or ""}

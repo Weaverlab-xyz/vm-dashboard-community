@@ -52,6 +52,11 @@ TAG_ENVIRONMENT = "povEnvironment"
 TAG_MANAGED_BY = "povManagedBy"
 TAG_ROLE = "povRole"
 TAG_NAME = "Name"
+
+# The Purdue zone a subnet or firewall belongs to (services/pov_zones.py). Only on the
+# resources of a zoned environment; read back by `read_network` to rebuild the zone map,
+# so services/tag_policy.py protects it like the three above.
+TAG_ZONE = "povZone"
 MANAGED_BY = "vm-dashboard"
 
 # The estate-wide tag every other dashboard-provisioned resource carries. Written IN
@@ -141,12 +146,39 @@ def base_tags(env_id: str) -> dict:
             TAG_ESTATE: MANAGED_BY}
 
 
+def placement(network: dict, spec: dict) -> dict:
+    """The zone entry a VM spec lands in, or ``{}`` for the network's one subnet.
+
+    Every driver's ``create_vms`` asks this rather than reading ``network["zones"]``
+    itself, so the refusal below is said once. A spec with no zone (an unzoned template)
+    gets ``{}`` and the driver uses its single subnet. The ENTERPRISE zone falls back the
+    same way, because on a network built before zones it IS that subnet, which is what
+    lets a broker be rebuilt on an older POV after its template gained zones.
+
+    Any other zone missing from the network is refused. Placing a plant guest in a flat
+    network would build a POV whose story says "no route in" while every guest can reach
+    it.
+    """
+    zone = (spec.get("zone") or "").strip()
+    if not zone:
+        return {}
+    zones = network.get("zones") or {}
+    if zone in zones:
+        return zones[zone]
+    if zone == "enterprise":
+        return {}
+    raise CloudEnvError(
+        f"VM {spec.get('name')!r} belongs in the {zone} zone, and this environment's "
+        f"network was built without Purdue zones. Destroy and recreate the POV from the "
+        f"zoned template.")
+
+
 def subnet_cidr(network_cidr: str) -> str:
     """The one subnet carved out of an environment's network.
 
-    A single subnet rather than one per tier: a POV is a handful of VMs that must all see
-    each other, and multi-subnet routing is a topology decision no template author has
-    asked for. Returns the first /24, or the network itself when it is already smaller.
+    A single subnet unless the template asks for Purdue zones, in which case this is the
+    enterprise zone's and ``pov_zones.subnets`` carves the other two. Returns the first
+    /24, or the network itself when it is already smaller.
     """
     net = ipaddress.ip_network(network_cidr or DEFAULT_NETWORK_CIDR, strict=False)
     if net.prefixlen >= 24:
@@ -220,12 +252,17 @@ def vm_specs(template_row, vm_rows, cloud: str, region: str, *,
     user-data on FIRST boot; handing it to an instance that is already up does nothing at
     all, silently. The payload has to be there at ``RunInstances``.
     """
+    from . import pov_zones
+    zoned = bool(getattr(template_row, "purdue_zones", False))
     specs = []
     for row in vm_rows:
         role = (row.role or "target").strip().lower()
         if role not in roles:
             continue
         specs.append({
+            # The subnet a driver places this VM in. "" on an unzoned template, where
+            # there is one subnet; on a zoned one, decided by the cell role alone.
+            "zone": pov_zones.zone_of(getattr(row, "cell_role", None)) if zoned else "",
             "name": row.name,
             "role": role,
             "os_family": (row.os_family or "linux").strip().lower(),
@@ -426,7 +463,19 @@ async def create_environment(cloud: str, template_id: str, name: str, *,
             f"target for the broker to reach, or there is nothing to demonstrate.")
 
     logger.info("POV %s: creating network in %s (%s)", env_id, region, cidr)
-    network = await mod.create_network(env_id, region, cidr, subnet_cidr(cidr))
+    if getattr(row, "purdue_zones", False):
+        # Three subnets with their firewalls, built in the same call as the network so
+        # nothing is ever reachable before its zone's rules exist. `zones` is passed only
+        # here, so an unzoned template reaches every driver exactly as before.
+        from . import pov_zones
+        try:
+            layout = pov_zones.layout(cidr)
+        except pov_zones.ZoneError as exc:
+            raise CloudEnvError(f"template {row.name!r}: {exc}") from None
+        network = await mod.create_network(env_id, region, cidr, subnet_cidr(cidr),
+                                           zones=layout)
+    else:
+        network = await mod.create_network(env_id, region, cidr, subnet_cidr(cidr))
     logger.info("POV %s: launching %d VMs", env_id, len(specs))
     await mod.create_vms(env_id, region, specs, network)
 
