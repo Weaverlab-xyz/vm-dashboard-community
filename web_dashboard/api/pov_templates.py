@@ -403,6 +403,8 @@ class CloudTemplateRequest(BaseModel):
     description: str = ""
     region: str = ""
     network_cidr: str = ""
+    # Three subnets with the flows between them limited; see services/pov_zones.
+    purdue_zones: bool = False
     workgroup: str = ""
     vms: list[CloudTemplateVMRequest] = []
 
@@ -470,6 +472,7 @@ def create_cloud_template(payload: CloudTemplateRequest,
         row = pov_cloud_template_service.create(
             db, cloud=cloud, name=payload.name, description=payload.description,
             region=payload.region, network_cidr=payload.network_cidr,
+            purdue_zones=payload.purdue_zones,
             workgroup=payload.workgroup,
             created_by=getattr(current_user, "username", None),
             vms=[v.model_dump() for v in payload.vms])

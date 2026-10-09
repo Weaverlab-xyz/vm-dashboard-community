@@ -29,7 +29,7 @@ import re
 from sqlalchemy.orm import Session
 
 from ..database import PovCloudTemplate, PovCloudTemplateVM
-from . import lab_platforms, pov_cell_roles, pov_cloud_env
+from . import lab_platforms, pov_cell_roles, pov_cloud_env, pov_zones
 
 logger = logging.getLogger(__name__)
 
@@ -221,13 +221,26 @@ def _replace_vms(db: Session, template_id: str, specs: list) -> None:
         db.add(PovCloudTemplateVM(template_id=template_id, **spec))
 
 
+def _check_zones(purdue_zones: bool, network_cidr: str) -> None:
+    """A zoned template's network has to hold three /24s. Checked at the form, not ten
+    minutes into a build with the first subnet already made."""
+    if not purdue_zones:
+        return
+    try:
+        pov_zones.check_network(network_cidr or pov_cloud_env.DEFAULT_NETWORK_CIDR)
+    except pov_zones.ZoneError as exc:
+        raise CloudTemplateError(str(exc)) from None
+
+
 def create(db: Session, *, cloud: str, name: str, vms: list, description: str = "",
            region: str = "", network_cidr: str = "", workgroup: str = "",
-           created_by: str = "", source_environment_id: str = "") -> PovCloudTemplate:
+           created_by: str = "", source_environment_id: str = "",
+           purdue_zones: bool = False) -> PovCloudTemplate:
     cloud = _validate_cloud(cloud)
     slug = normalize_name(name)
     cidr = _validate_cidr(network_cidr)
     specs = _validate_vms(vms)
+    _check_zones(bool(purdue_zones), cidr)
 
     # Unique per cloud, not globally: an `aws` and an `azure` template describing the same
     # POV are two rows by design, and making one of them pick a different name would be a
@@ -242,6 +255,7 @@ def create(db: Session, *, cloud: str, name: str, vms: list, description: str = 
         cloud=cloud, name=slug, description=(description or "").strip() or None,
         region=(region or "").strip() or None,
         network_cidr=cidr or None,
+        purdue_zones=bool(purdue_zones),
         source_environment_id=(source_environment_id or "").strip() or None,
         workgroup=(workgroup or "").strip() or None,
         created_by=created_by or None,
@@ -276,6 +290,11 @@ def update(db: Session, row: PovCloudTemplate, payload: dict) -> PovCloudTemplat
         row.region = (payload["region"] or "").strip() or None
     if "network_cidr" in payload:
         row.network_cidr = _validate_cidr(payload["network_cidr"]) or None
+    if "purdue_zones" in payload:
+        row.purdue_zones = bool(payload["purdue_zones"])
+    # Re-checked on every update, not only when either field is in the payload: a
+    # network narrowed under a template that is already zoned is the same mistake.
+    _check_zones(bool(row.purdue_zones), row.network_cidr or "")
     if "workgroup" in payload:
         row.workgroup = (payload["workgroup"] or "").strip() or None
     if "vms" in payload:
@@ -314,6 +333,7 @@ def describe(db: Session, row: PovCloudTemplate) -> dict:
         # Shown so an operator can see what a blank field will actually build, rather than
         # having to know the default.
         "effective_network_cidr": row.network_cidr or pov_cloud_env.DEFAULT_NETWORK_CIDR,
+        "purdue_zones": bool(row.purdue_zones),
         "source_environment_id": row.source_environment_id or "",
         "workgroup": row.workgroup or "",
         "created_by": row.created_by or "",
@@ -327,6 +347,8 @@ def describe(db: Session, row: PovCloudTemplate) -> dict:
             "role": v.role or "target",
             "os_family": v.os_family or "linux",
             "cell_role": v.cell_role or "",
+            # Derived, never stored: a zoned template places a guest by its cell role.
+            "zone": pov_zones.zone_of(v.cell_role) if row.purdue_zones else "",
             "image_ref": v.image_ref or "",
             "image_id": v.image_id or "",
             "instance_type": v.instance_type,

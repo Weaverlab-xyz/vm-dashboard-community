@@ -232,10 +232,105 @@ def _resource_name(env_id: str, suffix: str) -> str:
     return name
 
 
+# ── Purdue zones ─────────────────────────────────────────────────────────────
+#
+# A GCE firewall rule targets INSTANCES by network tag, not a subnet, so each zone is a
+# subnet AND a tag, and every zoned instance carries its zone's tag. The tags only have to
+# be unique within the network, which is per POV, so they are plain words.
+#
+# The enterprise zone keeps the unzoned subnet's name (`-subnet`), so `read_network` and
+# the teardown find it the same way either way. The other two, and every zone rule, take
+# a one-letter zone code to stay inside the 63-character name budget.
+_ZONE_CODE = {"enterprise": "e", "dmz": "d", "plant": "p"}
+# Allows at 1000; a zone's final egress deny below them at 2000. GCP's implied rules are
+# deny-all ingress and allow-all egress at 65535, so only egress needs a written deny.
+_ZONE_ALLOW_PRIORITY = 1000
+_ZONE_DENY_PRIORITY = 2000
+
+
+def zone_tag(zone: str) -> str:
+    return f"pov-{zone}"
+
+
+def _zone_subnet_suffix(zone: str) -> str:
+    return "-subnet" if zone == "enterprise" else f"-sn-{_ZONE_CODE[zone]}"
+
+
+def zone_firewalls(zone: dict) -> list:
+    """One zone's rules as GCE firewall specs: ``[(suffix, kwargs), ...]``. Pure.
+
+    ``kwargs`` are ``compute_v1.Firewall`` fields minus ``name`` and ``network``, and
+    with ``allowed``/``denied`` as plain ``(protocol, ports)`` tuples, so a test reads
+    them without the SDK.
+    """
+    code = _ZONE_CODE[zone["name"]]
+    tag = zone_tag(zone["name"])
+    out = []
+    for index, rule in enumerate(zone["rules"]):
+        ingress = rule["direction"] == "ingress"
+        spec = {"direction": "INGRESS" if ingress else "EGRESS",
+                "priority": _ZONE_ALLOW_PRIORITY,
+                "target_tags": [tag],
+                "allowed": [(rule["protocol"], [str(p) for p in rule.get("ports") or []])],
+                "description": f"Purdue {zone['name']}: {rule['why']}"[:2048]}
+        spec["source_ranges" if ingress else "destination_ranges"] = [rule["peer"]]
+        out.append((f"-fw-{code}-{index}", spec))
+    if not zone["internet_egress"]:
+        out.append((f"-fw-{code}-x", {
+            "direction": "EGRESS", "priority": _ZONE_DENY_PRIORITY,
+            "target_tags": [tag], "destination_ranges": ["0.0.0.0/0"],
+            "denied": [("all", [])],
+            "description": f"Purdue {zone['name']}: no egress beyond the zone's rules"}))
+    return out
+
+
+def _firewall_resource(compute_v1, name: str, network: str, spec: dict):
+    kwargs = dict(spec)
+    for key, cls in (("allowed", compute_v1.Allowed), ("denied", compute_v1.Denied)):
+        if key in kwargs:
+            kwargs[key] = [cls(I_p_protocol=proto, ports=ports) if ports
+                           else cls(I_p_protocol=proto)
+                           for proto, ports in kwargs[key]]
+    return compute_v1.Firewall(name=name, network=network, **kwargs)
+
+
+def _create_zones_sync(clients, compute_v1, project: str, env_id: str, region: str,
+                       network, zones: list) -> dict:
+    """A subnet per zone, then every zone's firewall rules. Returns ``{zone: {...}}``.
+
+    Rules before any instance exists, which is what makes the order safe: nothing is ever
+    reachable before its zone's rules are in place.
+    """
+    built = {}
+    for zone in zones:
+        sub_name = _resource_name(env_id, _zone_subnet_suffix(zone["name"]))
+        clients["subnetworks"].insert(
+            project=project, region=region,
+            subnetwork_resource=compute_v1.Subnetwork(
+                name=sub_name, ip_cidr_range=zone["cidr"], network=network.self_link,
+                region=region,
+                description=f"POV environment {env_id} - Purdue {zone['name']} zone",
+            )).result()
+        subnet = clients["subnetworks"].get(project=project, region=region,
+                                            subnetwork=sub_name)
+        built[zone["name"]] = {"subnet_id": subnet.self_link,
+                               "subnet_cidr": zone["cidr"],
+                               "tag": zone_tag(zone["name"]),
+                               "public_ip": bool(zone["public_ip"])}
+    for zone in zones:
+        for suffix, spec in zone_firewalls(zone):
+            clients["firewalls"].insert(
+                project=project,
+                firewall_resource=_firewall_resource(
+                    compute_v1, _resource_name(env_id, suffix), network.self_link,
+                    spec)).result()
+    return built
+
+
 # ── create ───────────────────────────────────────────────────────────────────
 
 def _create_network_sync(project: str, env_id: str, region: str, cidr: str,
-                         sub_cidr: str) -> dict:
+                         sub_cidr: str, zones: list | None = None) -> dict:
     from google.cloud import compute_v1
 
     clients = _clients()
@@ -257,6 +352,14 @@ def _create_network_sync(project: str, env_id: str, region: str, cidr: str,
     # to None, so anything treating `.result()` as the created resource hands the next
     # call a null self-link.
     network = clients["networks"].get(project=project, network=net_name)
+
+    if zones:
+        built = _create_zones_sync(clients, compute_v1, project, env_id, region,
+                                   network, zones)
+        first = built.get("enterprise") or next(iter(built.values()))
+        return {"project": project, "region": region, "network": network.self_link,
+                "subnet_id": first["subnet_id"], "subnet_cidr": first["subnet_cidr"],
+                "network_name": net_name, "zones": built}
 
     clients["subnetworks"].insert(
         project=project, region=region,
@@ -293,6 +396,7 @@ def _create_vms_sync(project: str, env_id: str, region: str, specs: list,
     for spec in specs:
         name = spec["name"]
         role = spec.get("role") or "target"
+        where = {**net, **env.placement(net, spec)}
         metadata_items = []
         if spec.get("user_data"):
             # `user-data`, read by cloud-init on FIRST boot. Deliberately not
@@ -314,12 +418,16 @@ def _create_vms_sync(project: str, env_id: str, region: str, specs: list,
                     disk_type=f"zones/{zone}/diskTypes/{_DISK_TYPE}",
                     labels=_labels(env_id, role)))],
             network_interfaces=[compute_v1.NetworkInterface(
-                subnetwork=net["subnet_id"],
+                subnetwork=where["subnet_id"],
                 # An ephemeral external address, for egress only — no Cloud NAT. Ephemeral
                 # rather than reserved because nothing here depends on it surviving a
-                # stop, and a reserved address bills while detached.
-                access_configs=[compute_v1.AccessConfig(
-                    name="External NAT", type_="ONE_TO_ONE_NAT")])],
+                # stop, and a reserved address bills while detached. None at all for a
+                # Purdue plant guest, whose zone has no route out.
+                access_configs=([compute_v1.AccessConfig(
+                    name="External NAT", type_="ONE_TO_ONE_NAT")]
+                    if where.get("public_ip", True) else []))],
+            # The zone's tag is what its firewall rules target.
+            tags=compute_v1.Tags(items=[where["tag"]]) if where.get("tag") else None,
             metadata=compute_v1.Metadata(items=metadata_items) if metadata_items else None,
         )
         instances.insert(project=project, zone=zone, instance_resource=instance).result()
@@ -328,9 +436,10 @@ def _create_vms_sync(project: str, env_id: str, region: str, specs: list,
     return created
 
 
-async def create_network(env_id: str, region: str, cidr: str, sub_cidr: str) -> dict:
+async def create_network(env_id: str, region: str, cidr: str, sub_cidr: str,
+                         zones: list | None = None) -> dict:
     return await gcp_service._to_thread(
-        _create_network_sync, _project(env_id), env_id, region, cidr, sub_cidr)
+        _create_network_sync, _project(env_id), env_id, region, cidr, sub_cidr, zones)
 
 
 async def create_vms(env_id: str, region: str, specs: list, net: dict) -> list:
@@ -466,9 +575,28 @@ async def read_network(env_id: str, region: str) -> dict:
                 subnetwork=_resource_name(env_id, "-subnet"))
         except NotFound:
             return {}
-        return {"project": project, "region": region, "subnet_id": subnet.self_link,
-                "subnet_cidr": subnet.ip_cidr_range or "",
-                "network": subnet.network or ""}
+        out = {"project": project, "region": region, "subnet_id": subnet.self_link,
+               "subnet_cidr": subnet.ip_cidr_range or "",
+               "network": subnet.network or ""}
+        # A zoned environment has the other two zones' subnets beside it. Looked up by
+        # name, like everything in the network layer here.
+        zones = {}
+        for zone in ("dmz", "plant"):
+            try:
+                found = _clients()["subnetworks"].get(
+                    project=project, region=region,
+                    subnetwork=_resource_name(env_id, _zone_subnet_suffix(zone)))
+            except (NotFound, env.CloudEnvError):
+                continue
+            zones[zone] = {"subnet_id": found.self_link,
+                           "subnet_cidr": found.ip_cidr_range or "",
+                           "tag": zone_tag(zone), "public_ip": zone != "plant"}
+        if zones:
+            zones["enterprise"] = {"subnet_id": subnet.self_link,
+                                   "subnet_cidr": subnet.ip_cidr_range or "",
+                                   "tag": zone_tag("enterprise"), "public_ip": True}
+            out["zones"] = zones
+        return out
 
     return await gcp_service._to_thread(_read)
 
@@ -530,6 +658,36 @@ def _delete_sync(project: str, env_id: str, region: str) -> list:
             removed.append(name)
         except Exception:  # noqa: BLE001
             logger.warning("POV %s: could not delete instance %s", env_id, name,
+                           exc_info=True)
+
+    # A zoned environment's rules first: the network cannot go while a rule names it.
+    # Listed by name prefix rather than enumerated, so a zone that gains a rule later is
+    # still torn down. Nothing matches on an unzoned environment, which costs one call.
+    try:
+        prefix = _resource_name(env_id, "-fw-")
+        for rule in clients["firewalls"].list(project=project,
+                                              filter=f'name eq "{prefix}.*"'):
+            try:
+                clients["firewalls"].delete(project=project, firewall=rule.name).result()
+                removed.append(rule.name)
+            except NotFound:
+                pass
+            except Exception:  # noqa: BLE001
+                logger.warning("POV %s: could not delete %s", env_id, rule.name,
+                               exc_info=True)
+    except Exception:  # noqa: BLE001
+        logger.warning("POV %s: could not list the zone firewall rules", env_id,
+                       exc_info=True)
+    for zone in ("dmz", "plant"):
+        try:
+            name = _resource_name(env_id, _zone_subnet_suffix(zone))
+            clients["subnetworks"].delete(project=project, region=region,
+                                          subnetwork=name).result()
+            removed.append(name)
+        except (NotFound, env.CloudEnvError):
+            pass
+        except Exception:  # noqa: BLE001
+            logger.warning("POV %s: could not delete the %s subnet", env_id, zone,
                            exc_info=True)
 
     # Named rather than labelled, because a Firewall, a Subnetwork and a Network carry no

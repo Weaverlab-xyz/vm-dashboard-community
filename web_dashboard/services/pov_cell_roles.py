@@ -21,9 +21,10 @@ What a role deliberately does NOT carry over from the demo cell, and why:
 * **The PRA Vault checkout** (``ot_service._wire_ps_checkout``). A POV already links its
   Password Safe accounts into PRA through ``pov_pra_ps_link``; a second path would be a
   second Vault account for the same credential.
-* **The Purdue firewall.** A POV network is one CIDR today, so the zoning is its own
-  later slice. The DMZ broker IS carried, as the ``ot-broker`` role plus the
-  ``pov_ot_adapter`` component, which is a setup step rather than a per-VM hook.
+* **The Purdue firewall, per VM.** The zoning is a property of the POV's network instead:
+  a cloud template with ``purdue_zones`` builds three subnets and places each guest by
+  its role (``services/pov_zones.py``). The DMZ broker is the ``ot-broker`` role plus
+  the ``pov_ot_adapter`` component, which is a setup step rather than a per-VM hook.
 
 Roles are Linux-only, all of them: the OT images and VyOS are Debian-derived.
 """

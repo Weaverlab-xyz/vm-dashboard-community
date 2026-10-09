@@ -113,11 +113,34 @@ Destroying the POV removes the integration from the Entitle tenant before it rem
 agent token, and deletes the adapter's stored credentials. If the Entitle tenant cannot be
 reached, the destroy log names the integration to delete by hand.
 
+## Purdue zones
+
+By default a cloud POV is one subnet, and every guest can reach every other guest. Tick
+**Purdue zones** on a cloud template to build three subnets instead, with the traffic
+between them limited the way the OT demo cell limits it. A guest's zone follows its cell
+role; there is no separate zone field to get wrong.
+
+| Zone | Who is in it | Reachable from | Can reach |
+|---|---|---|---|
+| Enterprise | The POV broker (dashboard agent, PRA Gateway, Resource Broker) and every guest with no OT role | Itself; SSH from the DMZ, for the Entitle agent | Anywhere |
+| DMZ | The `ot-broker` guest (Entitle agent, HMI adapter) | Itself; SSH from enterprise, for the broker agent's runs | The POV network, plus HTTPS, port 8080 and DNS outside it |
+| Plant | The `ot-sim` guest | Itself; from enterprise on SSH, the HMI and the PLC protocol ports; from the DMZ on SSH and the HMI | The POV network only. **No internet and no public address.** |
+
+The enterprise zone takes the first /24 of the network, the subnet an unzoned POV would
+have used; the DMZ and plant take the next two. So a zoned template's network has to be
+/22 or larger. The default /16 is.
+
+The rules are built once, in `services/pov_zones.py`, and each cloud expresses them in its
+own firewall: security groups on AWS, a network security group per subnet on Azure,
+firewall rules on per-zone instance tags on GCP, and a security list per subnet on OCI.
+On every cloud the plant's subnet gets no public addresses, and on OCI its route table
+has no route out at all.
+
+Zones are fixed when the POV is created. Ticking the box on a template does not rezone a
+POV already built from it; destroy and recreate the POV.
+
 ## What does not carry over, and why
 
-- **The Purdue-zone firewall.** A POV's network is a single address range today. The story
-  still holds without it: the plant is reachable only through the POV's Gateway. Multi-zone
-  POV templates are planned for a later release.
 - **The PRA Vault checkout the demo cell builds for its admin account.** A POV already
   brings Password Safe accounts into PRA through its
   [Password Safe credentials in PRA](wiring.md) step. A second path would create a second
