@@ -21,11 +21,11 @@ What a role deliberately does NOT carry over from the demo cell, and why:
 * **The PRA Vault checkout** (``ot_service._wire_ps_checkout``). A POV already links its
   Password Safe accounts into PRA through ``pov_pra_ps_link``; a second path would be a
   second Vault account for the same credential.
-* **The Purdue firewall and the DMZ broker.** A POV network is one CIDR today. The
-  zoning, the Entitle plant agent and the function adapter are their own later slices,
-  not something a per-VM hook can do.
+* **The Purdue firewall.** A POV network is one CIDR today, so the zoning is its own
+  later slice. The DMZ broker IS carried, as the ``ot-broker`` role plus the
+  ``pov_ot_adapter`` component, which is a setup step rather than a per-VM hook.
 
-Roles are Linux-only, both of them: the OT simulator image and VyOS are Debian-derived.
+Roles are Linux-only, all of them: the OT images and VyOS are Debian-derived.
 """
 from __future__ import annotations
 
@@ -40,11 +40,18 @@ logger = logging.getLogger(__name__)
 
 OT_SIM = "ot-sim"
 VYOS = "vyos"
-VALID_CELL_ROLES = (OT_SIM, VYOS)
+# The plant's DMZ broker: the ot-sim image baked with OT_ROLE=broker, which carries k3s,
+# the Entitle agent chart and an OpenFaaS runtime. It adds no PRA items of its own; it is
+# the host `pov_ot_adapter` puts the FUXA Entitle adapter on, beside the POV's Entitle
+# agent, which must be installed on this same guest for the adapter's in-cluster address
+# to resolve.
+OT_BROKER = "ot-broker"
+VALID_CELL_ROLES = (OT_SIM, VYOS, OT_BROKER)
 
 LABELS = {
     OT_SIM: "OT simulator (FUXA HMI + PLC protocols)",
     VYOS: "Network device (VyOS)",
+    OT_BROKER: "OT DMZ broker (k3s + Entitle agent + OpenFaaS)",
 }
 
 # The FUXA HMI's port in the ot-sim image (provisioners/ot/README.md). The demo cell

@@ -97,7 +97,8 @@ def test_the_ladder_is_the_dependency_order_and_every_step_appears_once():
     result = steps.describe(_row())
     keys = [s["key"] for s in result["steps"]]
     assert keys == ["environment", "guest_os", "broker", "gateway",
-                    "resource_broker", "entitle_agent", "wireup", "pra_ps", "share"], keys
+                    "resource_broker", "entitle_agent", "wireup", "pra_ps", "ot_adapter",
+                    "share"], keys
     assert len(set(keys)) == len(keys), "a step key is duplicated"
     assert keys == list(steps.STEP_KEYS), "STEP_KEYS has drifted from STEPS"
     # guest_os ahead of broker is deliberate: broker auto-detection is blind to a guest
@@ -399,6 +400,37 @@ def test_the_cursor_skips_the_two_steps_that_cannot_report_done():
     share link, which is the last thing an SE actually wants."""
     result = steps.describe(_row(shareable=True, share_url="", share_expired=False))
     assert result["next"] == "share", result["next"]
+
+
+# ── the OT HMI adapter ───────────────────────────────────────────────────────
+
+def test_the_ot_adapter_is_skipped_on_a_pov_with_no_ot_simulator():
+    """Most POVs are not about OT. Grey, never a warning, and never holding anything up."""
+    assert _state("ot_adapter") == "skipped"
+    assert _state("ot_adapter", cell_role_counts={"vyos": 1}) == "skipped"
+
+
+def test_the_ot_adapter_names_everything_it_is_missing_at_once():
+    step = _by_key(steps.describe(_row(
+        cell_role_counts={"ot-sim": 1}, cell_wired_counts={},
+        entitle_agent_installed=False)))["ot_adapter"]
+    assert step["state"] == "blocked"
+    for needle in ("ot-broker", "Entitle agent", "Wire up"):
+        assert needle in step["detail"], step["detail"]
+
+
+def test_the_ot_adapter_is_ready_then_done_on_the_registration():
+    ready = dict(cell_role_counts={"ot-sim": 1, "ot-broker": 1},
+                 cell_wired_counts={"ot-sim": 1, "ot-broker": 1})
+    assert _state("ot_adapter", **ready) == "ready"
+    done = _by_key(steps.describe(_row(**ready, ot_adapter_registered=True,
+                                       ot_adapter_dry_run=True)))["ot_adapter"]
+    assert done["state"] == "done" and "dry run" in done["detail"]
+
+
+def test_the_ot_adapter_is_skipped_without_an_entitle_tenant():
+    assert _state("ot_adapter", cell_role_counts={"ot-sim": 1},
+                  entitle_tenant_id="") == "skipped"
 
 
 if __name__ == "__main__":

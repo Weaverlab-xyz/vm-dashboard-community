@@ -303,7 +303,8 @@ def test_the_service_mints_the_password_once_and_rotates_before_deploying():
     assert "ensure_fuxa_admin_password" in service
     assert "FUXA_ROTATE_PLAYBOOK" in service
     # By reference, like every other credential here.
-    assert 'secret_vars={"fuxa_new_password": fuxa_admin_config_key(child_id)}' in service
+    # (rotate_spec builds it for both the demo cell and the POV adapter.)
+    assert '"secret_vars": {"fuxa_new_password": fuxa_admin_config_key(owner_id)}' in service
     wiring = io.open(os.path.join(_ROOT, "web_dashboard", "services",
                                   "ot_service.py"), encoding="utf-8").read()
     assert wiring.index("queue_fuxa_rotate") < wiring.index("queue_deploy"), (

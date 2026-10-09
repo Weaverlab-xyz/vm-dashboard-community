@@ -254,6 +254,7 @@
                       <option value="">no cell role</option>
                       <option value="ot-sim">OT simulator</option>
                       <option value="vyos">VyOS device</option>
+                      <option value="ot-broker">OT DMZ broker</option>
                     </select>
                   </td>
                   <td class="px-4 py-2 text-gray-600" x-text="vm.runstate || '—'"></td>
@@ -1203,12 +1204,17 @@
       // the Resource Broker's installer, zone and key — link to it with the editor open.
 
       stepActionLabel(s) {
+        // The OT adapter is the one step with something left to press once it is done: it
+        // deploys in dry run, and going live is a second press.
+        if (s.key === 'ot_adapter' && s.state === 'done') {
+          return this.env.ot_adapter_dry_run ? 'Go live' : '';
+        }
         if (s.state === 'done' || s.state === 'skipped') return '';
         if (s.key === 'pra_ps') return this.env.pra_ps_matched_count ? 'Link' : 'Check';
         const labels = {
           vms: 'Set guest OS', broker: 'Install broker', gateway: 'Create & install',
           resource_broker: 'Configure', entitle_agent: 'Install agent', wireup: 'Wire up',
-          share: 'Share',
+          share: 'Share', ot_adapter: 'Deploy adapter',
         };
         if (s.state === 'configured') return s.key === 'gateway' ? 'Check' : '';
         return labels[s.action] || '';
@@ -1253,6 +1259,15 @@
             if (vm === null) return;
             await this.stepPost(`${base}/entitle-agent`, { vm_name: vm, install: true });
             this.notice = 'Installing the Entitle agent. This takes minutes.';
+          } else if (s.key === 'ot_adapter') {
+            // First press deploys in dry run, the adapter's own default; `Go live` on a done
+            // step redeploys with real HMI grants, after saying what that means.
+            const live = s.state === 'done';
+            if (live && !window.confirm(
+                'Let Entitle grants create real users on the HMI? Until now each grant has '
+                + 'only reported what it would do.')) return;
+            const data = await this.stepPost(`${base}/ot-adapter`, { dry_run: !live });
+            this.notice = data.note || 'Deploying the HMI adapter.';
           } else if (s.action === 'wireup') {
             await this.stepPost(`${base}/wireup`, null);
             this.notice = 'Wiring the VMs. A VM already wired is skipped, not doubled.';

@@ -692,6 +692,21 @@ async def run_env_destroy(job_id: str, meta: dict) -> None:
             job_service.append_job_log(
                 db, job_id, f"WARNING: could not clear the Resource Broker state ({exc}).")
 
+        # The OT HMI adapter's integration, before the agent token below: it is
+        # agent-brokered, and its teardown reads the agent's name off this row, which the
+        # token teardown clears.
+        try:
+            from . import pov_ot_adapter
+            line = await pov_ot_adapter.teardown(db, env)
+            if line:
+                job_service.append_job_log(db, job_id, line)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("POV %s: OT adapter teardown failed", env.id, exc_info=True)
+            job_service.append_job_log(
+                db, job_id,
+                f"WARNING: could not clear the OT HMI adapter ({exc}). Check the Entitle "
+                f"tenant for a leftover integration.")
+
         # The Entitle agent's token next, and it goes here rather than with the wire-up
         # above for a reason worth stating: the integrations must be gone BEFORE the agent
         # they route through, or Entitle is left holding integrations that name a dead
