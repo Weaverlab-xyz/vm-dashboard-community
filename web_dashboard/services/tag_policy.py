@@ -86,6 +86,10 @@ PROTECTED_KEYS = {
                       "with the wrong value keeps running and nothing can find it",
     "povmanagedby": "it marks this as POV-owned, which teardown filters on",
     "povrole": "the POV environment's wiring depends on it",
+    # pov_cloud_env.TAG_ZONE. A zoned POV's subnets and security groups are found by it
+    # when a broker is rebuilt; a wrong value lands a VM in the wrong Purdue zone.
+    "povzone": "a zoned POV places its VMs by it; a wrong value puts a VM in the wrong "
+               "Purdue zone",
     # vdesktop_service.POOL_TAG, in both its AWS/Azure and GCP-legal spellings.
     "dashboard:desktop_pool": "it is how a virtual-desktop pool finds its seats",
     "dashboard_desktop_pool": "it is how a virtual-desktop pool finds its seats",

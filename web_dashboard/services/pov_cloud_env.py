@@ -52,8 +52,10 @@ TAG_ENVIRONMENT = "povEnvironment"
 TAG_MANAGED_BY = "povManagedBy"
 TAG_ROLE = "povRole"
 TAG_NAME = "Name"
-# The Purdue zone a subnet or firewall belongs to (services/pov_zones.py). Only on a
-# zoned environment's resources; read back by `read_network` to rebuild the zone map.
+
+# The Purdue zone a subnet or firewall belongs to (services/pov_zones.py). Only on the
+# resources of a zoned environment; read back by `read_network` to rebuild the zone map,
+# so services/tag_policy.py protects it like the three above.
 TAG_ZONE = "povZone"
 MANAGED_BY = "vm-dashboard"
 
