@@ -873,3 +873,23 @@ if __name__ == "__main__":
             print(f"FAIL {fn.__name__}: {e}")
     print(f"\n{len(fns) - failures}/{len(fns)} passed")
     sys.exit(1 if failures else 0)
+
+
+def test_the_demo_cell_routers_are_not_reachable_on_a_pov_instance():
+    """The OT and network cell routers deploy into the GLOBAL bt_* tenant.
+
+    Their only pages are cloud-console tabs, which _profile_page_gate("cloud_pages")
+    already 404s on a POV instance -- but the API routers stayed mounted, gated on
+    pra_enabled (profile-neutral) and netcell_enabled (then unmasked). A direct POST
+    deployed a cell into the global tenant from the instance doing customer work.
+    """
+    from web_dashboard.services import feature_flags as ff
+    assert "netcell_enabled" in ff._DEMO_ONLY, \
+        "netcell_enabled is no longer masked on a POV instance"
+
+    src = _read(_MAIN)
+    m = re.search(r"app\.include_router\(ot_api\.router,(.*?)\)\n", src, re.S)
+    assert m, "the OT router mount was not found"
+    assert '_profile_page_gate("cloud_pages")' in m.group(1), (
+        "the OT router is gated only on pra_enabled, which is profile-neutral, so it "
+        "deploys into the global tenant on a POV instance")

@@ -305,6 +305,7 @@ _TITLE_OVERRIDES = {
     "profiles/pov/public-cloud":         "Running POVs on a public cloud",
     "profiles/pov/gateway-and-broker":   "The Gateway and the Resource Broker",
     "profiles/pov/wiring":               "Wiring VMs into PRA, Password Safe and Entitle",
+    "profiles/pov/demo-cells":           "Demo cells in a POV",
     "profiles/pov/customer-access":      "What the customer sees",
     "profiles/pov/lifecycle":            "Keeping a POV true, and reaping it",
     "profiles/pov/ps-runbook":           "Password Safe POC runbook",

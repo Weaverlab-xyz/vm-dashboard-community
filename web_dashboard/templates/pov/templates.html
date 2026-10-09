@@ -410,12 +410,18 @@
               <option value="target">target</option>
               <option value="broker">broker</option>
             </select>
-            <select x-model="vm.os_family" class="col-span-2 rounded-md border-gray-300 text-sm">
+            <select x-model="vm.os_family" class="col-span-1 rounded-md border-gray-300 text-sm">
               <option value="linux">linux</option>
               <option value="windows">windows</option>
             </select>
-            <input type="text" x-model="vm.image_id" placeholder="ami-… or catalog id below"
-                   class="col-span-3 rounded-md border-gray-300 text-sm font-mono">
+            <select x-model="vm.cell_role" title="Demo-cell role"
+                    class="col-span-2 rounded-md border-gray-300 text-sm">
+              <option value="">no cell role</option>
+              <option value="ot-sim">OT simulator</option>
+              <option value="vyos">VyOS device</option>
+            </select>
+            <input type="text" x-model="vm.image_id" placeholder="ami-… or catalog id"
+                   class="col-span-2 rounded-md border-gray-300 text-sm font-mono">
             <input type="text" x-model="vm.instance_type" placeholder="t3.medium"
                    class="col-span-2 rounded-md border-gray-300 text-sm font-mono">
             <button @click="cloudForm.vms.splice(i, 1)"
@@ -431,7 +437,10 @@
       <p class="text-xs text-gray-400 mt-2">
         Exactly one VM may be the <span class="font-medium">broker</span>. Images are
         resolved when a POV is built, not now — so a template can name a catalog image
-        that has not been promoted to this cloud yet.
+        that has not been promoted to this cloud yet. A <span class="font-medium">cell
+        role</span> (Linux targets only) makes Wire up add that cell's PRA items — see
+        <a href="/docs/profiles/pov/demo-cells" class="text-blue-600 hover:underline">Demo
+        cells in a POV</a>.
       </p>
 
       <div class="mt-4 flex items-center gap-2">
@@ -791,7 +800,7 @@ function templatesPage() {
     // a broken feature.
 
     blankCloudVm() {
-      return { name: '', role: 'target', os_family: 'linux',
+      return { name: '', role: 'target', os_family: 'linux', cell_role: '',
                image_ref: '', image_id: '', instance_type: '', disk_gb: 0 };
     },
 
@@ -840,6 +849,7 @@ function templatesPage() {
         network_cidr: f.network_cidr,
         vms: f.vms.map(v => ({
           name: v.name, role: v.role, os_family: v.os_family,
+          cell_role: v.cell_role || '',
           image_ref: v.image_ref || '', image_id: v.image_id || '',
           instance_type: v.instance_type, disk_gb: Number(v.disk_gb) || 0,
         })),

@@ -82,6 +82,28 @@ _PRODUCT_REMEDY = {
     "entitle": "the Entitle integration — needs an SSH key on this POV, then the wire-up",
 }
 
+# The demo-cell roles a card can require (``UseCase.requires_cell_roles``). Not products,
+# and kept out of the three tables above on purpose: those are what a POV row is scoped
+# by, and `POV_PRODUCTS` is the list every product consumer iterates. A role is a fact
+# about one guest in the environment -- see `services/pov_cell_roles`.
+#
+# The absent copy is what `needs` shows on an out-of-scope card, so it names the guest
+# the POV would need rather than the role key.
+_CELL_ABSENT = {
+    "ot-sim": "an OT simulator guest (cell role ot-sim)",
+    "vyos": "a VyOS network-device guest (cell role vyos)",
+}
+_CELL_REMEDY = {
+    "ot-sim": "the OT simulator's HMI Web Jump and protocol tunnels — run the wire-up",
+    "vyos": "the network device's jump item — run the wire-up",
+}
+
+
+def cell_key(role: str, *, wired: bool = False) -> str:
+    """The product-mix key for a cell role. One spelling, read by both halves."""
+    return f"cell:{role}:wired" if wired else f"cell:{role}"
+
+
 # Where a card sends an operator when it is unready. One destination, not a per-card field:
 # every remedy above ends at the same tab, and a card that could name its own would
 # eventually name one that does not exist.
@@ -275,6 +297,44 @@ _PRA_CARDS = (
         minutes=10,
         docs="integrations/beyondtrust/privileged-remote-access",
         requires_products=("pra",),
+    ),
+    # The demo cells, as a POV carries them: a guest playing a cell role (see
+    # services/pov_cell_roles). Out of scope on every POV with no such guest, so they
+    # cost a POV that is not about OT or network devices nothing.
+    UseCase(
+        id="pov-ot-hmi-web-jump",
+        title="Operate the plant HMI through a recorded Web Jump",
+        summary="Open the OT simulator's FUXA HMI from the PRA console — no route into "
+                "the plant network, the session recorded, the operator never on it.",
+        target="#wired",
+        minutes=10,
+        docs="profiles/pov/demo-cells",
+        requires_products=("pra",),
+        requires_cell_roles=("ot-sim",),
+    ),
+    UseCase(
+        id="pov-ot-plc-protocol-tunnel",
+        title="Reach a PLC over Modbus or OPC UA, brokered",
+        summary="Point an engineering tool at 127.0.0.1 and land on the simulated PLC "
+                "through a PRA protocol tunnel — one jump item per protocol, so each can "
+                "be granted to different people.",
+        target="#wired",
+        minutes=12,
+        docs="profiles/pov/demo-cells",
+        requires_products=("pra",),
+        requires_cell_roles=("ot-sim",),
+    ),
+    UseCase(
+        id="pov-net-emergency-firewall-change",
+        title="Make an emergency firewall change on a network device",
+        summary="Shell Jump to the VyOS device, enter configure mode and change a rule, "
+                "recorded end to end — the change a network team most needs to be able "
+                "to prove afterwards.",
+        target="#wired",
+        minutes=10,
+        docs="profiles/pov/demo-cells",
+        requires_products=("pra",),
+        requires_cell_roles=("vyos",),
     ),
 )
 
@@ -541,6 +601,12 @@ def card_state(card: UseCase, products: dict) -> tuple:
         elif not products.get(_PRODUCT_ARTIFACT.get(product, ""), False):
             unwired.append(_PRODUCT_REMEDY.get(product,
                                                _PRODUCT_LABELS.get(product, product)))
+
+    for role in card.requires_cell_roles:
+        if not products.get(cell_key(role)):
+            absent.append(_CELL_ABSENT.get(role, role))
+        elif not products.get(cell_key(role, wired=True)):
+            unwired.append(_CELL_REMEDY.get(role, role))
 
     if absent:
         return "out_of_scope", tuple(absent)

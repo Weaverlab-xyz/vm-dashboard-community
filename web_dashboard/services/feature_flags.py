@@ -75,6 +75,13 @@ _DEMO_ONLY = (
     # the one to revisit -- and it should be revisited deliberately rather than deleted
     # because the tenancy sentence above does not happen to apply.
     "agentcell_enabled",
+    # The network demo cell. Demo-only for the tenancy reason at the top: its deploy is
+    # an ordinary gce_deploy whose Shell Jump and Password Safe onboarding resolve the
+    # global bt_* / pscli_* singletons. Its only page is /gcp#net, which
+    # _PROFILE_PAGES["cloud_pages"] already 404s on a POV instance -- but the API router
+    # was still mounted there, so a direct POST deployed into the global tenant from the
+    # instance that does customer work. A VyOS VM in a POV belongs in a POV template.
+    "netcell_enabled",
     "cost_explorer_enabled",
 )
 

@@ -1354,8 +1354,17 @@ app.include_router(gateways_api.router,
 try:
     # OT demo endpoints (protocol tunnels + the OT demo cell). Every route exists to
     # provision PRA jump items, so the whole router follows the PRA flag.
+    #
+    # And the cloud_pages profile gate as well, because pra_enabled is profile-NEUTRAL
+    # (a POV instance needs PRA) and so masks nothing there. Every route here deploys
+    # into, or wires against, the GLOBAL bt_* tenant and the shared Gateway host -- on a
+    # POV instance that is a customer's tenant reached by a path that never asked which
+    # one. The router's only callers are the /aws, /azure and /gcp OT tabs, which this
+    # same gate already 404s there, so nothing that works today loses a caller.
     from .api import ot as ot_api  # noqa: E402
-    app.include_router(ot_api.router, dependencies=[_feature_gate("pra_enabled")])
+    app.include_router(ot_api.router,
+                       dependencies=[_feature_gate("pra_enabled"),
+                                     _profile_page_gate("cloud_pages")])
 except ImportError as exc:
     logger.warning("API router 'ot' not loaded: %s", exc)
 

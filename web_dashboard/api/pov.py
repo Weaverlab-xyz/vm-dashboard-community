@@ -71,7 +71,8 @@ from ..config import settings
 from ..services import (bt_tenant_service, config_service, expiry_policy,
                         expiry_reaper, job_service,
                         lab_platforms, pov_blueprint_service, pov_broker, pov_env_service,
-                        pov_accessor_entitle, pov_gateway, pov_platform_cache,
+                        pov_accessor_entitle, pov_cell_roles, pov_gateway,
+                        pov_platform_cache,
                         pov_reconcile,
                         pov_cloud_cost, pov_entitle_agent, pov_guest_step,
                         pov_pra_ps_link, pov_ps_config, pov_resource_broker,
@@ -296,6 +297,10 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
             "login_password_set": (manual_login
                                    and pov_resource_broker.has_login_password(
                                        env, v.platform_vm_id)),
+            # The guest's demo-cell role and how many of its extra PRA items exist.
+            # Counts only: the items' Terraform state stays server-side, like
+            # pra_jump_tf_state above.
+            **pov_cell_roles.describe(v),
         } for v in vms]
     # LAST, and that is load-bearing: this reads the keys every `update()` above
     # contributed. Computed any earlier it would see a half-built row and report every step
@@ -1471,6 +1476,43 @@ def set_vm_os(env_id: str, vm_id: str, payload: VmOsRequest,
         note = pov_env_service.set_vm_os(db, env, vm_id, payload.os_family)
     except pov_env_service.VmOsError as exc:
         # 400, not 409: this is about the value in the request, not a step still owed.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    vms = (db.query(PovEnvironmentVM)
+             .filter(PovEnvironmentVM.environment_id == env.id).all())
+    return {"note": note,
+            "environment": _serialize(env, vms=vms,
+                                      broker=pov_broker.describe(db, env))}
+
+
+class VmCellRoleRequest(BaseModel):
+    """Say which demo-cell role a POV guest plays, if any.
+
+    ``"ot-sim"`` adds the OT simulator's HMI Web Jump and one PRA protocol tunnel per PLC
+    protocol to the next Wire up; ``"vyos"`` keeps the guest out of Entitle. Blank makes
+    it an ordinary target. See ``services/pov_cell_roles``.
+    """
+    cell_role: str = ""
+
+
+@router.post("/managed/{env_id}/vms/{vm_id}/cell-role", dependencies=_POV_WRITE_OWN)
+def set_vm_cell_role(env_id: str, vm_id: str, payload: VmCellRoleRequest,
+                     db: Session = Depends(get_db),
+                     current_user: User = Depends(get_current_user)):
+    """Record which demo-cell role one POV guest plays, or clear it."""
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    ok, why = pov_env_service.may_act_on(env)
+    if not ok:
+        raise HTTPException(status_code=409, detail=why)
+    vm = (db.query(PovEnvironmentVM)
+            .filter(PovEnvironmentVM.environment_id == env.id,
+                    PovEnvironmentVM.platform_vm_id == vm_id).first())
+    if vm is None:
+        raise HTTPException(status_code=404, detail="No such VM in this POV")
+    try:
+        note = pov_cell_roles.set_role(db, env, vm, payload.cell_role)
+    except pov_cell_roles.CellRoleError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     vms = (db.query(PovEnvironmentVM)
              .filter(PovEnvironmentVM.environment_id == env.id).all())

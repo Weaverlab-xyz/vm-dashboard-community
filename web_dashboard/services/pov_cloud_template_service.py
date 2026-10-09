@@ -29,7 +29,7 @@ import re
 from sqlalchemy.orm import Session
 
 from ..database import PovCloudTemplate, PovCloudTemplateVM
-from . import lab_platforms, pov_cloud_env
+from . import lab_platforms, pov_cell_roles, pov_cloud_env
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +156,19 @@ def _validate_vms(vms: list) -> list:
                 f"{os_family!r} is not an OS family; use "
                 f"{' or '.join(VALID_OS_FAMILIES)}")
 
+        # Checked here rather than at wire-up: a template that marks a Windows VM as an
+        # OT simulator would build cleanly and then wire nothing, minutes later.
+        try:
+            cell_role = pov_cell_roles.normalize(raw.get("cell_role"))
+            pov_cell_roles.check_os(cell_role, os_family)
+        except pov_cell_roles.CellRoleError as exc:
+            raise CloudTemplateError(f"VM {name!r}: {exc}") from exc
+        if cell_role and role == "broker":
+            raise CloudTemplateError(
+                f"VM {name!r} is the broker and a {cell_role}; the broker carries the "
+                f"agent, the Gateway and the Resource Broker, so a cell image goes on "
+                f"a target")
+
         image_ref = (raw.get("image_ref") or "").strip()
         image_id = (raw.get("image_id") or "").strip()
         if bool(image_ref) == bool(image_id):
@@ -175,7 +188,7 @@ def _validate_vms(vms: list) -> list:
                 f"VM {name!r} asks for a {disk_gb} GB disk; nothing boots in that")
 
         clean.append({
-            "name": name, "role": role, "os_family": os_family,
+            "name": name, "role": role, "os_family": os_family, "cell_role": cell_role,
             "image_ref": image_ref or None, "image_id": image_id or None,
             "instance_type": instance_type, "disk_gb": disk_gb,
             "sort_order": index,
@@ -313,6 +326,7 @@ def describe(db: Session, row: PovCloudTemplate) -> dict:
             "name": v.name,
             "role": v.role or "target",
             "os_family": v.os_family or "linux",
+            "cell_role": v.cell_role or "",
             "image_ref": v.image_ref or "",
             "image_id": v.image_id or "",
             "instance_type": v.instance_type,

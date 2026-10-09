@@ -39,7 +39,7 @@ from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovTemplateBuild, User, get_db
 from ..services import (job_service, lab_platforms, pov_blueprint_service,
-                        pov_cloud_env, pov_cloud_template_service,
+                        pov_cell_roles, pov_cloud_env, pov_cloud_template_service,
                         pov_template_builder)
 from .auth import get_current_user, require_admin, require_explicit_permission, require_permission
 
@@ -389,6 +389,8 @@ class CloudTemplateVMRequest(BaseModel):
     name: str
     role: str = "target"
     os_family: str = "linux"
+    # A demo-cell role ("ot-sim" | "vyos"), or blank. See services/pov_cell_roles.
+    cell_role: str = ""
     image_ref: str = ""
     image_id: str = ""
     instance_type: str = ""
@@ -431,6 +433,8 @@ def list_cloud_templates(cloud: str = Query(""), db: Session = Depends(get_db),
         "clouds": list(lab_platforms.CLOUD_PLATFORMS),
         "default_network_cidr": pov_cloud_env.DEFAULT_NETWORK_CIDR,
         "roles": list(pov_cloud_template_service.VALID_ROLES),
+        "cell_roles": [{"value": k, "label": pov_cell_roles.LABELS[k]}
+                       for k in pov_cell_roles.VALID_CELL_ROLES],
         "os_families": list(pov_cloud_template_service.VALID_OS_FAMILIES),
         "templates": [pov_cloud_template_service.describe(db, r) for r in rows],
     }
