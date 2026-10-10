@@ -45,7 +45,7 @@ markdown>=3.5,<4
 aiofiles==23.2.1
 
 # WebSockets: uvicorn[standard] chooses the version; nothing imports it directly.
-websockets>=12.0
+websockets>=17.2
 
 # Environment variables
 python-dotenv==1.2.2
