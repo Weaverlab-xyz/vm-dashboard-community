@@ -627,8 +627,10 @@ it. See [storage-management.md](storage-management.md).
 **Local Docker runner fails with "permission denied" mounting `/var/run/docker.sock`.**
 The dashboard container needs Docker-out-of-Docker access to spawn the
 side-car runner. Check `docker-compose.yml` includes
-`/var/run/docker.sock:/var/run/docker.sock:ro` and that the container
-user can read it.
+`/var/run/docker.sock:/var/run/docker.sock:ro`. The app runs as uid 10001 and the
+entrypoint gives it the socket's group automatically; if you start the container with
+`-u` / `runAsUser` yourself, add that group with `group_add`. See
+[Container User](container-user.md).
 
 **Cloud runner says "AccessDenied" fetching the asset from S3.**
 The IAM role / service principal / GCP service account the dashboard

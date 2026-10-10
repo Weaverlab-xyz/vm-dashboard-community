@@ -503,7 +503,9 @@ def _parse_lock_time(value: str):
 def _self_lock_owner() -> str:
     """This process's terraform lock identity. terraform builds ``Who`` as
     ``user.Current().Username + "@" + os.Hostname()``; in the container that is
-    ``root@<replica>``, which is what we match against."""
+    ``dashboard@<replica>`` (``root@<replica>`` before the image dropped root), which is
+    what we match against. A lock an older root replica left is never ours: it also
+    predates this run, so the cancel path leaves it for the operator either way."""
     try:
         import pwd  # POSIX-only, like fcntl above
         user = pwd.getpwuid(os.getuid()).pw_name

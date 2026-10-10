@@ -87,7 +87,15 @@ jobs:
               page=$(curl -s -L -o page.html -w '%{http_code} %{url_effective}' http://127.0.0.1:8000/login)
               echo "GET /login -> $page"
               if [ "${page%% *}" = "200" ] && grep -q '<title>' page.html; then
-                exit 0
+                # The app must run unprivileged: PID 1 (gunicorn, after the entrypoint's
+                # setpriv) and every process under it as uid 10001, never root.
+                uids=$(docker exec -u 10001 dash sh -c 'for s in /proc/[0-9]*/status; do awk "/^Uid:/{print \$2}" "$s"; done' | sort -u)
+                echo "process uids in the container: $uids"
+                if [ "$uids" = "10001" ]; then
+                  exit 0
+                fi
+                echo "::error::the dashboard is not running as uid 10001 (saw: $uids)"
+                exit 1
               fi
               echo "::error::/api/health is up but /login did not render a page ($page)"
               head -c 600 page.html; echo

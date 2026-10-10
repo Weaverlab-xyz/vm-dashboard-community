@@ -274,6 +274,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # The packer.zip curl also picks up the --retry flags the other release-artifact
 # fetches in this file already carry (see the helm-install curl below).
 ARG TERRAFORM_VERSION=1.10.5
+# Packer plugins go to a fixed path, not root's home (~/.config/packer/plugins), so the
+# unprivileged user the app runs as finds them; `packer init` at build time then sees them
+# installed and downloads nothing.
+ENV PACKER_PLUGIN_PATH=/opt/packer-plugins
 # https://releases.hashicorp.com/terraform/1.10.5/terraform_1.10.5_SHA256SUMS
 ARG TERRAFORM_SHA256_AMD64=0566a24f5332098b15716ebc394be503f4094acba5ba529bf5eb0698ed5e2a90
 ARG TERRAFORM_SHA256_ARM64=0ca5d6977c7c46bfa4bbe030030b911e897cf0cb72bff5525fb76c10f1c3409a
@@ -293,6 +297,7 @@ RUN --mount=type=secret,id=github_token,required=false \
        else \
            echo "packer plugin getter: no GITHUB token, using the 60/hour anonymous quota"; \
        fi \
+    && mkdir -p "${PACKER_PLUGIN_PATH}" \
     && for plugin in amazon azure googlecompute oracle; do \
            for attempt in 1 2 3 4 5; do \
                packer plugins install "github.com/hashicorp/${plugin}" && break; \
@@ -526,12 +531,17 @@ RUN ARCH=$(dpkg --print-architecture) \
     && rm -rf /tmp/helm.tar.gz /tmp/helm.sha256 "/tmp/linux-${ARCH}" \
     && helm version
 
-# Entrypoint fixes SSH key permissions when the Windows override
-# bind-mounts a key from %USERPROFILE%. Docker Desktop surfaces Windows
-# files as mode 0777 and sshd-client refuses keys that world-readable,
-# so copy to a private path before invoking gunicorn.
-RUN printf '#!/bin/sh\nif [ -f /root/.ssh/dev_dashboard_key ]; then\n    install -m 600 /root/.ssh/dev_dashboard_key /root/.ssh/dev_key\nfi\nexec "$@"\n' \
-    > /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
+# The app and the worker run as `dashboard` (uid/gid 10001, the remote agent's ids), not
+# root. The image does not set USER: the entrypoint starts as root only to give that user
+# the host's Docker-socket group and to hand over volumes earlier (root) releases wrote,
+# then drops to it with setpriv before the command runs. docker/entrypoint.sh explains.
+# The directories the app writes are created here, owned by it; everything else in /app
+# stays root-owned and read-only to the app.
+RUN groupadd -g 10001 dashboard \
+    && useradd -u 10001 -g dashboard -m -d /home/dashboard -s /usr/sbin/nologin dashboard \
+    && install -d -o dashboard -g dashboard /app/terraform/deployments /app/packer/builds \
+    && chown dashboard:dashboard /app
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # Long-lived job-progress WebSockets must outlive a provision; the durable
