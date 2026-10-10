@@ -50,13 +50,15 @@
 
     # The `ca=` value for the plugin's address, in the exact form it wants:
     # CA-HOST\CA Common Name. Read off the CA rather than assembled by hand, because a
-    # guessed common name fails later as an opaque enrollment error.
+    # guessed common name fails later as an opaque enrollment error. Interpolated rather
+    # than joined with a quoted backslash: Ansible splits a free-form command on quotes
+    # and reads a quote after a backslash as escaped, which stopped this file loading.
     - name: Read the CA configuration string
       ansible.windows.win_shell: |
         $ErrorActionPreference = 'Stop'
         $cfg = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration'
         $host_fqdn = $env:COMPUTERNAME + '.' + $env:USERDNSDOMAIN
-        $host_fqdn + '\' + $cfg.Active
+        "$host_fqdn\$($cfg.Active)"
       changed_when: false
       register: ca_config
 
@@ -82,8 +84,8 @@
         $ticks = [int64]({{ template_days }} * 24 * 60 * 60 * 10000000)
         $attrs['pKIExpirationPeriod'] = [System.BitConverter]::GetBytes(-$ticks)
         $attrs['pKIOverlapPeriod'] = [System.BitConverter]::GetBytes([int64](-1 * 24 * 60 * 60 * 10000000))
-        # Bit 0x00000001 = ENROLLEE_SUPPLIES_SUBJECT. Without it ADCS overrides the
-        # plugin's subject and the subject template is silently ignored.
+        # Bit 0x00000001 = ENROLLEE_SUPPLIES_SUBJECT. Without it ADCS overrides the subject
+        # the plugin sends, and the subject template is silently ignored.
         $attrs['msPKI-Certificate-Name-Flag'] = 1
         # No CA manager approval: bit 0x2 (PEND_ALL_REQUESTS) must be CLEAR, or every
         # rotation comes back CR_DISP_UNDER_SUBMISSION.

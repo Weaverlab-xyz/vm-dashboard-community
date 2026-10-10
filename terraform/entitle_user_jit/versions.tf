@@ -5,8 +5,10 @@ terraform {
     entitle = {
       # Published provider source on the Terraform Registry.
       # https://registry.terraform.io/providers/entitleio/entitle/latest
-      source  = "entitleio/entitle"
-      version = "~> 3.0"
+      source = "entitleio/entitle"
+      # 3.2.2 is the release this module was validated against; entitle_resource_synced,
+      # which it is built on, is not in every 3.x.
+      version = ">= 3.2.2, < 4.0.0"
     }
   }
 }

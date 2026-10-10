@@ -22,6 +22,6 @@
       - 7zip
   tasks:
     - name: Install packages
-      community.windows.win_chocolatey:
+      chocolatey.chocolatey.win_chocolatey:
         name: "{{ choco_packages }}"
         state: present

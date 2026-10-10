@@ -109,8 +109,8 @@ resource "aws_db_instance" "this" {
 
   publicly_accessible    = false
   db_subnet_group_name   = var.db_subnet_group_name
-  vpc_security_group_ids  = var.vpc_security_group_ids
-  parameter_group_name    = var.parameter_group_name != "" ? var.parameter_group_name : null
+  vpc_security_group_ids = var.vpc_security_group_ids
+  parameter_group_name   = var.parameter_group_name != "" ? var.parameter_group_name : null
 
   skip_final_snapshot = true
   apply_immediately   = true

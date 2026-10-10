@@ -493,7 +493,7 @@ async def ps_import(req: PSDirectoryImportRequest, db: Session = Depends(get_db)
         cand = by_id.get(item.system_id)
         name = (cand or {}).get("name") or str(item.system_id)
 
-        def fail(msg):
+        def fail(msg, item=item, name=name):
             failed.append({"system_id": item.system_id, "name": name, "error": msg})
 
         if cand is None:

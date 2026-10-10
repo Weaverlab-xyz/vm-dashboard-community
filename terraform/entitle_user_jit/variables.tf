@@ -6,70 +6,75 @@ variable "entitle_api_key" {
 
 variable "entitle_integration_id" {
   description = <<-EOT
-    ID of the existing Entra <-> Entitle directory integration. Entitle
-    needs this to resolve directory_group_id references on each
-    `entitle_resource`. Created once via the Entitle UI; we read the id
-    from there and pass it in.
+    ID of the existing Entra <-> Entitle integration. Its sync is what puts each
+    dashboard-* group into Entitle as a resource, with the group's Entra object id as
+    the resource's external_id; this module adopts those resources, it does not create
+    them. Created once in the Entitle UI; copy the id from there.
   EOT
   type        = string
 }
 
 variable "application_name" {
-  description = "Display name of the Entitle virtual application that bundles the dashboard's groups."
+  description = "Tag put on every dashboard group resource, so the catalog can be filtered to them."
   type        = string
   default     = "VM Dashboard"
 }
 
-variable "application_description" {
-  description = "Description shown in Entitle's catalog for end users."
-  type        = string
-  default     = "JIT access to the VM Dashboard's scoped permissions (aws / azure / gcp / vms / images / ...)."
-}
-
 variable "single_approver_group" {
   description = <<-EOT
-    Identifier (group name or user email — whatever the configured
-    Entitle integration resolves) for the single-approver workflow
-    tier. Used by every dashboard-*-write group + the per-workgroup
-    membership groups.
+    Name of the Entitle directory group whose members approve the single-approver tier
+    (every dashboard-*-write group and the per-workgroup membership groups). Matched
+    exactly against Entitle's directory groups; the plan fails unless exactly one matches.
   EOT
   type        = string
 }
 
 variable "two_approver_group" {
   description = <<-EOT
-    Identifier for the two-approver workflow tier. Used by every
-    dashboard-*-delete group and the high-value dashboard-admin
-    group. Two distinct approvals are required (Entitle handles the
-    fan-out automatically when this is a group rather than a user).
+    Name of the Entitle directory group that gives the FIRST approval on the two-approver
+    tier (every dashboard-*-delete group and dashboard-admin). Matched exactly.
   EOT
   type        = string
 }
 
-variable "auto_approve_max_minutes" {
-  description = "TTL ceiling for the auto-approve tier (baseline + *-read)."
-  type        = number
-  default     = 120
+variable "two_approver_second_group" {
+  description = <<-EOT
+    Name of the directory group that gives the SECOND approval on the two-approver tier.
+    Empty means the same group as two_approver_group. Use a different group when the two
+    approvals must come from two different people: whether one member of a single group
+    can approve both steps is Entitle's behaviour, not something this module enforces.
+  EOT
+  type        = string
+  default     = ""
 }
 
-variable "single_approver_max_minutes" {
-  description = "TTL ceiling for the single-approver tier (*-write + workgroup)."
-  type        = number
-  default     = 1440
+# Durations are in SECONDS and must come from Entitle's fixed list:
+# 1800, 3600, 10800, 21600, 43200, 57600, 86400, 259200, 604800, ... (-1 = unlimited).
+# The largest value in each list is also the tier's workflow ceiling.
+variable "auto_approve_durations" {
+  description = "Durations a requester may pick on the auto-approve tier (baseline + *-read)."
+  type        = list(number)
+  default     = [1800, 3600]
 }
 
-variable "two_approver_max_minutes" {
-  description = "TTL ceiling for the two-approver tier (*-delete + admin)."
-  type        = number
-  default     = 480
+variable "single_approver_durations" {
+  description = "Durations a requester may pick on the single-approver tier (*-write + workgroup)."
+  type        = list(number)
+  default     = [3600, 10800, 43200, 86400]
+}
+
+variable "two_approver_durations" {
+  description = "Durations a requester may pick on the two-approver tier (*-delete + admin)."
+  type        = list(number)
+  default     = [3600, 10800, 21600]
 }
 
 variable "groups" {
   description = <<-EOT
-    Map of dashboard-* groups to provision as Entitle resources.
+    Map of dashboard-* groups whose Entitle resources this module configures.
     Populated from `oauth_group_mappings` by the bootstrap_entitle_app.py
-    wrapper — Phase 1 wrote the Entra group ids there, and this file
-    threads them into the `entitle_resource.directory_group_id` field.
+    wrapper. Phase 1 wrote the Entra group ids there, and each one is the
+    external_id Entitle's Entra sync gave that group's resource.
 
     Each entry:
       display_name      — Entra group display name (lowercase, kebab-case)

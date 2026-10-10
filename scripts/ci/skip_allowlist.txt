@@ -1,0 +1,13 @@
+# Test files that may print a skip line in CI's `tests` job without failing it.
+# scripts/ci/run_tests.sh reads this. One file name per line, then `#` and WHY the skip
+# is expected there. Almost always: another job runs the file with what this one lacks.
+# An entry for a file that no longer exists fails the run.
+
+test_opa_needs_approval.py       # the `opa` job runs it with the real binary (OPA_REQUIRED=1)
+test_opa_policies.py             # the `opa` job runs it with the real binary (OPA_REQUIRED=1)
+test_destroy_guardrails.py       # its test_rego_* checks need opa; the `opa` job runs them
+test_postgres_migrations.py      # the `postgres` job runs it against a real server
+test_postgres_retired_levels.py  # the `postgres` job runs it against a real server
+test_no_undefined_names.py       # its ruff sweep skips here; the `ruff` job covers it repo-wide
+test_function_package.py         # one test covers the azure-functions-ABSENT path, which
+                                 # cannot run once requirements.txt installs it

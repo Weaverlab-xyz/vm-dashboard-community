@@ -1,0 +1,35 @@
+# Bug-only lint. CI runs `ruff check` with this file (the `ruff` job in tests.yml).
+#
+# Every rule here catches code that is WRONG, not code that is untidy: a name that is
+# not defined, a dict key written twice (the later value silently wins), a closure that
+# captures a loop variable, a mutable default argument. Style is deliberately out of
+# scope. B008 (a call in a default argument) is FastAPI's `Depends(...)` pattern, and
+# B904 (`raise ... from`) is a convention, not a bug; turning either on would bury the
+# signal under ~2,000 findings.
+#
+# Run it locally: ruff check
+target-version = "py312"  # matches the Dockerfile and CI; makes BaseExceptionGroup known
+extend-exclude = ["node_modules", ".venv"]
+
+[lint]
+select = [
+    "E9",      # syntax errors, IO errors
+    "F63",     # comparisons that are always true or false (`is` with a literal, ...)
+    "F7",      # break/continue/return/yield in the wrong place
+    "F82",     # undefined names
+    "F601", "F602",  # a dict key or variable key written twice
+    "F811",    # a definition that shadows an unused one
+    "PLE",     # pylint errors
+    "B006",    # mutable default argument
+    "B018",    # a statement that does nothing
+    "B023",    # a closure that captures a loop variable
+]
+
+[lint.per-file-ignores]
+# A deliberate bidi control character: the input the test feeds to the stripper.
+"tests/test_branding.py" = ["PLE2502"]
+# Tests pass lambdas that close over the loop variable to helpers (_run, _refused) that
+# call them before the iteration ends, and define ast keyword readers inside ast.walk
+# loops the same way. Both are safe because nothing outlives the iteration; the rule
+# stays on for the application, where a stored callback is a real bug.
+"tests/**" = ["B023"]

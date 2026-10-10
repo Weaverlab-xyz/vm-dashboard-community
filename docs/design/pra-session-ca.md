@@ -369,7 +369,7 @@ round.
 The Certificate plugin requires `msPKI-Enrollment-Flag = 0` — **no CA certificate manager
 approval** — because otherwise every rotation returns `CR_DISP_UNDER_SUBMISSION` and a
 rotation job cannot block on a human clicking Issue. The ADCS playbook sets it
-(`examples/playbooks/windows/adcs-pipeline-template.yml:89-90`) and
+(`examples/playbooks/windows/adcs-pipeline-template.yml:91-92`) and
 [Certificates](../workload-lab/certificates.md) explains why.
 
 For a client-auth leaf that constraint is a mild operational annoyance. For a **subordinate

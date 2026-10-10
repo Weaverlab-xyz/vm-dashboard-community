@@ -111,7 +111,7 @@ class _FakeMint:
 
 def _patch_mint(monkey=None, token="tok-blob-abc"):
     fake = _FakeMint(token)
-    entitle_registration_service.mint_agent_token = fake  # noqa: S3v — test double
+    entitle_registration_service.mint_agent_token = fake  # test double
     return fake
 
 

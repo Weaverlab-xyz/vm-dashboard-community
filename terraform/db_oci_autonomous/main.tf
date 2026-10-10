@@ -100,8 +100,8 @@ variable "subnet_ocid" {
 }
 
 variable "is_mtls_connection_required" {
-  type        = bool
-  default     = false
+  type    = bool
+  default = false
   # The DB is reached only through a BeyondTrust PRA tcp protocol tunnel, which
   # proxies the wire protocol and can't present a client wallet — so mTLS is
   # disabled and a plain TLS connection (no wallet) is accepted. The
