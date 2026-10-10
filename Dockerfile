@@ -535,12 +535,17 @@ RUN ARCH=$(dpkg --print-architecture) \
 # root. The image does not set USER: the entrypoint starts as root only to give that user
 # the host's Docker-socket group and to hand over volumes earlier (root) releases wrote,
 # then drops to it with setpriv before the command runs. docker/entrypoint.sh explains.
-# The directories the app writes are created here, owned by it; everything else in /app
-# stays root-owned and read-only to the app.
+# The directories the app writes are created here, owned by it. /app itself, and
+# everything else in it, stays root-owned: an owner of /app could rename or replace
+# /app/web_dashboard, which would undo the point of dropping root.
 RUN groupadd -g 10001 dashboard \
     && useradd -u 10001 -g dashboard -m -d /home/dashboard -s /usr/sbin/nologin dashboard \
-    && install -d -o dashboard -g dashboard /app/terraform/deployments /app/packer/builds \
-    && chown dashboard:dashboard /app
+    && install -d -o dashboard -g dashboard /app/terraform/deployments /app/packer/builds /app/data
+# The SQLite fallback lives in /app/data, which the app owns, not beside the code in /app
+# (SQLite needs to write its journal in the database's directory). Compose and every
+# cloud-hosting guide set DATABASE_URL to PostgreSQL, which overrides this; it only
+# applies to a bare `docker run`. config.py keeps ./vm_cli.db for local development.
+ENV DATABASE_URL=sqlite:////app/data/vm_cli.db
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 

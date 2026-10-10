@@ -36,7 +36,7 @@ def test_the_image_creates_the_user_and_its_writable_dirs():
     src = _read(_DOCKERFILE)
     assert re.search(r"groupadd -g 10001 dashboard", src), "no dashboard group (gid 10001)"
     assert re.search(r"useradd -u 10001 -g dashboard\b", src), "no dashboard user (uid 10001)"
-    for d in ("/app/terraform/deployments", "/app/packer/builds"):
+    for d in ("/app/terraform/deployments", "/app/packer/builds", "/app/data"):
         assert d in src, f"{d} is not created for the dashboard user"
     assert "COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh" in src
     assert 'ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]' in src
@@ -48,6 +48,25 @@ def test_the_image_does_not_pin_user_root_or_skip_the_entrypoint():
     hand-over that upgraded installs need. Either is a deliberate change, made here."""
     users = re.findall(r"^USER\s+(\S+)", _read(_DOCKERFILE), re.MULTILINE)
     assert not users, f"the dashboard image sets USER {users}; see docker/entrypoint.sh"
+
+
+def test_the_app_user_never_owns_app_itself():
+    """Owning a directory means being able to rename or replace anything in it, so an app
+    user that owned /app could swap out /app/web_dashboard: the image tampering that
+    dropping root is meant to prevent. Only named subdirectories are handed over."""
+    whole_app = re.compile(r"chown\b[^\n]*\s/app/?(\s|$|\\|&|;)")
+    for path in (_DOCKERFILE, _ENTRYPOINT):
+        for line in _read(path).splitlines():
+            if line.strip().startswith("#"):
+                continue
+            assert not whole_app.search(line), f"{os.path.basename(path)} hands /app to the app user: {line.strip()}"
+
+
+def test_the_images_sqlite_fallback_is_in_a_directory_the_app_owns():
+    """SQLite writes its journal beside the database, so the database's directory must be
+    the app's. The image points the fallback at /app/data; config.py's ./vm_cli.db stays
+    for local development."""
+    assert "ENV DATABASE_URL=sqlite:////app/data/vm_cli.db" in _read(_DOCKERFILE)
 
 
 def test_packer_plugins_live_outside_roots_home():

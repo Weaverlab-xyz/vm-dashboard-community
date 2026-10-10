@@ -46,7 +46,7 @@ These are ordered by how quietly they fail. The first three produce a dashboard
 that looks like it is working.
 
 **1. `DATABASE_URL` unset does not fail — it silently uses SQLite.** The default
-is `sqlite:///./vm_cli.db`, a file inside the container. So the app and the
+is SQLite (`/app/data/vm_cli.db` in the image), a file inside the container. So the app and the
 worker each get their *own private database*, the worker never sees a queued
 job, and everything vanishes on the next revision. Compose injects this variable
 for you, which is why it does not appear in `.env.example`; on a managed runtime

@@ -59,19 +59,15 @@ fi
 # -- directories the app writes -----------------------------------------------------
 # Only those that persist in volumes or the image; temp files go to /tmp. A directory
 # whose top is already owned by the app user is assumed migrated and not walked again.
-for dir in /app/terraform/deployments /app/packer/builds /run/spiffe-tokens /runner-work; do
+for dir in /app/terraform/deployments /app/packer/builds /app/data /run/spiffe-tokens /runner-work; do
     if [ ! -d "$dir" ]; then continue; fi
     if [ "$(stat -c %u "$dir")" != "$(id -u "$APP_USER")" ]; then
         chown -R "$APP_USER:$APP_USER" "$dir"
     fi
 done
-# SQLite's default database is /app/vm_cli.db, and SQLite writes its journal next to it,
-# so the directory itself (not its tree) belongs to the app user. A root-owned database
-# file from an older release is handed over too.
-chown "$APP_USER:$APP_USER" /app
-for f in /app/vm_cli.db /app/vm_cli.db-journal /app/vm_cli.db-wal /app/vm_cli.db-shm; do
-    if [ -e "$f" ]; then chown "$APP_USER:$APP_USER" "$f"; fi
-done
+# /app itself is deliberately NOT handed over: an owner of a directory can rename or
+# replace anything in it, /app/web_dashboard included. The image's SQLite fallback is
+# /app/data/vm_cli.db (see the Dockerfile).
 
 # -- optional dev SSH key -------------------------------------------------------------
 # A Windows host bind-mounts its key here as mode 0777, which ssh refuses; a private copy

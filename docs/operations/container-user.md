@@ -22,7 +22,10 @@ The image starts as root for a moment, then drops privileges before the dashboar
    - `/app/packer/builds`
    - `/run/spiffe-tokens`
    - `/runner-work`
-   - the SQLite database in `/app`
+   - `/app/data` (the image's SQLite fallback, `DATABASE_URL=sqlite:////app/data/vm_cli.db`.
+     Compose and the cloud guides set `DATABASE_URL` to PostgreSQL, which overrides it)
+
+   `/app` itself, and the code and binaries in the image, stay owned by root.
 
    A directory that `dashboard` already owns is left alone, so later starts skip this.
 3. **The dev SSH key**, if the Windows override mounts one. It is copied to
@@ -30,6 +33,33 @@ The image starts as root for a moment, then drops privileges before the dashboar
 
 Then `setpriv` switches to `dashboard`, with no capabilities and `no_new_privs` set, and
 runs gunicorn or the worker. Nothing the dashboard runs, and no job it starts, holds root.
+
+## What this protects, and what it does not
+
+Running as non-root limits what someone can do after finding a way to run code in the
+dashboard, for example through a bug in the web app. It is a second line of defence, not
+a replacement for the platform's own isolation.
+
+**What it protects:**
+- **The image cannot be altered.** The app cannot modify the image: its code, Terraform
+  and the provider mirror, OPA, kubectl, helm. Those binaries run with your cloud
+  credentials on every job, so a tampered one would turn a web-app compromise into a cloud
+  compromise.
+- **No Linux capabilities.** The app holds none (no raw sockets, no `chown`, no `setuid`),
+  and `no_new_privs` stops it regaining any.
+- **It satisfies non-root policies,** such as Azure Policy, Kubernetes `runAsNonRoot` and
+  image scanners.
+
+**What it does not protect:**
+- **The Docker socket is host root.** Whoever can use `/var/run/docker.sock` can start a
+  privileged container with the host's filesystem mounted. On a compose install with the
+  socket mounted (needed for the local Ansible runner), uid 10001 is not a boundary
+  between the dashboard and the host. The boundary is not mounting the socket: leave it
+  out if you don't use the local runner. The POV stack already does.
+- **Managed runtimes were never privileged.** On Container Apps, Cloud Run and Fargate,
+  root inside the container was never root on the host: the platform's sandbox (gVisor,
+  Firecracker, Hyper-V isolation) is the boundary. There, the gain is the list above, not
+  host protection.
 
 ## Upgrading
 
