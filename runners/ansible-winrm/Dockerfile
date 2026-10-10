@@ -38,6 +38,13 @@ FROM willhallonline/ansible:latest@sha256:969f0990b1ce6669cb6c6096e45047011c99e0
 # config-management runs. Hardening the runtime user is a separate, testable change.
 USER root
 
+# Upstream installs ansible itself with pip into the system Python, and the libraries its
+# modules import (pywinrm, paramiko, the BeyondTrust library) have to live in that same
+# interpreter; a virtualenv would be invisible to ansible. Newer Alpine py3-pip marks the
+# system Python as externally managed (PEP 668) and refuses that, so it is allowed
+# explicitly here, for this image only.
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+
 # pywinrm + requests-ntlm cover the NTLM transport the sample Windows plays default
 # to (ansible_winrm_transport: ntlm). Add pywinrm[credssp] if you use CredSSP.
 # cryptography/pyspnego publish musllinux wheels, so no build toolchain is needed on
