@@ -139,13 +139,16 @@ def canonical_ip(value) -> str:
         # A hostname, or one of the packed locators described in the module docstring.
         # Not an error — most values in these fields are not addresses.
         return ""
+    # An IPv4-mapped IPv6 address is the same host as its IPv4 form; fold it so a page
+    # that reports one and a tenant that stores the other still join. Folded BEFORE the
+    # property checks, so they judge the host's own address: Python before 3.12.4 reports
+    # every ::ffff:a.b.c.d as is_reserved (it sits in ::/8) and would refuse them all,
+    # while ::ffff:127.0.0.1 must still be refused as loopback on every version.
+    addr = getattr(addr, "ipv4_mapped", None) or addr
     if (addr.is_loopback or addr.is_unspecified or addr.is_link_local
             or addr.is_multicast or addr.is_reserved):
         return ""
-    # An IPv4-mapped IPv6 address is the same host as its IPv4 form; fold it so a page
-    # that reports one and a tenant that stores the other still join.
-    mapped = getattr(addr, "ipv4_mapped", None)
-    return str(mapped or addr)
+    return str(addr)
 
 
 def addr_list(*values) -> list:
