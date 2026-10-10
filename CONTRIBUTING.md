@@ -171,8 +171,10 @@ interpreter, SQLAlchemy 2.0.27 fails at import and `psycopg2-binary` has no whee
 every test that imports the app fails for reasons CI never sees.
 
 Claude Code cloud sessions do this for you: `.claude/hooks/session-start.sh` builds a 3.12
-virtualenv in `.venv/` (requirements plus pytest) and puts it first on the session's
-`PATH`.
+virtualenv in `.venv/` from the requirements and puts it first on the session's `PATH`.
+It installs no pytest, because CI has none: a test file whose imports fail prints `SKIP`
+and exits 0 without pytest, but exits 1 with it, so an extra package would make a session
+disagree with CI.
 
 ### Where the community can help most
 
