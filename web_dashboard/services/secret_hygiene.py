@@ -50,6 +50,43 @@ SECRET_REGISTRY: list = [
     ("xcpng_password",            "XCP-ng Password"),
 ]
 
+# Every config key whose VALUE is a credential: the registry above, which lists the ones
+# the Secrets page can move into a vault, plus every other secret a feature stores. The one
+# list, replacing four that had drifted apart: GET /api/setup/config masks these, the
+# feature panels never return them, the wizard treats a blank one as "keep what is stored",
+# and config_migrate expects them back from an HTTP export as bullets. Before this, the
+# setup endpoint masked five keys and returned the rest -- Gateway deploy keys, the ACR
+# password, every hypervisor password -- decrypted to any admin who asked.
+#
+# A pointer to a secret (``*_secret_name``, ``*_secret_title``, ``eso_bt_credentials_secret``)
+# is NOT one, and must stay legible. tests/test_secret_keys.py fails when a setting whose
+# name looks secret is in neither this list nor its short, reasoned allowlist.
+SECRET_KEYS: frozenset = frozenset(k for k, _ in SECRET_REGISTRY) | frozenset({
+    # cloud credentials
+    "oci_private_key", "oci_private_key_passphrase",
+    "azure_acr_password", "ansible_aci_acr_password",
+    # BeyondTrust Gateway deploy keys, one per runtime
+    "aws_ecs_docker_deploy_key", "azure_aci_docker_deploy_key",
+    "gcp_cloud_run_docker_deploy_key", "oci_jumpoint_docker_deploy_key",
+    # PRA / Password Safe database onboarding
+    "pra_config_api_client_secret",
+    "clouddb_ps_ssm_secret_access_key",
+    "clouddb_ps_ssm_plugin_private_key", "clouddb_ps_ssm_plugin_passphrase",
+    "clouddb_ps_azure_sp_client_secret",
+    "clouddb_ps_azure_plugin_private_key", "clouddb_ps_azure_plugin_passphrase",
+    "clouddb_ps_gcp_sa_key",
+    # Entitle and its adapters
+    "entitle_rest_secret", "entitle_atlas_private_key", "atlas_client_secret",
+    # managed services the dashboard deploys
+    "portainer_pat", "portainer_admin_password",
+    "rancher_bootstrap_password", "rancher_admin_password", "rancher_api_token",
+    # sign-in, POV and lab platforms
+    "oidc_client_secret", "pov_accessor_rest_secret", "skytap_api_token",
+    "first_run_admin_password",
+    # storage backends
+    "storage_local_password", "storage_agent_password",
+})
+
 # Prefix → backend id — must match secrets_backend_service._EXT_PREFIXES keys
 BACKEND_PREFIXES: dict = {
     "database":        "",

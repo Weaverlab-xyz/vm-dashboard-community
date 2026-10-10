@@ -525,13 +525,20 @@ def mark_setup_complete() -> None:
 
 # ── UI helpers ────────────────────────────────────────────────────────────────
 
-_SECRET_KEYS = frozenset({
-    "aws_secret_access_key",
-    "azure_client_secret",
-    "azure_oauth_client_secret",
-    "gcp_service_account_json",
-    "wlc_pat",
-})
+# Every key whose value is a credential. One list for the whole app -- see
+# secret_hygiene.SECRET_KEYS for why it replaced four.
+from .secret_hygiene import BACKEND_PREFIXES as _VAULT_PREFIXES  # noqa: E402
+from .secret_hygiene import SECRET_KEYS as _SECRET_KEYS  # noqa: E402
+
+#: What get_all_public() puts in place of a stored secret.
+MASK = "••••••••"
+
+
+def _is_vault_ref(value) -> bool:
+    """A pointer into an external vault (``azure_kv://…``) rather than the secret itself.
+    Not sensitive, and it is exactly what a config migration should carry, so it is shown."""
+    return isinstance(value, str) and any(
+        p and value.startswith(p) for p in _VAULT_PREFIXES.values())
 
 
 def get_all_public() -> dict:
@@ -542,7 +549,7 @@ def get_all_public() -> dict:
     _ensure_loaded()
     with _cache_lock:
         return {
-            key: ("••••••••" if key in _SECRET_KEYS and v else v)
+            key: (MASK if key in _SECRET_KEYS and v and not _is_vault_ref(v) else v)
             for (key, wg), v in _cache.items()
             if wg is None and key != "setup_complete"
         }

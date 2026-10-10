@@ -482,16 +482,17 @@ def _upsert_admin(username: str, password: str) -> None:
         db.close()
 
 
-_WIZARD_SECRET_FIELDS = frozenset({
-    "oidc_client_secret",
-    "aws_secret_access_key",
-    "wlc_pat",
-    "azure_client_secret",
-    "azure_oauth_client_secret",
-    "gcp_service_account_json",
-    "oci_private_key",
-    "oci_private_key_passphrase",
-})
+# The wizard treats a blank secret as "keep what is stored". The app-wide list, so a
+# secret the reconfigure form shows masked can never be erased by an untouched field.
+from ..services.secret_hygiene import SECRET_KEYS as _WIZARD_SECRET_FIELDS  # noqa: E402
+
+
+def _keep_stored(field: str, value) -> bool:
+    """True when a wizard field must leave the stored secret alone: it was left blank, or
+    it still holds the mask GET /api/setup/config showed. Writing the mask back would store
+    the literal bullets, which look configured in the UI and fail at cloud-call time."""
+    return field in _WIZARD_SECRET_FIELDS and (
+        not value or (isinstance(value, str) and value.startswith("••")))
 
 
 def _pov_storage_pairs(payload: SetupPayload) -> dict:
@@ -514,7 +515,7 @@ def _pov_storage_pairs(payload: SetupPayload) -> dict:
         value = creds.get(field, "")
         # Same reconfigure rule as the demo branch: a blank secret means "keep what is
         # already stored", not "erase it".
-        if field in _WIZARD_SECRET_FIELDS and not value:
+        if _keep_stored(field, value):
             continue
         pairs[field] = value
     for field in spec["settings"]:
@@ -574,7 +575,7 @@ def _apply_config(payload: SetupPayload) -> None:
     if payload.sso is not None:
         for field, value in payload.sso.model_dump().items():
             value = (value or "").strip()
-            if field in _WIZARD_SECRET_FIELDS and not value:
+            if _keep_stored(field, value):
                 continue
             pairs[field] = value
 
@@ -583,7 +584,7 @@ def _apply_config(payload: SetupPayload) -> None:
             for field, value in cloud.model_dump().items():
                 # Skip empty secret fields on reconfigure so existing DB values aren't
                 # blanked.
-                if field in _WIZARD_SECRET_FIELDS and not value:
+                if _keep_stored(field, value):
                     continue
                 # get_bool's canonical form, as _write_feature stores it.
                 pairs[field] = ("1" if value else "0") if isinstance(value, bool) else value
@@ -839,7 +840,7 @@ def import_config(payload: HeadlessImport, request: Request, background_tasks: B
         if value is None:
             continue
         # Skip the redaction sentinel, same as _write_feature. GET /api/setup/config
-        # returns bullets for the keys in config_service._SECRET_KEYS, so anything
+        # returns bullets for every key in secret_hygiene.SECRET_KEYS, so anything
         # that round-trips a read back into a write arrives holding them. Storing
         # one leaves a key that *looks* configured in the UI and fails at
         # cloud-call time — worse than leaving it unset.
@@ -2287,35 +2288,9 @@ _CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region", "oidc", "worker",
                          "cert_lab", "spire_lab", "directories",
                          "workload_credentials", "change_windows"}
 
-_SECRET_FEATURE_KEYS = frozenset({
-    "pscli_client_secret", "bt_client_secret", "epml_pat",
-    "clouddb_ps_ssm_secret_access_key", "pra_config_api_client_secret",
-    "clouddb_ps_azure_sp_client_secret", "clouddb_ps_azure_plugin_private_key",
-    "clouddb_ps_azure_plugin_passphrase",
-    "clouddb_ps_ssm_plugin_private_key", "clouddb_ps_ssm_plugin_passphrase",
-    "clouddb_ps_gcp_sa_key",
-    "portainer_pat", "portainer_admin_password",
-    "entitle_api_token", "entitle_api_key", "entitle_rest_secret",
-    "entitle_atlas_private_key", "atlas_client_secret",
-    "pov_accessor_rest_secret",
-    "proxmox_token_secret", "proxmox_password",
-    "skytap_api_token",
-    "aws_secret_access_key",
-    "azure_client_secret",
-    "gcp_service_account_json",
-    "oci_private_key",
-    "oci_private_key_passphrase",
-    "vsphere_password",
-    "hyperv_password",
-    "nutanix_password",
-    "xcpng_password",
-    "ansible_aci_acr_password",
-    "rancher_bootstrap_password", "rancher_admin_password", "rancher_api_token",
-    "oidc_client_secret",
-    "wlc_pat",
-    "cert_ps_bi_api_key",
-    "cert_ps_bi_client_secret",
-})
+# Never returned by a feature panel's GET. The app-wide list -- see
+# secret_hygiene.SECRET_KEYS.
+from ..services.secret_hygiene import SECRET_KEYS as _SECRET_FEATURE_KEYS  # noqa: E402
 
 
 def _feature_to_cfg_key(feature: str) -> str:

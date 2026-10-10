@@ -23,7 +23,7 @@ from __future__ import annotations
 
 # Re-exported so the diff's redaction and the "what didn't come across" report
 # read from the real registry rather than a copy of it.
-from ...services.secret_hygiene import BACKEND_PREFIXES, SECRET_REGISTRY
+from ...services.secret_hygiene import BACKEND_PREFIXES, SECRET_KEYS, SECRET_REGISTRY
 
 #: Exclusion reasons, in the order they are checked.
 INSTANCE_LOCAL = "instance_local"
@@ -257,19 +257,12 @@ _ON_PREM_PREFIXES = (
 
 # ── Secrets ──────────────────────────────────────────────────────────────────
 #
-# The codebase carries four non-identical secret-key lists (see
-# docs/operations/config-migration.md). Only config_service._SECRET_KEYS — the four below —
-# drives masking in GET /api/setup/config, which is why an HTTP export cannot
-# recover them and export-local exists.
+# GET /api/setup/config masks every key in secret_hygiene.SECRET_KEYS, the one app-wide
+# list (it replaced four that had drifted). An HTTP export therefore sees bullets for all
+# of them, which is why export-local exists: it reads the store directly.
 
 #: Masked by ``config_service.get_all_public()``; an HTTP export sees bullets.
-HTTP_MASKED_KEYS = frozenset({
-    "aws_secret_access_key",
-    "azure_client_secret",
-    "azure_oauth_client_secret",
-    "gcp_service_account_json",
-    "wlc_pat",
-})
+HTTP_MASKED_KEYS = SECRET_KEYS
 
 #: The sentinel ``get_all_public`` substitutes. Matched by prefix rather than
 #: equality because ``_write_feature`` uses the same two-bullet prefix test and
