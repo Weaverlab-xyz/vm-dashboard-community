@@ -71,7 +71,7 @@ reads from the database only; exporting an equivalently-named env var has no eff
 | I want to… | Page |
 |---|---|
 | Check out a secret or managed-account credential at runtime | [Password Safe](beyondtrust/password-safe.md) |
-| Onboard a VM or cloud database as a managed system | [Password Safe](beyondtrust/password-safe/vm-onboarding.md#password-safe-vm-onboarding-managed-systems) |
+| Onboard a VM as a managed system | [Password Safe: onboarding VMs](beyondtrust/password-safe/vm-onboarding.md#password-safe-vm-onboarding-managed-systems) |
 | Rotate a Kubernetes ServiceAccount token | [Password Safe](beyondtrust/password-safe/kubernetes-tokens.md#kubernetes-serviceaccount-token-rotation) |
 | Create Shell Jump / Web Jump / RDP / tunnel jump items | [Privileged Remote Access](beyondtrust/privileged-remote-access.md) |
 | Mint PRA Vault accounts for tunnel credentials | [Privileged Remote Access](beyondtrust/privileged-remote-access.md) |
@@ -79,7 +79,7 @@ reads from the database only; exporting an equivalently-named env var has no eff
 | Build EPM-L agent packages or mint installation tokens | [EPM-L](beyondtrust/epml.md) |
 | Request just-in-time cloud access | [Entitle](beyondtrust/entitle.md) |
 | Grant dashboard permissions just-in-time, instead of standing admins | [Entitle dashboard permissions](beyondtrust/entitle-dashboard-permissions.md) |
-| Hand a database credential's rotation to Password Safe | [Password Safe for databases](beyondtrust/databases/) — one page per cloud |
+| Hand a database credential's rotation to Password Safe | [Password Safe for databases](beyondtrust/password-safe/databases.md) — one page per cloud |
 | Pre-condition an image for any of the above | [below](#preparing-images-for-bt-management) |
 
 ---

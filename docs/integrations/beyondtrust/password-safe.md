@@ -187,56 +187,11 @@ Making the ServiceAccount token a PRA Kubernetes tunnel injects a rotating Passw
 
 ## Databases
 
-The dashboard also provisions **managed cloud databases** (AWS / Azure / GCP / OCI), reaches
-them through a PRA protocol tunnel, and can optionally **onboard AWS, Azure and GCP databases
-into Password Safe** for credential rotation (via the `{engine} SSM Custom Plugin`,
-`{engine} Azure Run Command Plugin` or `GCP Cloud SQL {engine}` plugin, and the shared
-`PRA Vault Username Password` plugin). GCP needs no jump host on either of its channels:
-PostgreSQL and MySQL go over Google's control plane (the Cloud SQL Data API), and SQL
-Server through a small Cloud Run service you deploy. It ships off — every channel is
-implemented plugin-side now, but none has been exercised against a live Cloud SQL
-instance. That whole feature — base provisioning, per-cloud
-prerequisites, and the Password Safe onboarding — is documented separately in
-**[Databases](../../databases.md)**. The tunnel half needs
-[Privileged Remote Access](privileged-remote-access.md).
-
-Onboarding is asked for **per database**, in one of two places: the **Onboard into Password
-Safe** checkbox on the Provision form (ticked by default once `clouddb_ps_onboarding_enabled`
-is on), or the row's **Register in Password Safe** action afterwards — which is how a
-database built before Password Safe was configured gets onboarded without being rebuilt.
-Registering after the fact **re-brokers the PRA tunnel** so it injects the rotatable managed
-user rather than the master admin; see
-[Databases → Two ways in](databases/password-safe.md#two-ways-in-at-provision-or-afterwards).
-
-The dashboard can also **register** a database it did not create — on-premises or in a cloud —
-so it can be a Configuration Management target. That path has no tunnel and no onboarding: its
-admin login is a Password Safe **managed account**, checked out just-in-time per run and never
-stored, so the database has to be onboarded in Password Safe *before* it can be registered.
-
-### Importing databases from Password Safe
-
-Since Password Safe's own discovery scanner already found and onboarded these databases —
-with managed credentials, so it knows the platform, port, instance and accounts — the
-Databases page can read that inventory directly instead of asking an operator to retype it.
-**Databases** → **Import from Password Safe** lists the candidates and registers the ones you
-tick. It **reads only**; nothing in Password Safe is created or changed.
-
-Two things worth knowing here rather than in the feature doc:
-
-- **This path uses the public REST API, not `ps-cli`.** It reads `Platforms`,
-  `ManagedSystems`, `Databases` and `ManagedAccounts` over HTTPS with the same
-  `pscli_api_url` / `pscli_client_id` / `pscli_client_secret` OAuth client configured in
-  [Step 1](#step-1--password-safe-oauth-application-ps-cli), so it works in an image with no
-  `ps-cli` binary. The run-time credential *checkout* still goes through `ps-cli`.
-- **The account list comes from the accounts the API identity can `request`.** That is the
-  same permission surface the checkout uses, so a missing **Requestor** role or Smart Rule
-  shows up as a greyed-out candidate instead of a `4031, statuscode: 403` in a worker log
-  hours later.
-
-Configuration keys (Settings → Integrations → Password Safe → *Database Import*):
-`clouddb_ps_import_workgroup`, `clouddb_ps_import_default_cloud`,
-`clouddb_ps_import_max_systems`, `clouddb_ps_import_platform_map`. All optional and all
-documented in **[Databases → Importing from Password Safe](../../databases.md#importing-from-password-safe)**.
+Handing database credentials to Password Safe, and importing databases Password Safe already
+manages. The shared model is on [Password Safe: databases](password-safe/databases.md), and
+each cloud's channel has its own page: [AWS (`dbssm`)](password-safe/databases-aws.md),
+[Azure (`dbazure`)](password-safe/databases-azure.md) and
+[GCP Cloud SQL (`dbgcp`)](password-safe/databases-gcp.md).
 
 ---
 
