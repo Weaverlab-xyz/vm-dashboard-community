@@ -187,11 +187,15 @@ def test_dashboard_egress_addresses_are_instance_identity():
 
 
 def test_masked_values_never_cross():
-    """``get_all_public`` bullets four keys. Storing the bullets leaves a key that
-    looks configured in the UI and fails at cloud-call time."""
+    """``get_all_public`` bullets every key in ``secret_hygiene.SECRET_KEYS``. Storing the
+    bullets leaves a key that looks configured in the UI and fails at cloud-call time."""
     for key in sorted(classify.HTTP_MASKED_KEYS):
         assert classify.exclusion_reason(key, "•" * 8) == classify.MASKED, key
-        # …but the same key with a real value is exactly what we want to carry.
+        # …but the same key with a real value is never held back AS masked. It may still
+        # be held back for its own reason (an on-prem hypervisor password is ON_PREM).
+        assert classify.exclusion_reason(key, "AKIAREAL") != classify.MASKED, key
+    # The cloud credentials carry outright: they are what a migration is for.
+    for key in ("aws_secret_access_key", "azure_client_secret", "gcp_service_account_json"):
         assert classify.exclusion_reason(key, "AKIAREAL") is None, key
 
 

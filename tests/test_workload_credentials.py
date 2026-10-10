@@ -353,17 +353,15 @@ def test_the_backend_is_registered_in_every_dispatch_table():
         assert fn in block, f"{table} does not point at {fn}"
 
 
-def test_the_pat_is_registered_in_all_four_secret_lists():
-    # These four lists are deliberately non-identical and have drifted before,
-    # so a new secret has to be added to each one by hand.
-    for parts, label in (
-        (("web_dashboard", "services", "config_service.py"), "_SECRET_KEYS"),
-        (("web_dashboard", "services", "secret_hygiene.py"), "SECRET_REGISTRY"),
-        (("web_dashboard", "api", "setup.py"), "_WIZARD_SECRET_FIELDS"),
-        (("web_dashboard", "scripts", "config_migrate", "classify.py"),
-         "HTTP_MASKED_KEYS"),
-    ):
-        assert "wlc_pat" in _read(*parts), f"{label} is missing wlc_pat"
+def test_the_pat_is_registered_as_a_secret_and_in_the_vault_registry():
+    # The four secret lists that used to drift are one now (secret_hygiene.SECRET_KEYS;
+    # tests/test_secret_keys.py pins that every consumer uses it). The PAT has to be in it,
+    # and in the vault registry the Secrets page migrates from.
+    src = _read("web_dashboard", "services", "secret_hygiene.py")
+    registry = src.split("SECRET_REGISTRY: list = [", 1)[1].split("\n]", 1)[0]
+    assert '"wlc_pat"' in registry, "SECRET_REGISTRY is missing wlc_pat"
+    assert "SECRET_KEYS: frozenset = frozenset(k for k, _ in SECRET_REGISTRY)" in src, \
+        "SECRET_KEYS no longer includes the registry, so wlc_pat would go unmasked"
 
 
 def test_the_pat_cannot_be_migrated_into_workload_credentials_itself():

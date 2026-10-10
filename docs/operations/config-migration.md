@@ -115,13 +115,16 @@ From a Compose instance, prefer `--via docker`:
 ```
 
 It execs into the container and reads the config store directly, which is the
-only way to capture two things the HTTP API withholds by design: the four keys
-`GET /api/setup/config` redacts (`aws_secret_access_key`, `azure_client_secret`,
-`azure_oauth_client_secret`, `gcp_service_account_json`) and webhook URLs, which
-are themselves bearer credentials and are never returned.
+only way to capture two things the HTTP API withholds by design: every secret, which
+`GET /api/setup/config` returns masked, and webhook URLs, which are themselves bearer
+credentials and are never returned. "Every secret" is one list,
+`secret_hygiene.SECRET_KEYS`: cloud credentials, Gateway deploy keys, hypervisor and
+storage passwords, API tokens and client secrets.
 
-Without Docker access, `--via http` works against any reachable instance and
-tells you exactly which keys came back redacted so you can set them by hand.
+Without Docker access, `--via http` works against any reachable instance, but it carries
+no secrets: it tells you exactly which keys came back masked so you can set them by hand
+on the target. Moving secrets into a vault first avoids that, because a vault reference
+is not a secret and travels as a pointer.
 
 The bundle lands in `~/.dashboard-migrate/` at mode 0600. **It contains live
 credentials.** Delete it after cutover; it is gitignored, but it should not be

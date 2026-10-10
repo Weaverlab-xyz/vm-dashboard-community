@@ -1458,6 +1458,12 @@ function wizard() {
           });
           if (cfgRes.ok) {
             const cfg = await cfgRes.json();
+            // Secrets come back masked. Drop them before anything below copies a value
+            // into a field: a pre-filled mask would be submitted as the password. Blank
+            // means "keep the stored one" for every secret (api/setup.py::_keep_stored).
+            for (const k of Object.keys(cfg)) {
+              if (typeof cfg[k] === 'string' && cfg[k].startsWith('••')) delete cfg[k];
+            }
             // The profile FIRST: it drives which steps exist, and leaving it at the
             // 'demo' default on a POV instance would show four cloud steps that instance
             // does not use -- and submit 'demo', flipping it back and unmasking every
