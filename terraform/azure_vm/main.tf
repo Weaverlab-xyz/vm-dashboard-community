@@ -9,7 +9,14 @@ terraform {
 }
 
 provider "azurerm" {
-  features {}
+  features {
+    # The OS disk goes with the VM. This is the azurerm 3.x default, stated so it cannot
+    # change underneath us: a deleted VM must not leave a disk billing on its own.
+    # (`os_disk.disk_delete_option` is not an argument of azurerm_linux_virtual_machine.)
+    virtual_machine {
+      delete_os_disk_on_deletion = true
+    }
+  }
   subscription_id = var.subscription_id
   client_id       = var.client_id
   client_secret   = var.client_secret
@@ -153,7 +160,6 @@ resource "azurerm_linux_virtual_machine" "vm" {
   os_disk {
     caching              = "ReadWrite"
     storage_account_type = "Standard_LRS"
-    disk_delete_option   = "Delete"
   }
 
   tags = {

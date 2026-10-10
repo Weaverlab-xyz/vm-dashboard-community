@@ -279,7 +279,7 @@ sets the mapping explicitly:
 
 | Path | OS disk | Public IP |
 |---|---|---|
-| `terraform/azure_vm/main.tf` | `disk_delete_option = "Delete"` | `count = create_public_ip ? 1 : 0`, same state as the VM |
+| `terraform/azure_vm/main.tf` | provider `features.virtual_machine.delete_os_disk_on_deletion = true` | `count = create_public_ip ? 1 : 0`, same state as the VM |
 | `azure_service._deploy_vm_sync` | `delete_option="Delete"` | `_best_effort_cleanup` deletes the PIP explicitly |
 | `azure_service._run_vm_jumpoint_sync` | `delete_option="Delete"` | — |
 | `azure_service._run_vm_container_node_sync` | OS `Delete`, data disk `Detach` | — |
