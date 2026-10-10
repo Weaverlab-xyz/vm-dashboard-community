@@ -39,8 +39,8 @@ logger = logging.getLogger(__name__)
 # HMAC alg were accepted here, the IdP's PUBLIC key bytes could be used as an HMAC secret
 # to sign a token of anyone's choosing -- the classic algorithm-confusion attack. A token
 # that says HS* never reaches this module (``api/auth.resolve_bearer`` routes it away).
-ASYMMETRIC_ALGS = ("RS256", "RS384", "RS512", "PS256", "PS384", "PS512",
-                   "ES256", "ES384", "ES512")
+# Defined in oidc_service, which applies the same rule to login ID tokens.
+ASYMMETRIC_ALGS = oidc_service.ASYMMETRIC_ALGS
 
 # A token naming a ``kid`` the cached JWKS lacks is either a key rotation or garbage. A
 # rotation needs ONE refetch; garbage must not turn every request into a round trip to the
