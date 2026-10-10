@@ -168,7 +168,8 @@ def gcp_join_service_account() -> str:
     if not sa:
         raise DomainJoinError(
             "GCP domain join runs as the VM's service account, and none is configured — "
-            "set gcp_domain_join_service_account (Settings → Managed Active Directory) to "
+            "set gcp_domain_join_service_account (Settings → Preview features → Directories → "
+            "Configure) to "
             "an account holding roles/managedidentities.domainJoin.")
     return sa
 

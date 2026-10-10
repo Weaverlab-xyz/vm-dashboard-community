@@ -206,12 +206,12 @@ first visit because no credentials are stored yet.
 
 | Step | What to fill in |
 |------|-----------------|
-| **Admin account** | Username and password you'll use to log in |
+| **Admin account** | Username and password you'll use to log in. Optionally expand **Single sign-on (OIDC)** to let people sign in through Okta, Entra ID, Keycloak or any OpenID Connect provider ([OIDC and single sign-on](oidc.md)) |
 | **AWS** | Access Key ID, Secret Access Key, and default region from Part A |
-| **Azure** | Service principal credentials from Part B. Optionally expand **Sign in with Microsoft** to add Entra OAuth (see Appendix B) |
+| **Azure** | Service principal credentials from Part B. Optionally expand **Sign in with Microsoft (legacy)** to add the older Entra-only sign-in ([oidc/entra-oauth.md](oidc/entra-oauth.md)); for new setups, prefer the OIDC panel on the Admin step |
 | **GCP** | Project ID, region/zone, and service account JSON key from Part C. Expand **Advanced** to set the SSH key secret name |
 | **OCI** | Tenancy/user OCID, key fingerprint, private key and region. Every field may be left blank to skip OCI |
-| **Feature flags** | Enable optional integrations — all default off (see Appendices A–F for on-prem hypervisors; Appendix J for MCP). Toggles only; the per-integration fields live in **Settings → Integrations** |
+| **Feature flags** | Enable optional integrations — all default off (each has its own guide: see [Optional integrations](#optional-integrations)). Toggles only; the per-integration fields live in **Settings → Integrations** |
 
 Steps are listed by name rather than number on purpose: the wizard's step list is data, and
 citing an ordinal is how this table came to omit OCI and call Feature flags "step 5".

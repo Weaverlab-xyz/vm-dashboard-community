@@ -1,10 +1,29 @@
 # Sign in with Microsoft (Entra OAuth)
 
-> **Audience:** operator · **Profile:** `both` · **Read this when:** you want the legacy per-tenant Entra sign-in button rather than the generic OIDC path.
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you already use the legacy Entra-only sign-in button, or are moving from it to generic OIDC.
 
-The older, Entra-specific sign-in path. For any other identity provider — or for
-Entra via discovery — use [Generic OIDC](../oidc.md) instead; that page notes this
-one is configured separately and is unaffected by it.
+The older, Entra-specific sign-in path. **It is legacy:** generic
+[OIDC single sign-on](../oidc.md) is the default, works with Entra ID, and is what the setup
+wizard's Admin step now offers. This path still works and can run alongside it, but new
+setups should use OIDC.
+
+### Moving from this button to OIDC
+
+You can reuse the app registration you already have:
+
+1. In the app registration, add a second redirect URI:
+   `{your-host}/api/auth/oauth/oidc/callback`. Keep the old one until you have switched.
+2. Make sure the ID token carries a **groups** claim (**Token configuration → Add groups
+   claim**), if you map groups to workgroups.
+3. In **Settings → Integrations → Single sign-on (OIDC)**, set the issuer to
+   `https://login.microsoftonline.com/<tenant-id>/v2.0`, with the same client ID and secret.
+   Use **Test** to check discovery.
+4. Sign in with the new button. Then clear the **Sign in with Microsoft (legacy)** fields
+   (setup wizard → Azure step) to remove the old button.
+
+People keep their accounts: both paths read the email from the same claims, and OIDC falls
+back to the email when it does not recognise the subject. Group mappings carry over too,
+because Entra sends group **object IDs** in both cases.
 
 
 Optional. Lets users log in with their work Microsoft account instead of
@@ -26,8 +45,8 @@ principal in Part B.
 
 ### Wire it up
 
-**During initial setup:** In the setup wizard, go to Step 3 (Azure) and
-expand the **Sign in with Microsoft — optional** panel. Enter the Client
+**During initial setup:** In the setup wizard, go to the Azure step and
+expand the **Sign in with Microsoft (legacy) — optional** panel. Enter the Client
 ID, Client Secret, and Tenant ID, then complete the wizard as normal.
 
 **After initial setup:** Navigate to `/setup` in your browser (admin

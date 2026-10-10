@@ -74,8 +74,10 @@ broader than necessary and too narrow to work:
 
 - **`AmazonEC2FullAccess`** grants more EC2 than the dashboard uses, and nothing
   at all for ECS, EKS, Lambda, RDS, Secrets Manager or Cost Explorer — every one
-  of which this same guide sets up later (Appendix L, Appendix M, and the
-  external-vault step in Part D).
+  of which a later guide sets up ([Kubernetes](../kubernetes.md),
+  [Cloud Functions](../integrations/cloud-functions.md), [Databases](../databases.md),
+  [Cloud Costs](../cloud/costs.md) and an external vault in
+  [Secrets Management](../access/secrets-management.md)).
 - **`AmazonS3ReadOnlyAccess` breaks deploys outright.** Terraform state lives in
   your active storage backend, so an apply must *write* `s3:PutObject` /
   `s3:DeleteObject` for both the `.tfstate` object and its `.tflock` companion
