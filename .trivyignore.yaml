@@ -1,0 +1,18 @@
+# Image findings scripts/ci/trivy_image.sh accepts. Each entry is scoped by `paths` to the
+# one place it was reviewed, and its `statement` says why it does not apply. Prefer fixing
+# (a base-image bump, a package upgrade) to adding an entry.
+vulnerabilities:
+  # The promote runner carries a private copy of setuptools that it injects into Azure VM
+  # images, only so WALinuxAgent's `setup.py install` can run inside the target image
+  # (runners/promote/Dockerfile, WALINUXAGENT block). setuptools vendors its own wheel and
+  # jaraco.context; the flagged versions are setuptools-internal and the same in every
+  # release WALinuxAgent can use (pinned <80; 79.0.1 and 80.9.0 vendor identical copies).
+  # Nothing in the runner imports them, and inside the VM they only serve that one install.
+  - id: CVE-2026-23949
+    paths:
+      - "opt/walinuxagent-src/_vendor/setuptools/_vendor/jaraco.context-5.3.0.dist-info/METADATA"
+    statement: setuptools-internal vendored copy, used only for WALinuxAgent's setup.py inside the target VM image; no allowed setuptools ships a fixed one
+  - id: CVE-2026-24049
+    paths:
+      - "opt/walinuxagent-src/_vendor/setuptools/_vendor/wheel-0.45.1.dist-info/METADATA"
+    statement: setuptools-internal vendored copy, used only for WALinuxAgent's setup.py inside the target VM image; no allowed setuptools ships a fixed one
