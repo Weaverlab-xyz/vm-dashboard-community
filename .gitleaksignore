@@ -1,0 +1,27 @@
+# gitleaks findings reviewed and accepted, by fingerprint (commit:file:rule:line).
+# Every one below was checked on 2026-10-10 and is not a credential: test fixtures (fake
+# JWTs, 'test-secret-*' JWT keys, jwt.io's published example RSA key), documentation
+# placeholders (USER:PASS, REPLACE_ME_WITH_32_BYTE_HEX), a public Azure built-in role id
+# and variable names a rule mistook for values. A new finding is NOT added here without
+# the same check: a real secret gets rotated first, then removed from history.
+
+9bfa89dd80f44085cf0d7929eea2a8f5ab18fdcd:tests/test_k8s_onprem_dex_kubeconfig.py:generic-api-key:19
+2721d7a04226982443fa3cd601bb218f1853e5c3:tests/test_cert_lab_functional_account.py:generic-api-key:504
+8a337722f2b21f2226ac8dd4e72295e3f37dbb21:web_dashboard/services/gcp_service.py:generic-api-key:5258
+9875a04aa7ca6b83893eac5c4974c156a6ed8442:tests/test_cert_lab_functional_account.py:private-key:41
+3fd540287c6a696511a6daf7c14cdbd6d90e10a3:tests/test_ps_vault_key_sync.py:private-key:106
+47d6c3b52c847b77a5a0b2f7839e3cac533d3d57:tests/test_pov_functional_account.py:generic-api-key:90
+8a0a81add363eeb97683e4513c8ed9fa46870adc:docs/integrations/vmware.md:curl-auth-user:61
+4adadf1b55555d0656cc498875dd5b90ff8329fb:tests/test_function_secretref.py:generic-api-key:78
+4adadf1b55555d0656cc498875dd5b90ff8329fb:tests/test_function_secretref.py:generic-api-key:79
+4adadf1b55555d0656cc498875dd5b90ff8329fb:tests/test_cloud_function_service.py:generic-api-key:423
+337cb84ae717e5c7d49e03f731cc28f469794045:web_dashboard/services/azure_role_rules.py:generic-api-key:30
+f5f26180b853f486854967f0d6198583f57e6889:tests/test_ps_k8ssa.py:generic-api-key:326
+2edec541d30699886102124a99ec235ad728d6bc:tests/test_k8s_token_sync.py:generic-api-key:28
+2edec541d30699886102124a99ec235ad728d6bc:tests/test_k8s_token_sync.py:generic-api-key:192
+2edec541d30699886102124a99ec235ad728d6bc:tests/test_ps_api_credentials.py:generic-api-key:68
+a6b5400d5534ab9c56da1b346cc8e96444fe0abf:docs/integrations/vmware.md:curl-auth-user:182
+2edec541d30699886102124a99ec235ad728d6bc:tests/test_ps_k8ssa.py:generic-api-key:232
+2edec541d30699886102124a99ec235ad728d6bc:tests/test_ps_k8ssa.py:generic-api-key:295
+156c70cd6c2343611be3ae88cb4f3b001b167d47:web_dashboard/services/terraform_pra_service.py:generic-api-key:996
+1e6f8b4b55148ec5135b56d5f757ebf160e30779:.env.example:generic-api-key:17

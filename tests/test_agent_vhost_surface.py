@@ -60,7 +60,6 @@ except ModuleNotFoundError as exc:  # pragma: no cover — bare interpreter
         print(f"SKIP: {exc}")
         sys.exit(0)
 
-from fastapi.routing import APIRoute  # noqa: E402
 from web_dashboard.main import app  # noqa: E402
 
 
@@ -108,7 +107,8 @@ def _matches(matcher, path):
 
 
 def _api_routes():
-    return [r for r in app.routes if isinstance(r, APIRoute)]
+    from _routes import api_routes
+    return api_routes(app)
 
 
 def _permission_gates(route):

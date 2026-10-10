@@ -595,8 +595,7 @@ def test_every_pov_route_in_the_whole_app_carries_a_permission_gate():
     Asserting it per known file would miss the next one, so this walks the REAL app.
     """
     os.environ.setdefault("JWT_SECRET_KEY", "test-secret-pov-instance-grants")
-    from fastapi.routing import APIRoute
-
+    from _routes import api_routes
     from web_dashboard.main import app
 
     # The two deliberate exemptions, each authorized by something other than a scope:
@@ -609,8 +608,8 @@ def test_every_pov_route_in_the_whole_app_carries_a_permission_gate():
     exempt = ("/api/pov/accessor/self", "/api/pov/accessor/rest")
 
     ungated = []
-    for route in app.routes:
-        if not isinstance(route, APIRoute) or not route.path.startswith("/api/pov"):
+    for route in api_routes(app):
+        if not route.path.startswith("/api/pov"):
             continue
         if route.path.startswith(exempt):
             continue

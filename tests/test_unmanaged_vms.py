@@ -268,13 +268,14 @@ def test_no_api_route_is_bound_to_a_fetcher():
     to assert against."""
     from web_dashboard.main import app
 
-    misbound = [(r.path, r.name) for r in app.routes
+    from _routes import all_routes
+    misbound = [(r.path, r.name) for r in all_routes(app)
                 if getattr(r, "path", "").startswith("/api/")
                 and getattr(r, "name", "").startswith(("_fetch", "_discovery"))]
     assert not misbound, f"routes bound to a helper rather than a handler: {misbound}"
 
     # And the four listings each still answer with their own handler.
-    by_path = {getattr(r, "path", ""): getattr(r, "name", "") for r in app.routes}
+    by_path = {getattr(r, "path", ""): getattr(r, "name", "") for r in all_routes(app)}
     for path, expected in (("/api/aws/instances", "list_instances"),
                            ("/api/azure/vms", "list_vms"),
                            ("/api/gcp/instances", "list_instances"),
@@ -283,8 +284,9 @@ def test_no_api_route_is_bound_to_a_fetcher():
 
 
 def test_all_four_clouds_expose_discovery():
+    from _routes import all_routes
     from web_dashboard.main import app
-    paths = {getattr(r, "path", "") for r in app.routes}
+    paths = {getattr(r, "path", "") for r in all_routes(app)}
     for cloud in ("aws", "azure", "gcp", "oci"):
         assert f"/api/{cloud}/unmanaged" in paths, cloud
 

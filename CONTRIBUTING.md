@@ -186,7 +186,18 @@ Each has a script, or a single command, that runs the same way locally:
 | `ruff` | Bug rules only: undefined names, a dict key written twice, a closure over a loop variable, a mutable default (`ruff.toml`) | `ruff check` |
 | `ansible-syntax` | A playbook Ansible cannot load: an unknown module, a malformed task | `scripts/ci/ansible_syntax.sh` (needs `pip install ansible`) |
 | `terraform` | Unformatted HCL, or a module that fails `terraform validate` | `scripts/ci/terraform_validate.sh` |
-| `Images` workflow | A Dockerfile that no longer builds, or a dashboard image that does not boot to `GET /api/health` | `docker build .` |
+| `Images` workflow | A Dockerfile that no longer builds, or a dashboard image that does not boot to `GET /api/health` and render a page | `docker build .` |
+| Trivy (in `Images`) | A fixable HIGH/CRITICAL vulnerability in an image's OS or Python packages. Vendored Go binaries (Terraform, providers, Packer, OPA) are reported, not blocking | `scripts/ci/trivy_image.sh IMAGE` |
+| `pip-audit` (`Security`) | A Python package the app installs has a published vulnerability | `scripts/ci/pip_audit.sh` (needs `pip install pip-audit`) |
+| `gitleaks` (`Security`) | A commit adds something shaped like a credential | `scripts/ci/gitleaks.sh origin/main..HEAD` |
+
+`Security` and the image scans also run nightly, because an advisory published today
+applies to code nobody changed. Dependabot (`.github/dependabot.yml`) proposes the
+upgrades that clear them. A finding that does not apply goes in that tool's exceptions
+file with the reason, never silently: `.pip-audit-ignore`, `.trivyignore.yaml`
+(scoped by path) or `.gitleaksignore` (reviewed fingerprints, never a real secret). A
+binary a Dockerfile downloads is pinned to a version and to its vendor's SHA256, and a
+version bump updates both.
 
 When a skip is expected in the `tests` job, because another job runs the file with what
 `tests` lacks (a real OPA binary, a PostgreSQL server), add the file to

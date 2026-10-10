@@ -14,6 +14,9 @@ name: Images
 # first-run setup (main.py's _SETUP_BYPASS_PREFIXES), so a 200 means the container booted
 # and served a request.
 #
+# Every image built here is then scanned by Trivy (scripts/ci/trivy_image.sh): fixable
+# HIGH/CRITICAL findings in OS or Python packages fail the job.
+#
 # The runner images build only when their folder (or this workflow) changes. Their
 # Dockerfiles already fail on an unresolvable collection or library (`ansible-doc ...`,
 # `python -c "import ..."`), so a successful build is the check. Their list is READ from
@@ -23,6 +26,11 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Nightly, every image is built and scanned, changed or not: an advisory published
+  # today applies to an image nobody touched, and a PR would never rebuild it.
+  schedule:
+    - cron: "41 5 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -34,6 +42,9 @@ concurrency:
 jobs:
   dashboard-image:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write  # the SARIF upload on main
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -60,7 +71,11 @@ jobs:
             type=gha,scope=chrweav/infra-dashboard
           cache-to: type=gha,mode=max,scope=ci-dashboard
 
-      - name: Boot and probe /api/health
+      # Then render a page. /api/health is JSON; a page exercises Jinja and the templates.
+      # A fresh install sends /login to /setup, so this follows the redirect and expects
+      # the setup page. (The Starlette 1.x upgrade broke every page while /api/health
+      # stayed 200; tests/test_template_response_order.py pins that cause.)
+      - name: Boot and probe /api/health and a page
         run: |
           docker run -d --name dash -p 8000:8000 \
             -e JWT_SECRET_KEY=ci-image-boot-check \
@@ -69,7 +84,14 @@ jobs:
             code=$(curl -s -o health.json -w '%{http_code}' http://127.0.0.1:8000/api/health || true)
             if [ "$code" = "200" ]; then
               echo "healthy after ~$((i * 2))s: $(cat health.json)"
-              exit 0
+              page=$(curl -s -L -o page.html -w '%{http_code} %{url_effective}' http://127.0.0.1:8000/login)
+              echo "GET /login -> $page"
+              if [ "${page%% *}" = "200" ] && grep -q '<title>' page.html; then
+                exit 0
+              fi
+              echo "::error::/api/health is up but /login did not render a page ($page)"
+              head -c 600 page.html; echo
+              exit 1
             fi
             if [ "$(docker inspect -f '{{.State.Running}}' dash)" != "true" ]; then
               echo "::error::the container exited before it served /api/health"
@@ -83,6 +105,47 @@ jobs:
       - name: Container logs
         if: always()
         run: docker logs dash 2>&1 | tail -200 || true
+
+      # Pinned and checksum-verified, not trivy-action: that action's tags were rewritten
+      # to a malicious commit in a 2025 supply-chain attack, and a pinned binary is simpler.
+      - name: Install Trivy
+        env:
+          TRIVY_VERSION: "0.74.0"
+          TRIVY_SHA256: 2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors -o /tmp/trivy.tgz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  /tmp/trivy.tgz" | sha256sum -c -
+          tar -xzf /tmp/trivy.tgz -C /usr/local/bin trivy
+          trivy --version
+
+      # The vulnerability database is a ~70 MB download that changes daily; one per day.
+      - name: Date for the Trivy DB cache
+        id: day
+        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      - name: Cache the Trivy DB
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ steps.day.outputs.day }}
+          restore-keys: trivy-db-
+
+      # Blocks on fixable HIGH/CRITICAL in OS and Python packages; reports the vendored Go
+      # binaries (Terraform, providers, Packer, OPA) without blocking. See the script.
+      - name: Scan the image
+        run: scripts/ci/trivy_image.sh infra-dashboard:ci trivy-dashboard.json
+
+      # On main, every finding (vendored binaries included) goes to the repository's code
+      # scanning alerts, where it is tracked until a vendor release clears it.
+      - name: Convert findings to SARIF
+        if: github.event_name == 'push' && always()
+        run: trivy convert --format sarif --output trivy-dashboard.sarif trivy-dashboard.json
+      - name: Upload to code scanning
+        if: github.event_name == 'push' && always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-dashboard.sarif
+          category: trivy-dashboard-image
 
   # Which runner images this change touches, as a matrix. Reads publish-images.yml so the
   # list cannot drift from what a release builds.
@@ -118,7 +181,7 @@ jobs:
           elif [ -n "$BEFORE" ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
             changed=$(git diff --name-only "$BEFORE" HEAD)
           else
-            changed=ALL   # a new branch or a force-push: no reliable base, build them all
+            changed=ALL   # nightly, manual, a new branch or a force-push: build them all
           fi
 
           if [ "$changed" = ALL ] || echo "$changed" | grep -qxE \
@@ -155,8 +218,37 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
+          load: true
           push: false
+          tags: runner:ci
           cache-from: |
             type=gha,scope=ci-${{ matrix.image }}
             type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=ci-${{ matrix.image }}
+
+      # Pinned and checksum-verified, not trivy-action: that action's tags were rewritten
+      # to a malicious commit in a 2025 supply-chain attack, and a pinned binary is simpler.
+      - name: Install Trivy
+        env:
+          TRIVY_VERSION: "0.74.0"
+          TRIVY_SHA256: 2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors -o /tmp/trivy.tgz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  /tmp/trivy.tgz" | sha256sum -c -
+          tar -xzf /tmp/trivy.tgz -C /usr/local/bin trivy
+          trivy --version
+
+      # The vulnerability database is a ~70 MB download that changes daily; one per day.
+      - name: Date for the Trivy DB cache
+        id: day
+        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      - name: Cache the Trivy DB
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ steps.day.outputs.day }}
+          restore-keys: trivy-db-
+
+      - name: Scan the image
+        run: scripts/ci/trivy_image.sh runner:ci

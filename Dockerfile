@@ -1,9 +1,21 @@
 # Terraform, Packer, and all other tools are downloaded as architecture-aware
 # binaries (see RUN steps below), so the image builds and runs natively on
 # both ARM64 (Apple Silicon, AWS Graviton) and AMD64.
-FROM python:3.12-slim AS base
+#
+# Every downloaded binary is pinned to a version AND to the SHA256 its vendor published
+# for that version, per architecture, and the build fails on a mismatch (helm: against
+# the checksum file it publishes beside the tarball, see below). TLS proves who
+# served the bytes, not that they are the bytes that were released; a pinned hash does.
+# Bumping a version means updating its two hashes from the vendor's checksum file in the
+# same change (the URL is in the comment next to each pair). Terraform providers and
+# Packer plugins need no hash here: `terraform init` and `packer plugins install` verify
+# signed checksums themselves.
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS base
 
 ARG PACKER_VERSION=1.11.2
+# https://releases.hashicorp.com/packer/1.11.2/packer_1.11.2_SHA256SUMS
+ARG PACKER_SHA256_AMD64=ced13efc257d0255932d14b8ae8f38863265133739a007c430cae106afcfc45a
+ARG PACKER_SHA256_ARM64=dd296d743dd4593304307583cff5290bba9b868fc2b0b605b64566f8141ca728
 
 # Escape hatch for networks whose proxy still mangles trixie-updates /
 # trixie-security Packages files even with the corp CA installed and apt
@@ -262,11 +274,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # The packer.zip curl also picks up the --retry flags the other release-artifact
 # fetches in this file already carry (see the helm-install curl below).
 ARG TERRAFORM_VERSION=1.10.5
+# https://releases.hashicorp.com/terraform/1.10.5/terraform_1.10.5_SHA256SUMS
+ARG TERRAFORM_SHA256_AMD64=0566a24f5332098b15716ebc394be503f4094acba5ba529bf5eb0698ed5e2a90
+ARG TERRAFORM_SHA256_ARM64=0ca5d6977c7c46bfa4bbe030030b911e897cf0cb72bff5525fb76c10f1c3409a
 RUN --mount=type=secret,id=github_token,required=false \
     ARCH=$(dpkg --print-architecture) \
     && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
         "https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_linux_${ARCH}.zip" \
         -o /tmp/packer.zip \
+    && SHA=$([ "$ARCH" = arm64 ] && echo "$PACKER_SHA256_ARM64" || echo "$PACKER_SHA256_AMD64") \
+    && echo "$SHA  /tmp/packer.zip" | sha256sum -c - \
     && unzip -q /tmp/packer.zip -d /usr/local/bin/ \
     && rm /tmp/packer.zip \
     && if [ -s /run/secrets/github_token ]; then \
@@ -300,6 +317,9 @@ RUN --mount=type=secret,id=github_token,required=false \
 # stream (exit 56) needs --retry-all-errors to be retried at all. The
 # `opa version` below stays the proof the binary arrived intact.
 ARG OPA_VERSION=0.70.0
+# https://github.com/open-policy-agent/opa/releases/download/v0.70.0/opa_linux_<arch>_static.sha256
+ARG OPA_SHA256_AMD64=00d114b94fdb1606a48cccdfc73c9ccdc62c38721150131ae578d5ff3df5c084
+ARG OPA_SHA256_ARM64=48061407a2d7b0b59440fc3a257e7bb251e9ec62f6ce7b1e45c142263ae24413
 RUN ARCH=$(dpkg --print-architecture) \
     && case "$ARCH" in \
          amd64) OPA_ARCH=amd64 ;; \
@@ -309,6 +329,8 @@ RUN ARCH=$(dpkg --print-architecture) \
     && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
         "https://openpolicyagent.org/downloads/v${OPA_VERSION}/opa_linux_${OPA_ARCH}_static" \
         -o /usr/local/bin/opa \
+    && SHA=$([ "$OPA_ARCH" = arm64 ] && echo "$OPA_SHA256_ARM64" || echo "$OPA_SHA256_AMD64") \
+    && echo "$SHA  /usr/local/bin/opa" | sha256sum -c - \
     && chmod +x /usr/local/bin/opa \
     && /usr/local/bin/opa version
 
@@ -359,6 +381,8 @@ RUN export TF_PLUGIN_CACHE_DIR="${TF_PROVIDER_MIRROR_DIR}" \
     && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
         "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${ARCH}.zip" \
         -o /tmp/terraform.zip \
+    && SHA=$([ "$ARCH" = arm64 ] && echo "$TERRAFORM_SHA256_ARM64" || echo "$TERRAFORM_SHA256_AMD64") \
+    && echo "$SHA  /tmp/terraform.zip" | sha256sum -c - \
     && unzip -qo /tmp/terraform.zip -d /usr/local/bin/ \
     && rm /tmp/terraform.zip \
     && mkdir -p "${TF_PLUGIN_CACHE_DIR}" \
@@ -472,16 +496,34 @@ RUN set -eu; \
 # Run, ECS/Fargate) that don't expose one -- and drops the whole sibling-runner
 # failure class (entrypoint, CA trust, shared volume, file perms). Fetched on CI's
 # clean network; both are architecture-aware (linux/amd64 + linux/arm64).
+#
+# Both are pinned. kubectl used to follow dl.k8s.io/release/stable.txt, so two builds of
+# the same commit could ship different kubectls; helm came from `curl get-helm-3 | bash`
+# off helm's main branch, which runs whatever that script says on the day. 1.37.1 and
+# 3.22.0 are what that produced in the last release, so behaviour is unchanged.
+# helm is checked against the .sha256sum file helm publishes next to each tarball rather
+# than a hash pinned here: get.helm.sh is the only place helm publishes its checksums.
+ARG KUBECTL_VERSION=v1.37.1
+# https://dl.k8s.io/release/v1.37.1/bin/linux/<arch>/kubectl.sha256
+ARG KUBECTL_SHA256_AMD64=65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8
+ARG KUBECTL_SHA256_ARM64=ff749f4b78d9c4f1ec87307df9b50119ed819e2094aa9810cb9acffc3286c8c7
+ARG HELM_VERSION=v3.22.0
 RUN ARCH=$(dpkg --print-architecture) \
-    && KVER="$(curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
-        https://dl.k8s.io/release/stable.txt)" \
     && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
-        "https://dl.k8s.io/release/${KVER}/bin/linux/${ARCH}/kubectl" \
+        "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl" \
         -o /usr/local/bin/kubectl \
+    && SHA=$([ "$ARCH" = arm64 ] && echo "$KUBECTL_SHA256_ARM64" || echo "$KUBECTL_SHA256_AMD64") \
+    && echo "$SHA  /usr/local/bin/kubectl" | sha256sum -c - \
     && chmod +x /usr/local/bin/kubectl \
     && kubectl version --client \
     && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
-        https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash \
+        "https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH}.tar.gz" -o /tmp/helm.tar.gz \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+        "https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH}.tar.gz.sha256sum" -o /tmp/helm.sha256 \
+    && echo "$(cut -d' ' -f1 /tmp/helm.sha256)  /tmp/helm.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/helm.tar.gz -C /tmp \
+    && mv "/tmp/linux-${ARCH}/helm" /usr/local/bin/helm \
+    && rm -rf /tmp/helm.tar.gz /tmp/helm.sha256 "/tmp/linux-${ARCH}" \
     && helm version
 
 # Entrypoint fixes SSH key permissions when the Windows override

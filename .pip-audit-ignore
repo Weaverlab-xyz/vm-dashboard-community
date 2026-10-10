@@ -1,0 +1,17 @@
+# Advisories scripts/ci/pip_audit.sh accepts. One advisory id per line, then `#` and WHY
+# it does not apply here. Every entry is a decision someone can disagree with in review;
+# an entry without a reason fails the run. Prefer upgrading to adding a line here.
+
+# python-jose: HS/RS algorithm confusion when a decode does not restrict its algorithms
+# (GHSA-3qf3-8w2g-rqmx, an incomplete fix for CVE-2024-33663). No fixed release exists.
+# Every jwt.decode in web_dashboard/ passes an explicit algorithm list: HS256 with the
+# dashboard's own secret, or asymmetric-only (oidc_service.ASYMMETRIC_ALGS) wherever the
+# key is a public JWKS. tests/test_oidc_service.py pins the OIDC case. Replacing jose with
+# PyJWT removes this entry.
+CVE-2026-85394  # python-jose: every decode pins its algorithms; asymmetric-only for public keys
+
+# ecdsa: Minerva timing side channel when SIGNING with python-ecdsa (CVE-2024-23342).
+# The project will not fix it. It is installed only as a python-jose dependency, and
+# jose[cryptography] signs and verifies EC keys with the `cryptography` backend
+# (jose.backends.ECKey is CryptographyECKey), so python-ecdsa never signs anything here.
+PYSEC-2026-1325  # ecdsa: python-jose dependency only; jose uses the cryptography backend

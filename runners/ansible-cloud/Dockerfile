@@ -31,10 +31,14 @@
 # Apple-silicon dev hosts alike:
 #   docker buildx build --platform linux/amd64,linux/arm64 \
 #     -t chrweav/ansible-cloud:latest --push runners/ansible-cloud
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 
 ARG HELM_VERSION=v3.16.3
 ARG KUBECTL_VERSION=v1.31.3
+# Pinned to the vendor's published SHA256 per architecture; see the root Dockerfile header.
+# https://dl.k8s.io/release/v1.31.3/bin/linux/<arch>/kubectl.sha256
+ARG KUBECTL_SHA256_AMD64=981f6b49577068bc174275184d8ee7105d8e54f40733792c519cd85023984c0f
+ARG KUBECTL_SHA256_ARM64=a3953ad2b32eca0b429249a5fbdf4f8ef7d57223c45cc0401fd80fd12c7b9071
 
 # FreeTDS for pymssql (the PyPI wheels bundle it, but keep the runtime libs +
 # build headers so a source build also succeeds on any arch); curl/tar to fetch
@@ -57,17 +61,23 @@ RUN apt-get update \
 # — see the OPA/terraform fetches in the root Dockerfile. The tarball lands in a
 # file before it is unpacked rather than being piped into tar, because a retry
 # restarts the download and tar cannot un-consume the bytes it already read.
-RUN curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
-      "https://get.helm.sh/helm-${HELM_VERSION}-linux-$(dpkg --print-architecture).tar.gz" \
-      -o /tmp/helm.tar.gz \
+RUN ARCH=$(dpkg --print-architecture) \
+ && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+      "https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH}.tar.gz" -o /tmp/helm.tar.gz \
+ && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+      "https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH}.tar.gz.sha256sum" -o /tmp/helm.sha256 \
+ && echo "$(cut -d' ' -f1 /tmp/helm.sha256)  /tmp/helm.tar.gz" | sha256sum -c - \
  && tar xzf /tmp/helm.tar.gz -C /tmp \
- && mv "/tmp/linux-$(dpkg --print-architecture)/helm" /usr/local/bin/helm \
- && rm -rf /tmp/helm.tar.gz /tmp/linux-* \
+ && mv "/tmp/linux-${ARCH}/helm" /usr/local/bin/helm \
+ && rm -rf /tmp/helm.tar.gz /tmp/helm.sha256 /tmp/linux-* \
  && helm version
 
 # kubectl — handy for ad-hoc `command:`/`shell:` tasks; not required by k8s_info/k8s.
-RUN curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o /usr/local/bin/kubectl \
-      "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/$(dpkg --print-architecture)/kubectl" \
+RUN ARCH=$(dpkg --print-architecture) \
+ && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o /usr/local/bin/kubectl \
+      "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl" \
+ && SHA=$([ "$ARCH" = arm64 ] && echo "$KUBECTL_SHA256_ARM64" || echo "$KUBECTL_SHA256_AMD64") \
+ && echo "$SHA  /usr/local/bin/kubectl" | sha256sum -c - \
  && chmod +x /usr/local/bin/kubectl \
  && kubectl version --client
 

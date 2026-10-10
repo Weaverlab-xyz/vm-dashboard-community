@@ -178,6 +178,60 @@ def test_group_ids_are_stringified():
     assert groups == ["1", "2"]
 
 
+# ── ID-token algorithms ──────────────────────────────────────────────────────
+
+def _signed_setup(advertised):
+    """An RSA key, a discovery doc advertising ``advertised`` and the matching JWKS."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from jose import jwk
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    priv = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                             serialization.NoEncryption())
+    pub = key.public_key().public_bytes(serialization.Encoding.PEM,
+                                        serialization.PublicFormat.SubjectPublicKeyInfo)
+    public_jwk = dict(jwk.construct(pub, "RS256").to_dict(), kid="k1")
+    _reset(oidc_issuer="https://idp.example.com", oidc_client_id="client-1")
+    doc = {"authorization_endpoint": "https://idp.example.com/auth",
+           "token_endpoint": "https://idp.example.com/token",
+           "jwks_uri": "https://idp.example.com/jwks",
+           "issuer": "https://idp.example.com",
+           "id_token_signing_alg_values_supported": advertised}
+    responses = {"https://idp.example.com/jwks": {"keys": [public_jwk]}}
+    claims = {"iss": "https://idp.example.com", "aud": "client-1", "sub": "alice",
+              "exp": 4102444800, "iat": 1700000000}
+    return priv, pub, (lambda url: responses.get(url, doc)), claims
+
+
+def test_an_advertised_hmac_algorithm_is_never_accepted():
+    """Discovery documents list HS256 (Keycloak and Auth0 do). Accepting it would let anyone
+    holding the IdP's PUBLIC key sign an ID token for any user (algorithm confusion).
+    python-jose's fix for that class is incomplete, so the dashboard drops HS* itself."""
+    assert oidc._id_token_algs({"id_token_signing_alg_values_supported":
+                                ["HS256", "RS256", "HS512", "ES256"]}) == ["RS256", "ES256"]
+    assert oidc._id_token_algs({"id_token_signing_alg_values_supported": ["HS256"]}) == ["RS256"]
+    assert oidc._id_token_algs({}) == ["RS256"]
+
+
+def test_an_hs256_id_token_is_rejected_and_rs256_still_verifies():
+    """Rejected as an OIDCError the callback handles. Before the allowlist, python-jose's
+    key-type check refused it with a JWKError that escaped validate_id_token as a 500."""
+    from jose import jwt
+    priv, pub, fetch, claims = _signed_setup(["HS256", "RS256"])
+    orig, oidc._fetch = oidc._fetch, fetch
+    try:
+        good = jwt.encode(claims, priv.decode(), algorithm="RS256", headers={"kid": "k1"})
+        assert oidc.validate_id_token(good)["sub"] == "alice"
+        forged = jwt.encode(claims, "any-secret", algorithm="HS256", headers={"kid": "k1"})
+        try:
+            oidc.validate_id_token(forged)
+        except oidc.OIDCError:
+            pass
+        else:
+            raise AssertionError("an HS256 ID token was accepted")
+    finally:
+        oidc._fetch = orig
+
 if __name__ == "__main__":
     if oidc is None:
         print(f"SKIP all: oidc_service unavailable ({_IMPORT_ERR})")

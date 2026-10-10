@@ -26,6 +26,18 @@ from jose.exceptions import JWTError
 
 logger = logging.getLogger(__name__)
 
+# The signature algorithms an ID token may use: asymmetric only. The keys come from the
+# provider's JWKS, which is public, and an HS* algorithm would let anyone holding those
+# public key bytes use them as an HMAC secret and sign a token for any user (algorithm
+# confusion). Today python-jose refuses an RSA JWK for HS256 on its own, but its fix for
+# the wider class is incomplete (GHSA-3qf3-8w2g-rqmx), so the rule is enforced here
+# rather than left to the library. Discovery documents commonly advertise HS256 (Keycloak
+# and Auth0 do); it is dropped, and an HS* token then fails as a clean OIDCError instead
+# of a JWKError that escaped as a 500. external_workload and spiffe_assertion use this
+# list as well.
+ASYMMETRIC_ALGS = ("RS256", "RS384", "RS512", "PS256", "PS384", "PS512",
+                   "ES256", "ES384", "ES512")
+
 # Discovery documents and JWKS are cached — they change rarely and every login
 # would otherwise cost two extra round trips to the IdP.
 _DISCOVERY_TTL = 3600
@@ -171,6 +183,12 @@ def exchange_code(code: str, redirect_uri: str, code_verifier: str) -> dict:
     return payload
 
 
+def _id_token_algs(doc: dict) -> list:
+    """The provider's advertised ID-token algorithms, minus anything not asymmetric."""
+    advertised = doc.get("id_token_signing_alg_values_supported") or ["RS256"]
+    return [a for a in advertised if a in ASYMMETRIC_ALGS] or ["RS256"]
+
+
 def validate_id_token(id_token: str) -> dict:
     """Verify signature, issuer and audience, and return the claims.
 
@@ -182,7 +200,7 @@ def validate_id_token(id_token: str) -> dict:
         return jwt.decode(
             id_token,
             _jwks(),
-            algorithms=doc.get("id_token_signing_alg_values_supported") or ["RS256"],
+            algorithms=_id_token_algs(doc),
             audience=_cfg("oidc_client_id"),
             issuer=doc.get("issuer") or _cfg("oidc_issuer").rstrip("/"),
             options={"verify_at_hash": False},  # no access-token hash check; we don't use it

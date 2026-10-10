@@ -1,6 +1,10 @@
 # FastAPI and web server
-fastapi==0.109.2
-uvicorn[standard]==0.27.1
+# fastapi 0.109 held starlette at 0.36, which has seven published advisories; the floor on
+# starlette is the version that fixes the last of them. pip-audit in CI (tests.yml) is
+# what notices the next one.
+fastapi==0.143.0
+starlette>=1.3.1
+uvicorn[standard]==0.54.0
 
 # Database
 sqlalchemy==2.0.27
@@ -8,7 +12,7 @@ alembic==1.13.1
 psycopg2-binary==2.9.9
 
 # WSGI server (used in Docker / Container Apps)
-gunicorn==21.2.0
+gunicorn==23.0.0
 
 # Data validation
 # Upper bound is load-bearing: pydantic 2.14.0 (2026-10) removed the private
@@ -20,16 +24,19 @@ pydantic>=2.7.2,<2.14
 pydantic-settings>=2.6.1
 
 # Authentication
-python-jose[cryptography]==3.3.0
+# 3.5.0 still carries GHSA-3qf3-8w2g-rqmx (HS/RS algorithm confusion, no upstream fix);
+# every decode here pins its algorithms, asymmetric-only where the key is public. See
+# .pip-audit-ignore for why it, and its ecdsa dependency, are accepted.
+python-jose[cryptography]==3.5.0
 bcrypt==4.2.1
 fido2>=1.1.2
 msal>=1.28.0
 
 # File uploads and forms
-python-multipart==0.0.7
+python-multipart==0.0.32
 
 # Templates
-jinja2==3.1.3
+jinja2==3.1.6
 
 # Markdown rendering for the in-app docs pages (/docs/<page>) — pure-Python.
 markdown>=3.5,<4
@@ -37,11 +44,11 @@ markdown>=3.5,<4
 # Async file operations
 aiofiles==23.2.1
 
-# WebSockets
-websockets==12.0
+# WebSockets: uvicorn[standard] chooses the version; nothing imports it directly.
+websockets>=12.0
 
 # Environment variables
-python-dotenv==1.0.1
+python-dotenv==1.2.2
 
 # Rate limiting
 slowapi==0.1.9
@@ -67,9 +74,9 @@ azure-mgmt-automation>=1.0.0,<2
 # Upper bound is load-bearing: mcp 2.x renamed FastMCP to MCPServer and dropped
 # mcp.server.fastmcp, which api/mcp_server.py imports at module level — and
 # main.py imports that module unconditionally, so a 2.x resolution would fail the
-# whole app at startup, not just /mcp. A clean install resolves 1.6.0 today only
-# because of co-constraints in this file; pin it rather than rely on them.
-mcp>=1.2.0,<2
+# whole app at startup, not just /mcp. The floor is the release that fixes the five
+# advisories against 1.6.0.
+mcp>=1.28.1,<2
 
 # Google Cloud SDK
 google-cloud-compute>=1.14.0
@@ -105,11 +112,9 @@ azure-functions>=1.21,<2
 oci>=2.120.0
 
 # Async HTTP client (Portainer CE API, Ollama)
-# Upper-bounded below 0.28: httpx 0.28 removed the `app=` shortcut that the
-# Starlette TestClient bundled with fastapi 0.109.2 passes to httpx.Client,
-# which breaks fastapi.testclient.TestClient (see tests/test_containers_page_
-# resilience.py). Bump deliberately alongside fastapi/starlette.
-httpx>=0.27.0,<0.28
+# The old <0.28 bound existed for the TestClient in starlette 0.36, which passed httpx
+# the `app=` shortcut 0.28 removed. Starlette 1.x no longer does.
+httpx>=0.27.0
 
 # YAML parsing (playbook generation validation)
 PyYAML>=6.0

@@ -1,0 +1,55 @@
+# Dependabot: proposes dependency upgrades as pull requests, so the security checks
+# (pip-audit and gitleaks in security.yml, Trivy in images.yml) turn into an upgrade PR
+# to merge rather than a red build to investigate.
+#
+# Weekly and grouped, so a normal week is a handful of PRs, not one per package. Security
+# updates (Dependabot alerts with a fix) are separate: GitHub opens those as soon as an
+# advisory lands, when "Dependabot security updates" is on in the repository settings.
+#
+# Every PR it opens runs the full CI: the tests, the image build and boot, and the scans.
+# A major version is a PR of its own (not grouped), since it is the one most likely to
+# need code changes.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directories:
+      - "/web_dashboard"
+      - "/web_dashboard/functions/fnentry"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    groups:
+      python-minor-and-patch:
+        update-types: [minor, patch]
+
+  # Base images. FROM lines pinned by digest (runners/ansible-winrm) get a digest bump;
+  # tag-only FROM lines get a tag bump. Python stays on 3.12 until it is moved on purpose:
+  # requirements.txt pins packages that have no wheels for newer interpreters.
+  - package-ecosystem: docker
+    directories:
+      - "/"
+      - "/runners/agent"
+      - "/runners/ansible-cloud"
+      - "/runners/ansible-winrm"
+      - "/runners/hypervisor"
+      - "/runners/promote"
+      - "/examples/cloud-gateway"
+    schedule:
+      interval: weekly
+      day: monday
+    ignore:
+      - dependency-name: python
+        update-types: [version-update:semver-minor, version-update:semver-major]
+    groups:
+      base-images:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]

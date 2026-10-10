@@ -318,8 +318,9 @@ def test_the_audit_action_is_dotted_so_the_prefix_filter_groups_it():
 
 def test_every_cloud_exposes_the_same_tag_route():
     """One path on all four, so a shared editor never needs a per-cloud lookup table."""
+    from _routes import all_routes
     from web_dashboard.main import app
-    paths = {r.path for r in app.routes}
+    paths = {r.path for r in all_routes(app)}
     for cloud in ("aws", "azure", "gcp", "oci"):
         assert f"/api/{cloud}/instances/tags" in paths, cloud
 
@@ -354,8 +355,9 @@ def test_no_new_permission_scope_was_invented_for_tags():
 # ── 5. Proxmox: two paths, one guard ─────────────────────────────────────────
 
 def test_the_proxmox_route_exists_alongside_the_clouds():
+    from _routes import all_routes
     from web_dashboard.main import app
-    assert "/api/proxmox/instances/tags" in {r.path for r in app.routes}
+    assert "/api/proxmox/instances/tags" in {r.path for r in all_routes(app)}
 
 
 def test_both_proxmox_paths_run_the_same_guard():

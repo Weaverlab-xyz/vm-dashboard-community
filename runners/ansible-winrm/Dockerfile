@@ -24,8 +24,12 @@
 # linux/arm64, so both buildx legs resolve. Bumping it is a deliberate act: re-pull
 # willhallonline/ansible:latest, confirm the build still passes, and update both the
 # digest and the date below.
-#   willhallonline/ansible:latest as of 2026-08-24
-FROM willhallonline/ansible:latest@sha256:fa4f22d33cd150c76d48900a29f9d03bf1eb5cfbe77cef9c7905dbc5b0635587
+# Dependabot (.github/dependabot.yml) now proposes the bump; the Images workflow builds it
+# and Trivy scans it, which is the "confirm the build still passes" step. The 2026-08-24
+# digest carried 44 fixable HIGH/CRITICAL findings (OpenSSL, expat, python3, rsync,
+# ansible-core); this one has none.
+#   willhallonline/ansible:latest as of 2026-10-06
+FROM willhallonline/ansible:latest@sha256:969f0990b1ce6669cb6c6096e45047011c99e0d6b1b6c66eea942fb30ff898db
 
 # The upstream image now defaults to the unprivileged `ansible` user. Both RUN layers
 # below write to system paths, and every runner that consumes this image ran as root for
@@ -33,6 +37,13 @@ FROM willhallonline/ansible:latest@sha256:fa4f22d33cd150c76d48900a29f9d03bf1eb5c
 # to fix the build without also changing the runtime user out from under the
 # config-management runs. Hardening the runtime user is a separate, testable change.
 USER root
+
+# Upstream installs ansible itself with pip into the system Python, and the libraries its
+# modules import (pywinrm, paramiko, the BeyondTrust library) have to live in that same
+# interpreter; a virtualenv would be invisible to ansible. Newer Alpine py3-pip marks the
+# system Python as externally managed (PEP 668) and refuses that, so it is allowed
+# explicitly here, for this image only.
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
 # pywinrm + requests-ntlm cover the NTLM transport the sample Windows plays default
 # to (ansible_winrm_transport: ntlm). Add pywinrm[credssp] if you use CredSSP.

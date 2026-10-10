@@ -1230,7 +1230,7 @@ app.openapi = _custom_openapi
 async def swagger_ui(request: Request):
     """API explorer. Authenticates client-side, then loads the schema with the
     stored bearer token attached."""
-    return templates.TemplateResponse("swagger.html", {"request": request})
+    return templates.TemplateResponse(request, "swagger.html", {"request": request})
 
 app.include_router(websocket.router)
 app.include_router(aws.router,
@@ -1514,13 +1514,13 @@ app.include_router(worker_api.router)
 @app.get("/setup", response_class=HTMLResponse, include_in_schema=False)
 async def setup_page(request: Request):
     """First-run setup wizard. Accessible without authentication."""
-    return templates.TemplateResponse("setup.html", {"request": request})
+    return templates.TemplateResponse(request, "setup.html", {"request": request})
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def root(request: Request):
     """Serve the dashboard."""
-    return templates.TemplateResponse("dashboard.html", {"request": request})
+    return templates.TemplateResponse(request, "dashboard.html", {"request": request})
 
 
 @app.get("/login", response_class=HTMLResponse, include_in_schema=False)
@@ -1540,7 +1540,7 @@ async def login_page(request: Request):
     except Exception:
         entra_oauth_enabled = False
     return templates.TemplateResponse(
-        "login.html",
+        request, "login.html",
         {"request": request, "oidc_enabled": oidc_enabled, "oidc_label": oidc_label,
          "entra_oauth_enabled": entra_oauth_enabled},
     )
@@ -1555,7 +1555,7 @@ async def vms_page(request: Request):
     # _hypervisor_page_host, which returns via_agent=False in its except branch — that
     # would ungrey every button on an install whose connection failed to resolve.
     return templates.TemplateResponse(
-        "vms/list.html",
+        request, "vms/list.html",
         {"request": request, "via_agent": True})
 
 
@@ -1615,7 +1615,7 @@ async def connections_page(request: Request):
                ("proxmox", "vsphere", "hyperv", "nutanix", "xcpng", "vmware")):
         raise HTTPException(status_code=404, detail="No hypervisor integration is enabled")
     return templates.TemplateResponse(
-        "agents/index.html", {"request": request, "initial_tab": "connections"})
+        request, "agents/index.html", {"request": request, "initial_tab": "connections"})
 
 
 @app.get("/proxmox", response_class=HTMLResponse, include_in_schema=False,
@@ -1623,7 +1623,7 @@ async def connections_page(request: Request):
 async def proxmox_page(request: Request):
     conn = _hypervisor_page_host("proxmox")
     return templates.TemplateResponse(
-        "proxmox/index.html",
+        request, "proxmox/index.html",
         {"request": request, "connection_name": conn["connection_name"],
          "via_agent": conn["via_agent"], "synced_at": conn["synced_at"]})
 
@@ -1633,7 +1633,7 @@ async def proxmox_page(request: Request):
 async def vsphere_page(request: Request):
     conn = _hypervisor_page_host("vsphere")
     return templates.TemplateResponse(
-        "vsphere/index.html",
+        request, "vsphere/index.html",
         {"request": request, "connection_name": conn["connection_name"],
          "via_agent": conn["via_agent"], "synced_at": conn["synced_at"]})
 
@@ -1643,7 +1643,7 @@ async def vsphere_page(request: Request):
 async def hyperv_page(request: Request):
     conn = _hypervisor_page_host("hyperv")
     return templates.TemplateResponse(
-        "hyperv/index.html",
+        request, "hyperv/index.html",
         {"request": request, "hyperv_host": conn["host"],
          "connection_name": conn["connection_name"], "via_agent": conn["via_agent"],
          "synced_at": conn["synced_at"]},
@@ -1655,7 +1655,7 @@ async def hyperv_page(request: Request):
 async def nutanix_page(request: Request):
     conn = _hypervisor_page_host("nutanix")
     return templates.TemplateResponse(
-        "nutanix/index.html",
+        request, "nutanix/index.html",
         {"request": request, "nutanix_host": conn["host"],
          "connection_name": conn["connection_name"], "via_agent": conn["via_agent"],
          "synced_at": conn["synced_at"]},
@@ -1667,7 +1667,7 @@ async def nutanix_page(request: Request):
 async def xcpng_page(request: Request):
     conn = _hypervisor_page_host("xcpng")
     return templates.TemplateResponse(
-        "xcpng/index.html",
+        request, "xcpng/index.html",
         {"request": request, "xcpng_host": conn["host"],
          "connection_name": conn["connection_name"], "via_agent": conn["via_agent"],
          "synced_at": conn["synced_at"]},
@@ -1677,7 +1677,7 @@ async def xcpng_page(request: Request):
 @app.get("/config-mgmt", response_class=HTMLResponse, include_in_schema=False,
          dependencies=[_feature_gate("ansible_enabled")])
 async def config_mgmt_page(request: Request):
-    return templates.TemplateResponse("config-mgmt/index.html", {"request": request})
+    return templates.TemplateResponse(request, "config-mgmt/index.html", {"request": request})
 
 
 @app.get("/containers", response_class=HTMLResponse, include_in_schema=False)
@@ -1686,14 +1686,14 @@ async def containers_page(request: Request):
     # ECS, Azure ACI and GCP Cloud Run, and each tab self-gates on its own configuration.
     # portainer_enabled reaches the template via _profile_context like every other flag.
     return templates.TemplateResponse(
-        "containers/index.html",
+        request, "containers/index.html",
         {"request": request},
     )
 
 
 @app.get("/jobs", response_class=HTMLResponse, include_in_schema=False)
 async def jobs_page(request: Request):
-    return templates.TemplateResponse("jobs/list.html", {"request": request})
+    return templates.TemplateResponse(request, "jobs/list.html", {"request": request})
 
 
 @app.get("/schedules", response_class=HTMLResponse, include_in_schema=False)
@@ -1701,7 +1701,7 @@ async def schedules_page(request: Request):
     """Recurring change schedules. Like /jobs and /audit, the shell renders for anyone
     who reaches the URL and the API it reads scopes what they actually see — a page that
     404s for the wrong user is an existence oracle, and one that renders empty is not."""
-    return templates.TemplateResponse("schedules/index.html", {"request": request})
+    return templates.TemplateResponse(request, "schedules/index.html", {"request": request})
 
 
 @app.get("/audit", response_class=HTMLResponse, include_in_schema=False)
@@ -1709,13 +1709,13 @@ async def audit_page(request: Request):
     """The audit trail. Admin-only, enforced by the API the page reads — the shell
     renders for anyone who guesses the URL and then shows them nothing, which is the
     same shape every other admin page here has."""
-    return templates.TemplateResponse("audit/index.html", {"request": request})
+    return templates.TemplateResponse(request, "audit/index.html", {"request": request})
 
 
 @app.get("/inventory", response_class=HTMLResponse, include_in_schema=False)
 async def inventory_page(request: Request):
     """Cross-provider deployment inventory (read-only aggregation of DB records)."""
-    return templates.TemplateResponse("inventory/list.html", {"request": request})
+    return templates.TemplateResponse(request, "inventory/list.html", {"request": request})
 
 
 @app.get("/costs", response_class=HTMLResponse, include_in_schema=False,
@@ -1724,12 +1724,12 @@ async def costs_page(request: Request):
     """Cloud cost page: account-total summary + dashboard-managed spend breakdown.
     Nav-, page- and router-gated on cost_explorer_enabled; /api/costs/* is
     additionally admin-only."""
-    return templates.TemplateResponse("costs/index.html", {"request": request})
+    return templates.TemplateResponse(request, "costs/index.html", {"request": request})
 
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse, include_in_schema=False)
 async def job_detail_page(request: Request, job_id: str):
-    return templates.TemplateResponse("jobs/detail.html", {"request": request, "job_id": job_id})
+    return templates.TemplateResponse(request, "jobs/detail.html", {"request": request, "job_id": job_id})
 
 
 def _windows_access_ctx() -> dict:
@@ -1745,7 +1745,7 @@ def _windows_access_ctx() -> dict:
 @app.get("/aws", response_class=HTMLResponse, include_in_schema=False,
          dependencies=[_profile_page_gate("cloud_pages")])
 async def aws_page(request: Request):
-    return templates.TemplateResponse("aws/index.html", {"request": request,
+    return templates.TemplateResponse(request, "aws/index.html", {"request": request,
                                                          **_windows_access_ctx()})
 
 
@@ -1753,7 +1753,7 @@ async def aws_page(request: Request):
          dependencies=[_profile_page_gate("cloud_pages")])
 async def azure_page(request: Request):
     location = config_service.get("azure_location") or settings.azure_location
-    return templates.TemplateResponse("azure/index.html", {
+    return templates.TemplateResponse(request, "azure/index.html", {
         "request": request, "default_location": location,
         # Initial state of the Windows deploy form's Entra ID checkboxes.
         "entra_join_default": config_service.get_bool("azure_windows_entra_join", False),
@@ -1765,14 +1765,14 @@ async def azure_page(request: Request):
 @app.get("/gcp", response_class=HTMLResponse, include_in_schema=False,
          dependencies=[_profile_page_gate("cloud_pages")])
 async def gcp_page(request: Request):
-    return templates.TemplateResponse("gcp/index.html", {"request": request,
+    return templates.TemplateResponse(request, "gcp/index.html", {"request": request,
                                                          **_windows_access_ctx()})
 
 
 @app.get("/oci", response_class=HTMLResponse, include_in_schema=False,
          dependencies=[_profile_page_gate("cloud_pages")])
 async def oci_page(request: Request):
-    return templates.TemplateResponse("oci/index.html", {"request": request})
+    return templates.TemplateResponse(request, "oci/index.html", {"request": request})
 
 
 @app.get("/workload-lab", response_class=HTMLResponse, include_in_schema=False,
@@ -1803,7 +1803,7 @@ async def workload_lab_page(request: Request):
     hidden, because neither has a preview flag of its own -- "do not change the settings
     menu" holds, so they ride the flags of the integrations they drive.
     """
-    return templates.TemplateResponse("workload_lab/index.html", {"request": request})
+    return templates.TemplateResponse(request, "workload_lab/index.html", {"request": request})
 
 
 # The two labs had a nav section and a page each before they were consolidated. Bookmarks,
@@ -1824,17 +1824,17 @@ async def spire_lab_page():
 
 @app.get("/settings", response_class=HTMLResponse, include_in_schema=False)
 async def settings_page(request: Request):
-    return templates.TemplateResponse("settings.html", {"request": request})
+    return templates.TemplateResponse(request, "settings.html", {"request": request})
 
 
 @app.get("/secrets", response_class=HTMLResponse, include_in_schema=False)
 async def secrets_page(request: Request):
-    return templates.TemplateResponse("secrets/index.html", {"request": request})
+    return templates.TemplateResponse(request, "secrets/index.html", {"request": request})
 
 
 @app.get("/storage", response_class=HTMLResponse, include_in_schema=False)
 async def storage_page(request: Request):
-    return templates.TemplateResponse("storage/index.html", {"request": request})
+    return templates.TemplateResponse(request, "storage/index.html", {"request": request})
 
 
 # DELIBERATELY UNGATED — no _feature_gate, no _profile_page_gate, and please do not "fix"
@@ -1846,13 +1846,13 @@ async def storage_page(request: Request):
 # the absence of a gate here, because adding one would look like an improvement.
 @app.get("/use-cases", response_class=HTMLResponse, include_in_schema=False)
 async def use_cases_page(request: Request):
-    return templates.TemplateResponse("use_cases.html", {"request": request})
+    return templates.TemplateResponse(request, "use_cases.html", {"request": request})
 
 
 @app.get("/images", response_class=HTMLResponse, include_in_schema=False,
          dependencies=[_profile_page_gate("cloud_pages")])
 async def images_page(request: Request):
-    return templates.TemplateResponse("images/index.html", {"request": request})
+    return templates.TemplateResponse(request, "images/index.html", {"request": request})
 
 
 @app.get("/desktops", response_class=HTMLResponse, include_in_schema=False,
@@ -1860,14 +1860,14 @@ async def images_page(request: Request):
 async def desktops_page(request: Request):
     """Virtual-desktop management page. Nav-, page- and router-gated on
     vdesktops_enabled."""
-    return templates.TemplateResponse("desktops/index.html", {"request": request})
+    return templates.TemplateResponse(request, "desktops/index.html", {"request": request})
 
 
 @app.get("/directories", response_class=HTMLResponse, include_in_schema=False,
          dependencies=[_feature_gate("directories_enabled")])
 async def directories_page(request: Request):
     """Managed Active Directory (AWS + GCP): build, discover, register, destroy."""
-    return templates.TemplateResponse("directories/index.html", {"request": request})
+    return templates.TemplateResponse(request, "directories/index.html", {"request": request})
 
 
 @app.get("/databases", response_class=HTMLResponse, include_in_schema=False,
@@ -1876,7 +1876,7 @@ async def databases_page(request: Request):
     """Cloud database infrastructure page. Nav- and page-gated on
     cloud_database_enabled; the /api/databases router self-gates per call.
     PostgreSQL/MySQL/SQL Server are live across AWS/Azure/GCP."""
-    return templates.TemplateResponse("databases/index.html", {
+    return templates.TemplateResponse(request, "databases/index.html", {
         "request": request,
         # Not in the shared feature map: this is a sub-setting of the Password Safe
         # panel, not an integration toggle. The provision form needs it as the INITIAL
@@ -1893,7 +1893,7 @@ async def databases_page(request: Request):
 async def functions_page(request: Request):
     """Cloud Functions page (preview). Nav-, page- and router-gated on
     cloud_functions_enabled."""
-    return templates.TemplateResponse("functions/index.html", {"request": request})
+    return templates.TemplateResponse(request, "functions/index.html", {"request": request})
 
 
 @app.get("/k8s", response_class=HTMLResponse, include_in_schema=False,
@@ -1901,7 +1901,7 @@ async def functions_page(request: Request):
 async def k8s_page(request: Request):
     """Kubernetes management page — Phase 3a. Nav-, page- and router-gated on
     k8s_management_enabled."""
-    return templates.TemplateResponse("k8s/index.html", {"request": request})
+    return templates.TemplateResponse(request, "k8s/index.html", {"request": request})
 
 
 @app.get("/agents", response_class=HTMLResponse, include_in_schema=False)
@@ -1927,7 +1927,7 @@ async def agents_page(request: Request):
     own any-of-six gate — see that route for why it is still here.
     """
     return templates.TemplateResponse(
-        "agents/index.html", {"request": request, "initial_tab": "agents"})
+        request, "agents/index.html", {"request": request, "initial_tab": "agents"})
 
 
 @app.get("/pov", response_class=HTMLResponse, include_in_schema=False,
@@ -1941,7 +1941,7 @@ async def pov_page(request: Request):
     route rendered the POV page on a DEMO instance to anyone who typed the URL — a page
     whose whole premise is a registry of customer tenants that a demo instance does not have.
     """
-    return templates.TemplateResponse("pov/index.html", {"request": request})
+    return templates.TemplateResponse(request, "pov/index.html", {"request": request})
 
 
 @app.get("/pov/templates", response_class=HTMLResponse, include_in_schema=False,
@@ -1957,7 +1957,7 @@ async def pov_templates_page(request: Request):
     Same gate as /pov, and for the same reason — this page writes to a customer's lab
     platform account, which a demo instance does not have.
     """
-    return templates.TemplateResponse("pov/templates.html", {"request": request})
+    return templates.TemplateResponse(request, "pov/templates.html", {"request": request})
 
 
 # ALSO DECLARED BEFORE /pov/{env_id}, for the reason spelled out below it. "access" is a
@@ -1974,7 +1974,7 @@ async def pov_access_page(request: Request):
     and every read on the page goes through /api/pov/accessor/self, which resolves the POV
     from the session's own binding and is the only route a POV accessor may reach.
     """
-    return templates.TemplateResponse("pov/access.html", {"request": request})
+    return templates.TemplateResponse(request, "pov/access.html", {"request": request})
 
 
 # A THIRD route declared before /pov/{env_id}, same reason as the two above: "cloud" is a
@@ -1993,7 +1993,7 @@ async def pov_cloud_page(request: Request):
     POV's environment has gone, and cannot tell you the cloud is holding one no row
     remembers, which is the direction cost leaks in.
     """
-    return templates.TemplateResponse("pov/cloud.html", {"request": request})
+    return templates.TemplateResponse(request, "pov/cloud.html", {"request": request})
 
 # DECLARED AFTER /pov/templates, AND THAT IS LOAD-BEARING. Starlette matches routes in
 # declaration order, so a `{env_id}` route declared above the literal one would capture
@@ -2013,7 +2013,7 @@ async def pov_detail_page(request: Request, env_id: str):
     Looking the row up twice would put a database call on an HTML route that has no other
     reason to touch one.
     """
-    return templates.TemplateResponse("pov/detail.html",
+    return templates.TemplateResponse(request, "pov/detail.html",
                                       {"request": request, "env_id": env_id})
 
 
@@ -2087,7 +2087,7 @@ async def rbac_page(request: Request):
     administrator. `tests/test_permission_catalog._NAV_EXEMPT` records that reasoning, and
     `docs/access/permissions.md` states it in prose.
     """
-    return templates.TemplateResponse("rbac/index.html", _rbac_context(request, "users"))
+    return templates.TemplateResponse(request, "rbac/index.html", _rbac_context(request, "users"))
 
 
 @app.get("/users", response_class=HTMLResponse, include_in_schema=False)
@@ -2106,7 +2106,7 @@ async def users_page(request: Request):
     body, because identity administration is never feature-gated. Do not add a decorative one
     to make the two look alike.
     """
-    return templates.TemplateResponse("rbac/index.html", _rbac_context(request, "users"))
+    return templates.TemplateResponse(request, "rbac/index.html", _rbac_context(request, "users"))
 
 
 @app.get("/groups", response_class=HTMLResponse, include_in_schema=False)
@@ -2121,7 +2121,7 @@ async def groups_page(request: Request):
     with one. You add group mappings WHILE wiring single sign-on up -- before the first SSO
     login can succeed -- so a gate would 404 the page at precisely the moment it is needed.
     """
-    return templates.TemplateResponse("rbac/index.html", _rbac_context(request, "groups"))
+    return templates.TemplateResponse(request, "rbac/index.html", _rbac_context(request, "groups"))
 
 
 @app.get("/workgroups", response_class=HTMLResponse, include_in_schema=False)
@@ -2141,7 +2141,7 @@ async def workgroups_page(request: Request):
     that -- see rbacPage() in rbac/index.html.
     """
     return templates.TemplateResponse(
-        "rbac/index.html", _rbac_context(request, "workgroups"))
+        request, "rbac/index.html", _rbac_context(request, "workgroups"))
 
 
 # ── Health / diagnostic ───────────────────────────────────────────────────────

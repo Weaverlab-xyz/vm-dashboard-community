@@ -1,0 +1,91 @@
+name: Security
+
+# Supply-chain and secret checks. CodeQL (repository settings, default setup) reads our
+# code; these read what the code is built from and what gets committed:
+#
+#   pip-audit  -- a Python package the app installs has a published vulnerability.
+#   gitleaks   -- a commit adds something shaped like a credential.
+#
+# The built images are scanned by Trivy in images.yml, next to the build.
+#
+# Runs on pull requests, on main, and nightly. Nightly matters for pip-audit: an advisory
+# published today makes yesterday's unchanged code vulnerable, and nothing else would run.
+# Each job's logic lives in a scripts/ci/ driver so it runs locally unchanged.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"  # matches the Dockerfile base image
+          cache: pip
+          cache-dependency-path: web_dashboard/requirements.txt
+
+      # The app's packages go in a venv of their own, built the way the tests job and the
+      # image build them, so the audit sees exactly the versions that ship. pip-audit lives
+      # outside it so its own dependencies are not audited as if they were the app's.
+      - name: Install the app's dependencies
+        run: |
+          python -m venv /tmp/app
+          /tmp/app/bin/python -m pip install --upgrade pip
+          /tmp/app/bin/pip install -r web_dashboard/requirements.txt
+          pip install pip-audit==2.10.1
+
+      - name: Audit installed packages
+        env:
+          PYTHON: /tmp/app/bin/python
+        run: scripts/ci/pip_audit.sh
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the commit range below needs history
+
+      # The binary, not gitleaks-action: the action needs a paid licence on organization
+      # repositories. Pinned and checksum-verified like every other download here.
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.30.0"
+          GITLEAKS_SHA256: 79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors -o /tmp/gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tgz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      # A pull request scans only its own commits; main and the nightly run scan all of
+      # history, so a finding .gitleaksignore no longer covers cannot hide in an old commit.
+      - name: Scan
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            scripts/ci/gitleaks.sh "origin/${BASE_REF}..HEAD"
+          else
+            scripts/ci/gitleaks.sh
+          fi
