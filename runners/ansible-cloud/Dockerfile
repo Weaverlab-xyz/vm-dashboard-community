@@ -101,7 +101,6 @@ RUN pip install --no-cache-dir \
         "python-ldap>=3.4" \
         "pywinrm>=0.4.3" \
         "requests-ntlm>=1.2" \
-        "urllib3>=2.8.0" \
         "beyondtrust-bips-library>=2.0.0,<3.0.0"
 
 # Ansible collections for the localhost k8s/DB plays. community.general carries

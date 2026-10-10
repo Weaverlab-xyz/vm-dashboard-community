@@ -16,3 +16,22 @@ vulnerabilities:
     paths:
       - "opt/walinuxagent-src/_vendor/setuptools/_vendor/wheel-0.45.1.dist-info/METADATA"
     statement: setuptools-internal vendored copy, used only for WALinuxAgent's setup.py inside the target VM image; no allowed setuptools ships a fixed one
+
+  # urllib3 2.7.0 in the two Ansible runners (ansible-cloud, ansible-winrm). Every
+  # beyondtrust-bips-library 2.x release pins urllib3==2.7.0 exactly, and that library backs
+  # the beyondtrust.secrets_safe lookup the Password Safe playbooks use. 3.x allows >=2.7,
+  # but a major bump of the credential library needs a run against a real Password Safe
+  # first; it is a follow-up, not something to slip in here. Exposure until then:
+  #   * CVE-2026-97687 needs an HTTPS proxy AND per-target TLS overrides; the runners make
+  #     neither kind of call (Password Safe, Kubernetes and WinRM are reached directly).
+  #   * CVE-2026-97689 needs a malicious server; the runners talk to the operator's own
+  #     Password Safe, cluster and hosts.
+  # Scoped by purl to 2.7.0, so it stops applying the moment the version changes.
+  - id: CVE-2026-97687
+    purls:
+      - "pkg:pypi/urllib3@2.7.0"
+    statement: pinned by beyondtrust-bips-library 2.x; runners use no HTTPS proxy with TLS overrides; bips 3.x upgrade is a tracked follow-up
+  - id: CVE-2026-97689
+    purls:
+      - "pkg:pypi/urllib3@2.7.0"
+    statement: pinned by beyondtrust-bips-library 2.x; runners only talk to the operator's own servers; bips 3.x upgrade is a tracked follow-up
