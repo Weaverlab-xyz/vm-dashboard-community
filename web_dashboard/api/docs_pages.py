@@ -253,7 +253,7 @@ _INDEX_SECTIONS = {
     "integrations/ansible", "remote-agents", "workload-lab", "operations/scheduling",
     "profiles/demo/ot-demo-cell", "oidc", "cloud", "access", "operations", "kubernetes",
     "editions", "directories", "integrations/rancher", "integrations/portainer",
-    "integrations/beyondtrust/password-safe",
+    "integrations/beyondtrust/password-safe", "operations/cloud-hosting",
 }
 
 # Heading text per section. Without this a nested section renders as
@@ -282,6 +282,7 @@ _SECTION_LABELS = {
     "integrations/rancher":       "Rancher",
     "integrations/portainer":     "Portainer",
     "integrations/beyondtrust/password-safe": "BeyondTrust · Password Safe",
+    "operations/cloud-hosting":   "Operations · cloud hosting",
 }
 
 # Titles for docs whose filename is an identifier rather than a phrase. The persona pages are
@@ -330,6 +331,12 @@ _TITLE_OVERRIDES = {
     "integrations/beyondtrust/password-safe/databases-aws":   "Databases on AWS (dbssm)",
     "integrations/beyondtrust/password-safe/databases-azure": "Databases on Azure (dbazure)",
     "integrations/beyondtrust/password-safe/databases-gcp":   "Databases on GCP Cloud SQL (dbgcp)",
+    "operations/cloud-hosting/azure-container-apps": "Azure Container Apps",
+    "operations/cloud-hosting/gcp-cloud-run":        "GCP Cloud Run",
+    "operations/cloud-hosting/aws-ecs":              "AWS ECS Fargate",
+    "profiles/demo/ot-demo-cell/identity":           "Who brokers identity",
+    "profiles/demo/ot-demo-cell/deploying":          "Deploying a cell",
+    "profiles/demo/ot-demo-cell/verification":       "End-to-end verification",
     "onboarding/aws":                    "AWS setup",
     "onboarding/azure":                  "Azure setup",
     "onboarding/gcp":                    "GCP setup",

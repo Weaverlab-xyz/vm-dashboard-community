@@ -71,7 +71,7 @@ environment** (not per build).
 > outside the plant both misrepresents the architecture and, with the cell's Purdue
 > zoning on, cannot reach it at all: the registration succeeds, the grant approves, and
 > the login fails. See
-> [Who brokers identity in the plant](../../profiles/demo/ot-demo-cell.md#who-brokers-identity-in-the-plant).
+> [Who brokers identity in the plant](../../profiles/demo/ot-demo-cell/identity.md#who-brokers-identity-in-the-plant).
 
 "Only in a Kubernetes cluster" does not have to mean a real one. For an edge or
 plant-floor host that will not carry a cluster, [KubeSolo](../../kubernetes/kubesolo.md) is a

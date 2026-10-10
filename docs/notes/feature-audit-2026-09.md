@@ -6,7 +6,7 @@ An audit of the shipping feature set, and four recommendations for work that is 
 codebase but sits naturally on top of what is.
 
 The hard part was not finding gaps. It was finding gaps that are not already written down.
-[saas-roadmap.md](../editions/roadmap.md) carries about twenty-five capabilities with honest
+[SaaS Roadmap](../editions/roadmap.md) carries about twenty-five capabilities with honest
 status labels, and [design/](../design/README.md) records the alternatives that were
 rejected and why. Continuous Terraform drift detection, compliance-as-code, a two-person
 approval gate, scheduled secret rotation, CVE scanning per image, signed build manifests and
