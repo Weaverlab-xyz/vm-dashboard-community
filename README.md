@@ -77,7 +77,7 @@ answers what. The full index of every page is [docs/README.md](docs/README.md).
 | [Workload Lab](docs/workload-lab.md) | something that isn't a person needs a credential (a certificate, a SPIFFE identity, a cluster token or a cloud key) and you want to pick the mechanism |
 | [Operations](docs/operations.md) | the dashboard is running and you're managing it day to day: scheduling and change windows, Config Management, the job worker, notifications, the auto-delete timer, hosting it in a cloud |
 | [Integrations](docs/integrations/README.md) | you're connecting an external system: the BeyondTrust products, the hypervisors, Rancher, Portainer, Cloud Functions, the Ansible runners, the MCP server |
-| [Demo and POV profiles](docs/profiles/README.md) | you're presenting to a particular role (the persona pages), or running customer proof-of-value work on a separate instance |
+| [Demo and POV profiles](docs/profiles/README.md) | you're presenting to a particular role (the [Personas](docs/profiles/demo/personas/README.md), one page per role), or running customer proof-of-value work on a separate instance |
 | [Editions](docs/editions.md) | you're choosing between running the dashboard yourself and a hosted edition |
 
 ## Quick start
@@ -152,8 +152,15 @@ go deeper on each axis once you're up and running.
   instance management, image capture, Secret Manager SSH-key integration
 - **OCI** — Compute deployment, custom images, Autonomous Database, OKE
   clusters; API-key signing auth, compartment-scoped
-- **Identity** — local username/password, optional WebAuthn/FIDO2 MFA,
-  optional Sign in with Microsoft (Entra ID)
+- **Identity** — local username/password, optional WebAuthn/FIDO2 MFA, and single
+  sign-on through any OpenID Connect provider (Okta, Entra ID, Keycloak, Google, …),
+  live as soon as an issuer is configured; see [docs/oidc.md](docs/oidc.md). The older
+  Sign in with Microsoft button is still there.
+- **Service accounts** — OAuth 2.0 client credentials for CI jobs, scripts and agents,
+  instead of handing them a personal token; see
+  [docs/access/service-accounts.md](docs/access/service-accounts.md)
+- **Audit log** — who did what, and a way to check the record has not been edited; see
+  [docs/access/audit-log.md](docs/access/audit-log.md)
 - **Jobs** — background task tracking with live WebSocket updates
 
 ## What's optional (feature-flagged, off by default)
@@ -196,13 +203,34 @@ The wizard turns a flag on; the per-integration fields live in Settings:
   management plane, deliver secrets via ESO, and layer PRA tunnels, Password
   Safe token rotation and Entra→RBAC federation on top. See
   [docs/kubernetes.md](docs/kubernetes.md).
-- **Cloud Costs** — a spend tile and a `/costs` page built on AWS Cost Explorer
-  and Azure Cost Management, scoped to what the dashboard deployed.
+- **Cloud Costs** (`cost_explorer_enabled`) — month-to-date spend for every configured
+  cloud on a `/costs` page and a home-page tile, with budgets and alerts: AWS Cost
+  Explorer, Azure Cost Management, GCP's BigQuery billing export and OCI's Usage API. See
+  [docs/cloud/costs.md](docs/cloud/costs.md).
 - **BeyondTrust Password Safe** — on-demand checkout of SSH keys and passwords, plus onboarding of the VMs, databases and Kubernetes tokens the dashboard builds as managed systems + accounts. See [docs/integrations/beyondtrust/password-safe.md](docs/integrations/beyondtrust/password-safe.md).
 - **BeyondTrust Privileged Remote Access** — Shell Jump, Web Jump, Remote RDP and protocol-tunnel jump items plus PRA Vault accounts, and the Gateway hosts they broker through. See [docs/integrations/beyondtrust/privileged-remote-access.md](docs/integrations/beyondtrust/privileged-remote-access.md).
 - **BeyondTrust EPM for Linux (EPM-L)** — list and build agent packages, one-click sync of `.rpm`/`.deb` packages to your Ansible asset bucket, installation-token issuance for new endpoint registration. See [docs/integrations/beyondtrust/epml.md](docs/integrations/beyondtrust/epml.md).
-- **Portainer CE** — on-prem Docker host management
-- **Entitle** — approval-workflow integration
+- **Portainer CE** — on-prem Docker host management, through a Portainer you run or one
+  the dashboard deploys for you. See [docs/integrations/portainer.md](docs/integrations/portainer.md).
+- **Entitle** — just-in-time access: register what the dashboard builds (VMs, databases,
+  clusters, Rancher, Portainer) as Entitle resources, and grant dashboard permissions
+  themselves for a limited time. See [docs/integrations/beyondtrust/entitle.md](docs/integrations/beyondtrust/entitle.md).
+- **Directories** (`directories_enabled`, preview) — build or register Active Directory in
+  AWS, Azure and GCP and join Windows servers to it, manage on-prem AD and LDAP through a
+  remote agent, and browse and change group membership in Entra ID, Okta and PingOne. See
+  [docs/directories.md](docs/directories.md).
+- **Virtual Desktops** (`vdesktops_enabled`, preview) — pools of private desktop VMs that
+  people reach through the PRA Gateway. See [docs/cloud/virtual-desktops.md](docs/cloud/virtual-desktops.md).
+- **Cloud Functions** (`cloud_functions_enabled`) — one Python handler deployed as an AWS
+  Lambda, Azure Function App or GCP Cloud Run function: a stable HTTPS endpoint inside your
+  network, including the Entitle adapters. See [docs/integrations/cloud-functions.md](docs/integrations/cloud-functions.md).
+- **Workload Lab** (`cert_lab_enabled`, `spire_lab_enabled`, `agentcell_enabled`,
+  `workload_credentials_enabled`) — credentials for things that are not people: a
+  private CA, SPIFFE identities, bound Kubernetes tokens, short-lived cloud keys. See
+  [docs/workload-lab.md](docs/workload-lab.md).
+- **Notifications** (`notifications_enabled`, dry-run by default) — outbound webhooks to
+  Slack, Microsoft Teams or anything that takes signed JSON, for auto-delete warnings, job
+  failures and budget, secret and drift alerts. See [docs/operations/notifications.md](docs/operations/notifications.md).
 - **MCP server** (`mcp_server_enabled`) — read-only AI client integration (Claude Desktop, Claude Code, Cursor…) via Personal Access Token; mounted at `/mcp`, no extra containers needed. Each tool returns only what the token's owner can see in the UI. See [docs/integrations/mcp-server.md](docs/integrations/mcp-server.md)
 - **Unmanaged VM discovery** (`cloud_unmanaged_discovery_enabled`) — show cloud VMs this dashboard did not deploy, in a separate list per cloud console. Discovered VMs can be started and stopped; they can never be destroyed from here. Off by default because it lists every instance in the account rather than the ones the dashboard deployed. A discovered VM is admin-only unless it carries a `workgroup` tag.
 - **Action Guardrails** — pre-action policy gate (OPA): evaluate every deploy against Rego policies *before* the job starts — allowed regions, blocked instance sizes, change-freeze windows — and block disallowed ones (403, audited). Fails closed. See [docs/operations/scheduling/policy-guardrails.md](docs/operations/scheduling/policy-guardrails.md).
