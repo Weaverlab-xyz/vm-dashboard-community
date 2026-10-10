@@ -100,7 +100,7 @@ RUN pip install --no-cache-dir \
         "python-ldap>=3.4" \
         "pywinrm>=0.4.3" \
         "requests-ntlm>=1.2" \
-        "beyondtrust-bips-library>=2.0.0,<3.0.0"
+        "beyondtrust-bips-library>=3.0.0,<4.0.0"
 
 # Ansible collections for the localhost k8s/DB plays. community.general carries
 # the mssql_* modules. beyondtrust.secrets_safe / beyondtrust.password_safe back the
