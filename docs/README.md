@@ -47,6 +47,7 @@ folder of the pages themselves. A page that stands alone is a row on its own.
 | [Infrastructure as Code](cloud/infrastructure-as-code.md) | you are about to deploy your first cloud resource and want to know what is actually running underneath. |
 | [Cloud Sandbox](cloud/sandbox.md) | you want an isolated cloud account for the dashboard's labs, bootstrapped rather than hand-built. |
 | [Cloud VMs](cloud/vms.md) | you are deploying cloud VMs, or want the dashboard to see and power ones it did not deploy. |
+| [Windows servers](cloud/windows-servers.md) | you are deploying a Windows server on AWS, Azure or GCP: where its administrator password goes, how PRA reaches it, and joining Entra ID or Active Directory. |
 | [Cloud Containers](cloud/containers.md) | you want a containerised app on a cloud runtime without standing up Portainer. |
 | [Virtual Desktops](cloud/virtual-desktops.md) | you need a pool of private desktop VMs that reps reach through the PRA Gateway rather than over the internet. |
 | [Image Management](cloud/image-management.md) | you are about to build a custom image and need to know how it will reach the other clouds. |

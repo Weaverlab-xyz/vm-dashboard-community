@@ -34,7 +34,7 @@ _API = os.path.join(_ROOT, "web_dashboard", "api", "containers.py")
 _K8S_API = os.path.join(_ROOT, "web_dashboard", "api", "k8s.py")
 _MODELS = os.path.join(_ROOT, "web_dashboard", "models", "containers.py")
 _SVC = os.path.join(_ROOT, "web_dashboard", "services", "k8s_service.py")
-_DOCS = os.path.join(_ROOT, "docs", "integrations", "rancher.md")
+_DOCS = os.path.join(_ROOT, "docs", "integrations", "rancher", "entitle.md")
 
 ROUTE = "/api/k8s/rancher/entitle-register"
 

@@ -2,10 +2,9 @@
 {% from "partials/secret_picker.html" import secret_picker %}
 {% block title %}Kubernetes{% endblock %}
 
-{# Kubernetes management — Phase 3a (docs/saas-kubernetes-management-plan.md).
-   Provision/register clusters, launch the Rancher management plane (central
-   server + imported clusters), and open the brokered console. The PRA tunnel +
-   Entitle-Rancher JIT land in Phase 3b. #}
+{# Kubernetes management (docs/kubernetes.md). Provision/register clusters, launch
+   the Rancher management plane (central server + imported clusters), and open the
+   brokered console, the PRA tunnel and Entitle-Rancher JIT. #}
 
 {% block content %}
 <div class="max-w-6xl mx-auto py-8 px-4" x-data="k8sPage()" x-init="init()">
@@ -894,7 +893,7 @@ gcloud auth login --login-config=login.json</pre>
           <span class="font-mono">PRA Vault Token</span> plugin and <em>synced</em> to it in Password Safe, so every
           rotation reaches PRA and the k8s tunnel keeps working. The functional
           account must already exist in Password Safe — see the
-          <a href="/docs/integrations/beyondtrust/password-safe#kubernetes-serviceaccount-token-rotation" class="underline" target="_blank">token rotation guide</a>
+          <a href="/docs/integrations/beyondtrust/password-safe/kubernetes-tokens#kubernetes-serviceaccount-token-rotation" class="underline" target="_blank">token rotation guide</a>
           for the plugin import, functional accounts and access policy.
         </p>
         <template x-if="psTokenTarget && psTokenTarget.ps_token_managed">

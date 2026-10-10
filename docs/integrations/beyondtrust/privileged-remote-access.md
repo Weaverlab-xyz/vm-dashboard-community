@@ -52,7 +52,7 @@ Terraform provider and all associated to a Jump Group for injection: **username/
 (cloud-database and Kubernetes tunnels, Web Jumps, the OT cell's admin credential),
 **token** (a cluster's ServiceAccount bearer token), and **SSH private key** (a cloud VM's
 rotating host key — see
-[Password Safe → Using the VM's key in PRA](password-safe.md#using-the-vms-key-in-pra--the-pra-vault-private-key-sync)).
+[Password Safe → Using the VM's key in PRA](password-safe/vm-onboarding.md#using-the-vms-key-in-pra--the-pra-vault-private-key-sync)).
 In every case the value the dashboard writes is a throwaway placeholder that Password Safe
 replaces through a `SyncedAccounts` link, so **managing** Vault accounts is required for
 those features while the real credential never passes through the dashboard.
@@ -117,7 +117,7 @@ Web Jump credentials land in.
 
 Password Safe can take that token over and rotate it on the tenant's schedule — the
 managed account name is `<namespace>/<serviceaccount>`, built from the two keys above. See
-[Password Safe → Kubernetes ServiceAccount token rotation](password-safe.md#kubernetes-serviceaccount-token-rotation).
+[Password Safe → Kubernetes ServiceAccount token rotation](password-safe/kubernetes-tokens.md#kubernetes-serviceaccount-token-rotation).
 That path needs both products enabled; PRA alone injects a token that never rotates.
 
 ---

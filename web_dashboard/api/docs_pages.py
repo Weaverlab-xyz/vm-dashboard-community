@@ -242,7 +242,8 @@ _INDEX_SECTIONS = {
     "integrations/beyondtrust", "integrations/beyondtrust/databases", "onboarding",
     "integrations/ansible", "remote-agents", "workload-lab", "operations/scheduling",
     "profiles/demo/ot-demo-cell", "oidc", "cloud", "access", "operations", "kubernetes",
-    "editions", "directories",
+    "editions", "directories", "integrations/rancher", "integrations/portainer",
+    "integrations/beyondtrust/password-safe",
 }
 
 # Heading text per section. Without this a nested section renders as
@@ -269,6 +270,9 @@ _SECTION_LABELS = {
     "kubernetes":                 "Kubernetes",
     "editions":                   "Editions",
     "directories":                "Directories",
+    "integrations/rancher":       "Rancher",
+    "integrations/portainer":     "Portainer",
+    "integrations/beyondtrust/password-safe": "BeyondTrust · Password Safe",
 }
 
 # Titles for docs whose filename is an identifier rather than a phrase. The persona pages are

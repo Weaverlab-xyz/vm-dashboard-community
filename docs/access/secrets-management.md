@@ -84,7 +84,7 @@ credentials for machines the dashboard built, not credentials the dashboard itse
 so a Windows build writes its administrator password to Password Safe, an external
 backend or the cloud's own vault, and refuses to build when none is configured. The
 **Windows VM administrator passwords** setting on the Secrets page picks the store
-explicitly. See [Windows servers](../cloud/vms.md#windows-servers).
+explicitly. See [Windows servers](../cloud/windows-servers.md).
 
 ---
 

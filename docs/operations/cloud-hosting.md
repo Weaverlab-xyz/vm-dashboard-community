@@ -370,7 +370,7 @@ another sidecar: [job-worker.md](job-worker.md#container-apps).
 A Container Apps environment with no NAT gateway has **no single outbound address**.
 It SNATs traffic out of a shared pool of several hundred addresses, and it picks an
 address per *destination*. That breaks anything that admits the dashboard by source
-address, the managed [Portainer](../integrations/portainer.md#firewall) and
+address, the managed [Portainer](../integrations/portainer/managed-server.md#firewall) and
 [Rancher](../integrations/rancher.md) node firewalls above all. The dashboard learns its
 address from an echo service, but the echo service and the node see *different*
 addresses, so the node drops the bootstrap. The job reads "serving", then

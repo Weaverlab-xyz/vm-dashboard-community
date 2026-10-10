@@ -98,7 +98,9 @@ this adds** — an always-on, externally callable endpoint is.
 ## Workloads
 
 Each is one module in `web_dashboard/functions/fnworkloads/`. **The filesystem is the
-catalog** — adding a module makes it deployable, no registry to edit.
+catalog** — adding a module makes it deployable, no registry to edit. Sample request
+payloads for each, and a template for writing your own, are in
+[`examples/functions/`](../../examples/functions/README.md).
 
 | Workload | What it does |
 |---|---|
@@ -362,7 +364,7 @@ adapter is the only route to it.
 > the Entitle integration registered — all as one job. The adapter reads its target
 > from its own environment, so a hand-deploy that named the wrong Portainer cannot be
 > corrected afterwards. See
-> [portainer.md](portainer.md#just-in-time-access-via-entitle-optional). The form below
+> [Portainer through Entitle](portainer/entitle.md). The form below
 > is the path for a Portainer that lives outside this dashboard's reach.
 
 | Setting | Notes |

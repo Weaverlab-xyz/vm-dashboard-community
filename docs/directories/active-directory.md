@@ -14,7 +14,7 @@ All three clouds sell a managed Active Directory, and the **Directories** page c
   page.
 
 Azure VMs can also join **Entra ID** directly, without a domain
-(see [Windows servers](../cloud/vms.md#windows-servers)). Entra Domain Services is for servers that
+(see [Windows servers](../cloud/windows-servers.md)). Entra Domain Services is for servers that
 need Kerberos, LDAP or Group Policy. A VM joins one or the other, not both.
 
 To join servers to the domain you already run on-premises instead of building one, see
@@ -69,7 +69,7 @@ domain-admin credential, so it follows the same rules as Windows server password
 
 - It is **never stored in the dashboard database**. It is written to Password Safe
   (Secrets Safe), your external secrets backend, or the cloud's own vault, in the same
-  order as [Windows server passwords](../cloud/vms.md#where-the-administrator-password-goes).
+  order as [Windows server passwords](../cloud/windows-servers.md#where-the-administrator-password-goes).
   If none is configured, the build is refused.
 - On **AWS**, Terraform must pass a password at create, and that value ends up in
   Terraform state. So the build immediately resets `Admin` to a fresh password through
