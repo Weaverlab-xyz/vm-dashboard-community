@@ -2,21 +2,28 @@
 
 Provisions the Entitle side of the user-based JIT authorization
 flow described in [`docs/design/entitle-user-jit.md`](../../docs/design/entitle-user-jit.md).
-One `terraform apply` creates:
+One `terraform apply`:
 
-1. The **VM Dashboard** virtual application bundling every
-   dashboard-`*` Entra group as a grantable Entitle resource.
-2. **Three workflows** — one per sensitivity tier:
-   - `auto_approve` — ≤2h TTL, no human in the loop. Used by
+1. Creates **three workflows**, one per sensitivity tier:
+   - `auto_approve`: no human in the loop, up to 1h by default. Used by
      `dashboard-baseline` + every `*-read` group.
-   - `single_approver` — ≤24h TTL, one approver. Used by every
-     `*-write` group and the per-workgroup membership groups.
-   - `two_approver` — ≤8h TTL, two approvers. Used by every
+   - `single_approver`: one approval from `single_approver_group`, up to 24h.
+     Used by every `*-write` group and the per-workgroup membership groups.
+   - `two_approver`: two sequential approvals, up to 6h. Used by every
      `*-delete` group and the high-value `dashboard-admin` group.
-3. **Policy rules** routing each resource to its tier.
+2. **Adopts each dashboard-\* group's Entitle resource** and sets its tier's
+   workflow and allowed durations. Entitle's Entra integration already synced
+   each group in as a resource, with the group's object id as its `external_id`;
+   `entitle_resource_synced` finds it by that id. Nothing is created in Entra,
+   and `terraform destroy` only releases the resources from state.
 
-The Entra group object ids feeding `entitle_resource` come from the
-DB rows that [`bootstrap_entitle_groups.py`](../../web_dashboard/scripts/bootstrap_entitle_groups.py)
+The workflow sits on the resource because the resource is what users request:
+the dashboard's 403 page deep-links straight to it. There are no `entitle_policy`
+rules. In Entitle a policy is a *birthright* grant, which gives a group's members
+roles with no request at all, so it cannot route requests to a tier.
+
+The Entra group object ids come from the DB rows that
+[`bootstrap_entitle_groups.py`](../../web_dashboard/scripts/bootstrap_entitle_groups.py)
 populated in Phase 1. The [`bootstrap_entitle_app.py`](../../web_dashboard/scripts/bootstrap_entitle_app.py)
 wrapper reads `oauth_group_mappings` and writes a `tfvars` file
 before running `terraform apply`.
@@ -25,23 +32,27 @@ before running `terraform apply`.
 
 - Phase 1 (`bootstrap_entitle_groups.py`) has been run against the
   target Entra tenant. `oauth_group_mappings` has one row per group.
-- An Entitle tenant + an API key with permissions to create
-  integrations, workflows, policies, and resources.
-- The Entra → Entitle directory integration is already configured
-  in the Entitle UI. Pass its id via `entitle_integration_id`.
-- Approver groups (single-approver and two-approver tiers) exist
-  in your IdP and have stable identifiers Entitle can resolve.
+- An Entitle tenant + an API key with permissions to manage workflows
+  and resources.
+- The Entra → Entitle integration is configured in the Entitle UI and has
+  **synced since Phase 1 ran**, so every dashboard-\* group exists in Entitle.
+  Pass the integration's id as `entitle_integration_id`.
+- The approver groups exist as Entitle directory groups. Pass their **names**,
+  exactly as Entitle shows them; the plan fails unless each matches one group.
 
-## Provider schema notes
+## Durations
 
-The [`entitle-terraform-provider`](https://docs.beyondtrust.com/entitle/docs/entitle-terraform-provider)
-exposes `entitle_integration`, `entitle_workflow`, `entitle_policy`,
-`entitle_resource`, `entitle_role`, `entitle_bundle`,
-`entitle_permission`. Attribute names below are based on the public
-provider documentation as of the design's v2.2 update. If the
-provider has rolled forward, the module's first `terraform plan`
-flags any schema drift loudly — adjust the affected files locally
-before `terraform apply`.
+`*_durations` variables take seconds from Entitle's fixed list (1800, 3600, 10800,
+21600, 43200, 57600, 86400, 259200, 604800, ...; -1 is unlimited). The longest value
+in each list is also that tier's workflow ceiling.
+
+## Provider version
+
+Pinned to `entitleio/entitle` `>= 3.2.2, < 4.0.0`; `entitle_resource_synced` is not
+in every 3.x. CI's `terraform` job runs `terraform validate` on this module against
+the provider's real schema. An earlier version of the module was written from the
+provider's documentation and never applied; validate showed that almost none of its
+attributes existed.
 
 ## Run
 
@@ -55,17 +66,16 @@ cd terraform/entitle_user_jit
 terraform init
 terraform plan  -var "entitle_api_key=$ENTITLE_API_KEY" \
                 -var "entitle_integration_id=<entra-integration-id>" \
-                -var "single_approver_group=<group-or-user>" \
-                -var "two_approver_group=<group-or-user>"
+                -var "single_approver_group=<entitle-group-name>" \
+                -var "two_approver_group=<entitle-group-name>"
 terraform apply -var "entitle_api_key=$ENTITLE_API_KEY" \
                 -var "entitle_integration_id=<entra-integration-id>" \
-                -var "single_approver_group=<group-or-user>" \
-                -var "two_approver_group=<group-or-user>"
+                -var "single_approver_group=<entitle-group-name>" \
+                -var "two_approver_group=<entitle-group-name>"
 ```
 
-`terraform apply` a second time is a no-op — Entitle resources are
-identified by name, so re-running matches existing entities and
-no-ops on unchanged attributes. Tier reassignment is supported via a
+`terraform apply` a second time is a no-op: Terraform state holds the
+workflows and the adopted resources, and nothing differs. Tier reassignment is supported via a
 single edit to `_tier_for_group()` in the bootstrap script.
 
 ## State

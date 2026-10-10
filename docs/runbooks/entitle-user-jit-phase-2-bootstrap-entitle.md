@@ -94,35 +94,34 @@ $env:TF_VAR_entitle_api_key = '<your-entitle-api-key>'
 terraform init
 ```
 
-**Expected:** Terraform downloads the `beyondtrust/entitle` provider
-and initialises the working directory. If the registry resolution
-fails, double-check the provider source string in `versions.tf`
-matches your tenant's published provider — BeyondTrust occasionally
-relocates the registry namespace.
+**Expected:** Terraform downloads the `entitleio/entitle` provider (3.2.2 or a later
+3.x) and initialises the working directory.
 
 ## Step 4 — `terraform plan` (dry run)
 
 ```powershell
 terraform plan `
   -var "entitle_integration_id=<entra-integration-id>" `
-  -var "single_approver_group=<approver-identifier>" `
-  -var "two_approver_group=<two-approver-identifier>"
+  -var "single_approver_group=<entitle-directory-group-name>" `
+  -var "two_approver_group=<entitle-directory-group-name>"
 ```
+
+The approver values are the **names** of Entitle directory groups, exactly as Entitle
+shows them. The plan stops unless exactly one group has each name.
 
 **Expected:** plan shows:
 - **3 to add** for `entitle_workflow` (auto_approve / single_approver /
   two_approver).
-- **N to add** for `entitle_resource.dashboard_group["…"]` where N
-  matches Step 1's count.
-- **3 to add** for `entitle_policy` (one per tier).
-- **1 to add** for `entitle_bundle.vm_dashboard`.
+- **N to add** for `entitle_resource_synced.dashboard_group["…"]`, where N
+  matches Step 1's count. These are not new resources: each one adopts the resource
+  Entitle's Entra sync already made for that group, and sets its workflow.
 - **0 to change, 0 to destroy.**
 
-If `terraform plan` errors on a schema attribute (e.g.
-`approval_steps.count` not recognized), the deployed provider has
-diverged from the public docs. Update the affected `.tf` file
-locally; both `workflows.tf` and `resources.tf` have comments
-flagging the lines most likely to need adjustment.
+A group the sync has not picked up yet fails the plan with the provider's "resource
+not found". Wait for the next sync, or trigger one from the integration in the Entitle UI.
+
+CI runs `terraform validate` on this module against the real provider schema (the
+`terraform` job), so a schema error here means the provider moved past 3.x.
 
 ## Step 5 — `terraform apply`
 
@@ -136,21 +135,20 @@ terraform apply `
 (or via the wrapper: `docker compose exec app python -m web_dashboard.scripts.bootstrap_entitle_app --apply --entitle-integration-id … --single-approver-group … --two-approver-group …` — the wrapper threads vars through `TF_VAR_*` env so the API key never lands in shell history.)
 
 **Expected:** apply completes cleanly. Outputs include:
-- `application_id` — the bundle's id, surface this in the dashboard's
-  `Settings → Integrations → Entitle` panel for Phase 4's
-  "Request access" deep links.
 - `workflow_ids` — three-entry map.
-- `resource_ids` — N-entry map (`dashboard-* → entitle resource id`).
+- `resource_ids` — N-entry map (`dashboard-* → entitle resource id`). Paste it into the
+  dashboard's `Settings → Integrations → Entitle` panel (resource ID map) for Phase 4's
+  "Request access" deep links.
 - `resource_count` — N.
 
 ## Step 6 — Spot-check in the Entitle UI
 
 Sign into your Entitle tenant's web console. Confirm:
 
-1. **Catalog → Applications** lists "VM Dashboard" with the
-   description from `application_description`.
-2. Opening the application shows N resources, each named after the
-   matching `dashboard-*` Entra group.
+1. The N `dashboard-*` group resources carry the tag `VM Dashboard` (from
+   `application_name`) and a `tier:<tier>` tag, so filtering the catalog by
+   `VM Dashboard` shows exactly them.
+2. Each one's description is the one the bootstrap script wrote.
 3. **Workflows** page lists the three new workflows with the names
    `vm-dashboard-auto-approve`, `vm-dashboard-single-approver`,
    `vm-dashboard-two-approver`.
@@ -170,7 +168,7 @@ terraform apply -var "entitle_integration_id=<…>" -var "single_approver_group=
 This is the load-bearing property — operators can re-run the bootstrap
 script + apply as part of every deployment without risk. Tier
 reassignment is a single edit to `_tier_for_group()` followed by a
-re-run; Terraform diffs the per-resource `workflow_id` and only
+re-run; Terraform diffs each resource's `workflow` and only
 updates the affected entries.
 
 ## Step 8 — Add a new dashboard-* group end-to-end
@@ -183,10 +181,9 @@ To prove the Phase 1 → Phase 2 chain works:
 2. Re-run Phase 1: `python -m web_dashboard.scripts.bootstrap_entitle_groups --scope=permissions --yes`.
 3. Re-run Phase 2 Step 1 + Step 5 (apply).
 
-**Expected:** Step 5 reports `~ X to change` (for the bundle's
-`resource_ids` list) and `+ N to add`, where N is the number of levels
-the new scope declared — not always three. The Entitle UI's VM Dashboard
-catalog entry now shows the new resources.
+**Expected:** Step 5 reports `+ N to add`, where N is the number of levels
+the new scope declared — not always three. The new resources now carry the
+`VM Dashboard` tag and their tier's workflow.
 
 > **Before you add one, read this.** `has_permission` treats an empty
 > permission map as *unrestricted* but a non-empty map as a strict
@@ -216,12 +213,14 @@ to the matching resource so users can request access in one click.
 ## Rollback
 
 1. `terraform destroy` from the `terraform/entitle_user_jit` directory
-   removes every entity provisioned by this module. The Entra groups
-   themselves are untouched — only the Entitle-side wrapper goes
-   away. Phase 1's groups stay intact for a future re-bootstrap.
+   deletes the three workflows and releases the group resources from
+   Terraform state. The resources themselves stay in Entitle (the Entra
+   sync owns them), still pointing at the deleted workflows, so set their
+   workflow in the UI, or re-apply, before anyone requests them. The Entra
+   groups and Phase 1 are untouched.
 2. For partial rollback (e.g. one bad tier assignment), edit
    `_tier_for_group()` and re-run the bootstrap script + apply. The
-   provider's diffing handles the policy/workflow swap.
+   provider's diffing handles the workflow swap.
 3. If `terraform state` gets out of sync with the live Entitle tenant
    (operator deleted a resource via the UI), `terraform refresh`
    followed by another `apply` reconciles. The wrapper's tfvars file

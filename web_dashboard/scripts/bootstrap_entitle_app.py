@@ -199,12 +199,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--single-approver-group",
         default=os.environ.get("SINGLE_APPROVER_GROUP", ""),
-        help="Approver id for the single-approver tier. Falls back to SINGLE_APPROVER_GROUP env.",
+        help="Entitle directory group NAME that approves the single-approver tier. Falls back to SINGLE_APPROVER_GROUP env.",
     )
     parser.add_argument(
         "--two-approver-group",
         default=os.environ.get("TWO_APPROVER_GROUP", ""),
-        help="Approver id for the two-approver tier. Falls back to TWO_APPROVER_GROUP env.",
+        help="Entitle directory group NAME that approves the two-approver tier. Falls back to TWO_APPROVER_GROUP env.",
     )
     args = parser.parse_args(argv)
 

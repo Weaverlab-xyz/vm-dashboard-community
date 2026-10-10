@@ -310,12 +310,13 @@ won't run it.
 
 Adds:
 - `terraform/entitle_user_jit/` Terraform module:
-  - `entitle_application "vm_dashboard"` — the virtual app.
-  - `entitle_resource "<group>"` for each Entra group from
-    Phase 1 — each pointing at the group's Entra object id.
   - Three `entitle_workflow` definitions (auto-approve /
     single-approver / two-approver).
-  - `entitle_policy` rules routing each resource to its tier.
+  - `entitle_resource_synced "<group>"` for each Entra group from
+    Phase 1: it adopts the resource Entitle's Entra sync created (its
+    external_id is the group's object id) and sets its tier's workflow.
+  - No `entitle_policy`. In Entitle a policy is a birthright grant, not
+    routing; the tier is the workflow on the resource itself.
 - Auth via `ENTITLE_API_KEY` env var (per the Terraform provider
   docs).
 - A wrapper script `bootstrap_entitle_app.py` that calls

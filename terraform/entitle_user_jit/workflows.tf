@@ -1,53 +1,85 @@
-# Three workflows — one per sensitivity tier. Each `entitle_resource` in
-# `resources.tf` references one of these by id.
+# Three workflows, one per sensitivity tier. resources.tf sets one of them on each
+# dashboard group's Entitle resource, so a request for that group's role is approved
+# the way its tier says:
 #
-# Per design §6.4 (cloud-identity-jit.md auto-approval shape; same
-# pattern applies to user-side JIT):
-#   IF requester in policy scope AND duration ≤ max
-#   THEN approver: {automatic | single | two}
+#   auto_approve    -- no human. Baseline + every *-read group.
+#   single_approver -- one approval from single_approver_group. *-write + workgroups.
+#   two_approver    -- two sequential approvals. *-delete + dashboard-admin.
 #
-# Workflow `approval_steps` documents the chain Entitle walks before
-# issuing the grant. `step_type = "Automatic Approval"` is Entitle's
-# native no-human path; `step_type = "User Approval"` routes to the
-# named identifier (group or user).
+# A workflow rule applies to requests up to its `under_duration`; each tier has one
+# rule, whose ceiling is the longest duration that tier allows. The resource's
+# allowed_durations (resources.tf) is what stops a requester asking for more.
+
+locals {
+  durations = {
+    auto_approve    = var.auto_approve_durations
+    single_approver = var.single_approver_durations
+    two_approver    = var.two_approver_durations
+  }
+  ceiling = { for tier, d in local.durations : tier => max(d...) }
+}
 
 resource "entitle_workflow" "auto_approve" {
-  name        = "vm-dashboard-auto-approve"
-  description = "Auto-approve up to ${var.auto_approve_max_minutes} min. Baseline + *-read tier."
-
-  max_duration_minutes = var.auto_approve_max_minutes
-
-  approval_steps {
-    step_type = "Automatic Approval"
-  }
+  name = "vm-dashboard-auto-approve"
+  rules = [{
+    sort_order     = 1
+    under_duration = local.ceiling.auto_approve
+    any_schedule   = false
+    approval_flow = {
+      steps = [{
+        sort_order        = 1
+        operator          = "or"
+        approval_entities = [{ type = "Automatic" }]
+      }]
+    }
+  }]
 }
 
 resource "entitle_workflow" "single_approver" {
-  name        = "vm-dashboard-single-approver"
-  description = "One approver, up to ${var.single_approver_max_minutes} min. *-write + workgroup tier."
-
-  max_duration_minutes = var.single_approver_max_minutes
-
-  approval_steps {
-    step_type = "User Approval"
-    approver  = var.single_approver_group
-  }
+  name = "vm-dashboard-single-approver"
+  rules = [{
+    sort_order     = 1
+    under_duration = local.ceiling.single_approver
+    any_schedule   = false
+    approval_flow = {
+      steps = [{
+        sort_order = 1
+        operator   = "or"
+        approval_entities = [{
+          type  = "DirectoryGroup"
+          group = { id = local.approver_group_id.single }
+        }]
+      }]
+    }
+  }]
 }
 
 resource "entitle_workflow" "two_approver" {
-  name        = "vm-dashboard-two-approver"
-  description = "Two approvers, up to ${var.two_approver_max_minutes} min. *-delete + admin tier."
-
-  max_duration_minutes = var.two_approver_max_minutes
-
-  approval_steps {
-    step_type = "User Approval"
-    approver  = var.two_approver_group
-    # The Entitle provider docs document `count = 2` on a User Approval
-    # step as the canonical "require two distinct approvers from the
-    # group" knob. If the operator's tenant ships a different schema
-    # (older / newer provider), this is the one line most likely to
-    # need adjustment — Terraform will surface a clear error on plan.
-    count = 2
-  }
+  name = "vm-dashboard-two-approver"
+  rules = [{
+    sort_order     = 1
+    under_duration = local.ceiling.two_approver
+    any_schedule   = false
+    approval_flow = {
+      # Two steps run in order: the second approver acts only after the first.
+      steps = [
+        {
+          sort_order = 1
+          operator   = "or"
+          approval_entities = [{
+            type  = "DirectoryGroup"
+            group = { id = local.approver_group_id.two_first }
+          }]
+        },
+        {
+          sort_order = 2
+          operator   = "or"
+          approval_entities = [{
+            type  = "DirectoryGroup"
+            group = { id = local.approver_group_id.two_second }
+          }]
+        },
+      ]
+    }
+  }]
 }
