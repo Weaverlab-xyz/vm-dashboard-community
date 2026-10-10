@@ -165,8 +165,8 @@ is the operator-facing flow. Update both when adding a target.
 ### Running the suite
 
 CI runs every file in `tests/` as a script on **Python 3.12**, the Dockerfile's base
-image: `for f in tests/test_*.py; do python "$f"; done`, after
-`pip install -r web_dashboard/requirements.txt`. Use 3.12 locally too. On a newer
+image, with `scripts/ci/run_tests.sh` after `pip install -r web_dashboard/requirements.txt`.
+Pass file names to run just those. Use 3.12 locally too. On a newer
 interpreter, SQLAlchemy 2.0.27 fails at import and `psycopg2-binary` has no wheel, so
 every test that imports the app fails for reasons CI never sees.
 
@@ -175,6 +175,22 @@ virtualenv in `.venv/` from the requirements and puts it first on the session's 
 It installs no pytest, because CI has none: a test file whose imports fail prints `SKIP`
 and exits 0 without pytest, but exits 1 with it, so an extra package would make a session
 disagree with CI.
+
+### Other checks CI runs
+
+Each has a script, or a single command, that runs the same way locally:
+
+| Check | What it catches | Run it locally |
+|---|---|---|
+| Skip guard (in `run_tests.sh`) | A test file that passed only because its tests printed `SKIP`, from a missing stub or dependency | `scripts/ci/run_tests.sh` |
+| `ruff` | Bug rules only: undefined names, a dict key written twice, a closure over a loop variable, a mutable default (`ruff.toml`) | `ruff check` |
+| `ansible-syntax` | A playbook Ansible cannot load: an unknown module, a malformed task | `scripts/ci/ansible_syntax.sh` (needs `pip install ansible`) |
+| `terraform` | Unformatted HCL, or a module that fails `terraform validate` | `scripts/ci/terraform_validate.sh` |
+| `Images` workflow | A Dockerfile that no longer builds, or a dashboard image that does not boot to `GET /api/health` | `docker build .` |
+
+When a skip is expected in the `tests` job, because another job runs the file with what
+`tests` lacks (a real OPA binary, a PostgreSQL server), add the file to
+`scripts/ci/skip_allowlist.txt` with the reason. Fix any other skip.
 
 ### Where the community can help most
 

@@ -45,18 +45,119 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r web_dashboard/requirements.txt
 
+      # The loop lives in the script so it runs locally unchanged. It also fails a file
+      # that passed only by SKIPPING (a missing stub or dependency makes every test
+      # print "SKIP" and exit 0), unless scripts/ci/skip_allowlist.txt says why that
+      # skip is expected here.
       - name: Run test suite
+        run: scripts/ci/run_tests.sh
+
+  # ── Python bug lint ─────────────────────────────────────────────────────────
+  #
+  # Bug rules only (ruff.toml says which and why): an undefined name, a dict key written
+  # twice, a closure over a loop variable, a mutable default. The first is the bug class
+  # tests/test_no_undefined_names.py was written after; it found the second in
+  # api/spire_lab.py the first time it ran. Pinned, because a new ruff release can add
+  # findings to a rule, and that should arrive as a deliberate bump, not a red main.
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff==0.16.8
+
+      - name: ruff check
+        run: ruff check --output-format=github
+
+  # ── Ansible syntax ──────────────────────────────────────────────────────────
+  #
+  # `ansible-playbook --syntax-check` on every shipped playbook: Ansible resolves each
+  # module name against the installed collections and parses every task's arguments.
+  # tests/test_playbook_samples.py reads the files as text and could not see that two
+  # Windows playbooks never loaded at all. The `ansible` package bundles the community
+  # collections; the BeyondTrust ones come from Galaxy, as in the runner images.
+  ansible-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Ansible and the BeyondTrust collections
         run: |
-          fail=0
-          for f in tests/test_*.py; do
-            echo "::group::$f"
-            python "$f" || fail=1
-            echo "::endgroup::"
-          done
-          if [ "$fail" -ne 0 ]; then
-            echo "::error::One or more test files failed"
+          pip install ansible
+          ansible-galaxy collection install beyondtrust.secrets_safe beyondtrust.password_safe
+          ansible --version
+
+      - name: Syntax-check every playbook
+        run: scripts/ci/ansible_syntax.sh
+
+  # ── Terraform ───────────────────────────────────────────────────────────────
+  #
+  # `terraform fmt -check` and `terraform validate` on every module: no credentials and
+  # no state (`init -backend=false`), so it checks every block against the providers'
+  # schemas and catches a misspelled argument or a dangling reference before a user's
+  # plan does. Validated with the CLI version the image ships (read from the
+  # Dockerfile, as the opa job reads its pin), except workload_credentials, which an
+  # operator applies from a workstation and requires 1.11 for a write-only attribute.
+  terraform:
+    runs-on: ubuntu-latest
+    env:
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.tf-plugin-cache
+      # The modules commit no lock files (.gitignore), and without one Terraform 1.4+
+      # ignores the cache unless told this is acceptable.
+      TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read the Terraform version from the Dockerfile
+        id: tf
+        run: |
+          v=$(sed -n 's/^ARG TERRAFORM_VERSION=//p' Dockerfile)
+          if [ -z "$v" ]; then
+            echo "::error::could not read ARG TERRAFORM_VERSION from the Dockerfile"
+            exit 1
           fi
-          exit $fail
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Cache provider plugins
+        uses: actions/cache@v4
+        with:
+          path: .tf-plugin-cache
+          key: tf-plugins-${{ hashFiles('terraform/**/*.tf') }}
+          restore-keys: tf-plugins-
+
+      - name: Set up Terraform ${{ steps.tf.outputs.version }} (as the image ships)
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ steps.tf.outputs.version }}
+          terraform_wrapper: false
+
+      - name: fmt and validate every module
+        env:
+          TF_EXCLUDE: workload_credentials
+        run: scripts/ci/terraform_validate.sh
+
+      - name: Set up Terraform 1.11 for workload_credentials
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.11.0"
+          terraform_wrapper: false
+
+      - name: Validate workload_credentials
+        run: scripts/ci/terraform_validate.sh terraform/workload_credentials
 
   # ── Docs gate ───────────────────────────────────────────────────────────────
   #

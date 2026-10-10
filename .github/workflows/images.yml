@@ -1,0 +1,162 @@
+name: Images
+
+# Build every image on pull requests, and boot the dashboard.
+#
+# publish-images.yml builds the six images only on a release tag. Until this workflow, a
+# broken Dockerfile, a COPY of a file that moved, a pip pin that no longer resolves or a
+# collection Galaxy dropped was first seen at release time, with the release half-pushed.
+# Here the same Dockerfiles build on every PR, for linux/amd64 only and with no push.
+#
+# The dashboard image is also STARTED, with SQLite and a throwaway JWT key. The suite
+# imports the app in-process, so nothing exercised the image's own entrypoint, CMD,
+# installed packages or file layout, and a missing system library or a module the
+# Dockerfile forgot to COPY would pass every test. GET /api/health answers before
+# first-run setup (main.py's _SETUP_BYPASS_PREFIXES), so a 200 means the container booted
+# and served a request.
+#
+# The runner images build only when their folder (or this workflow) changes. Their
+# Dockerfiles already fail on an unresolvable collection or library (`ansible-doc ...`,
+# `python -c "import ..."`), so a successful build is the check. Their list is READ from
+# publish-images.yml's matrix, so a runner added there is built here without a second edit.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dashboard-image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Same secret publish-images.yml passes: the Dockerfile's Packer step uses it to
+      # avoid the GitHub API's anonymous rate limit. It is a build secret, so it never
+      # lands in a layer. The cache reads the release build's layers as well as its own.
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: infra-dashboard:ci
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
+          cache-from: |
+            type=gha,scope=ci-dashboard
+            type=gha,scope=chrweav/infra-dashboard
+          cache-to: type=gha,mode=max,scope=ci-dashboard
+
+      - name: Boot and probe /api/health
+        run: |
+          docker run -d --name dash -p 8000:8000 \
+            -e JWT_SECRET_KEY=ci-image-boot-check \
+            infra-dashboard:ci
+          for i in $(seq 1 60); do
+            code=$(curl -s -o health.json -w '%{http_code}' http://127.0.0.1:8000/api/health || true)
+            if [ "$code" = "200" ]; then
+              echo "healthy after ~$((i * 2))s: $(cat health.json)"
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' dash)" != "true" ]; then
+              echo "::error::the container exited before it served /api/health"
+              break
+            fi
+            sleep 2
+          done
+          echo "::error::/api/health did not return 200 within 120s (last: ${code:-none})"
+          exit 1
+
+      - name: Container logs
+        if: always()
+        run: docker logs dash 2>&1 | tail -200 || true
+
+  # Which runner images this change touches, as a matrix. Reads publish-images.yml so the
+  # list cannot drift from what a release builds.
+  runner-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+      any: ${{ steps.pick.outputs.any }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Pick the runner images to build
+        id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          all=$(yq -o=json -I=0 \
+            '[.jobs.publish.strategy.matrix.include[] | select(.context != ".")]' \
+            .github/workflows/publish-images.yml)
+          if [ "$(echo "$all" | jq length)" -eq 0 ]; then
+            echo "::error::read no runner images from publish-images.yml; the matrix moved"\
+                 "or changed shape. Fix this selector rather than listing images here."
+            exit 1
+          fi
+
+          if [ "$EVENT" = "pull_request" ]; then
+            changed=$(git diff --name-only "origin/${BASE_REF}...HEAD")
+          elif [ -n "$BEFORE" ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            changed=$(git diff --name-only "$BEFORE" HEAD)
+          else
+            changed=ALL   # a new branch or a force-push: no reliable base, build them all
+          fi
+
+          if [ "$changed" = ALL ] || echo "$changed" | grep -qxE \
+              '\.github/workflows/(images|publish-images)\.yml'; then
+            pick="$all"
+          else
+            pick=$(jq -c --arg changed "$changed" '
+              ($changed | split("\n")) as $files
+              | [.[] | . as $img | select(any($files[]; startswith($img.context + "/")))]
+            ' <<<"$all")
+          fi
+          echo "building: $(jq -r '[.[].image] | join(", ")' <<<"$pick")"
+          echo "matrix={\"include\":$pick}" >> "$GITHUB_OUTPUT"
+          echo "any=$([ "$(jq length <<<"$pick")" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  runner-images:
+    needs: runner-matrix
+    if: needs.runner-matrix.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.runner-matrix.outputs.matrix) }}
+    name: runner-image (${{ matrix.image }})
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: false
+          cache-from: |
+            type=gha,scope=ci-${{ matrix.image }}
+            type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=ci-${{ matrix.image }}
