@@ -326,7 +326,7 @@ password is kept when Password Safe is not in use.
 | `passwordsafe_managed_account_name` | `adminuser` | The onboarded account (the `{name}` part for SSM) |
 | `passwordsafe_vm_functional_account_windows` / `passwordsafe_vm_functional_account_windows_azure` / `passwordsafe_vm_functional_account_windows_aws` | — | Windows VMs: functional account on a **Windows** platform (generic, then per-cloud override) |
 | `passwordsafe_windows_change_password_on_register` | `true` | Windows VMs: rotate the seeded administrator password right after onboarding |
-| `passwordsafe_directory_functional_account` | — | Managed Active Directory: functional account on an **Active Directory** platform for the directory administrator (set on the Managed Active Directory panel; see [Managed Active Directory](../../cloud/directories.md)) |
+| `passwordsafe_directory_functional_account` | — | Managed Active Directory: functional account on an **Active Directory** platform for the directory administrator (set on the Managed Active Directory panel; see [Directories](../../directories.md)) |
 | `passwordsafe_directory_change_password_on_register` | `true` | Managed Active Directory: rotate the seeded administrator password right after onboarding |
 | `passwordsafe_aws_registration_method` | `ssm` | AWS method: `ssm` (AWS Systems Manager plugin) or `ssh` |
 | `passwordsafe_ssm_account_suffix` | `local` | SSM account-name suffix; an AssumeRole ARN for EC2 cross-account mode |

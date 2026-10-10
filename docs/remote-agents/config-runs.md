@@ -154,7 +154,7 @@ the agent.
 ### On-premises directories
 
 An Active Directory or LDAP directory registered on the Directories page with an agent
-(see [On-premises directories](../cloud/directories.md#on-premises-directories-through-a-remote-agent))
+(see [On-premises directories](../directories/on-premises.md#discover-register-and-change-them))
 is a third kind of run, `directory`, with two transports:
 
 - **LDAP** (`local`): the same `hosts: localhost` shape as a database run, using
@@ -177,7 +177,7 @@ serves both transports. Add the directory's LDAP port, and 5986 for WinRM, to
 `ansible.targets`. Directory runs need agent 2.8.0 or later.
 
 The same run kind joins a new GCE Windows server to an on-prem domain through a
-[GCP DNS link](../cloud/directories.md#extending-to-gcp-a-dns-link). The dashboard queues
+[GCP DNS link](../directories/on-premises.md#extending-to-gcp-a-dns-link). The dashboard queues
 it after the deploy, against the server's private address on 5986, so that address must be
 in `ansible.targets` too.
 

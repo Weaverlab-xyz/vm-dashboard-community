@@ -49,7 +49,6 @@ folder of the pages themselves. A page that stands alone is a row on its own.
 | [Cloud VMs](cloud/vms.md) | you are deploying cloud VMs, or want the dashboard to see and power ones it did not deploy. |
 | [Cloud Containers](cloud/containers.md) | you want a containerised app on a cloud runtime without standing up Portainer. |
 | [Virtual Desktops](cloud/virtual-desktops.md) | you need a pool of private desktop VMs that reps reach through the PRA Gateway rather than over the internet. |
-| [Managed Active Directory](cloud/directories.md) | you want Windows servers on AWS or GCP joined to an Active Directory domain (built here, one you already run, or your on-premises domain), or want to manage an on-prem AD or LDAP directory through a remote agent. |
 | [Image Management](cloud/image-management.md) | you are about to build a custom image and need to know how it will reach the other clouds. |
 | [Cloud Costs](cloud/costs.md) | you want month-to-date cloud spend on the dashboard, a budget alert, or a budget in the cloud that alerts while the dashboard is down. |
 
@@ -74,6 +73,7 @@ folder of the pages themselves. A page that stands alone is a row on its own.
 | [Service Accounts](access/service-accounts.md) | something that is not a person — a CI job, an MCP agent, a script — needs to call the API, and you would otherwise hand it a PAT. OAuth 2.0 client credentials, built in, no IdP needed. |
 | [Secrets Management](access/secrets-management.md) | you are deciding where to store cloud credentials, and how to evolve that over time. |
 | [Audit Log](access/audit-log.md) | you need to show who did what, or to satisfy yourself that the record has not been edited. |
+| [Directories](directories.md) | you want Windows servers joined to an Active Directory domain (built in a cloud, one you already run, or your on-premises domain), want to manage an on-prem AD or LDAP directory through a remote agent, or want to browse and change group membership in Entra ID, Okta or PingOne. The pages are under [`directories/`](directories.md). |
 | [OIDC and single sign-on](oidc.md) | you want single sign-on, Dex in front of your clusters, Entra federation to Kubernetes, or the dashboard reaching AWS, Azure, GCP and k3s with its own short-lived identity instead of a stored key. The pages are under [`oidc/`](oidc.md). |
 | [Workload Lab](workload-lab.md) | something that is not a person needs a credential — a certificate, a SPIFFE identity, a cluster token or a cloud key — and you want to pick the mechanism before reading any one guide. The per-tab guides, the Workload Credentials product pages and the register of what consumes each credential are all under [`workload-lab/`](workload-lab.md). |
 
@@ -115,7 +115,7 @@ feature) is indexed by its own `README.md`.
 | [notes/](notes/README.md) | Dated investigations, kept for their conclusions rather than their narrative. |
 
 The sections — [`onboarding/`](ONBOARDING.md), [`cloud/`](cloud.md), [`access/`](access.md),
-[`oidc/`](oidc.md), [`workload-lab/`](workload-lab.md), [`remote-agents/`](remote-agents.md),
+[`oidc/`](oidc.md), [`directories/`](directories.md), [`workload-lab/`](workload-lab.md), [`remote-agents/`](remote-agents.md),
 [`operations/`](operations.md) (with [`operations/scheduling/`](operations/scheduling.md) inside it), [`kubernetes/`](kubernetes.md)
 and [`editions/`](editions.md) — are listed with their hubs above.
 

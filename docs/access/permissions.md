@@ -190,7 +190,7 @@ no scope of their own; each is gated like this:
 | Virtual Desktops | administrator |
 | Certificate Lab, SPIRE Lab | `cloud_function:read` to see, `cloud_function:write` to change |
 | Agent Cell | `config_mgmt:write` |
-| Directories | its own `directories` scope (read, write, delete), which must be granted explicitly. See [Directories → Permissions](../cloud/directories.md#permissions) |
+| Directories | its own `directories` scope (read, write, delete), which must be granted explicitly. See [Directories → Permissions](../directories.md#permissions) |
 
 ## Giving a customer read access to their own POV
 

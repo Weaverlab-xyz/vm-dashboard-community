@@ -305,7 +305,7 @@ domain and base DN, the DC's host name and, for AD, the functional level. You ca
 the scan by a **domain name**: the domain's A records are its domain controllers, so
 `corp.example.com` finds every DC. **All** stays hypervisor-only. A finding has a
 **Register directory** link, covered in
-[On-premises directories](../cloud/directories.md#on-premises-directories-through-a-remote-agent).
+[On-premises directories](../directories/on-premises.md#discover-register-and-change-them).
 
 **WinRM is the honest limit of the set.** It identifies WinRM on Windows — and nearly
 every domain-joined Windows Server has WinRM enabled, the overwhelming majority of them

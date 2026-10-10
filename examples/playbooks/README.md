@@ -552,7 +552,7 @@ formats, and a standalone `docker run` smoke test.
 ## Directories: Active Directory and LDAP (`directory/`)
 
 Plays that change an **on-premises directory** registered on the Directories page
-through a remote agent (see [docs/cloud/directories.md](../../docs/cloud/directories.md#on-premises-directories-through-a-remote-agent)).
+through a remote agent (see [docs/directories/on-premises.md](../../docs/directories/on-premises.md#discover-register-and-change-them)).
 In Config Management, pick the directory under **On-Prem Directories (via agent)** and
 choose the transport:
 
@@ -620,7 +620,7 @@ agent that reaches it, and refuses without `confirm: true`. The tunnel keys come
 `--check` first. The runner needs the `vyos.vyos` and `ansible.netcommon` collections.
 
 Why VyOS on-prem with the cloud's managed VPN, and what it costs: see
-[Connecting on-prem AD to the cloud](../../docs/cloud/directories.md#connecting-on-prem-ad-to-the-cloud).
+[Connecting on-prem AD to the cloud](../../docs/directories/on-premises.md#connecting-on-prem-ad-to-the-cloud).
 
 ## Notes
 

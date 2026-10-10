@@ -200,6 +200,9 @@ _MOVED = {
     "scheduling":                                "operations/scheduling",
     "config-management":                         "operations/config-management",
     "storage-management":                        "operations/storage-management",
+    # Directories, 2026-10: out of cloud/ into its own section, split into cloud AD,
+    # on-premises directories and identity providers. The old page lands on the hub.
+    "cloud/directories":                         "directories",
 }
 
 
@@ -239,7 +242,7 @@ _INDEX_SECTIONS = {
     "integrations/beyondtrust", "integrations/beyondtrust/databases", "onboarding",
     "integrations/ansible", "remote-agents", "workload-lab", "operations/scheduling",
     "profiles/demo/ot-demo-cell", "oidc", "cloud", "access", "operations", "kubernetes",
-    "editions",
+    "editions", "directories",
 }
 
 # Heading text per section. Without this a nested section renders as
@@ -265,6 +268,7 @@ _SECTION_LABELS = {
     "operations":                 "Operations",
     "kubernetes":                 "Kubernetes",
     "editions":                   "Editions",
+    "directories":                "Directories",
 }
 
 # Titles for docs whose filename is an identifier rather than a phrase. The persona pages are

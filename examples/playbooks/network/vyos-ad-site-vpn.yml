@@ -3,7 +3,7 @@
 # remote agent that reaches it. The cloud side is the cloud's managed VPN (AWS
 # Site-to-Site VPN, GCP HA VPN, Azure VPN Gateway): two tunnels with BGP, so a tunnel or
 # cloud-endpoint failure fails over by itself. That pairing is the recommended cheap and
-# reliable setup; see docs/cloud/directories.md#connecting-on-prem-ad-to-the-cloud.
+# reliable setup; see docs/directories/on-premises.md#connecting-on-prem-ad-to-the-cloud.
 #
 # What it configures:
 #   - one route-based IPsec tunnel (VTI) per cloud tunnel: IKEv2, AES-256-GCM, DH group 20,

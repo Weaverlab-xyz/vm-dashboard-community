@@ -668,7 +668,7 @@ Windows builds on **AWS, Azure and GCP** follow a different path from Linux afte
 exists: no SSH key and no Entitle SSH integration. In their place is the local
 administrator password, a PRA **Shell Jump over OpenSSH** (with an RDP jump only if you ask
 for one), and an identity: an Entra ID join (directly on Azure, through Azure Arc on AWS and
-GCP), or an [Active Directory join](directories.md) on AWS, GCP and Azure (Entra Domain
+GCP), or an [Active Directory join](../directories.md) on AWS, GCP and Azure (Entra Domain
 Services). A server gets one or the other, not both.
 
 ### Where the administrator password goes
@@ -909,7 +909,7 @@ local administrator are unaffected.
 
 On AWS and GCP, a Windows server can instead join a managed Active Directory at deploy:
 pick one under **Join Active Directory** on the deploy form. Directories are built or
-registered on the [Managed Active Directory](directories.md) page, which also covers
+registered on the [Directories](../directories.md) page, which also covers
 what each cloud requires.
 
 - **AWS:** after the password is captured, the instance runs AWS's
@@ -924,7 +924,7 @@ on the form.
 
 If Entra Connect syncs that domain with hybrid join configured, pick **Hybrid join** under
 **Microsoft Entra ID** as well: the server is then also Entra hybrid joined, and a follow-up
-check confirms it. See [Hybrid Entra join](directories.md#hybrid-entra-join).
+check confirms it. See [Hybrid Entra join](../directories/on-premises.md#hybrid-entra-join).
 
 ### Not yet supported
 
