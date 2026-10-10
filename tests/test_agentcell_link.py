@@ -273,7 +273,8 @@ def test_the_api_is_reachable_and_paired():
     import warnings
     warnings.filterwarnings("ignore")
     from web_dashboard.main import app
-    paths = {r.path for r in app.routes if "agentcell" in getattr(r, "path", "")}
+    from _routes import all_routes
+    paths = {r.path for r in all_routes(app) if "agentcell" in (getattr(r, "path", "") or "")}
     assert "/api/agentcell/agent/{agent_id}/link" in paths, "no link route is mounted"
 
 
