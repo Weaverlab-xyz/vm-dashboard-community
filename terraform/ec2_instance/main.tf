@@ -96,7 +96,7 @@ resource "aws_instance" "vm" {
   }
 
   tags = {
-    Name      = var.instance_name
+    Name         = var.instance_name
     "managed-by" = "vm-dashboard"
   }
 }
