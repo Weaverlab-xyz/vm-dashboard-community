@@ -80,9 +80,16 @@ def test_no_source_exists_again():
 def test_folder_keys_carry_the_rest_of_the_path():
     if _skip():
         return
-    assert _moved_to("integrations/databases") == "integrations/beyondtrust/databases"
+    # A folder key carries the rest of the path: anything under operations' old
+    # scheduling/ follows it, with no entry of its own.
+    assert (_moved_to("scheduling/change-windows")
+            == "operations/scheduling/change-windows")
+    # Moved twice: each old address points straight at where the page lives now, never
+    # at an intermediate one that is itself a redirect.
     assert (_moved_to("integrations/databases/password-safe-gcp")
-            == "integrations/beyondtrust/databases/password-safe-gcp")
+            == "integrations/beyondtrust/password-safe/databases-gcp")
+    assert (_moved_to("integrations/beyondtrust/databases")
+            == "integrations/beyondtrust/password-safe/databases")
     # A prefix only counts at a path boundary: entitle must not swallow
     # entitle-dashboard-permissions, which has its own entry.
     assert (_moved_to("integrations/entitle-dashboard-permissions")
@@ -98,7 +105,9 @@ def test_an_old_url_redirects():
                      ("/docs/integrations/password-safe",
                       "/docs/integrations/beyondtrust/password-safe"),
                      ("/docs/integrations/databases/password-safe-gcp",
-                      "/docs/integrations/beyondtrust/databases/password-safe-gcp"),
+                      "/docs/integrations/beyondtrust/password-safe/databases-gcp"),
+                     ("/docs/integrations/beyondtrust/databases/password-safe",
+                      "/docs/integrations/beyondtrust/password-safe/databases"),
                      ("/docs/integrations/spiffe", "/docs/workload-lab/spiffe")):
         r = c.get(old, follow_redirects=False)
         assert r.status_code == 301, f"{old}: {r.status_code}"
@@ -111,7 +120,7 @@ def test_live_pages_and_misses_are_unchanged():
         return
     c = _client()
     for live in ("/docs/integrations/beyondtrust", "/docs/operations/scheduling",
-                 "/docs/integrations/beyondtrust/databases"):
+                 "/docs/integrations/beyondtrust/password-safe/databases"):
         assert c.get(live, follow_redirects=False).status_code == 200, live
     assert c.get("/docs/no-such-page", follow_redirects=False).status_code == 404
 

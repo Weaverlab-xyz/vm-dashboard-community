@@ -585,12 +585,14 @@ Password Safe and keeps the PRA-vaulted credential in sync. **OCI is not support
 those databases provision and get a tunnel, but no Password Safe onboarding. GCP covers
 **PostgreSQL and MySQL only**, and ships off — see that section for both reasons.
 
-The mechanism, the functional-account rules and the per-cloud setup are two pages:
+The mechanism, the functional-account rules and the per-cloud setup are under Password Safe:
 
 | Channel | Page |
 |---|---|
-| AWS (`dbssm`) and Azure (`dbazure`), plus the shared model | [Password Safe rotation (AWS + Azure)](integrations/beyondtrust/databases/password-safe.md) |
-| GCP (`dbgcp`, Cloud SQL Data API) | [Password Safe rotation for Cloud SQL](integrations/beyondtrust/databases/password-safe-gcp.md) |
+| The shared model: the two ways in, the functional account, importing | [Password Safe: databases](integrations/beyondtrust/password-safe/databases.md) |
+| AWS (`dbssm`, Systems Manager on the ECS gateway host) | [Password Safe: AWS databases](integrations/beyondtrust/password-safe/databases-aws.md) |
+| Azure (`dbazure`, Run Command on the jump VM) | [Password Safe: Azure databases](integrations/beyondtrust/password-safe/databases-azure.md) |
+| GCP (`dbgcp`, Cloud SQL Data API) | [Password Safe: GCP Cloud SQL](integrations/beyondtrust/password-safe/databases-gcp.md) |
 
 ### Oracle on RDS: the native platform
 

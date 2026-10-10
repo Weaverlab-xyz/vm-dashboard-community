@@ -1,12 +1,8 @@
-# Password Safe rotation for Cloud SQL (GCP)
+# Password Safe: GCP Cloud SQL (`dbgcp`)
 
-> **Audience:** operator · **Profile:** `demo` · **Read this when:** you are onboarding a Cloud SQL database into Password Safe over the Data API.
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** you are onboarding a Cloud SQL database into Password Safe over the Data API, or SQL Server through the Cloud Run service.
 
-Part of [Databases](../../../databases.md), Layer 2. The shared model and the
-AWS/Azure channels are in
-[Password Safe rotation (AWS + Azure)](password-safe.md).
-
-### GCP — `dbgcp` (Cloud SQL Data API)
+Part of [Password Safe: databases](databases.md), which has the shared model: the two ways to onboard, and where the functional account comes from.
 
 > **Every channel is built. None has been exercised against a live instance.**
 >

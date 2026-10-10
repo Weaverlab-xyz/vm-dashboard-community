@@ -271,7 +271,7 @@ def test_every_index_links_its_immediate_subfolders():
         for href in _LINK.findall(_read(index)):
             href = href.split("#")[0].rstrip("/")
             # As above: a sibling hub's hrefs carry its folder's name. Until a hub's
-            # folder held a folder of its own (integrations/beyondtrust/databases/) this
+            # folder held a folder of its own (integrations/beyondtrust/password-safe/) this
             # check never met one.
             if base != folder and href.lower().startswith(
                     f"{os.path.basename(folder).lower()}/"):

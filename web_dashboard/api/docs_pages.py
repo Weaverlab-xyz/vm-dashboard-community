@@ -159,7 +159,9 @@ _MOVED = {
     "integrations/entitle":                      "integrations/beyondtrust/entitle",
     "integrations/entitle-dashboard-permissions": "integrations/beyondtrust/entitle-dashboard-permissions",
     "integrations/epml":                         "integrations/beyondtrust/epml",
-    "integrations/databases":                    "integrations/beyondtrust/databases",
+    "integrations/databases":                    "integrations/beyondtrust/password-safe/databases",
+    "integrations/databases/password-safe":      "integrations/beyondtrust/password-safe/databases",
+    "integrations/databases/password-safe-gcp":  "integrations/beyondtrust/password-safe/databases-gcp",
     "profiles/demo/ot-protocol-clients":         "profiles/demo/ot-demo-cell/ot-protocol-clients",
     # The Workload Lab folder, 2026-09. certificates.md was split three ways; its opening
     # section, the plugin reference, is what kept the name.
@@ -203,13 +205,21 @@ _MOVED = {
     # Directories, 2026-10: out of cloud/ into its own section, split into cloud AD,
     # on-premises directories and identity providers. The old page lands on the hub.
     "cloud/directories":                         "directories",
+    # Password Safe for databases, 2026-10: out of beyondtrust/databases/ and into the
+    # Password Safe section beside VM onboarding and token rotation, one page per cloud.
+    # The old AWS + Azure page lands on the shared-model page, which links both.
+    "integrations/beyondtrust/databases":        "integrations/beyondtrust/password-safe/databases",
+    "integrations/beyondtrust/databases/password-safe":
+        "integrations/beyondtrust/password-safe/databases",
+    "integrations/beyondtrust/databases/password-safe-gcp":
+        "integrations/beyondtrust/password-safe/databases-gcp",
 }
 
 
 def _moved_to(rel: str):
     """Where a moved page lives now, or None. An exact key wins; otherwise the longest key
     that is a folder prefix of ``rel`` carries the rest of the path with it, so
-    integrations/databases/password-safe-gcp follows its folder."""
+    a page under a moved folder follows its folder."""
     if rel in _MOVED:
         return _MOVED[rel]
     for old in sorted(_MOVED, key=len, reverse=True):
@@ -239,7 +249,7 @@ def _moved_to(rel: str):
 _INDEX_SECTIONS = {
     "General", "integrations",
     "profiles", "profiles/demo", "profiles/demo/personas", "profiles/pov",
-    "integrations/beyondtrust", "integrations/beyondtrust/databases", "onboarding",
+    "integrations/beyondtrust", "onboarding",
     "integrations/ansible", "remote-agents", "workload-lab", "operations/scheduling",
     "profiles/demo/ot-demo-cell", "oidc", "cloud", "access", "operations", "kubernetes",
     "editions", "directories", "integrations/rancher", "integrations/portainer",
@@ -256,7 +266,6 @@ _SECTION_LABELS = {
     "profiles/demo/personas":     "Demo profile · personas",
     "profiles/pov":               "POV profile",
     "integrations/beyondtrust":   "BeyondTrust products",
-    "integrations/beyondtrust/databases":     "BeyondTrust · Password Safe for databases",
     "onboarding":                 "Onboarding · per-cloud setup",
     "integrations/ansible":       "Remote Worker runners",
     "remote-agents":              "Remote agents",
@@ -317,8 +326,10 @@ _TITLE_OVERRIDES = {
     "profiles/pov/customer-access":      "What the customer sees",
     "profiles/pov/lifecycle":            "Keeping a POV true, and reaping it",
     "profiles/pov/ps-runbook":           "Password Safe POC runbook",
-    "integrations/beyondtrust/databases/password-safe":     "Rotation on AWS and Azure",
-    "integrations/beyondtrust/databases/password-safe-gcp": "Rotation on GCP Cloud SQL",
+    "integrations/beyondtrust/password-safe/databases":       "Databases: the shared model",
+    "integrations/beyondtrust/password-safe/databases-aws":   "Databases on AWS (dbssm)",
+    "integrations/beyondtrust/password-safe/databases-azure": "Databases on Azure (dbazure)",
+    "integrations/beyondtrust/password-safe/databases-gcp":   "Databases on GCP Cloud SQL (dbgcp)",
     "onboarding/aws":                    "AWS setup",
     "onboarding/azure":                  "Azure setup",
     "onboarding/gcp":                    "GCP setup",
