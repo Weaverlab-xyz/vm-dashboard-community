@@ -15,7 +15,7 @@
 # with argparse exit 2. Keep the base current AND set GOTOOLCHAIN=auto so a
 # future version bump fetches the toolchain go.mod asks for instead of breaking
 # another release.
-FROM golang:1.26-bookworm AS gcp-guest-agent
+FROM golang:1.26-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS gcp-guest-agent
 ENV GOTOOLCHAIN=auto
 ARG GUEST_AGENT_VERSION=20260529.00
 RUN apt-get update \
@@ -47,7 +47,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
 # image promotion. Launched as an ECS Fargate task / Azure ACI container
 # / GCP Cloud Run job by the dashboard. Stays slim so cold-start is
 # fast and the runtime footprint is bounded.
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 
 # libguestfs (virt-customize) offline-edits the disk image so an Azure-target
 # promotion can inject the Azure Linux Agent (waagent) into a foreign Linux
@@ -94,6 +94,7 @@ ARG WALINUXAGENT_VERSION=2.15.0.1
 RUN curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
       "https://github.com/Azure/WALinuxAgent/archive/refs/tags/v${WALINUXAGENT_VERSION}.tar.gz" \
       -o /tmp/waagent.tar.gz \
+    && echo "WALinuxAgent v${WALINUXAGENT_VERSION} sha256 $(sha256sum /tmp/waagent.tar.gz | cut -d' ' -f1)" \
     && mkdir -p /opt/walinuxagent-src \
     && tar -xzf /tmp/waagent.tar.gz -C /opt/walinuxagent-src --strip-components=1 \
     && rm /tmp/waagent.tar.gz \

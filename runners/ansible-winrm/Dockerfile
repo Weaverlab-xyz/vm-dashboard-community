@@ -24,8 +24,12 @@
 # linux/arm64, so both buildx legs resolve. Bumping it is a deliberate act: re-pull
 # willhallonline/ansible:latest, confirm the build still passes, and update both the
 # digest and the date below.
-#   willhallonline/ansible:latest as of 2026-08-24
-FROM willhallonline/ansible:latest@sha256:fa4f22d33cd150c76d48900a29f9d03bf1eb5cfbe77cef9c7905dbc5b0635587
+# Dependabot (.github/dependabot.yml) now proposes the bump; the Images workflow builds it
+# and Trivy scans it, which is the "confirm the build still passes" step. The 2026-08-24
+# digest carried 44 fixable HIGH/CRITICAL findings (OpenSSL, expat, python3, rsync,
+# ansible-core); this one has none.
+#   willhallonline/ansible:latest as of 2026-10-06
+FROM willhallonline/ansible:latest@sha256:969f0990b1ce6669cb6c6096e45047011c99e0d6b1b6c66eea942fb30ff898db
 
 # The upstream image now defaults to the unprivileged `ansible` user. Both RUN layers
 # below write to system paths, and every runner that consumes this image ran as root for

@@ -8,7 +8,7 @@
 # operator-supplied code — a property tests/test_agent_runner_contract.py asserts
 # rather than trusts. When agent-executed Ansible lands it will spawn a one-shot
 # sibling container; the supervisor itself stays inert.
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 
 # Four dependencies, all auditable:
 #   requests      — the HTTPS client (trust_env picks up corporate proxy + CA settings)
