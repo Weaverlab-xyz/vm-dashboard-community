@@ -121,7 +121,7 @@ PyYAML>=6.0
 
 # Proxmox VE REST API
 proxmoxer>=2.0.0
-requests>=2.31.0
+requests>=2.34.2
 
 # VMware vSphere / ESXi (vSphere Web Services API)
 pyVmomi>=8.0.0
