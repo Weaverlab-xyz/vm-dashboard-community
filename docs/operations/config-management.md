@@ -521,7 +521,7 @@ a Secrets-Management secret (as a named var, become password, or SSH key) — or
 **BeyondTrust Password Safe managed account** checked out just-in-time — straight
 into the run. The operator never sees the value; it's scrubbed from job output and
 the use is audited. Requires the `secrets:use` permission. See
-[Using a Secrets-Management secret in a run](../integrations/ansible\secrets.md#using-a-secrets-management-secret-in-a-run).
+[Using a Secrets-Management secret in a run](../integrations/ansible/secrets.md#using-a-secrets-management-secret-in-a-run).
 
 **Escalate through a privilege broker, not just sudo.** The run form's **Become method**
 picker sets how a play escalates when it says `become: true`. Leave it on the default and

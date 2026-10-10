@@ -38,7 +38,7 @@ half of the story.
   `beyondtrust.secrets_safe` Galaxy collection. The dashboard reuses this same OAuth
   client (`pscli_*`) — auto-injecting it into the runner as `PASSWORD_SAFE_*` — so no
   separate credential is needed. See
-  [integrations/ansible.md](../ansible\secrets.md#in-playbook-password-safe-lookup-beyondtrustsecrets_safe)
+  [Ansible secrets](../ansible/secrets.md#in-playbook-password-safe-lookup-beyondtrustsecrets_safe)
   and [examples/playbooks/password-safe/](../../../examples/playbooks/password-safe/).
 
 ---
@@ -134,7 +134,7 @@ details are worth knowing because they are not obvious:
   RBAC-locked secret and force-deleted after the run.
 
 Full walkthrough in
-[Ansible → Managed-account checkout](../ansible\secrets.md#managed-account-checkout-beyondtrust-password-safe).
+[Ansible → Managed-account checkout](../ansible/secrets.md#managed-account-checkout-beyondtrust-password-safe).
 
 ### Hypervisor credentials for a remote agent
 
@@ -651,7 +651,7 @@ path proven immediately, remembering that LongLived revokes the token a live ses
 The **OT demo cell** uses the same primitive for its `adminuser` credential — parent on the
 GCP VM SSH Rotation platform, subscriber on the **PRA Vault Username Password** plugin, PRA
 Vault account associated to the cell's Jump Group for checkout/injection. See
-[cloud-ot.md](../../profiles/demo/ot-demo-cell.md#pra-checkout-of-the-cells-admin-credential).
+[OT demo cell](../../profiles/demo/ot-demo-cell.md#pra-checkout-of-the-cells-admin-credential).
 
 **The LongLived break window.** Rotation revokes the old token immediately. Password Safe
 applies the new value to the subscriber as part of the same change, but change operations are

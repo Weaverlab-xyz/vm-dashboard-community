@@ -16,8 +16,8 @@ your LAN, surviving a laptop reboot, or fronting remote agents.
 > edition, single-tenant, with the JWT root key supplied as a platform secret.
 > The hosted edition's differences are narrower and more specific than "runs in
 > a cloud": the root key is never a static credential, and one deployment serves
-> many tenants. See [saas-comparison.md](../editions/comparison.md). If you have read
-> [saas-roadmap.md](../editions/roadmap.md) and remember Container Apps being ruled
+> many tenants. See [Community vs. hosted](../editions/comparison.md). If you have read
+> [SaaS Roadmap](../editions/roadmap.md) and remember Container Apps being ruled
 > out — that was about *per-tenant* SaaS revisions and their cost, not about
 > self-hosting one instance, which is what the reference install has run all
 > along.
@@ -83,7 +83,7 @@ minted on an install permanently pins the signing audience, and every agent
 signature is checked against it afterwards. A platform-assigned name — an
 `*.azurecontainerapps.io` default FQDN, a Cloud Run auto-URL — will change, and
 changing it strands the fleet. Bind a custom domain first. See
-[remote-agents.md](../remote-agents/enrolment.md#the-signing-audience-is-pinned-by-that-first-code).
+[Remote Agents → enrolment](../remote-agents/enrolment.md#the-signing-audience-is-pinned-by-that-first-code).
 
 ---
 

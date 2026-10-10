@@ -74,7 +74,7 @@ record kept: 9 of 14 run, 2 skipped"* — at the moment somebody is closing the 
 out, which is the one time anybody reads it.
 
 The design note, including the accessor identity that is **not** kept, is in
-[design/pov-use-cases.md](design/use-cases.md).
+[design/use-cases.md](design/use-cases.md).
 
 ---
 

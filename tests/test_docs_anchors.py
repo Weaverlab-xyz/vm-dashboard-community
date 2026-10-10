@@ -141,6 +141,17 @@ def test_docs_links_point_at_files_that_exist():
         f"{len(missing)} link(s) to a file that isn't there:\n  " + "\n  ".join(missing))
 
 
+def test_docs_links_use_forward_slashes():
+    """``_links`` folds ``\\`` into ``/`` so a target resolves the same on Windows, which
+    also hid nine ``ansible\\secrets.md``-style links a Windows-side move wrote: they
+    passed the existence check above while GitHub treats the backslash as part of the
+    file name. A link path is a URL, so it only ever takes ``/``."""
+    bad = sorted({f"{src} -> {href}" for src, href, _, _ in _links()
+                  if "\\" in href.partition("#")[0]})
+    assert not bad, (
+        f"{len(bad)} link(s) with a backslash in the path:\n  " + "\n  ".join(bad))
+
+
 # ── the slugifier itself ──────────────────────────────────────────────────────
 # Pinned against real github-slugger output, so a well-meaning "simplify this
 # regex" can't quietly restore the collapsing behaviour.
