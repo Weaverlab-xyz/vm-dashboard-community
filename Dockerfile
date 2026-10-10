@@ -3,7 +3,8 @@
 # both ARM64 (Apple Silicon, AWS Graviton) and AMD64.
 #
 # Every downloaded binary is pinned to a version AND to the SHA256 its vendor published
-# for that version, per architecture, and the build fails on a mismatch. TLS proves who
+# for that version, per architecture, and the build fails on a mismatch (helm: against
+# the checksum file it publishes beside the tarball, see below). TLS proves who
 # served the bytes, not that they are the bytes that were released; a pinned hash does.
 # Bumping a version means updating its two hashes from the vendor's checksum file in the
 # same change (the URL is in the comment next to each pair). Terraform providers and
@@ -500,6 +501,8 @@ RUN set -eu; \
 # the same commit could ship different kubectls; helm came from `curl get-helm-3 | bash`
 # off helm's main branch, which runs whatever that script says on the day. 1.37.1 and
 # 3.22.0 are what that produced in the last release, so behaviour is unchanged.
+# helm is checked against the .sha256sum file helm publishes next to each tarball rather
+# than a hash pinned here: get.helm.sh is the only place helm publishes its checksums.
 ARG KUBECTL_VERSION=v1.37.1
 # https://dl.k8s.io/release/v1.37.1/bin/linux/<arch>/kubectl.sha256
 ARG KUBECTL_SHA256_AMD64=65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8
@@ -518,7 +521,6 @@ RUN ARCH=$(dpkg --print-architecture) \
     && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
         "https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH}.tar.gz.sha256sum" -o /tmp/helm.sha256 \
     && echo "$(cut -d' ' -f1 /tmp/helm.sha256)  /tmp/helm.tar.gz" | sha256sum -c - \
-    && echo "helm ${HELM_VERSION} ${ARCH} sha256 $(sha256sum /tmp/helm.tar.gz | cut -d' ' -f1)" \
     && tar -xzf /tmp/helm.tar.gz -C /tmp \
     && mv "/tmp/linux-${ARCH}/helm" /usr/local/bin/helm \
     && rm -rf /tmp/helm.tar.gz /tmp/helm.sha256 "/tmp/linux-${ARCH}" \

@@ -67,7 +67,6 @@ RUN ARCH=$(dpkg --print-architecture) \
  && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
       "https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH}.tar.gz.sha256sum" -o /tmp/helm.sha256 \
  && echo "$(cut -d' ' -f1 /tmp/helm.sha256)  /tmp/helm.tar.gz" | sha256sum -c - \
- && echo "helm ${HELM_VERSION} ${ARCH} sha256 $(sha256sum /tmp/helm.tar.gz | cut -d' ' -f1)" \
  && tar xzf /tmp/helm.tar.gz -C /tmp \
  && mv "/tmp/linux-${ARCH}/helm" /usr/local/bin/helm \
  && rm -rf /tmp/helm.tar.gz /tmp/helm.sha256 /tmp/linux-* \

@@ -91,10 +91,13 @@ ENV LIBGUESTFS_BACKEND=direct
 # 504 kills the build; retrying on all errors survives the blip the same way
 # the go-mod-download and terraform-init steps already do.
 ARG WALINUXAGENT_VERSION=2.15.0.1
+# SHA256 of the GitHub source tarball for that tag (GitHub archives are byte-stable). Taken
+# from this image's CI build; bumping the version means updating it in the same change.
+ARG WALINUXAGENT_SHA256=f405cb90179dbe582a1c71a36af8016072c0defeb969aeee7861d5aab10499d8
 RUN curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
       "https://github.com/Azure/WALinuxAgent/archive/refs/tags/v${WALINUXAGENT_VERSION}.tar.gz" \
       -o /tmp/waagent.tar.gz \
-    && echo "WALinuxAgent v${WALINUXAGENT_VERSION} sha256 $(sha256sum /tmp/waagent.tar.gz | cut -d' ' -f1)" \
+    && echo "${WALINUXAGENT_SHA256}  /tmp/waagent.tar.gz" | sha256sum -c - \
     && mkdir -p /opt/walinuxagent-src \
     && tar -xzf /tmp/waagent.tar.gz -C /opt/walinuxagent-src --strip-components=1 \
     && rm /tmp/waagent.tar.gz \
