@@ -33,8 +33,9 @@ replace them:
 - **Local password accounts** — unaffected.
 - **FIDO2 / WebAuthn MFA** — unaffected.
 - **"Sign in with Microsoft" (legacy Entra/Azure path)** — configured separately
-  under the Azure settings and unaffected. If you'd rather run Entra through this
-  generic path, you can — see [Provider quick reference](#provider-quick-reference).
+  under the Azure settings and unaffected. Its button shows only when that path has a
+  client ID and tenant, and sits below this one when both are set. If you'd rather run
+  Entra through this generic path, you can — see [Provider quick reference](#provider-quick-reference).
 
 > **Scope.** GitHub is **not** supported — it isn't an OIDC provider (no discovery
 > document, no ID token). **SAML is not supported** either. This integration is

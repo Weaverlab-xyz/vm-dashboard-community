@@ -1525,16 +1525,24 @@ async def root(request: Request):
 
 @app.get("/login", response_class=HTMLResponse, include_in_schema=False)
 async def login_page(request: Request):
-    # Surface the generic-OIDC button only when an issuer is configured, so a
-    # default install doesn't show a button that 501s.
+    # Surface each SSO button only when its provider is configured, so a default
+    # install doesn't show a button that 501s. Generic OIDC is the default path; the
+    # legacy Sign in with Microsoft button needs its own Entra client id and tenant,
+    # the same check /api/auth/oauth/azure/login makes before redirecting.
     try:
         from .services import oidc_service
         oidc_enabled, oidc_label = oidc_service.is_configured(), oidc_service.provider_label()
     except Exception:
         oidc_enabled, oidc_label = False, "SSO"
+    try:
+        client_id, _, tenant_id = auth._oauth_cfg()
+        entra_oauth_enabled = bool(client_id and tenant_id)
+    except Exception:
+        entra_oauth_enabled = False
     return templates.TemplateResponse(
         "login.html",
-        {"request": request, "oidc_enabled": oidc_enabled, "oidc_label": oidc_label},
+        {"request": request, "oidc_enabled": oidc_enabled, "oidc_label": oidc_label,
+         "entra_oauth_enabled": entra_oauth_enabled},
     )
 
 
