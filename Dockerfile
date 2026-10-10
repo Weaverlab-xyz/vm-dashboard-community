@@ -86,7 +86,7 @@ ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt \
 
 # Install Python dependencies first so this layer caches when only app
 # code changes.
-COPY web_dashboard/requirements.txt ./requirements.txt
+COPY web_dashboard/requirements-missing.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Cloud Functions: database drivers vendored into the deployed function zip.
