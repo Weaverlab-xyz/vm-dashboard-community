@@ -55,7 +55,12 @@ def _install_stubs():
         K8sCluster=type("K8sCluster", (), {}),
         VirtualDesktop=type("VirtualDesktop", (), {}))
     mod("web_dashboard.models.gcp", GCPDeployRequest=type("GCPDeployRequest", (), {}))
-    for svc in ("cache_service", "gcp_service", "job_service", "region_catalog"):
+    # gcp_vm_service imports GCPError from gcp_service by name. Without it the import
+    # below fails, and under CI -- which runs this file as a script, with no pytest
+    # installed -- that is a printed SKIP and exit 0: the whole file stopped running,
+    # green, from the day the import was added.
+    mod("web_dashboard.services.gcp_service", GCPError=type("GCPError", (Exception,), {}))
+    for svc in ("cache_service", "job_service", "region_catalog"):
         mod(f"web_dashboard.services.{svc}")
 
 

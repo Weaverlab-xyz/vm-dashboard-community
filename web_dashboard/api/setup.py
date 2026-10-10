@@ -277,6 +277,23 @@ class ProfileSetup(BaseModel):
         return v
 
 
+class SsoSetup(BaseModel):
+    """Generic OIDC single sign-on, the default SSO path, offered in the wizard so an
+    operator need not finish setup and then find the Settings panel to turn it on.
+
+    The same four keys the Settings → OIDC panel writes (``OidcFeatureConfig``); the rest
+    of that panel (scopes, groups claim, workload issuers) keeps its defaults here and stays
+    in Settings. There is no enable flag: SSO is live once an issuer and client id are set,
+    which is what ``oidc_service.is_configured()`` checks.
+    """
+    oidc_issuer: str = ""
+    oidc_client_id: str = ""
+    # Optional: blank for a public client. Never read back into the wizard -- on a
+    # reconfigure, blank means "keep the stored one", as for the other wizard secrets.
+    oidc_client_secret: str = ""
+    oidc_provider_name: str = ""
+
+
 class PersonaSetup(BaseModel):
     """Which role's material this instance leads with. A DISPLAY DEFAULT, not a gate.
 
@@ -391,6 +408,10 @@ class SetupPayload(BaseModel):
     # Defaulted, so an older UI or a script that omits it leaves a POV's storage alone
     # rather than clearing it — the same reasoning as `profile` and `persona` above.
     pov_storage: PovStorageSetup = PovStorageSetup()
+    # `None` for the same reason as `profile`: absent must mean "leave SSO alone", so an
+    # older UI or a script that omits the block can never switch a working login off.
+    # Written on either profile -- signing in to the dashboard is not a demo-only concern.
+    sso: SsoSetup | None = None
     features: FeaturesSetup
 
 
@@ -462,6 +483,7 @@ def _upsert_admin(username: str, password: str) -> None:
 
 
 _WIZARD_SECRET_FIELDS = frozenset({
+    "oidc_client_secret",
     "aws_secret_access_key",
     "wlc_pat",
     "azure_client_secret",
@@ -549,6 +571,13 @@ def _apply_config(payload: SetupPayload) -> None:
                 detail=f"A focus cannot be set on {feature_flags.profile_noun(profile)}.")
         pairs["default_persona"] = payload.persona.default_persona
 
+    if payload.sso is not None:
+        for field, value in payload.sso.model_dump().items():
+            value = (value or "").strip()
+            if field in _WIZARD_SECRET_FIELDS and not value:
+                continue
+            pairs[field] = value
+
     if profile == "demo":
         for cloud in (payload.aws, payload.azure, payload.gcp, payload.oci):
             for field, value in cloud.model_dump().items():
@@ -601,6 +630,15 @@ def _apply_config(payload: SetupPayload) -> None:
         azure_service.invalidate_credentials()
     except Exception:
         pass
+
+    # Discovery and JWKS are cached for an hour, as on the Settings panel's save: a
+    # corrected issuer must take effect now, not when the old one's cache expires.
+    if payload.sso is not None:
+        try:
+            from ..services import oidc_service
+            oidc_service.clear_cache()
+        except Exception:
+            pass
 
 
 # Data caches whose payload is derived from cloud/config values written via the

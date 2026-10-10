@@ -162,6 +162,20 @@ is the operator-facing flow. Update both when adding a target.
 
 ## Testing
 
+### Running the suite
+
+CI runs every file in `tests/` as a script on **Python 3.12**, the Dockerfile's base
+image: `for f in tests/test_*.py; do python "$f"; done`, after
+`pip install -r web_dashboard/requirements.txt`. Use 3.12 locally too. On a newer
+interpreter, SQLAlchemy 2.0.27 fails at import and `psycopg2-binary` has no wheel, so
+every test that imports the app fails for reasons CI never sees.
+
+Claude Code cloud sessions do this for you: `.claude/hooks/session-start.sh` builds a 3.12
+virtualenv in `.venv/` from the requirements and puts it first on the session's `PATH`.
+It installs no pytest, because CI has none: a test file whose imports fail prints `SKIP`
+and exits 0 without pytest, but exits 1 with it, so an extra package would make a session
+disagree with CI.
+
 ### Where the community can help most
 
 The maintainer's home lab covers **VMware Workstation** and

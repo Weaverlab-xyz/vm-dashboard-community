@@ -11,7 +11,7 @@ several other places too, each with its own page:
 | [Dex](oidc/dex.md) | you want one issuer that both the dashboard and your on-prem clusters trust |
 | [Entra → Kubernetes federation](oidc/entra-k8s-federation.md) | you want people signing in to managed clusters as themselves, with their Entra groups as RBAC subjects |
 | [Identity providers](directories/identity-providers.md) | you want to browse or change users and groups in Entra ID, Okta or PingOne, rather than sign in through one. That lives in the [Directories](directories.md) section |
-| [Sign in with Microsoft (Entra OAuth)](oidc/entra-oauth.md) | you want the legacy per-tenant Entra sign-in button rather than the generic path below |
+| [Sign in with Microsoft (Entra OAuth)](oidc/entra-oauth.md) | you already use the legacy Entra-only sign-in button, or are moving from it to the generic path below |
 
 ## What is it?
 
@@ -102,7 +102,10 @@ name your provider uses.
 
 ### Step 2 — Configure the dashboard
 
-Go to **Settings → Integrations → Single sign-on (OIDC)** and fill in:
+On a new install, the setup wizard's **Admin** step has a **Single sign-on (OIDC) —
+optional** panel with the first four fields below; the rest keep their defaults until you
+change them in Settings. Afterwards, or on an existing instance, go to **Settings →
+Integrations → Single sign-on (OIDC)** and fill in:
 
 | Field | Config key | Default | Notes |
 |---|---|---|---|
