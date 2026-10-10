@@ -42,7 +42,8 @@ in the wizard hint (`{your-host}/api/auth/oauth/azure/callback`) in the
 Azure app registration under **Authentication**.
 
 Once saved, the login page shows a **Sign in with Microsoft** button
-without a restart.
+without a restart. Until a client ID and tenant are saved there is no button at all, and
+when [generic OIDC](../oidc.md) is also configured its button comes first.
 
 Optional: map Entra group object IDs to dashboard workgroups from
 **Settings → Groups** — users in a mapped group are auto-created and

@@ -84,7 +84,7 @@ credentials for machines the dashboard built, not credentials the dashboard itse
 so a Windows build writes its administrator password to Password Safe, an external
 backend or the cloud's own vault, and refuses to build when none is configured. The
 **Windows VM administrator passwords** setting on the Secrets page picks the store
-explicitly. See [Windows servers](../cloud/vms.md#windows-servers).
+explicitly. See [Windows servers](../cloud/windows-servers.md).
 
 ---
 
@@ -396,7 +396,7 @@ Unlike the four backend prefixes, `ps_account://` is deliberately **not** resolv
 `config_service.get()`. The others are stateless reads; this one opens a request that
 something has to close, so it is handled only on the agent-credential path where the release
 lifecycle exists. See
-[docs/remote-agents.md](../remote-agents/credentials.md#the-credential-the-dashboard-holds).
+[Remote Agents → credentials](../remote-agents/credentials.md#the-credential-the-dashboard-holds).
 
 ---
 
@@ -430,7 +430,7 @@ Managed-account checkout works on the **local and Azure (ACI) runners** (both
 inject inline); on **ECS / Cloud Run** it requires the opt-in below.
 
 Full operator detail lives in
-[docs/integrations/ansible.md → Using a Secrets-Management secret in a run](../integrations/ansible\secrets.md#using-a-secrets-management-secret-in-a-run).
+[Ansible secrets → Using a Secrets-Management secret in a run](../integrations/ansible/secrets.md#using-a-secrets-management-secret-in-a-run).
 
 ### Ephemeral cloud secrets
 
@@ -474,7 +474,7 @@ use. If that trade-off isn't acceptable, use the local or ACI runner (inline, no
 store copy) — the default.
 
 Full operator detail:
-[docs/integrations/ansible.md → Managed-account checkout](../integrations/ansible\secrets.md#managed-account-checkout-beyondtrust-password-safe).
+[Ansible secrets → Managed-account checkout](../integrations/ansible/secrets.md#managed-account-checkout-beyondtrust-password-safe).
 
 ### Collect from the dashboard (no store copy)
 

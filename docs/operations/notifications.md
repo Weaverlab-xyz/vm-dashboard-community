@@ -6,7 +6,7 @@ Part of [Operations](../operations.md).
 
 **Outbound only.** The dashboard POSTs to endpoints you configure. It never opens an
 inbound webhook, and nothing here listens for anything. (A per-tenant *inbound* endpoint
-is reserved for the hosted edition — see [saas-roadmap.md](../editions/roadmap.md) — and is a
+is reserved for the hosted edition — see [SaaS Roadmap](../editions/roadmap.md) — and is a
 different feature entirely.)
 
 The problem it solves: everything the dashboard knows is on a page you have to open.

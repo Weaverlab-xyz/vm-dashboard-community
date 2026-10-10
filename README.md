@@ -21,8 +21,8 @@ Five readers, five ways in:
 
 | You are… | Start here |
 |---|---|
-| **installing or running** the dashboard | [Onboarding](docs/ONBOARDING.md), then the reference table below |
-| **running your own infrastructure** with it | the reference table below — you want the `demo` profile, whatever its name suggests |
+| **installing or running** the dashboard | [Onboarding](docs/ONBOARDING.md), then [Where everything is](#where-everything-is) |
+| **running your own infrastructure** with it | [Where everything is](#where-everything-is) — you want the `demo` profile, whatever its name suggests |
 | **showing** it to someone | [Demo profile](docs/profiles/demo/README.md) — one page per role, plus the OT demo cell |
 | running **customer proof-of-value** work | [POV profile](docs/profiles/pov/README.md) |
 | **changing the code** | [CONTRIBUTING.md](CONTRIBUTING.md), then [design notes](docs/design/README.md) |
@@ -36,46 +36,49 @@ administering infrastructure you actually depend on, `demo` is still the profile
 want. [Demo and POV profiles](docs/profiles/README.md)
 explains why, and which features each one gets.
 
-The full index of every page is [docs/README.md](docs/README.md).
-
 ## How the dashboard thinks
 
-Before you spin it up, the reference docs below explain the
-opinions baked into the codebase — what the dashboard does *for* you,
-and what discipline it expects from you. Read them in order if you're
-new to the tool; skim if you already know how this kind of platform
-works:
+Before you spin it up, five pages explain the opinions baked into the codebase: what the
+dashboard does *for* you, and what discipline it expects from you. Read them in order if
+you're new to the tool; skim if you already know how this kind of platform works.
 
-| Doc | What's in it | Read this when |
-|---|---|---|
-| [Infrastructure as Code](docs/cloud/infrastructure-as-code.md) | The Terraform-per-deploy model, per-job state, idempotent destroy, where Packer + the sandbox bootstrappers fit. | You're about to deploy your first cloud VM and want to know what's actually running underneath. |
-| [Image Management](docs/cloud/image-management.md) | Build-once-promote-many lifecycle: build a portable VHD in one cloud, hub it in your designated storage backend, run **one-click cross-cloud promote** via a transient runner in the target cloud (ECS / ACI / Cloud Run). | You're about to build a custom image and need to know how it'll reach the other clouds. |
-| [Config Management](docs/operations/config-management.md) | Why one-shot ephemeral runners are the security argument, the .yml/.sh/.ps1/.rpm/.deb wrap rules, on-prem vs cloud target paths; ready-to-adapt Linux + Windows playbooks in [`examples/playbooks/`](examples/playbooks/). | You're about to run an Ansible job and want to know how the runner handles secrets and isolation. |
-| [Secrets Management](docs/access/secrets-management.md) | Tier 1 (encrypted DB) → Tier 2 (external vault) → Tier 3 (vault-backed runtime checkout); migration UI; why the JWT root key can't move. | You're deciding where to store cloud credentials and how to evolve that over time. |
-| [Storage Management](docs/operations/storage-management.md) | Four backends (S3, Azure Blob, GCS, Local/UNC); migration; why backends are a deployment-level concern, not a per-feature one. | You're about to enable the Ansible feature flag — storage is a prerequisite. |
-| [Cloud VMs](docs/cloud/vms.md) | Deploy EC2 / Azure VM / GCE / OCI Compute; the provisioning + PRA / Password Safe / Entitle layer model; per-cloud prerequisites and config keys. | You're deploying cloud VMs and want the full access/onboarding story. |
-| [Databases](docs/databases.md) | Provision private Postgres / MySQL / SQL Server (AWS/Azure/GCP) + Oracle (OCI) — PRA tunnel, optional Password Safe rotation + Entitle JIT — or register a database you already run, on-premises included, as a Configuration Management target. | You're standing up a managed database and need the per-cloud prerequisites, or you want to manage one that already exists. |
-| [Cloud Containers](docs/cloud/containers.md) | Deploy a stored Docker Compose file to ECS / ACI / GCE-COS; the supported subset; app starters in [`examples/compose/`](examples/compose/); monitoring the container fleet. | You want to run a containerized app (Guacamole, Trivy, OPA, …) on a cloud runtime without Portainer. |
-| [Cloud Functions](docs/integrations/cloud-functions.md) | One Python handler deployed unchanged as an AWS Lambda / Azure Function App / GCP Cloud Run function, optionally VPC-attached; layered auth; workload templates in [`examples/functions/`](examples/functions/). | You need a stable HTTPS endpoint that external systems can call to act *inside* your network — the case a one-shot container can't serve. |
-| [Entitle Dashboard Permissions](docs/integrations/beyondtrust/entitle-dashboard-permissions.md) | Time-boxed permissions **inside the dashboard**, granted by Entitle. Compares the two mechanisms — REST (current; any user, immediate) and Entra groups (legacy; Entra only, next login) — and how to migrate between them. | You want dashboard access without standing admins, or you need to tell the two mechanisms apart. |
-| [Kubernetes](docs/kubernetes.md) | Provision/import EKS / AKS / GKE; a Rancher management plane on the cloud of your choice; ESO secret delivery; PRA tunnels, Password Safe rotation of the injected ServiceAccount token, Entra→RBAC federation, Entitle JIT. | You're managing Kubernetes clusters and their privileged access. |
-| [Workload Lab](docs/workload-lab.md) | Credentials for things that are not people, four mechanisms on one page — a certificate from a private CA you stand up here, a SPIFFE SVID, a bound Kubernetes ServiceAccount token, or a short-lived AWS/Azure credential. Every tab *issues* rather than lists, records what it issued, and can remove it. Nine pages under [`docs/workload-lab/`](docs/workload-lab.md), including the register of [what actually consumes each one](docs/workload-lab/consumers.md). | A pipeline, a broker, a cluster or an AI agent needs a credential, and you want to pick the mechanism before reading any one guide. |
-| [Generic OIDC (SSO)](docs/oidc.md) | Discovery-driven OpenID Connect login for any IdP (Okta, Entra, Keycloak, Google, …); PKCE, group→workgroup mapping, admin Settings panel. | You want single sign-on for the dashboard instead of local passwords. |
-| [Scheduling](docs/operations/scheduling.md) | Run a change later, only inside an approved change window, or on every occurrence of one. Tells a one-off booking, a recurring schedule (`/schedules`) and the cloud suspend schedule apart, and lists which surfaces can be booked. |
-| [Inventory](docs/inventory.md) | One list across every cloud and hypervisor at `/inventory`: choose the columns, filter on a cloud tag or a Password Safe attribute, assign attributes and re-run Smart Rules, run a playbook on a selection. |
-| [Auto-delete Timer](docs/operations/auto-delete-timer.md) | Give provisioned VMs, databases and clusters an expiry, then run the same teardown the Destroy button runs. The four gates, the two one-hour arming clocks, extending and pinning. | You want lab resources to clean themselves up — read it *before* enabling, because it deletes infrastructure. |
-| [Notifications](docs/operations/notifications.md) | Outbound webhooks — Slack, Microsoft Teams (Power Automate Workflows), or a signed JSON envelope you point at anything. Auto-delete warnings, job failures, budget/secret/drift alerts. | You've turned on the auto-delete timer and want to hear about it without opening the dashboard. |
-| [Remote Agents](docs/remote-agents.md) | Reaching infrastructure the dashboard cannot route to: an outbound-dialing agent an operator runs inside the private network — no inbound ports, no stored path in. Enrolment and credential sealing (*the config file travels, the key does not*), discovery, agent-executed Config Management, and the one-shot sibling runners for Hyper-V and bare ESXi. | Your hypervisors, databases or clusters live somewhere the dashboard can't reach — a customer network, a lab behind NAT, an air-gapped segment. |
-| [Cloud Hosting](docs/operations/cloud-hosting.md) | Running the dashboard itself on Azure Container Apps / Cloud Run / ECS instead of Compose: the gateway sidecar that splits the agent endpoint from the UI, why an unset `DATABASE_URL` or `JWT_SECRET_KEY` fails silently, and what on-premises capability you give up. | You want the dashboard reachable from outside your LAN, or fronting remote agents. |
-| [Config Migration](docs/operations/config-migration.md) | Moving Settings configuration between two instances. Why `pg_dump` of the config table restores unreadable ciphertext without erroring, and what deliberately stays behind. | You're standing up a second instance and don't want to re-type months of configuration. |
-| [Personas](docs/profiles/demo/personas/README.md) | One page per role — Cloud Ops, DevOps, hypervisor admin, IT, OT/ICS, DBA, security analyst, SRE, network/firewall admin, FinOps/cloud governance, AI/agent platform — covering what that person owns, the four-layer story in their language (provisioning → PRA → Password Safe → Entitle), the use cases to run, and which integrations each needs. The in-app **Use cases** page is the same catalog, with each card reporting whether this instance can actually run it. | You are presenting to a specific role and want the story and the click path, rather than a feature list. |
-| [POV Instance](docs/profiles/pov/README.md) | Running a **second** dashboard for sandbox POV/POC environments — a lab you run, wired into the customer's tenant — across seven pages: the **tenant registry** that replaces the singletons, running POVs on a public cloud, the POV Gateway and Resource Broker, wiring guests into PRA / Password Safe / Entitle, and what the customer sees — the per-POV use-case checklist, the **accessor** login that reaches its own POV and nothing else, and the share link. | You do customer proof-of-value work and don't want it sharing an instance, a database or a BeyondTrust tenant with your own estate. |
-| [Skytap](docs/profiles/pov/skytap.md) | The first POV **lab platform**: the API token (not your password), why 423 is normal rather than an error, why every read carries `keep_idle`, why the Terraform provider is deliberately unused, the **template contract** the broker VM has to satisfy — Skytap hands `user_data` to the guest and nothing executes it — and the **template builder** that now writes that runner for you and bakes the result into a new template. | You're pointing a POV instance at Skytap and want to know what it will and won't do with the account. |
+1. [Infrastructure as Code](docs/cloud/infrastructure-as-code.md): a Terraform run per
+   deploy, per-job state, idempotent destroy, and where Packer and the sandbox
+   bootstrappers fit.
+2. [Config Management](docs/operations/config-management.md): why one-shot, ephemeral
+   runners are the security argument, and how on-prem and cloud targets are reached.
+3. [Secrets Management](docs/access/secrets-management.md): encrypted database, then an
+   external vault, then runtime checkout from a vault, and why the JWT root key can't move.
+4. [Storage Management](docs/operations/storage-management.md): four backends, and why a
+   backend is a deployment-level choice rather than a per-feature one.
+5. [Image Management](docs/cloud/image-management.md): build an image once, then promote it
+   to the other clouds.
 
-Together they're the philosophy of the tool: **declarative,
-version-controlled, idempotent, ephemeral where it should be and
-persistent where it must be**. The features in the rest of this
-README make sense in that frame.
+Together they're the philosophy of the tool: **declarative, version-controlled,
+idempotent, ephemeral where it should be and persistent where it must be**. The features in
+the rest of this README make sense in that frame.
+
+## Where everything is
+
+The docs are grouped into sections. Each one has a front page that says which page
+answers what. The full index of every page is [docs/README.md](docs/README.md).
+
+| Section | Read this when |
+|---|---|
+| [Onboarding](docs/ONBOARDING.md) | you're setting the dashboard up for the first time, and want the per-cloud setup and the feature-test checklist |
+| [Cloud](docs/cloud.md) | you're putting workloads on AWS, Azure, GCP or OCI: VMs, containers, virtual desktops, Active Directory in the cloud, images and costs |
+| [Databases](docs/databases.md) | you're provisioning Postgres, MySQL, SQL Server, Oracle or MongoDB, or registering a database you already run |
+| [Kubernetes](docs/kubernetes.md) | you're managing clusters and the privileged access into them: managed EKS / AKS / GKE / OKE, on-prem k3s, or single-node KubeSolo |
+| [Inventory](docs/inventory.md) | you want one list across every cloud and hypervisor, filtered by tag or Password Safe attribute, and to act on a selection |
+| [Remote Agents](docs/remote-agents.md) | your hypervisors, databases, directories or clusters live somewhere the dashboard can't reach |
+| [Identity and access](docs/access.md) | you're deciding who and what may use the dashboard, how it keeps credentials, or how you would prove what happened |
+| [Directories](docs/directories.md) | you want Windows servers joined to an Active Directory domain, to manage on-prem AD or LDAP, or to manage group membership in Entra ID, Okta or PingOne |
+| [OIDC and single sign-on](docs/oidc.md) | you want single sign-on, Dex in front of your clusters, Entra federation to Kubernetes, or the dashboard reaching the clouds with its own short-lived identity |
+| [Workload Lab](docs/workload-lab.md) | something that isn't a person needs a credential (a certificate, a SPIFFE identity, a cluster token or a cloud key) and you want to pick the mechanism |
+| [Operations](docs/operations.md) | the dashboard is running and you're managing it day to day: scheduling and change windows, Config Management, the job worker, notifications, the auto-delete timer, hosting it in a cloud |
+| [Integrations](docs/integrations/README.md) | you're connecting an external system: the BeyondTrust products, the hypervisors, Rancher, Portainer, Cloud Functions, the Ansible runners, the MCP server |
+| [Demo and POV profiles](docs/profiles/README.md) | you're presenting to a particular role (the [Personas](docs/profiles/demo/personas/README.md), one page per role), or running customer proof-of-value work on a separate instance |
+| [Editions](docs/editions.md) | you're choosing between running the dashboard yourself and a hosted edition |
 
 ## Quick start
 
@@ -137,7 +140,7 @@ It prompts for an admin login, provisions, configures, then you log in — see
 
 See [docs/ONBOARDING.md](docs/ONBOARDING.md) for the full walkthrough,
 including AWS IAM setup, Azure service principal setup, and the
-feature-test checklist. The "How the dashboard thinks" docs above
+feature-test checklist. The "How the dashboard thinks" pages above
 go deeper on each axis once you're up and running.
 
 ## What's included
@@ -149,8 +152,15 @@ go deeper on each axis once you're up and running.
   instance management, image capture, Secret Manager SSH-key integration
 - **OCI** — Compute deployment, custom images, Autonomous Database, OKE
   clusters; API-key signing auth, compartment-scoped
-- **Identity** — local username/password, optional WebAuthn/FIDO2 MFA,
-  optional Sign in with Microsoft (Entra ID)
+- **Identity** — local username/password, optional WebAuthn/FIDO2 MFA, and single
+  sign-on through any OpenID Connect provider (Okta, Entra ID, Keycloak, Google, …),
+  live as soon as an issuer is configured; see [docs/oidc.md](docs/oidc.md). The older
+  Sign in with Microsoft button is still there.
+- **Service accounts** — OAuth 2.0 client credentials for CI jobs, scripts and agents,
+  instead of handing them a personal token; see
+  [docs/access/service-accounts.md](docs/access/service-accounts.md)
+- **Audit log** — who did what, and a way to check the record has not been edited; see
+  [docs/access/audit-log.md](docs/access/audit-log.md)
 - **Jobs** — background task tracking with live WebSocket updates
 
 ## What's optional (feature-flagged, off by default)
@@ -186,20 +196,41 @@ The wizard turns a flag on; the per-integration fields live in Settings:
   credentials; the dashboard never needs a path in. See
   [docs/remote-agents.md](docs/remote-agents.md).
 - **Cloud Databases** — provision private Postgres / MySQL / SQL Server on
-  AWS/Azure/GCP and Oracle on OCI, brokered through a PRA tunnel, or register a
+  AWS/Azure/GCP, Oracle on AWS RDS or OCI, and MongoDB on Atlas, brokered through a PRA tunnel, or register a
   database you already run (on-premises included) as a Config Management
   target. See [docs/databases.md](docs/databases.md).
 - **Kubernetes** — provision or import EKS / AKS / GKE / OKE, run a Rancher
   management plane, deliver secrets via ESO, and layer PRA tunnels, Password
   Safe token rotation and Entra→RBAC federation on top. See
   [docs/kubernetes.md](docs/kubernetes.md).
-- **Cloud Costs** — a spend tile and a `/costs` page built on AWS Cost Explorer
-  and Azure Cost Management, scoped to what the dashboard deployed.
+- **Cloud Costs** (`cost_explorer_enabled`) — month-to-date spend for every configured
+  cloud on a `/costs` page and a home-page tile, with budgets and alerts: AWS Cost
+  Explorer, Azure Cost Management, GCP's BigQuery billing export and OCI's Usage API. See
+  [docs/cloud/costs.md](docs/cloud/costs.md).
 - **BeyondTrust Password Safe** — on-demand checkout of SSH keys and passwords, plus onboarding of the VMs, databases and Kubernetes tokens the dashboard builds as managed systems + accounts. See [docs/integrations/beyondtrust/password-safe.md](docs/integrations/beyondtrust/password-safe.md).
 - **BeyondTrust Privileged Remote Access** — Shell Jump, Web Jump, Remote RDP and protocol-tunnel jump items plus PRA Vault accounts, and the Gateway hosts they broker through. See [docs/integrations/beyondtrust/privileged-remote-access.md](docs/integrations/beyondtrust/privileged-remote-access.md).
 - **BeyondTrust EPM for Linux (EPM-L)** — list and build agent packages, one-click sync of `.rpm`/`.deb` packages to your Ansible asset bucket, installation-token issuance for new endpoint registration. See [docs/integrations/beyondtrust/epml.md](docs/integrations/beyondtrust/epml.md).
-- **Portainer CE** — on-prem Docker host management
-- **Entitle** — approval-workflow integration
+- **Portainer CE** — on-prem Docker host management, through a Portainer you run or one
+  the dashboard deploys for you. See [docs/integrations/portainer.md](docs/integrations/portainer.md).
+- **Entitle** — just-in-time access: register what the dashboard builds (VMs, databases,
+  clusters, Rancher, Portainer) as Entitle resources, and grant dashboard permissions
+  themselves for a limited time. See [docs/integrations/beyondtrust/entitle.md](docs/integrations/beyondtrust/entitle.md).
+- **Directories** (`directories_enabled`, preview) — build or register Active Directory in
+  AWS, Azure and GCP and join Windows servers to it, manage on-prem AD and LDAP through a
+  remote agent, and browse and change group membership in Entra ID, Okta and PingOne. See
+  [docs/directories.md](docs/directories.md).
+- **Virtual Desktops** (`vdesktops_enabled`, preview) — pools of private desktop VMs that
+  people reach through the PRA Gateway. See [docs/cloud/virtual-desktops.md](docs/cloud/virtual-desktops.md).
+- **Cloud Functions** (`cloud_functions_enabled`) — one Python handler deployed as an AWS
+  Lambda, Azure Function App or GCP Cloud Run function: a stable HTTPS endpoint inside your
+  network, including the Entitle adapters. See [docs/integrations/cloud-functions.md](docs/integrations/cloud-functions.md).
+- **Workload Lab** (`cert_lab_enabled`, `spire_lab_enabled`, `agentcell_enabled`,
+  `workload_credentials_enabled`) — credentials for things that are not people: a
+  private CA, SPIFFE identities, bound Kubernetes tokens, short-lived cloud keys. See
+  [docs/workload-lab.md](docs/workload-lab.md).
+- **Notifications** (`notifications_enabled`, dry-run by default) — outbound webhooks to
+  Slack, Microsoft Teams or anything that takes signed JSON, for auto-delete warnings, job
+  failures and budget, secret and drift alerts. See [docs/operations/notifications.md](docs/operations/notifications.md).
 - **MCP server** (`mcp_server_enabled`) — read-only AI client integration (Claude Desktop, Claude Code, Cursor…) via Personal Access Token; mounted at `/mcp`, no extra containers needed. Each tool returns only what the token's owner can see in the UI. See [docs/integrations/mcp-server.md](docs/integrations/mcp-server.md)
 - **Unmanaged VM discovery** (`cloud_unmanaged_discovery_enabled`) — show cloud VMs this dashboard did not deploy, in a separate list per cloud console. Discovered VMs can be started and stopped; they can never be destroyed from here. Off by default because it lists every instance in the account rather than the ones the dashboard deployed. A discovered VM is admin-only unless it carries a `workgroup` tag.
 - **Action Guardrails** — pre-action policy gate (OPA): evaluate every deploy against Rego policies *before* the job starts — allowed regions, blocked instance sizes, change-freeze windows — and block disallowed ones (403, audited). Fails closed. See [docs/operations/scheduling/policy-guardrails.md](docs/operations/scheduling/policy-guardrails.md).

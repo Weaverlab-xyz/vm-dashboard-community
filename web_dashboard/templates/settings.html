@@ -2698,7 +2698,7 @@
               Password Safe, so every rotation reaches PRA with nothing running on the dashboard's side.
               Importing the two plugins, creating the functional accounts, and granting the API identity Requestor + an
               auto-release access policy on the new managed accounts are one-time manual setup — see the
-              <a href="/docs/integrations/beyondtrust/password-safe#kubernetes-serviceaccount-token-rotation" class="underline" target="_blank">token rotation guide</a>.
+              <a href="/docs/integrations/beyondtrust/password-safe/kubernetes-tokens#kubernetes-serviceaccount-token-rotation" class="underline" target="_blank">token rotation guide</a>.
               <span class="text-amber-600">Neither account's access policy may enable "Change Password After
               Release"</span> — a credential change on <em>either</em> member of a synced pair re-rotates both, so a
               release-triggered change on the PRA copy would rotate the real cluster token.
@@ -6932,7 +6932,7 @@
           <p class="text-sm text-gray-500">
             Defaults for building directories and for joining Windows servers to them. Enable
             or disable the feature with the Preview toggle.
-            <a href="/docs/cloud/directories" target="_blank"
+            <a href="/docs/directories" target="_blank"
                class="text-blue-600 hover:text-blue-800 underline">Guide</a>.
           </p>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">

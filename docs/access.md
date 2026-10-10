@@ -15,6 +15,8 @@ record of all of it.
 Related sections:
 - [OIDC and single sign-on](oidc.md): how people sign in, and how the dashboard proves
   its own identity to the clouds;
+- [Directories](directories.md): Active Directory domains servers join, and the identity
+  providers (Entra ID, Okta, PingOne) whose users and groups you manage;
 - [Workload Lab](workload-lab.md): credentials for workloads the dashboard provisions,
   rather than for the dashboard itself;
 - [Entitle dashboard permissions](integrations/beyondtrust/entitle-dashboard-permissions.md):

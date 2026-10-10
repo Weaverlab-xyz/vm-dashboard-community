@@ -244,7 +244,7 @@ it used to ride `restart`, which really is `/status/shutdown` on Proxmox alone. 
 moved anyway, because leaving it would have kept "restart means shutdown here" alive as a
 per-kind special case, and that reading is what made Reboot unmappable in the first place.
 
-[page-ops]: ../web_dashboard/services/agent_hypervisor_meta.py
+[page-ops]: ../../web_dashboard/services/agent_hypervisor_meta.py
 
 **`snapshot`** creates a snapshot named `dash-<job id>`. The name is *generated*, never
 supplied — which is exactly why it was held back at first: a created thing needs a name,

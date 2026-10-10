@@ -11,9 +11,10 @@ you deploy, then the bill.
 | [Infrastructure as Code](cloud/infrastructure-as-code.md) | you are about to deploy your first cloud resource and want to know what is actually running underneath |
 | [Cloud Sandbox](cloud/sandbox.md) | you want an isolated cloud account for the dashboard's labs, bootstrapped rather than hand-built |
 | [Cloud VMs](cloud/vms.md) | you are deploying cloud VMs, or want the dashboard to see and power ones it did not deploy |
+| [Windows servers](cloud/windows-servers.md) | you are deploying a Windows server on AWS, Azure or GCP: its administrator password, PRA jumps, and joining Entra ID or Active Directory |
 | [Cloud Containers](cloud/containers.md) | you want a containerised app on a cloud runtime without standing up Portainer |
 | [Virtual Desktops](cloud/virtual-desktops.md) | you need a pool of private desktop VMs that reps reach through the PRA Gateway rather than over the internet |
-| [Managed Active Directory](cloud/directories.md) | you want Windows servers on AWS or GCP joined to an Active Directory domain (built here, one you already run, or your on-premises domain), or want to manage an on-prem AD or LDAP directory through a remote agent |
+| [Active Directory in the cloud](directories/active-directory.md) | you want Windows servers on AWS, GCP or Azure joined to a managed Active Directory domain, built here or one that already exists. The rest of [Directories](directories.md), on-premises AD and identity providers, is its own section |
 | [Image Management](cloud/image-management.md) | you are about to build a custom image and need to know how it will reach the other clouds |
 | [Cloud Costs](cloud/costs.md) | you want month-to-date cloud spend, a budget alert, or a budget in the cloud that alerts while the dashboard is down |
 

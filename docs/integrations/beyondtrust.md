@@ -58,7 +58,7 @@ reads from the database only; exporting an equivalently-named env var has no eff
 
 > **Independently *gated* is not independently *behaved*.** Some paths genuinely need two
 > products live, and enabling only one leaves them inert rather than broken:
-> [Kubernetes token rotation](beyondtrust/password-safe.md#kubernetes-serviceaccount-token-rotation)
+> [Kubernetes token rotation](beyondtrust/password-safe/kubernetes-tokens.md#kubernetes-serviceaccount-token-rotation)
 > rotates a token whose ServiceAccount PRA injects; a database tunnel is PRA, while the
 > credential it carries can be Password Safe-managed; and
 > `bt_ps_deploy_key_title` stores a PRA Gateway's Docker deploy key in Password Safe.
@@ -71,8 +71,8 @@ reads from the database only; exporting an equivalently-named env var has no eff
 | I want to… | Page |
 |---|---|
 | Check out a secret or managed-account credential at runtime | [Password Safe](beyondtrust/password-safe.md) |
-| Onboard a VM or cloud database as a managed system | [Password Safe](beyondtrust/password-safe.md#password-safe-vm-onboarding-managed-systems) |
-| Rotate a Kubernetes ServiceAccount token | [Password Safe](beyondtrust/password-safe.md#kubernetes-serviceaccount-token-rotation) |
+| Onboard a VM or cloud database as a managed system | [Password Safe](beyondtrust/password-safe/vm-onboarding.md#password-safe-vm-onboarding-managed-systems) |
+| Rotate a Kubernetes ServiceAccount token | [Password Safe](beyondtrust/password-safe/kubernetes-tokens.md#kubernetes-serviceaccount-token-rotation) |
 | Create Shell Jump / Web Jump / RDP / tunnel jump items | [Privileged Remote Access](beyondtrust/privileged-remote-access.md) |
 | Mint PRA Vault accounts for tunnel credentials | [Privileged Remote Access](beyondtrust/privileged-remote-access.md) |
 | Deploy or inventory more Gateway hosts | [Gateway hosts](beyondtrust/gateways.md) |
@@ -103,7 +103,7 @@ Images built by the dashboard's Packer flow (`/images/aws`, `/images/azure`, `/i
 ### What the Linux scripts prepare
 
 - **PRA Shell Jump connectivity** — sshd hardened (key-only, no root password, sensible client-alive), passwordless sudo wired to the cloud-default user via a `/etc/sudoers.d/90-bt-ready` drop-in, host clock synced. The sshd drop-in is written as `00-bt-ready.conf` so it loads lex-first and wins against any later compliance drop-ins (sshd is first-occurrence-wins). On OpenSSH &lt; 8.2 — no `Include` for `sshd_config.d` — the directives are written into `/etc/ssh/sshd_config` directly instead.
-- **A Password Safe / Entitle SSH bootstrap account** — `adminuser` by default (`BT_ADMIN_USER`). This is the account the Azure and GCP [Password Safe onboarding paths](beyondtrust/password-safe.md#password-safe-vm-onboarding-managed-systems) expect to exist: their plugins write a key *to* it, they don't create it.
+- **A Password Safe / Entitle SSH bootstrap account** — `adminuser` by default (`BT_ADMIN_USER`). This is the account the Azure and GCP [Password Safe onboarding paths](beyondtrust/password-safe/vm-onboarding.md#password-safe-vm-onboarding-managed-systems) expect to exist: their plugins write a key *to* it, they don't create it.
 - **Optional EPM-L package install** — set `BT_EPML_URL` to a presigned URL for the `.deb` / `.rpm`.
 - **Optional PRA SSH certificate login** — see below.
 - **Conservative baseline hygiene** — security updates applied, persistent journald, opt-in unattended security updates (`BT_AUTOPATCH=1`), image cleaned for re-launch (host keys + machine-id + cloud-init state stripped).
@@ -126,7 +126,7 @@ accounts NOPASSWD sudo (default: none).
 
 - **No Password Safe onboarding.** They *create* `adminuser`; registering it as a Managed
   Account (Smart Rule / rotation) is out-of-band — or done by the dashboard's own
-  [VM onboarding](beyondtrust/password-safe.md#password-safe-vm-onboarding-managed-systems).
+  [VM onboarding](beyondtrust/password-safe/vm-onboarding.md#password-safe-vm-onboarding-managed-systems).
 - **No EPM-L activation.** Package install only. `pbactivate` runs post-deploy with a
   short-lived token from the EPM-L integration, because registration tokens expire 8h
   after issue and can't be baked into an image. See [EPM-L](beyondtrust/epml.md).
@@ -142,7 +142,7 @@ Set these as Packer build env on the build page. Full detail and a smoke-test re
 |---|---|
 | `BT_TARGET_USER` | Force the sudoers-target user; default autodetects the cloud-default (`ubuntu`/`debian`/`admin`, `ec2-user`/`rocky`/`centos`/`almalinux`/`cloud-user`) |
 | `BT_ADMIN_USER` | The Password-Safe-managed bootstrap account (default `adminuser`) |
-| `BT_SEED_ADMIN_KEY=1` | Seed `adminuser`'s `authorized_keys` with a throwaway key **so the AWS Systems Manager plugin has one to rotate** — the private half is discarded. Relevant to the [AWS SSM path](beyondtrust/password-safe.md#aws--aws-systems-manager-custom-plugin-cloud-native-default), where the credential is minted on first change |
+| `BT_SEED_ADMIN_KEY=1` | Seed `adminuser`'s `authorized_keys` with a throwaway key **so the AWS Systems Manager plugin has one to rotate** — the private half is discarded. Relevant to the [AWS SSM path](beyondtrust/password-safe/vm-onboarding.md#aws--aws-systems-manager-custom-plugin-cloud-native-default), where the credential is minted on first change |
 | `BT_ADMIN_NOPASSWD_ALL=1` | Full `NOPASSWD: ALL` sudo for `adminuser` instead of the scoped set — **required for Ansible Config-Management `become`**, which runs sudo's `/bin/sh` |
 | `BT_PRA_CA_PUBKEY` | PRA Vault SSH CA public key (enables certificate login) |
 | `BT_PRA_USERS` | Accounts to create for certificate login; names must match the PRA vault accounts |
@@ -161,7 +161,7 @@ Set these as Packer build env on the build page. Full detail and a smoke-test re
 
 **Linux** — upload the script to your active storage backend via `/storage`, then on the AWS / Azure / GCP build page pick it from the **Load from storage** dropdown above the Provisioner Script textarea.
 
-**Windows** — `bt-ready-windows.ps1` runs on the Azure Windows build (`os_type=Windows`) before the template's windows-restart + Sysprep finisher. It bakes OpenSSH + RDP into the *output* image so VMs deployed from it are reachable by SSH like Linux ones, plus agentless RDP through the Gateway. A plain marketplace Windows image does not need it for SSH: every Windows deploy switches on OpenSSH at first boot and gets a Shell Jump, with an RDP jump only on request (see [Windows servers](../cloud/vms.md#pra-jumps-ssh-by-default-rdp-on-request)). Bake it when you want an authorized key or key-only SSH in the image.
+**Windows** — `bt-ready-windows.ps1` runs on the Azure Windows build (`os_type=Windows`) before the template's windows-restart + Sysprep finisher. It bakes OpenSSH + RDP into the *output* image so VMs deployed from it are reachable by SSH like Linux ones, plus agentless RDP through the Gateway. A plain marketplace Windows image does not need it for SSH: every Windows deploy switches on OpenSSH at first boot and gets a Shell Jump, with an RDP jump only on request (see [Windows servers](../cloud/windows-servers.md#pra-jumps-ssh-by-default-rdp-on-request)). Bake it when you want an authorized key or key-only SSH in the image.
 
 > **Azure cannot inject SSH public keys into Windows VMs** — that is a Linux-only deploy feature. So the key is authorized *in the image*. Use the public half of the keypair the dashboard holds in Key Vault (`azure_ssh_keypair_secret_name`) so the private half stays retrievable from the VMs tab exactly as it is for Linux. With no key set, password SSH still works using the admin password the deploy generates and vaults.
 

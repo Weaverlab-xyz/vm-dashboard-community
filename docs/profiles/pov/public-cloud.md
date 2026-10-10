@@ -167,7 +167,7 @@ Compute Engine's own rules cannot be met by the shared code.
 Give the service account **Compute Admin** on its project, with the Compute Engine API
 enabled.
 
-**A GCE label key must be lowercase.** The rule is `[a-z](../../[-_a-z0-9]*)?`, so
+**A GCE label key must be lowercase.** The rule is `[a-z]([-_a-z0-9]*)?`, so
 `povEnvironment` is refused outright — with an error naming the API field rather than the
 tag. Each shared key is mapped once: `pov_environment`, `pov_managed_by`, `pov_role`, and
 `managed-by` unchanged.

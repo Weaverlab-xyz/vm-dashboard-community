@@ -16,8 +16,8 @@ your LAN, surviving a laptop reboot, or fronting remote agents.
 > edition, single-tenant, with the JWT root key supplied as a platform secret.
 > The hosted edition's differences are narrower and more specific than "runs in
 > a cloud": the root key is never a static credential, and one deployment serves
-> many tenants. See [saas-comparison.md](../editions/comparison.md). If you have read
-> [saas-roadmap.md](../editions/roadmap.md) and remember Container Apps being ruled
+> many tenants. See [Community vs. hosted](../editions/comparison.md). If you have read
+> [SaaS Roadmap](../editions/roadmap.md) and remember Container Apps being ruled
 > out — that was about *per-tenant* SaaS revisions and their cost, not about
 > self-hosting one instance, which is what the reference install has run all
 > along.
@@ -83,7 +83,7 @@ minted on an install permanently pins the signing audience, and every agent
 signature is checked against it afterwards. A platform-assigned name — an
 `*.azurecontainerapps.io` default FQDN, a Cloud Run auto-URL — will change, and
 changing it strands the fleet. Bind a custom domain first. See
-[remote-agents.md](../remote-agents/enrolment.md#the-signing-audience-is-pinned-by-that-first-code).
+[Remote Agents → enrolment](../remote-agents/enrolment.md#the-signing-audience-is-pinned-by-that-first-code).
 
 ---
 
@@ -370,7 +370,7 @@ another sidecar: [job-worker.md](job-worker.md#container-apps).
 A Container Apps environment with no NAT gateway has **no single outbound address**.
 It SNATs traffic out of a shared pool of several hundred addresses, and it picks an
 address per *destination*. That breaks anything that admits the dashboard by source
-address, the managed [Portainer](../integrations/portainer.md#firewall) and
+address, the managed [Portainer](../integrations/portainer/managed-server.md#firewall) and
 [Rancher](../integrations/rancher.md) node firewalls above all. The dashboard learns its
 address from an echo service, but the echo service and the node see *different*
 addresses, so the node drops the bootstrap. The job reads "serving", then

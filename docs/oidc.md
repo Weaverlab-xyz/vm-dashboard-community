@@ -10,6 +10,7 @@ several other places too, each with its own page:
 | [The dashboard's own identity](oidc/dashboard-identity.md) | you want the dashboard to reach AWS, Azure, GCP or a k3s cluster with a short-lived token instead of a stored key. Here the dashboard is the **issuer**. Its tokens come from the SPIRE server that [Remote Agents](remote-agents/spire-attestation.md) also uses |
 | [Dex](oidc/dex.md) | you want one issuer that both the dashboard and your on-prem clusters trust |
 | [Entra → Kubernetes federation](oidc/entra-k8s-federation.md) | you want people signing in to managed clusters as themselves, with their Entra groups as RBAC subjects |
+| [Identity providers](directories/identity-providers.md) | you want to browse or change users and groups in Entra ID, Okta or PingOne, rather than sign in through one. That lives in the [Directories](directories.md) section |
 | [Sign in with Microsoft (Entra OAuth)](oidc/entra-oauth.md) | you want the legacy per-tenant Entra sign-in button rather than the generic path below |
 
 ## What is it?
@@ -32,8 +33,9 @@ replace them:
 - **Local password accounts** — unaffected.
 - **FIDO2 / WebAuthn MFA** — unaffected.
 - **"Sign in with Microsoft" (legacy Entra/Azure path)** — configured separately
-  under the Azure settings and unaffected. If you'd rather run Entra through this
-  generic path, you can — see [Provider quick reference](#provider-quick-reference).
+  under the Azure settings and unaffected. Its button shows only when that path has a
+  client ID and tenant, and sits below this one when both are set. If you'd rather run
+  Entra through this generic path, you can — see [Provider quick reference](#provider-quick-reference).
 
 > **Scope.** GitHub is **not** supported — it isn't an OIDC provider (no discovery
 > document, no ID token). **SAML is not supported** either. This integration is

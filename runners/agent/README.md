@@ -87,7 +87,7 @@ match the entry's `host:` and changing that address means sealing again.
 This is not protection from `root` on this host: the key is on the same machine, which is
 unavoidable for a container that restarts unattended. It protects the *config file*, which
 gets copied into repos, tickets and backups in a way the state volume does not. See
-[docs/remote-agents.md](../../docs/remote-agents/credentials.md#sealing-a-credential-this-host-keeps)
+[docs/remote-agents/credentials.md](../../docs/remote-agents/credentials.md#sealing-a-credential-this-host-keeps)
 for the full trade against `ps_managed_account` and `dashboard_secret`. Where the site
 allows it, the recommended model stores nothing here at all: `dashboard_secret: true`, with
 this agent attested through SPIRE ([how to attest it](../../docs/remote-agents/spire-attestation.md)) — see
@@ -132,7 +132,7 @@ Two things behave differently here rather than merely looking different:
   UTF-8 BOM survives the whitespace trim and makes the code invalid. Write it with
   `Set-Content -Encoding ascii -NoNewline`.
 
-See [`docs/remote-agents.md`](../../docs/remote-agents/agent-host.md#running-on-windows) for the host
+See [`docs/remote-agents/agent-host.md`](../../docs/remote-agents/agent-host.md#running-on-windows) for the host
 setup, including why `--restart unless-stopped` does not survive a logoff.
 
 ## Back-pressure

@@ -102,9 +102,10 @@ def test_each_product_page_names_its_own_flag():
 
 def test_the_token_rotation_anchor_survived_the_move():
     """Three sites depend on this exact slug — docs/kubernetes.md, settings.html and
-    k8s/index.html. The heading text was kept byte-identical on purpose so the move was a
-    path-only edit; renaming it now breaks all three (test_app_docs_links catches two)."""
-    ps = _read(os.path.join(_PRODUCTS, "password-safe.md"))
+    k8s/index.html. The heading text was kept byte-identical on purpose through both moves
+    (out of the hub, then into password-safe/kubernetes-tokens.md), so each was a path-only
+    edit; renaming it now breaks all three (test_app_docs_links catches two)."""
+    ps = _read(os.path.join(_PRODUCTS, "password-safe", "kubernetes-tokens.md"))
     assert "## Kubernetes ServiceAccount token rotation" in ps, (
         "the token-rotation heading changed; its slug is depended on by "
         "docs/kubernetes.md, settings.html and k8s/index.html")

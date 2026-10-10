@@ -131,9 +131,9 @@ The image-promote runner is documented with the runner itself, in
 2. Open **Settings → Integrations**. The **Remote Worker** toggle, previously
    greyed out, is now selectable.
 3. Click **Configure** on the Remote Worker row to set the
-   [runner backends](ansible\config-reference.md#runner-backends) — pick Local or the matching cloud
+   [runner backends](ansible/config-reference.md#runner-backends) — pick Local or the matching cloud
    service per target cloud for each runner — the per-cloud SSH usernames, and,
-   for cloud backends, the [shared cloud infrastructure](ansible\shared-cloud.md#shared-cloud-infrastructure).
+   for cloud backends, the [shared cloud infrastructure](ansible/shared-cloud.md#shared-cloud-infrastructure).
 4. Toggle Remote Worker **on**. This is the `ansible_enabled` feature flag. No restart required.
 
 ### Per-cloud SSH user (Ansible runner)

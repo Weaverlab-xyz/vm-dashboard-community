@@ -12,7 +12,7 @@ privileged-access problem (the same model used across the [Cloud VMs](cloud/vms.
 [Kubernetes](kubernetes.md) docs):
 
 - **Provisioning** — stand up a **private** database (AWS RDS / Azure Flexible Server +
-  SQL DB / GCP Cloud SQL / OCI Autonomous DB). The dashboard mints the admin credential
+  SQL DB / GCP Cloud SQL / OCI Autonomous DB, plus MongoDB on Atlas). The dashboard mints the admin credential
   and stores it encrypted.
 - **Layer 1 — PRA** *(reach it)* — a BeyondTrust Privileged Remote Access protocol
   tunnel brokers private access to the DB; the admin credential is vaulted in PRA for
@@ -248,10 +248,10 @@ toggle gates registration and provisioning alike.
 
 | Field | Notes |
 |---|---|
-| **Engine** | postgres / mysql / sqlserver / oracle |
+| **Engine** | postgres / mysql / sqlserver / oracle / mongodb |
 | **Location** | `local` (on-premises) / aws / azure / gcp / oci |
 | **Host** | Required — it is how the runner reaches the database. One row per engine + host; a duplicate is refused. |
-| **Port** | Optional; defaults per engine (5432 / 3306 / 1433 / 1521). |
+| **Port** | Optional; defaults per engine (5432 / 3306 / 1433 / 1521 / 27017). |
 | **Database name** | Optional. SQL Server falls back to `master`. |
 | **Admin account** | A Password Safe **managed system + account**, looked up live by host — the same lookup the Configuration Management run form uses. Onboard the database in Password Safe *first*; the list is empty until you do. |
 
@@ -285,7 +285,7 @@ credential from the provisioning job's Terraform variables and the encrypted con
 clusters — an on-premises database runs in a sibling container on the dashboard host,
 because nothing in a cloud has a route to your LAN; a cloud-hosted one runs on that
 cloud's transient in-subnet runner. See
-[Ansible → Kubernetes-cluster and database targets](integrations/ansible\kubernetes-runner.md#kubernetes-cluster-and-database-targets-localhost-runs).
+[Ansible → Kubernetes-cluster and database targets](integrations/ansible/kubernetes-runner.md#kubernetes-cluster-and-database-targets-localhost-runs).
 
 **Every runner takes the just-in-time credential, AWS and GCP included.** A database run is
 a localhost play, and its connection variables ride the runner's *inline* environment

@@ -41,7 +41,7 @@
 #                     Shell Jump. Bake the public half of the key pair your PRA
 #                     Gateway presents, or set VYOS_ADMIN_PASSWORD instead.
 #   VYOS_RUNNER_PUBKEY a SECOND public key for the same account, stored in its own slot
-#                     ('runner'). For the VyOS site link (docs/cloud/directories.md): the
+#                     ('runner'). For the VyOS site link (docs/directories/on-premises.md): the
 #                     public half of the GCP Ansible key (gcp_ssh_key_secret_name), so the
 #                     dashboard's Cloud Run runner can configure the peer while the PRA
 #                     Gateway's key stays in the 'default' slot. Default: unset.

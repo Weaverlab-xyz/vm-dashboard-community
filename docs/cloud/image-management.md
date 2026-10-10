@@ -184,7 +184,7 @@ placement before Packer starts
 (`oci_service.check_launch_placement`) — so cases 1 and 2 now fail
 with a message naming the shape and listing what would work. The two
 OCI *deploy* endpoints run the same check for the same reason — see the
-`shape_not_launchable` entry in [cloud-vms.md](vms.md).
+`shape_not_launchable` entry in [Cloud VMs](vms.md).
 
 That precheck **fails open when a lookup is silent** — it can't reach
 OCI, or one of the two lists (`ListShapes`, or the image's compatibility
