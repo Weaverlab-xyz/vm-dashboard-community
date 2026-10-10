@@ -70,7 +70,7 @@ RUN pip install --no-cache-dir "paramiko>=3.4" \
 # musllinux wheels, so no build toolchain is needed on Alpine. Install collections to a
 # system path so any container user resolves them. The final line fails the build early if
 # the lookup can't be resolved.
-RUN pip install --no-cache-dir "beyondtrust-bips-library>=2.0.0,<3.0.0" \
+RUN pip install --no-cache-dir "beyondtrust-bips-library>=3.0.0,<4.0.0" \
  && ansible-galaxy collection install \
         beyondtrust.secrets_safe \
         beyondtrust.password_safe \
