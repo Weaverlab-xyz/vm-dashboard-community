@@ -33,7 +33,7 @@ The chart is baked because the agent install's *other* egress dependency is the 
 repo, which is a CDN — and a CDN cannot be named in the narrow allow-list a plant
 boundary is built from. The agent's images still come from Entitle at run time; that is
 what the 443 hole is for. See
-[Who brokers identity in the plant](../../docs/profiles/demo/ot-demo-cell.md#who-brokers-identity-in-the-plant).
+[Who brokers identity in the plant](../../docs/profiles/demo/ot-demo-cell/identity.md#who-brokers-identity-in-the-plant).
 
 ## Image contract
 

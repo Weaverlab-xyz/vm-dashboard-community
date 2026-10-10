@@ -67,7 +67,7 @@ instead of a network one.
 
 The agent half of that story runs next door, on the cell's DMZ broker — same k3s,
 same chart, inside the plant. See
-[Who brokers identity in the plant](../ot-demo-cell.md#who-brokers-identity-in-the-plant).
+[Who brokers identity in the plant](../ot-demo-cell/identity.md#who-brokers-identity-in-the-plant).
 
 **Guide:** [The cell runs on k3s](../ot-demo-cell.md#the-cell-runs-on-k3s) · [KubeSolo, for edge hosts](../../../kubernetes/kubesolo.md)
 
@@ -82,7 +82,7 @@ no route out at all; the DMZ host has two ports to one destination; and the rule
 so are readable in the cloud console. If the customer's first question is "so what did you
 open in my plant?", that list is the answer.
 
-**Guide:** [Who brokers identity in the plant](../ot-demo-cell.md#who-brokers-identity-in-the-plant)
+**Guide:** [Who brokers identity in the plant](../ot-demo-cell/identity.md#who-brokers-identity-in-the-plant)
 · [Entitle user JIT](../../../design/entitle-user-jit.md)
 
 ### Check out the cell's admin credential in PRA

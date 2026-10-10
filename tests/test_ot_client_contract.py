@@ -30,6 +30,11 @@ _SVC = os.path.join(_ROOT, "web_dashboard", "services", "ot_service.py")
 _DOCS = [
     os.path.join(_ROOT, "docs", "profiles", "demo", "ot-demo-cell.md"),
     os.path.join(_ROOT, "docs", "profiles", "demo", "ot-demo-cell", "ot-protocol-clients.md"),
+    # Split out of ot-demo-cell.md: they carry ports and tag names the checks below hold
+    # against the bake script, so leaving them out would stop checking that text silently.
+    os.path.join(_ROOT, "docs", "profiles", "demo", "ot-demo-cell", "identity.md"),
+    os.path.join(_ROOT, "docs", "profiles", "demo", "ot-demo-cell", "deploying.md"),
+    os.path.join(_ROOT, "docs", "profiles", "demo", "ot-demo-cell", "verification.md"),
     os.path.join(_ROOT, "provisioners", "ot", "README.md"),
 ]
 

@@ -253,7 +253,7 @@ The node's ingress opens **tcp 9443 and 8000** to a merged source set:
   Container Apps. The recent-`/32` heuristic can't cover a pool of several hundred
   addresses that picks one per destination, so the dashboard reads the pool from its
   own Container App and admits all of it. That needs one Reader grant: see
-  [Outbound addresses](../../operations/cloud-hosting.md#outbound-addresses-and-the-managed-node-firewalls).
+  [Outbound addresses](../../operations/cloud-hosting/azure-container-apps.md#outbound-addresses-and-the-managed-node-firewalls).
   Settings shows the pool as a count, or shows the reason it couldn't be read.
 - A `/32` per dashboard-deployed Gateway, when the
   [PRA Web Jump](#pra-web-jump-optional) is on.
