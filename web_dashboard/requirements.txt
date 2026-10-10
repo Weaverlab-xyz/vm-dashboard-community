@@ -76,7 +76,7 @@ azure-mgmt-automation>=1.0.0,<2
 # main.py imports that module unconditionally, so a 2.x resolution would fail the
 # whole app at startup, not just /mcp. The floor is the release that fixes the five
 # advisories against 1.6.0.
-mcp>=1.28.1,<2
+mcp>=2.3.0,<3
 
 # Google Cloud SDK
 google-cloud-compute>=1.14.0
