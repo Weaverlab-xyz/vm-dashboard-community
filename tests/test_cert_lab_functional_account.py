@@ -719,9 +719,11 @@ def test_every_new_config_key_is_declared_bound_and_classified():
         assert re.search(rf"^    {key}: ", conf, re.M), f"{key} missing from Settings"
         assert f"{key}: " in model, f"{key} missing from CertLabFeatureConfig"
         assert f"panelCfg.{key}" in panel, f"{key} is unbound, so a save discards it"
-    secrets = setup.split("_SECRET_FEATURE_KEYS = frozenset({")[1].split("})")[0]
+    # The feature API redacts secret_hygiene.SECRET_KEYS, the app-wide list (stdlib-only,
+    # so importing it here adds no dependency to this test).
+    from web_dashboard.services.secret_hygiene import SECRET_KEYS
     for key in ("cert_ps_bi_api_key", "cert_ps_bi_client_secret"):
-        assert f'"{key}"' in secrets, \
+        assert key in SECRET_KEYS, \
             "an unclassified secret round-trips in clear through the feature API"
     assert '("cert_ps_bi_client_secret",' in _src("web_dashboard/services/secret_hygiene.py"), \
         "a secret missing from SECRET_REGISTRY is invisible to the hygiene scanner"
