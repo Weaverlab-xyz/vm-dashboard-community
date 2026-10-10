@@ -4003,7 +4003,7 @@ def _eks_name_region(kubeconfig: str) -> tuple:
             exec_blk = (u.get("user") or {}).get("exec") or {}
             args = exec_blk.get("args") or []
             if exec_blk.get("command") == "aws" and "get-token" in args:
-                def _arg(flag: str) -> str:
+                def _arg(flag: str, args=args) -> str:
                     return args[args.index(flag) + 1] if (flag in args and args.index(flag) + 1 < len(args)) else ""
                 return _arg("--cluster-name"), _arg("--region")
     except Exception:

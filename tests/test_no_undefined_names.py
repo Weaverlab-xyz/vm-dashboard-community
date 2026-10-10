@@ -22,8 +22,9 @@ Two layers, deliberately:
   * a targeted AST check that always runs, covering the specific shape both bugs took
     (a bare global name used but never bound at module level);
   * the full ruff F821 sweep when ruff is available, which is stricter and understands
-    real scoping. There is no lint step in CI, so without this the sweep only happens
-    when someone remembers to run it.
+    real scoping. In CI that sweep is the ``ruff`` job (tests.yml, rules in ruff.toml),
+    which covers the whole repository; the ``tests`` job has no ruff, so here it skips,
+    and scripts/ci/skip_allowlist.txt records why that skip is expected.
 
 Runs under pytest, or standalone:
     python tests/test_no_undefined_names.py
@@ -139,8 +140,8 @@ def test_ruff_f821_is_clean():
     """The authoritative sweep, when ruff is installed.
 
     Stricter than the AST check above because it models real scoping. Skipped rather
-    than required, since ruff is not in requirements.txt and there is no lint step in
-    CI — the check above is the one that always runs.
+    than required, since ruff is not in requirements.txt; CI's ``ruff`` job runs the
+    same rule over everything, and the check above is the one that always runs here.
 
     The availability check is ``find_spec``, not a ``FileNotFoundError`` around the
     subprocess, and that distinction is the whole reason this comment exists: with ruff

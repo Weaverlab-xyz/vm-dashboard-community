@@ -124,7 +124,9 @@ def _shape(row) -> dict:
         # like an admin_ids problem, so it is surfaced rather than left in a job log.
         "admin_svid_expires_at": (row.admin_svid_expires_at.isoformat()
                                   if row.admin_svid_expires_at else None),
-        "ps_system_id": row.ps_system_id, "ps_account_id": row.ps_account_id,
+        # ps_system_id is set once, below, with the governance fields. It used to appear
+        # here too, and a dict literal keeps the later of two equal keys.
+        "ps_account_id": row.ps_account_id,
         # WHICH credential this lab was built with — "managed" / "ssh-key-secret" /
         # "auto". The kind and the account NAME only: a name is not a credential (it is
         # also what becomes ansible_user), and the ref itself has no business on a page.

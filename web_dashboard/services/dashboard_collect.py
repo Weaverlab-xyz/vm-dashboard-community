@@ -112,8 +112,8 @@ def count_payload(items, *, running=None) -> dict:
     return out
 
 
-def _upper_running(field: str):
-    return lambda i: str(i.get(field, "") or "").upper() == "RUNNING"
+def _upper_running(key: str):
+    return lambda i: str(i.get(key, "") or "").upper() == "RUNNING"
 
 
 # ── fetchers ─────────────────────────────────────────────────────────────────

@@ -169,7 +169,7 @@ def test_the_account_fetch_budget_is_per_request_and_reports_truncation():
     """A selection that fans out to more systems than the ceiling must SAY so — a
     silently shorter list reads as 'this host is not onboarded'."""
     _reset()
-    mal.MAX_ACCOUNT_FETCHES  # documented constant, referenced so a rename is noticed
+    mal.MAX_ACCOUNT_FETCHES  # noqa: B018 -- documented constant, referenced so a rename is noticed
     batch = mal._Batch(limit=2)
     asyncio.run(batch.accounts_for_system(1))
     asyncio.run(batch.accounts_for_system(2))
