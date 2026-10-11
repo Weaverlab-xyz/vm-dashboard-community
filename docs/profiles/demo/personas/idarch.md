@@ -80,7 +80,7 @@ Turn on **Directories** under Preview features, and **Entitle**. Then add:
 - **Entitle user JIT** for the zero-standing-privilege card;
 - the machine-identity settings on the Entitle panel for the machine-identity card.
 
-Directories is demo-only, so the cards that target it are masked on a
+Directories is estate-owned, so the cards that target it are masked on a
 [POV instance](../../pov/README.md). The two Entitle cards and the audit card work on both
 profiles.
 

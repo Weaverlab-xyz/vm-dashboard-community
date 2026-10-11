@@ -88,7 +88,7 @@ Turn on **Directories** under Preview features. Then add:
   later on the domain's network;
 - **Entitle user JIT** for the last card.
 
-Directories is demo-only, so most of these cards are masked on a
+**This focus needs an estate instance:** Directories is estate-owned, so most of these cards are masked on a
 [POV instance](../../pov/README.md). Directories builds billing domain controllers and
 onboards their administrator through the instance-wide Password Safe settings, and on a POV
 instance that would write into the wrong customer's tenant.
