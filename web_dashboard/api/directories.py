@@ -40,6 +40,10 @@ Entitle (any directory):
 
   GET    /api/directories/{id}/entitle-candidates   — the tenant's integrations, likely first
   PUT    /api/directories/{id}/entitle-integration  — pin one ({"integration_id": ""} unpins)
+  GET    /api/directories/{id}/entitle-roles?q=     — roles the pinned integration synced
+  GET    /api/directories/{id}/virtual-apps         — Entitle virtual applications over it
+  POST   /api/directories/{id}/virtual-apps         — create one (checked, then a job)
+  DELETE /api/directories/{id}/virtual-apps/{app}   — remove it from Entitle (a job)
 
 The admin password route is ``directories:write`` and refuses (409) when Password Safe
 manages the account — the dashboard then holds no valid copy.
@@ -683,6 +687,12 @@ async def reset_admin_password(directory_id: str, db: Session = Depends(get_db),
 def delete_directory(directory_id: str, db: Session = Depends(get_db),
                      user: User = Depends(require_explicit_permission("directories", "delete"))):
     row = _row_or_404(db, directory_id, user)
+    from ..services import entitle_virtual_app_service as vapps
+    live = vapps.live_for_directory(db, row.id)
+    if live:
+        raise HTTPException(status_code=409, detail=(
+            f"{row.name} has Entitle virtual application(s) "
+            f"{', '.join(a.name for a in live)} — remove them first."))
     try:
         if row.source == "registered":
             directory_service.unregister(db, directory_id=row.id)
@@ -915,6 +925,95 @@ async def pin_entitle_integration(directory_id: str, req: EntitleLinkRequest,
     job_service.log_audit(db, user.username, "directory_entitle_pin", details={
         "directory": row.name, "integration_id": wanted, "integration_name": name})
     return directory_service.to_dict(row)
+
+
+# ── Entitle virtual applications ─────────────────────────────────────────────
+#
+# Friendly, tiered roles over the groups the pinned integration synced. Every linked role
+# is checked against Entitle as belonging to that integration before the job is queued.
+
+class VirtualAppRole(BaseModel):
+    role_id: str                    # the synced Entitle role this one fronts
+    name: str                       # what requesters see, e.g. "AWS – Cloud Ops"
+    resource: str = "Access"        # grouping inside the app, e.g. "AWS"
+    tier: str = "single_approver"   # auto_approve | single_approver | two_approver
+    persona: str = ""
+    cloud: str = ""
+
+
+class VirtualAppRequest(BaseModel):
+    name: str
+    roles: List[VirtualAppRole]
+
+
+@router.get("/{directory_id}/entitle-roles")
+async def entitle_roles(directory_id: str, q: str = "", db: Session = Depends(get_db),
+                        user: User = Depends(require_explicit_permission("directories", "write"))):
+    from ..services import entitle_virtual_app_service as vapps
+    row = _row_or_404(db, directory_id, user)
+    reason = vapps.refusal(row)
+    if reason:
+        return {"roles": [], "refusal": reason}
+    try:
+        roles = await vapps.directory_roles(row, q)
+    except vapps.VirtualAppError as e:
+        return {"roles": [], "error": str(e)}
+    return {"roles": roles, "refusal": ""}
+
+
+@router.get("/{directory_id}/virtual-apps")
+def list_virtual_apps(directory_id: str, db: Session = Depends(get_db),
+                      user: User = Depends(require_explicit_permission("directories", "read"))):
+    from ..services import entitle_tiers
+    from ..services import entitle_virtual_app_service as vapps
+    row = _row_or_404(db, directory_id, user)
+    flows = entitle_tiers.resolve_workflows()
+    return {
+        "apps": vapps.list_for_directory(db, row.id),
+        "refusal": vapps.refusal(row),
+        "tiers": [{"id": t, "label": entitle_tiers.TIER_LABELS[t],
+                   "durations": list(entitle_tiers.TIER_DURATIONS[t]),
+                   "workflow_set": bool(flows[t]["id"]),
+                   "workflow_fallback": flows[t]["fallback"]}
+                  for t in entitle_tiers.TIERS],
+    }
+
+
+@router.post("/{directory_id}/virtual-apps", status_code=202)
+async def create_virtual_app(directory_id: str, req: VirtualAppRequest,
+                             db: Session = Depends(get_db),
+                             user: User = Depends(require_explicit_permission("directories", "write"))):
+    from ..services import entitle_virtual_app_service as vapps
+    row = _row_or_404(db, directory_id, user)
+    try:
+        name, roles = await vapps.prepare(row, req.name, [r.model_dump() for r in req.roles])
+    except vapps.VirtualAppError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    app, job = vapps.start_create(db, row, name=name, roles=roles, created_by=user.username)
+    job_service.log_audit(db, user.username, "entitle_virtual_app_create", details={
+        "directory": row.name, "app": name, "app_id": app.id,
+        "integration_id": row.entitle_integration_id,
+        "roles": [{"name": r["name"], "tier": r["tier"],
+                   "fronts": r["virtualized_role_id"]} for r in roles]})
+    return {"app": vapps.to_dict(app), "job_id": job.id}
+
+
+@router.delete("/{directory_id}/virtual-apps/{app_id}", status_code=202)
+def delete_virtual_app(directory_id: str, app_id: str, db: Session = Depends(get_db),
+                       user: User = Depends(require_explicit_permission("directories", "write"))):
+    from ..services import entitle_virtual_app_service as vapps
+    row = _row_or_404(db, directory_id, user)
+    app = vapps.get(db, app_id)
+    if not app or app.directory_id != row.id or app.status == "deleted":
+        raise HTTPException(status_code=404, detail="virtual application not found")
+    try:
+        job = vapps.start_delete(db, app, created_by=user.username)
+    except vapps.VirtualAppError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    job_service.log_audit(db, user.username, "entitle_virtual_app_delete", details={
+        "directory": row.name, "app": app.name, "app_id": app.id,
+        "integration_id": app.integration_id or ""})
+    return {"app": vapps.to_dict(app), "job_id": job.id}
 
 
 @router.put("/{directory_id}/join-account")

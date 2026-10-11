@@ -1,0 +1,49 @@
+# Make sure the Entitle persona-bundle groups (ent-<target>-<persona>) exist in an
+# on-prem Active Directory domain.
+# Target: a domain controller (or a member server with the AD module), over WinRM HTTPS
+# (5986), from the directory's remote agent. Queued by Settings → Integrations → Entitle
+# → Persona access bundles → Create missing groups.
+#
+# Through the dashboard: WinRM logs on as the directory's Password Safe account, and the
+# microsoft.ad modules act as that same identity (dir_bind_dn / dir_bind_password,
+# checked out for this run only). That account needs "Create group objects" on the OU.
+# Required:
+#   ad_groups: [{name: ent-ad-itops, description: "..."}]
+# Optional:
+#   ad_groups_path: OU=Entitle,OU=Groups,DC=corp,DC=example,DC=com   # blank = the Users container
+#
+# Only ever CREATES or updates the description of an ent-* group. It never sets
+# members, never removes a group, and refuses any name outside the ent-* convention, so
+# it cannot be pointed at a built-in group. A new group grants nothing until its rights
+# are delegated — see docs/integrations/beyondtrust/entitle-persona-bundles.md.
+- name: Ensure the Entitle persona-bundle groups exist
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: winrm
+    ad_groups: []
+    ad_groups_path: ""
+  tasks:
+    - name: Fail early on a missing credential or a name outside the ent-* convention
+      ansible.builtin.assert:
+        that:
+          - dir_bind_dn is defined and dir_bind_dn | length > 0
+          - ad_groups | length > 0
+          - ad_groups | map(attribute='name') | select('match', '^ent-(ad|aws|azure|gcp|oci)-[a-z0-9-]+$') | list | length == ad_groups | length
+        fail_msg: Pass ad_groups with ent-<target>-<persona> names only, and the directory credential.
+
+    - name: Create the group if it is missing (members are never touched)
+      microsoft.ad.group:
+        name: "{{ item.name }}"
+        state: present
+        scope: global
+        category: security
+        description: "{{ item.description | default(omit) }}"
+        path: "{{ ad_groups_path if ad_groups_path | length > 0 else omit }}"
+        domain_server: "{{ dir_host | default(omit) }}"
+        domain_username: "{{ dir_bind_dn }}"
+        domain_password: "{{ dir_bind_password }}"
+      loop: "{{ ad_groups }}"
+      loop_control:
+        label: "{{ item.name }}"
+      no_log: true              # module args carry the bind password

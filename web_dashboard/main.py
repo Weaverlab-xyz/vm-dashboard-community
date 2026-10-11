@@ -1043,6 +1043,7 @@ from .api import workgroups as workgroups_api  # noqa: E402
 from .api import roles as roles_api  # noqa: E402
 from .api import workgroup_overrides as workgroup_overrides_api  # noqa: E402
 from .api import cloud_identity as cloud_identity_api  # noqa: E402
+from .api import entitle_bundles as entitle_bundles_api  # noqa: E402
 from .api import gateways as gateways_api  # noqa: E402
 from .api import expiry as expiry_api  # noqa: E402
 from .api import notifications as notifications_api  # noqa: E402
@@ -1106,6 +1107,7 @@ def _profile_page_gate(name: str):
 app.include_router(setup.router)
 app.include_router(secrets.router)
 app.include_router(cloud_identity_api.router)
+app.include_router(entitle_bundles_api.router)
 app.include_router(storage.router)
 # The cloud consoles' API layer, gated by the SAME page group as their pages.
 #

@@ -162,6 +162,8 @@
                       class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Reset admin password</button>
               <button x-show="d.status === 'available'" @click="openEntitle(d)"
                       class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Entitle</button>
+              <button x-show="d.status === 'available' && d.entitle_integration_id" @click="openVapp(d)"
+                      class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Virtual app</button>
               <button @click="remove(d)"
                       class="text-xs border border-red-200 text-red-600 hover:bg-red-50 px-2.5 py-1.5 rounded-lg"
                       x-text="d.source === 'registered' ? 'Unregister' : 'Destroy'"></button>
@@ -848,6 +850,93 @@
     </div>
   </div>
 
+  <!-- Entitle virtual applications over this directory's groups -->
+  <div x-show="va.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="va.open = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-4xl p-6 space-y-4 max-h-[92vh] overflow-y-auto">
+      <h3 class="text-lg font-semibold text-gray-800" x-text="'Entitle virtual applications · ' + (va.dir?.name || '')"></h3>
+      <p class="text-xs text-gray-500">A virtual application gives the groups Entitle synced from
+        <span class="font-medium" x-text="va.dir?.entitle_integration_name || 'this directory'"></span>
+        friendly names, grouped under one application, each routed through an approval tier. Requesting a role
+        adds the requester to the group; what the group already grants (an SSO assignment, a cloud role) does the
+        rest. Nothing is created in the directory. Groups named <code>ent-&lt;cloud&gt;-&lt;persona&gt;</code>
+        are named for you to match the persona bundles.</p>
+      <div x-show="va.refusal" class="text-sm text-amber-700 bg-amber-50 rounded-lg px-3 py-2" x-text="va.refusal"></div>
+      <div x-show="va.error" class="text-sm text-red-600" x-text="va.error"></div>
+
+      <div x-show="va.apps.length" class="border border-gray-200 rounded-lg divide-y divide-gray-100">
+        <template x-for="a in va.apps" :key="a.id">
+          <div class="px-3 py-2 text-sm flex items-start justify-between gap-3">
+            <div>
+              <span class="font-medium text-gray-800" x-text="a.name"></span>
+              <span class="text-xs ml-1"
+                    :class="{'text-green-700': a.status === 'active', 'text-red-600': a.status === 'failed', 'text-gray-500': !['active','failed'].includes(a.status)}"
+                    x-text="a.status"></span>
+              <div class="text-xs text-gray-500" x-text="a.roles.map(r => r.name + ' → ' + (r.group_name || r.virtualized_role_name)).join(' · ')"></div>
+              <div x-show="a.error" class="text-xs text-red-600" x-text="a.error"></div>
+            </div>
+            <button x-show="!['applying','destroying'].includes(a.status)" @click="deleteVapp(a)"
+                    class="text-xs border border-red-200 text-red-600 hover:bg-red-50 px-2.5 py-1.5 rounded-lg whitespace-nowrap">Remove</button>
+          </div>
+        </template>
+      </div>
+
+      <div x-show="!va.refusal" class="space-y-3 border-t border-gray-100 pt-3">
+        <h4 class="text-sm font-semibold text-gray-700">New virtual application</h4>
+        <input type="text" x-model="va.name" maxlength="50" placeholder="Application name, e.g. Cloud access"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+        <div class="flex gap-2">
+          <input type="text" x-model="va.q" @keydown.enter.prevent="searchVappRoles()" placeholder="Search groups (e.g. ent-)"
+                 class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          <button @click="searchVappRoles()" :disabled="va.searching"
+                  class="px-3 py-2 text-sm border border-gray-300 rounded-lg">Search</button>
+        </div>
+        <div x-show="va.searching" class="text-sm text-gray-400">Reading Entitle…</div>
+        <div x-show="va.found.length" class="border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-56 overflow-y-auto">
+          <template x-for="r in va.found" :key="r.id">
+            <div class="px-3 py-1.5 text-sm flex items-center justify-between">
+              <span><span class="text-gray-800" x-text="r.resource_name"></span>
+                <span class="text-xs text-gray-400" x-text="' · ' + r.name"></span>
+                <span x-show="r.suggested" class="text-xs text-blue-600" x-text="' · ' + (r.suggested?.name || '')"></span></span>
+              <button @click="addVappRole(r)" :disabled="va.picked.some(p => p.role_id === r.id)"
+                      class="text-xs border border-gray-200 px-2 py-1 rounded disabled:opacity-40">Add</button>
+            </div>
+          </template>
+        </div>
+        <table x-show="va.picked.length" class="w-full text-sm">
+          <thead class="text-xs text-gray-500 text-left">
+            <tr><th class="py-1">Group</th><th>Role name</th><th>Grouping</th><th>Tier</th><th></th></tr>
+          </thead>
+          <tbody>
+            <template x-for="(p, idx) in va.picked" :key="p.role_id">
+              <tr class="border-t border-gray-100">
+                <td class="py-1 pr-2 text-xs text-gray-600" x-text="p.group"></td>
+                <td class="pr-2"><input type="text" x-model="p.name" maxlength="50" class="w-full border border-gray-300 rounded px-2 py-1 text-sm"></td>
+                <td class="pr-2"><input type="text" x-model="p.resource" maxlength="50" class="w-full border border-gray-300 rounded px-2 py-1 text-sm"></td>
+                <td class="pr-2">
+                  <select x-model="p.tier" class="border border-gray-300 rounded px-2 py-1 text-sm">
+                    <template x-for="t in va.tiers" :key="t.id">
+                      <option :value="t.id" x-text="t.label + (t.workflow_set ? (t.workflow_fallback ? ' (default workflow)' : '') : ' (no workflow!)')"></option>
+                    </template>
+                  </select>
+                </td>
+                <td><button @click="va.picked.splice(idx, 1)" class="text-xs text-red-600">✕</button></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+        <p class="text-xs text-gray-400" x-show="va.tiers.some(t => t.workflow_fallback)">
+          A tier marked "default workflow" has no workflow of its own and routes through entitle_workflow_id —
+          set entitle_workflow_&lt;tier&gt;_id in Settings → Integrations → Entitle to give it one.</p>
+      </div>
+      <div class="flex justify-end gap-2">
+        <button @click="va.open = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Close</button>
+        <button x-show="!va.refusal" @click="createVapp()" :disabled="va.saving || !va.name || !va.picked.length"
+                class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg">Create in Entitle</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Pin the Entra Domain Services join account -->
   <div x-show="ja.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
        @click.self="ja.open = false">
@@ -951,6 +1040,7 @@ function directoriesPage() {
     idp: { open: false, systems: [] }, idpOpts: {},
     br: { open: false, items: [], members: [], userGroups: [], addResults: [] },
     ent: { open: false, items: [] },
+    va: { open: false, dir: null, apps: [], tiers: [], found: [], picked: [], refusal: '', error: '', name: '', q: '' },
     ja: { open: false, systems: [] },
     hy: { open: false },
     agents: [],
@@ -1146,6 +1236,57 @@ function directoriesPage() {
         await this.load();
       } catch (err) { e.error = err.message; }
       finally { e.saving = false; }
+    },
+    async openVapp(d) {
+      this.va = { open: true, dir: d, apps: [], tiers: [], found: [], picked: [], refusal: '', error: '',
+                  name: '', q: 'ent-', searching: false, saving: false };
+      await this.loadVapps();
+    },
+    async loadVapps() {
+      const v = this.va;
+      try {
+        const r = await API.get(`/api/directories/${v.dir.id}/virtual-apps`);
+        v.apps = r.apps || []; v.tiers = r.tiers || []; v.refusal = r.refusal || '';
+      } catch (e) { v.error = e.message; }
+    },
+    async searchVappRoles() {
+      const v = this.va;
+      v.searching = true; v.error = '';
+      try {
+        const r = await API.get(`/api/directories/${v.dir.id}/entitle-roles?q=${encodeURIComponent(v.q || '')}`);
+        v.found = r.roles || [];
+        if (r.refusal) v.refusal = r.refusal;
+        if (r.error) v.error = r.error;
+      } catch (e) { v.error = e.message; }
+      finally { v.searching = false; }
+    },
+    addVappRole(r) {
+      const s = r.suggested || {};
+      this.va.picked.push({ role_id: r.id, group: r.resource_name + ' · ' + r.name,
+                            name: (s.name || r.resource_name || r.name).slice(0, 50),
+                            resource: s.resource || 'Access', tier: s.tier || 'single_approver',
+                            persona: s.persona || '', cloud: s.cloud || '' });
+    },
+    async createVapp() {
+      const v = this.va;
+      v.saving = true; v.error = '';
+      try {
+        const r = await API.post(`/api/directories/${v.dir.id}/virtual-apps`, {
+          name: v.name, roles: v.picked.map(p => ({ role_id: p.role_id, name: p.name, resource: p.resource,
+                                                    tier: p.tier, persona: p.persona, cloud: p.cloud })) });
+        this.note('Virtual application queued — job ' + r.job_id.slice(0, 8));
+        v.picked = []; v.name = '';
+        await this.loadVapps();
+      } catch (e) { v.error = e.message; }
+      finally { v.saving = false; }
+    },
+    async deleteVapp(a) {
+      if (!confirm(`Remove ${a.name} and its ${a.roles.length} role(s) from Entitle? Check Entitle for active grants on its roles first: the dashboard removes the application, not group memberships.`)) return;
+      try {
+        const r = await API.del(`/api/directories/${this.va.dir.id}/virtual-apps/${a.id}`);
+        this.note('Removal queued — job ' + r.job_id.slice(0, 8));
+        await this.loadVapps();
+      } catch (e) { this.va.error = e.message; }
     },
     psiPicked() { return (this.psi.systems || []).filter(c => c._pick && c._agent && c._account); },
     async submitPsImport() {

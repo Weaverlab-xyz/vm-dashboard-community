@@ -67,6 +67,7 @@ HANDLED_TYPES = (
     "clouddb_ps_register",
     "cloudfn_deploy", "cloudfn_update", "cloudfn_decommission",
     "cloudfn_entitle_register",
+    "entitle_virtual_app", "entitle_persona_bundles",
     "clouddb_adapter_pair", "clouddb_dbops_deploy",
     "certca_provision", "certca_decommission", "cert_ps_register",
     "directory_provision", "directory_decommission",
@@ -142,6 +143,9 @@ MEDIUM_TYPES = (
     # Password Safe managed systems, each a terraform apply in a tempdir)
     "k8s_tunnel", "k8s_api_tunnel", "k8s_entitle_register", "k8s_ps_token",
     "rancher_entitle_register", "clouddb_entitle_register", "cloudfn_entitle_register",
+    # One terraform apply/destroy each, against Entitle only: a virtual application over
+    # a directory's groups, and a set of persona bundles.
+    "entitle_virtual_app", "entitle_persona_bundles",
     # SSM SendCommand / Azure Run Command against the shared jump host, then one short
     # terraform per Password Safe managed system (ps_resource_service) and — on the
     # register path — a re-broker of the DB's PRA tunnel. No streaming, no long process.
@@ -680,6 +684,12 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             from .services import cloud_function_service
             await cloud_function_service.run_decommission(
                 db, fn_id=meta["fn_id"], job_id=job_id)
+        elif job_type == "entitle_virtual_app":
+            from .services import entitle_virtual_app_service
+            await entitle_virtual_app_service.run_job(db, job_id=job_id, meta=meta)
+        elif job_type == "entitle_persona_bundles":
+            from .services import entitle_persona_bundles
+            await entitle_persona_bundles.run_job(db, job_id=job_id, meta=meta)
         elif job_type == "cloudfn_entitle_register":
             from .services import cloud_function_service
             await cloud_function_service.run_entitle_register(

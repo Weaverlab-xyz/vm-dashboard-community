@@ -1,0 +1,758 @@
+{
+ "_source": "entitleio/entitle provider built from v1.1.6-0.20260929094117-3cdbf1c02673; regenerate with scripts/entitle_provider_schema.sh",
+ "data": {
+  "entitle_integration": {
+   "allow_changing_account_permissions": {
+    "mode": "computed"
+   },
+   "allow_creating_accounts": {
+    "mode": "computed"
+   },
+   "allowed_durations": {
+    "mode": "computed"
+   },
+   "application": {
+    "mode": "computed",
+    "nested": {
+     "name": {
+      "mode": "computed"
+     }
+    }
+   },
+   "auto_assign_recommended_maintainers": {
+    "mode": "computed"
+   },
+   "auto_assign_recommended_owners": {
+    "mode": "computed"
+   },
+   "id": {
+    "mode": "optional"
+   },
+   "maintainers": {
+    "mode": "computed",
+    "nested": {
+     "entity": {
+      "mode": "computed",
+      "nested": {
+       "email": {
+        "mode": "computed"
+       },
+       "id": {
+        "mode": "computed"
+       }
+      }
+     },
+     "type": {
+      "mode": "computed"
+     }
+    }
+   },
+   "name": {
+    "mode": "optional"
+   },
+   "notify_about_external_permission_changes": {
+    "mode": "computed"
+   },
+   "readonly": {
+    "mode": "computed"
+   },
+   "requestable": {
+    "mode": "computed"
+   },
+   "requestable_by_default": {
+    "mode": "computed"
+   },
+   "workflow": {
+    "mode": "computed",
+    "nested": {
+     "id": {
+      "mode": "computed"
+     },
+     "name": {
+      "mode": "computed"
+     }
+    }
+   }
+  },
+  "entitle_roles": {
+   "filter": {
+    "mode": "block",
+    "nested": {
+     "external_id": {
+      "mode": "optional"
+     },
+     "page": {
+      "mode": "optional"
+     },
+     "per_page": {
+      "mode": "optional"
+     },
+     "search": {
+      "mode": "optional"
+     }
+    }
+   },
+   "integration_id": {
+    "mode": "optional"
+   },
+   "resource_id": {
+    "mode": "optional"
+   },
+   "roles": {
+    "mode": "computed",
+    "nested": {
+     "external_id": {
+      "mode": "computed"
+     },
+     "id": {
+      "mode": "computed"
+     },
+     "name": {
+      "mode": "computed"
+     },
+     "requestable": {
+      "mode": "computed"
+     },
+     "resource_id": {
+      "mode": "computed"
+     },
+     "workflow": {
+      "mode": "computed",
+      "nested": {
+       "id": {
+        "mode": "computed"
+       },
+       "name": {
+        "mode": "computed"
+       }
+      }
+     }
+    }
+   }
+  },
+  "entitle_workflow": {
+   "id": {
+    "mode": "optional"
+   },
+   "name": {
+    "mode": "optional"
+   },
+   "rules": {
+    "mode": "computed",
+    "nested": {
+     "any_schedule": {
+      "mode": "computed"
+     },
+     "approval_flow": {
+      "mode": "computed",
+      "nested": {
+       "steps": {
+        "mode": "computed",
+        "nested": {
+         "approval_entities": {
+          "mode": "computed",
+          "nested": {
+           "channel": {
+            "mode": "computed",
+            "nested": {
+             "id": {
+              "mode": "computed"
+             }
+            }
+           },
+           "group": {
+            "mode": "computed",
+            "nested": {
+             "id": {
+              "mode": "computed"
+             },
+             "name": {
+              "mode": "computed"
+             }
+            }
+           },
+           "schedule": {
+            "mode": "computed",
+            "nested": {
+             "id": {
+              "mode": "computed"
+             },
+             "name": {
+              "mode": "computed"
+             }
+            }
+           },
+           "type": {
+            "mode": "computed"
+           },
+           "user": {
+            "mode": "computed",
+            "nested": {
+             "email": {
+              "mode": "computed"
+             },
+             "id": {
+              "mode": "computed"
+             }
+            }
+           },
+           "webhook": {
+            "mode": "computed",
+            "nested": {
+             "id": {
+              "mode": "computed"
+             },
+             "name": {
+              "mode": "computed"
+             }
+            }
+           }
+          }
+         },
+         "notified_entities": {
+          "mode": "computed",
+          "nested": {
+           "channel": {
+            "mode": "computed",
+            "nested": {
+             "id": {
+              "mode": "computed"
+             }
+            }
+           },
+           "group": {
+            "mode": "computed",
+            "nested": {
+             "id": {
+              "mode": "computed"
+             },
+             "name": {
+              "mode": "computed"
+             }
+            }
+           },
+           "schedule": {
+            "mode": "computed",
+            "nested": {
+             "id": {
+              "mode": "computed"
+             },
+             "name": {
+              "mode": "computed"
+             }
+            }
+           },
+           "type": {
+            "mode": "computed"
+           },
+           "user": {
+            "mode": "computed",
+            "nested": {
+             "email": {
+              "mode": "computed"
+             },
+             "id": {
+              "mode": "computed"
+             }
+            }
+           },
+           "webhook": {
+            "mode": "computed",
+            "nested": {
+             "id": {
+              "mode": "computed"
+             },
+             "name": {
+              "mode": "computed"
+             }
+            }
+           }
+          }
+         },
+         "operator": {
+          "mode": "computed"
+         },
+         "sort_order": {
+          "mode": "computed"
+         }
+        }
+       }
+      }
+     },
+     "in_groups": {
+      "mode": "computed",
+      "nested": {
+       "id": {
+        "mode": "computed"
+       },
+       "name": {
+        "mode": "computed"
+       }
+      }
+     },
+     "in_schedules": {
+      "mode": "computed",
+      "nested": {
+       "id": {
+        "mode": "computed"
+       },
+       "name": {
+        "mode": "computed"
+       }
+      }
+     },
+     "sort_order": {
+      "mode": "computed"
+     },
+     "under_duration": {
+      "mode": "computed"
+     }
+    }
+   }
+  }
+ },
+ "resource": {
+  "entitle_bundle": {
+   "allowed_durations": {
+    "mode": "required"
+   },
+   "category": {
+    "mode": "optional"
+   },
+   "description": {
+    "mode": "required"
+   },
+   "id": {
+    "mode": "computed"
+   },
+   "name": {
+    "mode": "required"
+   },
+   "roles": {
+    "mode": "required",
+    "nested": {
+     "id": {
+      "mode": "optional"
+     },
+     "name": {
+      "mode": "computed"
+     },
+     "resource": {
+      "mode": "computed",
+      "nested": {
+       "id": {
+        "mode": "computed"
+       },
+       "integration": {
+        "mode": "computed",
+        "nested": {
+         "application": {
+          "mode": "computed",
+          "nested": {
+           "name": {
+            "mode": "computed"
+           }
+          }
+         },
+         "id": {
+          "mode": "computed"
+         },
+         "name": {
+          "mode": "computed"
+         }
+        }
+       },
+       "name": {
+        "mode": "computed"
+       }
+      }
+     }
+    }
+   },
+   "tags": {
+    "mode": "optional"
+   },
+   "workflow": {
+    "mode": "required",
+    "nested": {
+     "id": {
+      "mode": "required"
+     },
+     "name": {
+      "mode": "computed"
+     }
+    }
+   }
+  },
+  "entitle_integration": {
+   "agent_token": {
+    "mode": "optional",
+    "nested": {
+     "name": {
+      "mode": "required"
+     }
+    }
+   },
+   "allow_changing_account_permissions": {
+    "mode": "optional"
+   },
+   "allow_creating_accounts": {
+    "mode": "optional"
+   },
+   "allowed_durations": {
+    "mode": "required"
+   },
+   "application": {
+    "mode": "required",
+    "nested": {
+     "name": {
+      "mode": "required"
+     }
+    }
+   },
+   "auto_assign_recommended_maintainers": {
+    "mode": "optional"
+   },
+   "auto_assign_recommended_owners": {
+    "mode": "optional"
+   },
+   "connection_json": {
+    "mode": "required"
+   },
+   "id": {
+    "mode": "computed"
+   },
+   "maintainers": {
+    "mode": "optional",
+    "nested": {
+     "entity": {
+      "mode": "optional",
+      "nested": {
+       "email": {
+        "mode": "computed"
+       },
+       "id": {
+        "mode": "required"
+       }
+      }
+     },
+     "type": {
+      "mode": "required"
+     }
+    }
+   },
+   "name": {
+    "mode": "required"
+   },
+   "notify_about_external_permission_changes": {
+    "mode": "optional"
+   },
+   "owner": {
+    "mode": "required",
+    "nested": {
+     "email": {
+      "mode": "computed"
+     },
+     "id": {
+      "mode": "required"
+     }
+    }
+   },
+   "prerequisite_permissions": {
+    "mode": "optional",
+    "nested": {
+     "default": {
+      "mode": "optional"
+     },
+     "role": {
+      "mode": "required",
+      "nested": {
+       "id": {
+        "mode": "required"
+       },
+       "name": {
+        "mode": "computed"
+       },
+       "resource": {
+        "mode": "computed",
+        "nested": {
+         "id": {
+          "mode": "computed"
+         },
+         "integration": {
+          "mode": "computed",
+          "nested": {
+           "application": {
+            "mode": "computed",
+            "nested": {
+             "name": {
+              "mode": "computed"
+             }
+            }
+           },
+           "id": {
+            "mode": "computed"
+           },
+           "name": {
+            "mode": "computed"
+           }
+          }
+         },
+         "name": {
+          "mode": "computed"
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "readonly": {
+    "mode": "optional"
+   },
+   "requestable": {
+    "mode": "optional"
+   },
+   "requestable_by_default": {
+    "mode": "optional"
+   },
+   "workflow": {
+    "mode": "required",
+    "nested": {
+     "id": {
+      "mode": "required"
+     },
+     "name": {
+      "mode": "computed"
+     }
+    }
+   }
+  },
+  "entitle_resource": {
+   "allowed_durations": {
+    "mode": "optional"
+   },
+   "external_id": {
+    "mode": "computed"
+   },
+   "id": {
+    "mode": "computed"
+   },
+   "integration": {
+    "mode": "optional",
+    "nested": {
+     "id": {
+      "mode": "optional"
+     },
+     "name": {
+      "mode": "computed"
+     }
+    }
+   },
+   "maintainers": {
+    "mode": "optional",
+    "nested": {
+     "entity": {
+      "mode": "optional",
+      "nested": {
+       "email": {
+        "mode": "computed"
+       },
+       "id": {
+        "mode": "required"
+       }
+      }
+     },
+     "type": {
+      "mode": "required"
+     }
+    }
+   },
+   "name": {
+    "mode": "required"
+   },
+   "owner": {
+    "mode": "optional",
+    "nested": {
+     "email": {
+      "mode": "optional"
+     },
+     "id": {
+      "mode": "optional"
+     }
+    }
+   },
+   "prerequisite_permissions": {
+    "mode": "optional",
+    "nested": {
+     "default": {
+      "mode": "optional"
+     },
+     "role": {
+      "mode": "required",
+      "nested": {
+       "id": {
+        "mode": "required"
+       },
+       "name": {
+        "mode": "computed"
+       },
+       "resource": {
+        "mode": "computed",
+        "nested": {
+         "id": {
+          "mode": "computed"
+         },
+         "integration": {
+          "mode": "computed",
+          "nested": {
+           "application": {
+            "mode": "computed",
+            "nested": {
+             "name": {
+              "mode": "computed"
+             }
+            }
+           },
+           "id": {
+            "mode": "computed"
+           },
+           "name": {
+            "mode": "computed"
+           }
+          }
+         },
+         "name": {
+          "mode": "computed"
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "requestable": {
+    "mode": "required"
+   },
+   "tags": {
+    "mode": "computed"
+   },
+   "user_defined_description": {
+    "mode": "optional"
+   },
+   "user_defined_tags": {
+    "mode": "optional"
+   },
+   "workflow": {
+    "mode": "optional",
+    "nested": {
+     "id": {
+      "mode": "optional"
+     },
+     "name": {
+      "mode": "computed"
+     }
+    }
+   }
+  },
+  "entitle_role": {
+   "allowed_durations": {
+    "mode": "required"
+   },
+   "external_id": {
+    "mode": "computed"
+   },
+   "id": {
+    "mode": "computed"
+   },
+   "name": {
+    "mode": "required"
+   },
+   "prerequisite_permissions": {
+    "mode": "optional",
+    "nested": {
+     "default": {
+      "mode": "optional"
+     },
+     "role": {
+      "mode": "required",
+      "nested": {
+       "id": {
+        "mode": "required"
+       },
+       "name": {
+        "mode": "computed"
+       },
+       "resource": {
+        "mode": "computed",
+        "nested": {
+         "id": {
+          "mode": "computed"
+         },
+         "integration": {
+          "mode": "computed",
+          "nested": {
+           "application": {
+            "mode": "computed",
+            "nested": {
+             "name": {
+              "mode": "computed"
+             }
+            }
+           },
+           "id": {
+            "mode": "computed"
+           },
+           "name": {
+            "mode": "computed"
+           }
+          }
+         },
+         "name": {
+          "mode": "computed"
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "requestable": {
+    "mode": "required"
+   },
+   "resource": {
+    "mode": "required",
+    "nested": {
+     "id": {
+      "mode": "required"
+     },
+     "name": {
+      "mode": "computed"
+     }
+    }
+   },
+   "virtualized_role": {
+    "mode": "optional",
+    "nested": {
+     "id": {
+      "mode": "required"
+     },
+     "name": {
+      "mode": "computed"
+     }
+    }
+   },
+   "workflow": {
+    "mode": "optional",
+    "nested": {
+     "id": {
+      "mode": "required"
+     },
+     "name": {
+      "mode": "computed"
+     }
+    }
+   }
+  }
+ }
+}
