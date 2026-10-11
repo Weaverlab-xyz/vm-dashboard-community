@@ -2560,6 +2560,38 @@ class ManagedDirectory(Base):
     expiry_warned_at = Column(DateTime, nullable=True)
 
 
+class DirectoryHealth(Base):
+    """The last health check of one :class:`ManagedDirectory`: is it up and answering.
+
+    Infrastructure health only — the control plane's own state, domain controller status,
+    whether the identity provider signs in, whether an on-prem DC answers LDAP. Nothing
+    here describes accounts, groups or privilege: identity posture is BeyondTrust Identity
+    Security Insights' data, and ``services/directory_health_service`` says why it is not
+    duplicated here.
+
+    One row per directory, overwritten by each check, so the page is one query and no
+    provider calls. ``checks`` is a JSON list of ``{key, label, status, detail}``.
+
+    ``pending_job_id`` is the agent_discover job probing an on-prem directory. The probe
+    finishes on the agent's schedule, not the checker's, so its result is folded in when
+    that job completes (``api/agent.complete``) rather than awaited.
+    """
+    __tablename__ = "directory_health"
+
+    # Not a FK: a directory is soft-deleted (status="deleted"), and the health page skips
+    # those rows by joining on the directory, so a stale row here is harmless.
+    directory_id = Column(String(36), primary_key=True)
+    status = Column(String(16), nullable=False, default="unknown")  # ok | warn | fail | unknown
+    checks = Column(Text, nullable=True)
+    checked_at = Column(DateTime, nullable=True, index=True)
+    duration_ms = Column(Integer, nullable=True)
+    pending_job_id = Column(String(36), nullable=True, index=True)
+    pending_since = Column(DateTime, nullable=True)
+    # When the last probe was queued. Separate from checked_at, which every pass moves,
+    # because on-prem probes run on their own, slower cadence.
+    probe_queued_at = Column(DateTime, nullable=True)
+
+
 class EntitleVirtualApp(Base):
     """An Entitle **Virtual Application** the dashboard created over a directory's groups.
 
@@ -4605,6 +4637,33 @@ def _narrow_presenter_to_own_povs(db) -> int:
     return changed
 
 
+# How many times init_db re-runs create_all on SQLite after losing the race below.
+_SQLITE_CREATE_ATTEMPTS = 5
+
+
+def _create_all_sqlite(conn) -> None:
+    """``create_all`` for SQLite, tolerating a second process creating tables meanwhile.
+
+    PostgreSQL serializes concurrent init_db callers with an advisory lock; SQLite has
+    none. The image's ``gunicorn -w 2`` boots two workers on the same fresh file, both
+    pass create_all's "does it exist" check, and the slower one's CREATE TABLE fails
+    with "table ... already exists" -- which aborts that worker's startup, and gunicorn
+    then takes the whole container down. Re-running create_all re-checks, so it skips
+    whatever the other worker created and makes only what is still missing.
+    """
+    import time as _time
+    from sqlalchemy.exc import OperationalError
+    for attempt in range(_SQLITE_CREATE_ATTEMPTS):
+        try:
+            Base.metadata.create_all(bind=conn)
+            return
+        except OperationalError as exc:
+            if "already exists" not in str(exc) or attempt == _SQLITE_CREATE_ATTEMPTS - 1:
+                raise
+            conn.rollback()
+            _time.sleep(0.2 * (attempt + 1))
+
+
 def init_db():
     """Initialize database — create all tables and run lightweight migrations.
 
@@ -4668,7 +4727,10 @@ def init_db():
 
         # Pass the connection so create_all runs inside the same transaction
         # (and the same advisory-lock session on PostgreSQL).
-        Base.metadata.create_all(bind=conn)
+        if _is_sqlite:
+            _create_all_sqlite(conn)
+        else:
+            Base.metadata.create_all(bind=conn)
 
         _migrations = [
             # `false`, not `0`. PostgreSQL will not coerce an integer literal to a

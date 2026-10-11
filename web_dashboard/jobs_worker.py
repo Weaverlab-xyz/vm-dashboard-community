@@ -1309,7 +1309,8 @@ async def _main() -> None:
     multiply those caps (the claim is atomic), so replica-based scale-out is unchanged;
     the caps exist because replicas are not a free, or even an available, knob everywhere.
     """
-    from .services import cloud_executor, dashboard_collect, notification_service
+    from .services import (cloud_executor, dashboard_collect, directory_health_service,
+                           notification_service)
 
     loop = asyncio.get_running_loop()
     threads = _executor_size(_limits())
@@ -1338,12 +1339,17 @@ async def _main() -> None:
     # This worker is the PRIMARY collector; the app's lifespan runs the same loop with a
     # long deference window as a fallback for installs with no worker at all.
     stats = asyncio.create_task(dashboard_collect.collect_loop(), name="dash-stats")
+    # Same reasoning again: directory health checks call cloud and identity-provider APIs,
+    # so they run here, once, rather than in every gunicorn worker. A no-op while
+    # Directories is off or its interval is 0.
+    dirhealth = asyncio.create_task(directory_health_service.check_loop(),
+                                    name="directory-health")
     try:
         await _run_loop(shutdown=shutdown)   # returns once shutdown is set and jobs drain
     finally:
-        for task in (drain, stats):
+        for task in (drain, stats, dirhealth):
             task.cancel()
-        for task in (drain, stats):
+        for task in (drain, stats, dirhealth):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         # Non-blocking: a poller's thread still parked in time.sleep() would otherwise

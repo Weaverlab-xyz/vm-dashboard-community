@@ -1872,6 +1872,14 @@ async def directories_page(request: Request):
     return templates.TemplateResponse(request, "directories/index.html", {"request": request})
 
 
+@app.get("/directories/health", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("directories_enabled")])
+async def directory_health_page(request: Request):
+    """Directory health: is each directory up and answering. Infrastructure only —
+    identity posture is Identity Security Insights' (services/directory_health_service)."""
+    return templates.TemplateResponse(request, "directories/health.html", {"request": request})
+
+
 @app.get("/databases", response_class=HTMLResponse, include_in_schema=False,
          dependencies=[_feature_gate("cloud_database_enabled")])
 async def databases_page(request: Request):

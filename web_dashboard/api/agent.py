@@ -69,6 +69,7 @@ from ..services import (agent_ansible_bundle, agent_ansible_meta, agent_gateway_
                         agent_guard, agent_hypervisor_meta, agent_job_meta,
                         agent_ps_credential_service, agent_sealing, agent_service,
                         agent_signing, agent_storage_meta, config_service,
+                        directory_health_service,
                         hypervisor_connection_service, hypervisor_sync_service,
                         job_service, public_url)
 from ..services.hypervisor_connection_service import HypervisorConnectionError
@@ -592,6 +593,15 @@ async def complete(job_id: str, body: CompleteRequest, request: Request,
                                          result=result, error=body.error)
     agent_service.audit(db, agent, "agent.complete", ip=_client_ip(request),
                         details={"job_id": job.id, "status": applied})
+
+    # A directory health probe is an ordinary single-host discovery job; its result is
+    # also the directory's LDAP check. Matches nothing for any other discovery job.
+    if job.job_type == "agent_discover":
+        try:
+            directory_health_service.apply_probe(db, job, status=body.status,
+                                                 result=result, error=body.error)
+        except Exception:  # noqa: BLE001 — a finished job must not fail on its follow-up
+            logger.exception("could not record directory health from job %s", job.id)
 
     # Re-read the inventory the operator just changed, on their behalf. The dashboard
     # has no route to an agent-bound hypervisor, so a start or a stop left the page

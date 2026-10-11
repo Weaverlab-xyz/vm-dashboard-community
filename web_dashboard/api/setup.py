@@ -2006,6 +2006,7 @@ class DirectoriesFeatureConfig(BaseModel):
     directory_gcp_reserved_ip_range: str = ""
     directory_join_default_ou: str = ""
     directory_idp_page_size: int = 50
+    directory_health_interval_minutes: int = 15
     gcp_domain_join_service_account: str = ""
     passwordsafe_directory_functional_account: str = ""
     passwordsafe_directory_change_password_on_register: bool = True

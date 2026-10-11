@@ -310,11 +310,13 @@ _TITLE_OVERRIDES = {
     "profiles/demo/personas/itops":      "IT engineer",
     "profiles/demo/personas/ot":         "OT / ICS engineer",
     "profiles/demo/personas/dba":        "DBA / data platform",
-    "profiles/demo/personas/security":   "Security / IAM analyst",
+    "profiles/demo/personas/security":   "Security analyst",
     "profiles/demo/personas/sre":        "Platform / SRE",
     "profiles/demo/personas/netadmin":   "Network / firewall admin",
     "profiles/demo/personas/finops":     "FinOps / cloud governance",
     "profiles/demo/personas/aiops":      "AI / agent platform",
+    "profiles/demo/personas/iamops":     "IAM engineer",
+    "profiles/demo/personas/idarch":     "Identity architect",
     # Not personas. The derived title is the filename title-cased, which reads as a
     # filename ("Ps Runbook", "Standing One Up") rather than as the page.
     "kubernetes/kubesolo":               "KubeSolo",

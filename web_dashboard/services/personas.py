@@ -84,6 +84,12 @@ VALID_PERSONAS = (
     # "agent" (services/remote_agent*), and a persona sharing that word would make every
     # grep for either return both.
     "aiops",
+    # `iamops`, not `iam`: AWS IAM is everywhere in this codebase, and `persona == "iam"`
+    # would be one hit among hundreds -- the argument `itops` and `netadmin` settled.
+    "iamops",
+    # `idarch`, not `architect`: the architect owns the identity plane, not architecture
+    # in general, and the short key keeps card ids (`idarch-...`) readable.
+    "idarch",
 )
 
 # Human names for the flags a card can require, for the "Needs: ..." copy. A card names a
@@ -751,7 +757,7 @@ _DBA = Persona(
 
 _SECURITY = Persona(
     key="security",
-    label="Security / IAM analyst",
+    label="Security analyst",
     blurb="The oversight lens: who has access to what right now, what they did with it, "
           "and what should have expired already.",
     section_order=("overview", "managed", "cloud", "containers", "hypervisors"),
@@ -1149,10 +1155,162 @@ _AIOPS = Persona(
     ),
 )
 
+_IAMOPS = Persona(
+    key="iamops",
+    label="IAM engineer",
+    blurb="Runs the directories: domains, identity providers and the groups that grant "
+          "access — with no standing domain admin and every change on the record.",
+    section_order=("overview", "managed", "cloud", "containers", "hypervisors"),
+    tile_emphasis=("active_jobs", "deployed_resources"),
+    nav_pins=("dashboard", "directories", "config_mgmt", "agents", "jobs", "audit"),
+    quick_deploy=(),
+    docs=("profiles/demo/personas/iamops",),
+    preset_flags=("password_safe_enabled", "ansible_enabled"),
+    use_cases=(
+        UseCase(
+            id="iamops-domain-admin-nobody-knows",
+            title="A domain admin password nobody knows",
+            summary="Build a managed AD domain and watch its delegated administrator go "
+                    "straight into Password Safe and get rotated — the password in "
+                    "Terraform state stops working before anyone could have read it.",
+            target="/directories",
+            minutes=15,
+            docs="directories/active-directory",
+            requires_flags=("directories_enabled", "password_safe_enabled"),
+        ),
+        UseCase(
+            id="iamops-is-every-directory-answering",
+            title="Is every directory answering?",
+            summary="One page for whether each domain, domain controller and identity "
+                    "provider is up: the cloud's own health for managed AD, a sign-in to "
+                    "each provider, Entra Connect sync age, and an LDAP probe of each "
+                    "on-prem DC through its agent.",
+            target="/directories/health",
+            minutes=6,
+            docs="directories/health",
+            requires_flags=("directories_enabled",),
+        ),
+        UseCase(
+            id="iamops-import-from-password-safe",
+            title="Start from the directories Password Safe already manages",
+            summary="Import the AD and LDAP directories Password Safe already holds, each "
+                    "bound through a managed account checked out per run — no service "
+                    "account password typed into another tool.",
+            target="/directories",
+            minutes=8,
+            docs="directories/on-premises",
+            requires_flags=("directories_enabled", "password_safe_enabled"),
+        ),
+        UseCase(
+            id="iamops-audit-through-the-agent",
+            title="Privileged groups and stale accounts, audited from inside the network",
+            summary="Run the read-only AD audits — privileged group membership, stale "
+                    "users, stale computers — through a remote agent on the domain's own "
+                    "network, with the bind credential checked out for that run only.",
+            target="/config-mgmt",
+            minutes=10,
+            docs="directories/on-premises",
+            requires_flags=("ansible_enabled", "directories_enabled",
+                            "remote_agents_enabled"),
+        ),
+        UseCase(
+            id="iamops-membership-on-the-record",
+            title="Change a group membership, with the change on the record",
+            summary="Add a user to an Entra ID, Okta or PingOne group from one place, "
+                    "with writes off until someone turns them on and every add or remove "
+                    "written to the audit log with the tenant, group and user.",
+            target="/directories",
+            minutes=8,
+            docs="directories/identity-providers",
+            requires_flags=("directories_enabled",),
+        ),
+        UseCase(
+            id="iamops-no-standing-directory-admin",
+            title="Nobody holds directory write by default",
+            summary="Grant an engineer the dashboard's directories write scope for an "
+                    "hour through Entitle, and show it gone when the hour is — the people "
+                    "who change the directory are not standing admins of it either.",
+            target="/rbac",
+            minutes=10,
+            docs="integrations/beyondtrust/entitle-dashboard-permissions",
+            requires_flags=("entitle_user_jit_enabled",),
+        ),
+    ),
+)
+
+_IDARCH = Persona(
+    key="idarch",
+    label="Identity architect",
+    blurb="Designs the identity plane: how the directories connect, where privilege is "
+          "granted, and how to prove none of it is standing.",
+    section_order=("overview", "managed", "cloud", "containers", "hypervisors"),
+    tile_emphasis=("active_jobs", "deployed_resources"),
+    nav_pins=("dashboard", "directories", "rbac", "audit", "request_access"),
+    quick_deploy=(),
+    docs=("profiles/demo/personas/idarch",),
+    preset_flags=("entitle_enabled",),
+    use_cases=(
+        UseCase(
+            id="idarch-every-directory",
+            title="Every directory, and what grants access to it, on one page",
+            summary="Cloud and on-prem domains beside Entra ID, Okta and PingOne, each "
+                    "pinned to the Entitle integration that grants access to it — the "
+                    "identity estate as a map rather than a list of consoles.",
+            target="/directories",
+            minutes=8,
+            docs="directories",
+            requires_flags=("directories_enabled", "entitle_enabled"),
+        ),
+        UseCase(
+            id="idarch-hybrid-without-a-cloud-dc",
+            title="Extend the forest to the cloud without a domain controller there",
+            summary="Join cloud servers to the on-prem domain through an AD Connector or "
+                    "a DNS link, and confirm Entra hybrid join from Microsoft Graph — one "
+                    "forest, no new tier-0 asset to protect.",
+            target="/directories",
+            minutes=15,
+            docs="directories/on-premises",
+            requires_flags=("directories_enabled", "remote_agents_enabled"),
+        ),
+        UseCase(
+            id="idarch-zero-standing-privilege",
+            title="Zero standing privilege, including in the tool itself",
+            summary="Every dashboard scope, administrator included, requested through "
+                    "Entitle and revoked the moment the grant ends — the access model the "
+                    "architect specifies, applied to the console that enforces it.",
+            target="/rbac",
+            minutes=10,
+            docs="integrations/beyondtrust/entitle-dashboard-permissions",
+            requires_flags=("entitle_user_jit_enabled",),
+        ),
+        UseCase(
+            id="idarch-machine-identity-jit",
+            title="Machine identities elevated per action, not per year",
+            summary="The dashboard's own cloud identities get a role grant scoped to one "
+                    "operation for minutes through Entitle, instead of carrying broad "
+                    "privilege all the time — non-human identity held to the human rule.",
+            target="/settings",
+            minutes=12,
+            docs="design/cloud-identity-jit",
+            requires_flags=("entitle_enabled",),
+        ),
+        UseCase(
+            id="idarch-prove-it",
+            title="Who can change the directory, and who did",
+            summary="The directories permission scope says who may write, and the audit "
+                    "log records every membership change and Entitle pin — the evidence an "
+                    "identity governance review asks for, without an export.",
+            target="/audit",
+            minutes=6,
+            docs="access/audit-log",
+        ),
+    ),
+)
+
 
 _PERSONAS = {p.key: p for p in (
     _CLOUDOPS, _DEVOPS, _HYPERVISOR, _ITOPS, _OT, _DBA, _SECURITY, _SRE, _NETADMIN,
-    _FINOPS, _AIOPS,
+    _FINOPS, _AIOPS, _IAMOPS, _IDARCH,
 )}
 
 

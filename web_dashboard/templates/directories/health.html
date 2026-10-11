@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+{% block title %}Directory health{% endblock %}
+
+{# Is each directory up and answering. Backed by GET /api/directories/health, which reads
+   stored checks only (services/directory_health_service), and POST
+   /api/directories/{id}/health/check for Check now. Infrastructure only: identity posture
+   (accounts, privilege, MFA, app secrets) is Identity Security Insights' data and is
+   deliberately not shown here. #}
+
+{% block content %}
+<div class="max-w-6xl mx-auto py-8 px-4" x-data="directoryHealthPage()" x-init="init()">
+
+  <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3 sm:mb-1">
+    <h1 class="text-2xl font-bold text-gray-800">Directory health</h1>
+    <div class="flex flex-wrap items-center gap-2">
+      <a href="/directories"
+         class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium px-3 py-1.5 rounded-lg">
+        Directories
+      </a>
+      <button @click="load()"
+              class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium px-3 py-1.5 rounded-lg">
+        Reload
+      </button>
+    </div>
+  </div>
+  <p class="text-sm text-gray-500 mb-6">
+    Whether each directory is up and answering: the cloud's own state for a managed domain and
+    its domain controllers, a sign-in to each identity provider, Entra Connect sync freshness,
+    and an LDAP probe of each on-prem domain through its remote agent.
+    <span x-show="data.interval_minutes > 0">Checked every <span x-text="data.interval_minutes"></span> minutes;
+      on-prem directories at most hourly.</span>
+    <span x-show="data.interval_minutes === 0">Scheduled checks are off; use <strong>Check now</strong>.</span>
+    Accounts, groups and privilege are not shown here.
+  </p>
+
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
+
+  <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+    <template x-for="s in summary" :key="s.status">
+      <div class="bg-white rounded-xl shadow-sm border border-gray-200 px-4 py-3">
+        <div class="text-xs text-gray-500" x-text="s.label"></div>
+        <div class="text-2xl font-semibold" :class="s.text" x-text="(data.counts || {})[s.status] || 0"></div>
+      </div>
+    </template>
+  </div>
+
+  <div x-show="loading" class="text-sm text-gray-500">Loading…</div>
+  <div x-show="!loading && !(data.directories || []).length" x-cloak
+       class="bg-white rounded-xl border border-gray-200 px-4 py-6 text-sm text-gray-500">
+    No directories to check. Register or build one on the <a href="/directories" class="text-blue-600 hover:underline">Directories</a> page.
+  </div>
+
+  <div class="space-y-3">
+    <template x-for="d in (data.directories || [])" :key="d.directory_id">
+      <div class="bg-white rounded-xl shadow-sm border border-gray-200">
+        <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between px-4 py-3">
+          <div class="flex items-center gap-3 min-w-0">
+            <span class="inline-block text-xs font-semibold px-2 py-0.5 rounded-full shrink-0"
+                  :class="badge(d.status)" x-text="statusLabel(d.status)"></span>
+            <div class="min-w-0">
+              <div class="font-medium text-gray-800 truncate" x-text="d.name"></div>
+              <div class="text-xs text-gray-500" x-text="d.provider_label"></div>
+            </div>
+          </div>
+          <div class="flex items-center gap-3 text-xs text-gray-500">
+            <span x-show="d.probe_pending">Probe queued on the agent</span>
+            <span x-text="d.checked_at ? 'Checked ' + ago(d.checked_at) : 'Not checked yet'"></span>
+            <button @click="checkNow(d)" :disabled="busy[d.directory_id]"
+                    class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-2.5 py-1 rounded-lg disabled:opacity-50"
+                    x-text="busy[d.directory_id] ? 'Checking…' : 'Check now'"></button>
+          </div>
+        </div>
+        <ul class="border-t border-gray-100 divide-y divide-gray-100" x-show="d.checks.length">
+          <template x-for="c in d.checks" :key="c.key">
+            <li class="flex items-start gap-3 px-4 py-2 text-sm">
+              <span class="mt-1.5 inline-block w-2 h-2 rounded-full shrink-0" :class="dot(c.status)"></span>
+              <div class="min-w-0">
+                <span class="font-medium text-gray-700" x-text="c.label"></span>
+                <span class="text-gray-500" x-text="c.detail ? ' — ' + c.detail : ''"></span>
+              </div>
+            </li>
+          </template>
+        </ul>
+      </div>
+    </template>
+  </div>
+
+  <p x-show="(data.unmonitored || []).length" x-cloak class="text-xs text-gray-500 mt-4">
+    Not checked on their own, because each is a link to an on-prem directory and is as healthy as it is:
+    <span x-text="(data.unmonitored || []).map(u => u.name + ' (' + u.provider_label + ')').join(', ')"></span>.
+  </p>
+</div>
+
+<script>
+function directoryHealthPage() {
+  return {
+    data: {}, loading: true, busy: {},
+    toast: '', toastType: 'success',
+    summary: [
+      {status: 'fail', label: 'Failing', text: 'text-red-600'},
+      {status: 'warn', label: 'Degraded', text: 'text-amber-600'},
+      {status: 'ok', label: 'Healthy', text: 'text-green-600'},
+      {status: 'unknown', label: 'Unknown', text: 'text-gray-500'},
+    ],
+
+    async init() {
+      requireAuth();
+      await this.load();
+    },
+
+    async load() {
+      this.loading = true;
+      try { this.data = (await API.get('/api/directories/health')) || {}; }
+      catch (e) { this.note(e.message, 'error'); }
+      finally { this.loading = false; }
+    },
+
+    async checkNow(d) {
+      this.busy = {...this.busy, [d.directory_id]: true};
+      try {
+        const fresh = await API.post(`/api/directories/${d.directory_id}/health/check`, {});
+        if (fresh) {
+          const list = (this.data.directories || []).map(x => x.directory_id === d.directory_id ? fresh : x);
+          this.data = {...this.data, directories: list, counts: this.countOf(list)};
+        }
+      } catch (e) { this.note(e.message, 'error'); }
+      finally { this.busy = {...this.busy, [d.directory_id]: false}; }
+    },
+
+    countOf(list) {
+      const out = {ok: 0, warn: 0, fail: 0, unknown: 0};
+      for (const d of list) out[d.status] = (out[d.status] || 0) + 1;
+      return out;
+    },
+    statusLabel(s) { return {ok: 'Healthy', warn: 'Degraded', fail: 'Failing'}[s] || 'Unknown'; },
+    badge(s) {
+      return {ok: 'bg-green-100 text-green-800', warn: 'bg-amber-100 text-amber-800',
+              fail: 'bg-red-100 text-red-800'}[s] || 'bg-gray-100 text-gray-700';
+    },
+    dot(s) {
+      return {ok: 'bg-green-500', warn: 'bg-amber-500', fail: 'bg-red-500'}[s] || 'bg-gray-300';
+    },
+    ago(iso) {
+      const secs = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+      if (secs < 90) return 'just now';
+      const mins = Math.round(secs / 60);
+      if (mins < 90) return mins + ' min ago';
+      const hours = Math.round(mins / 60);
+      return hours < 48 ? hours + ' h ago' : Math.round(hours / 24) + ' d ago';
+    },
+    note(msg, type = 'success') {
+      this.toast = msg; this.toastType = type;
+      setTimeout(() => { this.toast = ''; }, 6000);
+    },
+  };
+}
+</script>
+{% endblock %}

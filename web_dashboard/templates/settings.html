@@ -7195,6 +7195,14 @@
                 Entra ID, Okta or PingOne directory.</p>
             </div>
             <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Health check interval (minutes)</label>
+              <input type="number" min="0" max="1440" x-model.number="panelCfg.directory_health_interval_minutes"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="15">
+              <p class="text-[11px] text-gray-400 mt-1">How often the Directory health page re-checks
+                each directory. On-prem directories are probed through their agent at most hourly.
+                0 turns scheduled checks off.</p>
+            </div>
+            <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">GCP domain-join service account</label>
               <input type="text" x-model="panelCfg.gcp_domain_join_service_account"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="ad-join@project.iam.gserviceaccount.com">
