@@ -46,8 +46,34 @@ logger = logging.getLogger(__name__)
 JOB_TYPE = "entitle_persona_bundles"
 CLOUDS = ("aws", "azure", "gcp", "oci")
 CLOUD_LABELS = {"aws": "AWS", "azure": "Azure", "gcp": "GCP", "oci": "OCI"}
+# On-premises Active Directory is a target alongside the clouds: the IT, OT and
+# hypervisor personas work there, through AD groups that are delegated rights on OUs,
+# jump hosts and hypervisor identity sources.
+AD = "ad"
+TARGETS = CLOUDS + (AD,)
+TARGET_LABELS = {**CLOUD_LABELS, AD: "On-prem AD"}
 CATEGORY = "Cloud access"
+CATEGORIES = {**{c: "Cloud access" for c in CLOUDS}, AD: "On-prem access"}
 GROUP_PREFIX = "ent"
+
+# Directory kinds that are Active Directory (or LDAP with AD-style groups) for the AD
+# target. Their pinned Entitle integration is where the AD component is resolved.
+AD_DIRECTORY_PROVIDERS = ("onprem_ad", "aws_managed_ad", "aws_ad_connector",
+                          "aws_simple_ad", "gcp_managed_ad", "azure_managed_ad", "ldap")
+
+# Built-in AD groups that are tier 0, or that reach domain controllers. A requestable
+# bundle must never grant one: membership is control of the domain, and Entitle would
+# hand it out on a single request. The catalog is pinned against this list by a test,
+# and resolution refuses a match on it at run time as well, so a group renamed to one of
+# these in a customer's AD is still not picked up.
+PRIVILEGED_AD_GROUPS = frozenset(g.casefold() for g in (
+    "Administrators", "Domain Admins", "Enterprise Admins", "Schema Admins",
+    "Account Operators", "Server Operators", "Backup Operators", "Print Operators",
+    "DnsAdmins", "Group Policy Creator Owners", "Cert Publishers", "Key Admins",
+    "Enterprise Key Admins", "Domain Controllers", "Read-only Domain Controllers",
+    "Remote Desktop Users", "Remote Management Users", "Hyper-V Administrators",
+    "Incoming Forest Trust Builders", "Replicator", "Storage Replica Administrators",
+))
 
 
 @dataclass(frozen=True)
@@ -70,12 +96,21 @@ class PersonaAccess:
     gcp: tuple = ()
     oci_policy: tuple = ()          # documentation for the ent-oci-<key> group's policy
     dashboard: tuple = ()           # "{cloud}" is replaced by the cloud key
+    targets: tuple = CLOUDS         # where this job function has a bundle
+    # Further delegated AD groups for the AD target, beyond ent-ad-<key> itself. Your
+    # own groups only — never a built-in (PRIVILEGED_AD_GROUPS).
+    ad_extra: tuple = ()
 
     @property
     def persona(self) -> str:
         return self.key.split("-", 1)[0]
 
     def cloud_roles(self, cloud: str) -> tuple:
+        """Role names for the target's own integration. For AD these are GROUP names —
+        the persona's ent-ad-<key> group first — matched as resources in the AD
+        directory's Entitle integration."""
+        if cloud == AD:
+            return (group_name(self.key, AD),) + tuple(self.ad_extra)
         return getattr(self, cloud) if cloud in ("aws", "azure", "gcp") else ()
 
     def dashboard_groups(self, cloud: str) -> tuple:
@@ -187,6 +222,40 @@ CATALOG = (
         oci_policy=("manage generative-ai-family in compartment <c>",),
         dashboard=("dashboard-{cloud}-read", "dashboard-cloud_function-write"),
     ),
+    # ── On-premises, through Active Directory ────────────────────────────────
+    # Each fronts the persona's own delegated group, ent-ad-<key>, which carries the
+    # rights where they are needed: delegated control of an OU, local admin on a set of
+    # jump hosts, the admin role in vCenter's AD identity source. None is a built-in.
+    PersonaAccess(
+        key="itops", label="IT engineer",
+        purpose="Endpoints and servers: the delegated rights on their OUs (join, reset, "
+                "LAPS read) and the dashboard's VM and configuration pages.",
+        tier="single_approver", max_duration=43200, targets=(AD,),
+        dashboard=("dashboard-vms-write", "dashboard-config_mgmt-write",
+                   "dashboard-directories-read"),
+    ),
+    PersonaAccess(
+        key="ot", label="OT / ICS engineer",
+        purpose="Plant access: the group the OT jump hosts and engineering workstations "
+                "admit, for a few hours at a time.",
+        tier="single_approver", max_duration=10800, targets=(AD,),
+        dashboard=("dashboard-ot-write", "dashboard-connections-read"),
+    ),
+    PersonaAccess(
+        key="ot-breakglass", label="OT break-glass",
+        purpose="Incident-only control of the OT cell, one hour at most, two approvers.",
+        tier="two_approver", max_duration=3600, targets=(AD,),
+        dashboard=("dashboard-ot-delete", "dashboard-connections-read"),
+    ),
+    PersonaAccess(
+        key="hypervisor", label="Hypervisor admin",
+        purpose="The virtualisation layer: the group vCenter, Hyper-V and the other "
+                "hypervisors map to their admin role through AD.",
+        tier="single_approver", max_duration=43200, targets=(AD,),
+        dashboard=("dashboard-vsphere-write", "dashboard-hyperv-write",
+                   "dashboard-proxmox-write", "dashboard-nutanix-write",
+                   "dashboard-xcpng-write"),
+    ),
 )
 
 _BY_KEY = {p.key: p for p in CATALOG}
@@ -201,14 +270,14 @@ def group_name(access_key: str, cloud: str) -> str:
 
 
 def bundle_name(p: PersonaAccess, cloud: str) -> str:
-    return f"{p.label} — {CLOUD_LABELS[cloud]}"
+    return f"{p.label} — {TARGET_LABELS[cloud]}"
 
 
 def catalog() -> list:
     """Every bundle the catalog defines, flat, for the settings card."""
     out = []
     for p in CATALOG:
-        for cloud in CLOUDS:
+        for cloud in p.targets:
             out.append({
                 "key": bundle_key(p.key, cloud), "access": p.key, "persona": p.persona,
                 "cloud": cloud, "name": bundle_name(p, cloud), "label": p.label,
@@ -218,6 +287,7 @@ def catalog() -> list:
                 "cloud_roles": list(p.cloud_roles(cloud)),
                 "oci_policy": list(p.oci_policy) if cloud == "oci" else [],
                 "dashboard_groups": list(p.dashboard_groups(cloud)),
+                "category": CATEGORIES[cloud],
             })
     return out
 
@@ -226,11 +296,12 @@ def suggest_for_group(group: str) -> Optional[dict]:
     """Name a virtual-app role for a directory group that follows ``ent-<cloud>-<key>``.
     ``None`` for any other group — no guessing at groups named some other way."""
     g = (group or "").strip().lower()
-    for cloud in CLOUDS:
+    for cloud in TARGETS:
         prefix = f"{GROUP_PREFIX}-{cloud}-"
-        if g.startswith(prefix) and g[len(prefix):] in _BY_KEY:
-            p = _BY_KEY[g[len(prefix):]]
-            return {"name": bundle_name(p, cloud)[:50], "resource": CLOUD_LABELS[cloud],
+        key = g[len(prefix):]
+        if g.startswith(prefix) and key in _BY_KEY and cloud in _BY_KEY[key].targets:
+            p = _BY_KEY[key]
+            return {"name": bundle_name(p, cloud)[:50], "resource": TARGET_LABELS[cloud],
                     "tier": p.tier, "persona": p.key, "cloud": cloud}
     return None
 
@@ -247,7 +318,60 @@ def cloud_settings(cfg=None) -> dict:
     cfg = cfg or _cfg
     return {c: {"integration_id": (cfg(f"entitle_cloud_integration_{c}") or "").strip(),
                 "resource": (cfg(f"entitle_cloud_resource_{c}") or "").strip()}
-            for c in CLOUDS}
+            for c in TARGETS}
+
+
+def ad_directories(db) -> list:
+    """AD / LDAP directories with an Entitle integration pinned: the candidates for the
+    AD target. ``[{integration_id, integration_name, directory_id, name, provider}]``."""
+    from ..database import ManagedDirectory
+    rows = (db.query(ManagedDirectory)
+            .filter(ManagedDirectory.provider.in_(AD_DIRECTORY_PROVIDERS),
+                    ManagedDirectory.status != "deleted",
+                    ManagedDirectory.entitle_integration_id.isnot(None)).all())
+    return [{"integration_id": r.entitle_integration_id,
+             "integration_name": r.entitle_integration_name or "",
+             "directory_id": r.id, "name": r.name, "provider": r.provider}
+            for r in rows if r.entitle_integration_id]
+
+
+def _ad_integration(db, pinned: str) -> tuple:
+    """``(integration_id, "")`` or ``("", reason)`` for the AD target. An explicit pin
+    wins; otherwise the one AD directory with an integration pinned, and never a guess
+    between several."""
+    if pinned:
+        return pinned, ""
+    found = {d["integration_id"]: d for d in ad_directories(db)}
+    if len(found) == 1:
+        return next(iter(found)), ""
+    if not found:
+        return "", ""
+    names = ", ".join(sorted(d["name"] for d in found.values())[:4])
+    return "", (f"{len(found)} AD directories have an Entitle integration pinned ({names})"
+                " — choose one for the AD target")
+
+
+def _group_cn(name: str) -> str:
+    """``CN=ent-ad-itops,OU=Groups,…`` and ``ent-ad-itops`` are the same group."""
+    n = (name or "").strip().casefold()
+    if n.startswith("cn="):
+        n = n[3:].split(",", 1)[0]
+    return n
+
+
+def _match_group(roles: list, wanted: str) -> tuple:
+    """A directory GROUP's membership role, by the group's name (or CN). ``(role, "")``
+    or ``(None, reason)``; refuses a built-in privileged group whatever it matched."""
+    w = wanted.casefold()
+    if w in PRIVILEGED_AD_GROUPS:
+        return None, f"{wanted}: a built-in privileged group is never bundled"
+    hits = [r for r in roles if _group_cn(r["resource_name"]) == w]
+    member = [r for r in hits if "member" in r["name"].casefold()] or hits
+    if not member:
+        return None, f"{wanted}: not found"
+    if len({r["id"] for r in member}) > 1:
+        return None, f"{wanted}: {len(member)} matching roles"
+    return member[0], ""
 
 
 def _match_role(roles: list, wanted: str, resource: str) -> tuple:
@@ -284,7 +408,7 @@ async def resolve(db, keys: list, *, cfg=None, tp=None) -> list:
     wanted = []
     for k in dict.fromkeys(keys):
         access, _, cloud = k.rpartition("-")
-        if cloud in CLOUDS and access in _BY_KEY:
+        if access in _BY_KEY and cloud in _BY_KEY[access].targets:
             wanted.append((_BY_KEY[access], cloud))
     if not wanted:
         return []
@@ -296,6 +420,12 @@ async def resolve(db, keys: list, *, cfg=None, tp=None) -> list:
 
     clouds = cloud_settings(cfg)
     native: dict = {}
+    target_refusal: dict = {}
+    if any(c == AD for _, c in wanted):
+        iid, why = _ad_integration(db, clouds[AD]["integration_id"])
+        clouds[AD]["integration_id"] = iid
+        if why:
+            target_refusal[AD] = why
     for cloud in {c for _, c in wanted}:
         iid = clouds[cloud]["integration_id"]
         if iid and cloud != "oci":
@@ -333,9 +463,18 @@ async def resolve(db, keys: list, *, cfg=None, tp=None) -> list:
             group = _component([])
 
         names = p.cloud_roles(cloud)
+        if cloud == AD and group["state"] == "resolved":
+            # The virtual-app role already fronts a group; granting the same group's
+            # membership a second time, directly, adds nothing.
+            fronted = _group_cn(vr[0].get("group_name") or "")
+            names = tuple(n for n in names if _group_cn(n) != fronted)
         if cloud in native and names:
-            res = clouds[cloud]["resource"]
-            cloud_c = _component([(n, *_match_role(native[cloud], n, res)) for n in names])
+            if cloud == AD:
+                cloud_c = _component([(n, *_match_group(native[cloud], n)) for n in names])
+            else:
+                res = clouds[cloud]["resource"]
+                cloud_c = _component([(n, *_match_role(native[cloud], n, res))
+                                      for n in names])
         else:
             cloud_c = _component([])
 
@@ -352,10 +491,13 @@ async def resolve(db, keys: list, *, cfg=None, tp=None) -> list:
 
         comps = {"group": group, "cloud": cloud_c, "dashboard": dash_c}
         blockers = [f"{n} is partial" for n, c in comps.items() if c["state"] == "partial"]
+        if cloud in target_refusal:
+            blockers.append(target_refusal[cloud])
         if group["state"] != "resolved" and cloud_c["state"] != "resolved":
-            blockers.append("no cloud access resolved — create the virtual-app role for "
-                            f"{group_name(p.key, cloud)}, or pin the {CLOUD_LABELS[cloud]} "
-                            "integration")
+            where = ("pin an AD directory's Entitle integration" if cloud == AD
+                     else f"pin the {TARGET_LABELS[cloud]} integration")
+            blockers.append(f"no {TARGET_LABELS[cloud]} access resolved — create the "
+                            f"virtual-app role for {group_name(p.key, cloud)}, or {where}")
         if not flows[p.tier]["id"]:
             blockers.append(f"no workflow for the {entitle_tiers.TIER_LABELS[p.tier]} tier")
         role_ids = [f["role_id"] for c in comps.values() for f in c["found"]]
@@ -377,7 +519,7 @@ def _hcl_bundle(row: dict) -> dict:
         "key": row["key"], "name": row["name"],
         "description": f"{p.purpose} ({entitle_tiers.TIER_LABELS[p.tier]}; created by "
                        "VM Dashboard from its persona catalog.)",
-        "category": CATEGORY,
+        "category": CATEGORIES[row["cloud"]],
         "tags": ["vm-dashboard", f"persona:{p.persona}", f"cloud:{row['cloud']}",
                  f"tier:{p.tier}"],
         "workflow_id": row["workflow_id"],

@@ -1,8 +1,8 @@
 """Persona × cloud access bundles in Entitle — Settings → Integrations → Entitle.
 
   GET    /api/entitle/persona-bundles                    — catalog, cloud pins, applied sets
-  GET    /api/entitle/persona-bundles/cloud-candidates   — integrations to pin per cloud
-  PUT    /api/entitle/persona-bundles/clouds             — pin a cloud's integration/resource
+  GET    /api/entitle/persona-bundles/cloud-candidates   — integrations to pin per target
+  PUT    /api/entitle/persona-bundles/clouds             — pin a target's integration/resource
   POST   /api/entitle/persona-bundles/preview            — resolve the selected bundles
   POST   /api/entitle/persona-bundles/apply              — resolve again, apply the ready ones
   DELETE /api/entitle/persona-bundles/sets/{id}          — remove an applied set
@@ -11,6 +11,12 @@ Administrator-only, like the rest of the Entitle panel: a bundle is standing
 infrastructure in the tenant that decides what people can request. ``apply`` resolves the
 keys afresh rather than trusting a preview the browser sends back, so what is created is
 what Entitle holds at apply time.
+
+The ``ad`` target is pinned to an AD directory's Entitle integration, from the AD and
+LDAP rows on the Directories page that have one pinned — not from the tenant's whole
+integration list — so the AD bundles always resolve against a directory this dashboard
+knows. With one such directory and no pin it is used as is; with several, it must be
+chosen.
 """
 import logging
 from typing import List
@@ -57,10 +63,20 @@ def overview(db: Session = Depends(get_db), user: User = Depends(require_admin))
     }
 
 
+def _ad_candidates(db: Session) -> list:
+    from ..services.directory_service import PROVIDER_LABELS
+    return [{"id": d["integration_id"], "name": d["name"],
+             "application": PROVIDER_LABELS.get(d["provider"], d["provider"]),
+             "suggested": True} for d in bundles.ad_directories(db)]
+
+
 @router.get("/cloud-candidates")
-async def cloud_candidates(cloud: str, user: User = Depends(require_admin)):
-    if cloud not in bundles.CLOUDS:
+async def cloud_candidates(cloud: str, db: Session = Depends(get_db),
+                           user: User = Depends(require_admin)):
+    if cloud not in bundles.TARGETS:
         raise HTTPException(status_code=400, detail="unknown cloud")
+    if cloud == bundles.AD:
+        return {"integrations": _ad_candidates(db)}
     try:
         rows = await api.get_paged("/public/v1/integrations", what="integrations")
     except api.EntitleApiError as e:
@@ -81,10 +97,14 @@ async def cloud_candidates(cloud: str, user: User = Depends(require_admin)):
 async def pin_cloud(req: CloudPin, db: Session = Depends(get_db),
                     user: User = Depends(require_admin)):
     from ..services import config_service
-    if req.cloud not in bundles.CLOUDS:
+    if req.cloud not in bundles.TARGETS:
         raise HTTPException(status_code=400, detail="unknown cloud")
     iid = req.integration_id.strip()
-    if iid:
+    if iid and req.cloud == bundles.AD:
+        if not any(c["id"] == iid for c in _ad_candidates(db)):
+            raise HTTPException(status_code=400, detail=(
+                "Pick the Entitle integration pinned on one of your AD directories."))
+    elif iid:
         try:
             rows = await api.get_paged("/public/v1/integrations", what="integrations")
         except api.EntitleApiError as e:

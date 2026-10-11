@@ -43,7 +43,8 @@ INELIGIBLE_PROVIDERS = ("dns_link", "gcp_vyos_link")
 
 MAX_ROLES = 100
 LIVE_STATUSES = ("applying", "active", "failed", "destroying")
-CLOUDS = ("aws", "azure", "gcp", "oci")
+# Where a role's access lands, for the persona bundles: a cloud, or on-prem AD.
+CLOUDS = ("aws", "azure", "gcp", "oci", "ad")
 
 _NAME_RE = re.compile(r"^[\w .,:()&/+'\-–—]{2,50}$")
 # An Entitle id. It is put into a URL path (GET /public/v1/roles/{id}), so nothing that

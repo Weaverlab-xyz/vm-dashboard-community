@@ -65,7 +65,8 @@ through a one-step workflow without you seeing it.
 4. For each group, set the role name, the grouping (the resource inside the application)
    and the tier. Groups named `ent-<cloud>-<persona>` come pre-filled to match the
    [persona bundles](entitle-persona-bundles.md), for example `ent-gcp-sre` →
-   **SRE — GCP**, grouping **GCP**, tier auto-approve.
+   **SRE — GCP**, grouping **GCP**, tier auto-approve. On an AD directory,
+   `ent-ad-itops` → **IT engineer — On-prem AD**.
 5. Click **Create in Entitle**. This queues an `entitle_virtual_app` job. When the job
    finishes, the application is **active** and each role's new Entitle id is stored with it.
 

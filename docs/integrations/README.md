@@ -28,7 +28,7 @@ product behind one of them, and the register of what actually consumes each. Sta
 | [Entitle](beyondtrust/entitle.md) | you want access to expire on its own instead of being revoked by someone remembering. |
 | [Entitle dashboard permissions](beyondtrust/entitle-dashboard-permissions.md) | you want dashboard access without standing admins, or you need to tell the two mechanisms apart. |
 | [Entitle virtual applications](beyondtrust/entitle-virtual-apps.md) | you registered Active Directory or an identity provider and want people to request its groups in Entitle by a clear name, under an approval tier. |
-| [Entitle persona bundles](beyondtrust/entitle-persona-bundles.md) | you want people to request everything one job function needs on one cloud in a single Entitle request, instead of a handful of separate roles. |
+| [Entitle persona bundles](beyondtrust/entitle-persona-bundles.md) | you want people to request everything one job function needs on one cloud, or on-premises through Active Directory, in a single Entitle request instead of a handful of separate roles. |
 | [EPM for Linux](beyondtrust/epml.md) | you are rolling Endpoint Privilege Management for Linux onto provisioned hosts. |
 
 ## On-premises hypervisors

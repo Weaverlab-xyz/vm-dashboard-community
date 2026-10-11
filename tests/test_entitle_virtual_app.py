@@ -42,7 +42,8 @@ from web_dashboard.services import entitle_virtual_app_service as vapps  # noqa:
 
 Base.metadata.create_all(bind=engine)
 
-SCHEMA = json.load(open(os.path.join(_ROOT, "tests", "fixtures", "entitle_provider_schema.json")))
+SCHEMA = json.load(open(os.path.join(_ROOT, "tests", "fixtures", "entitle_provider_schema.json"),
+                       encoding="utf-8"))
 OWNER, WF, WF_AUTO = ("11111111-1111-4111-8111-111111111111",
                       "22222222-2222-4222-8222-222222222222",
                       "33333333-3333-4333-8333-333333333333")

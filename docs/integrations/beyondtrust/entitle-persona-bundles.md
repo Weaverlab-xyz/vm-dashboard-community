@@ -1,15 +1,16 @@
 # Entitle persona bundles
 
-> **Audience:** operator · **Profile:** `demo` · **Read this when:** you want people to request everything one job function needs on one cloud in a single Entitle request, instead of a handful of separate roles.
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** you want people to request everything one job function needs on one cloud, or on-premises through Active Directory, in a single Entitle request instead of a handful of separate roles.
 
 An Entitle **bundle** grants several roles, from any number of integrations, in one
-request. The dashboard ships a catalog with one bundle per job function per cloud. Each
-bundle combines three components:
+request. The dashboard ships a catalog with one bundle per job function per **target**.
+A target is a cloud (AWS, Azure, GCP or OCI) or **on-prem AD**, which is where the IT,
+OT and hypervisor roles work. Each bundle combines three components:
 
 | Component | What it is | Where it is found |
 |---|---|---|
-| **group** | the [virtual-application](entitle-virtual-apps.md) role over the directory group `ent-<cloud>-<persona>`, the group your cloud's SSO maps to a permission set, role or binding | active virtual applications, by the persona and cloud the role is tagged with |
-| **cloud** | roles in the cloud's own Entitle integration | the AWS, Azure or GCP integration you pin for that cloud |
+| **group** | the [virtual-application](entitle-virtual-apps.md) role over the directory group `ent-<target>-<persona>`. For a cloud, this is the group your cloud's SSO maps to a permission set, role or binding. For AD, it is the group that holds the delegated rights | active virtual applications, by the persona and target the role is tagged with |
+| **cloud** | for a cloud: roles in that cloud's own Entitle integration. For AD: membership of the persona's own delegated AD groups | the AWS, Azure or GCP integration you pin for that cloud, or the Entitle integration pinned on your AD directory |
 | **dashboard** | the dashboard's own `dashboard-<scope>-<level>` groups | the directory integration those groups were synced from |
 
 **Settings → Integrations → Entitle → Persona access bundles** shows the catalog as a grid
@@ -40,8 +41,33 @@ Every bundle also includes the matching dashboard groups. For example, Cloud Ops
 includes `dashboard-aws-write` and `dashboard-images-write`, and DBA includes
 `dashboard-cloud_database-write`.
 
-The Hypervisor, IT and OT [personas](../../profiles/demo/personas/README.md) have no
-cloud bundle, because their work is on-premises.
+### On-prem, through Active Directory
+
+The IT, OT and hypervisor [personas](../../profiles/demo/personas/README.md) work
+on-premises, so their bundles target **on-prem AD** instead of a cloud:
+
+| Persona | AD group | Where its rights are delegated | Dashboard groups | Tier · durations |
+|---|---|---|---|---|
+| IT engineer | `ent-ad-itops` | the workstation and server OUs (join, reset, LAPS read) | `vms-write`, `config_mgmt-write`, `directories-read` | one approver · 1–12 h |
+| OT / ICS engineer | `ent-ad-ot` | the local admin or RDP group on the OT jump hosts and engineering workstations | `ot-write`, `connections-read` | one approver · 1–3 h |
+| OT break-glass | `ent-ad-ot-breakglass` | full control of the OT cell | `ot-delete`, `connections-read` | two approvers · 1 h |
+| Hypervisor admin | `ent-ad-hypervisor` | the admin role in vCenter, Hyper-V, Proxmox, Nutanix and XCP-ng, through their AD identity source | `vsphere-write`, `hyperv-write`, `proxmox-write`, `nutanix-write`, `xcpng-write` | one approver · 1–12 h |
+
+**Only your own delegated groups.** The AD bundles never include a built-in group. The
+catalog is pinned to `ent-ad-*` names by a test. At run time, resolution also refuses to
+match the built-in groups that are tier 0 or reach domain controllers, even if one is
+renamed or added to the catalog by mistake. These include Domain Admins, Enterprise
+Admins, Administrators, Account Operators, Server Operators, Backup Operators, DnsAdmins,
+Group Policy Creator Owners and the built-in Remote Desktop Users. If someone needs one
+of those, Entitle's own break-glass process is the place for it, not a requestable bundle.
+
+The AD groups can be granted two ways, and the bundle grants each group only once:
+
+- as the virtual-application role over the group, which gives it a friendly name and a tier;
+- or directly, as the group's membership role in the AD integration.
+
+A group can be given as its plain name or its distinguished name
+(`CN=ent-ad-itops,OU=Groups,…`). Both refer to the same group.
 
 **Durations follow the tier.** The tier workflows from `terraform/entitle_user_jit` each
 have one rule that ends at the tier's longest duration: 1 h for auto-approve, 24 h for
@@ -79,6 +105,11 @@ dashboard registers when it builds a database. See [Entitle](entitle.md).
    the tenant.
 5. Set the three **tier workflows**, as described in
    [virtual applications](entitle-virtual-apps.md#tiers).
+6. **For the on-prem AD bundles:** create the `ent-ad-<persona>` groups and delegate
+   their rights (see the table above). Register the AD on **Directories** and pin its
+   Entitle integration. If exactly one AD directory has an integration pinned, the AD
+   target uses it automatically. If several do, pick one in the **On-prem AD** box of the
+   bundle card. Until you do, the AD bundles report the ambiguity rather than picking one.
 
 ## Why a bundle is not ready
 
@@ -88,8 +119,8 @@ A bundle is created only when:
 
 - **no component is partial.** Creating it would grant less than its name promises.
   Fix the missing role or group, or remove that component;
-- **it has cloud access.** The group or cloud component must be resolved. A bundle that
-  carried only dashboard groups under a cloud's name would mislead;
+- **it has access on its target.** The group or cloud component must be resolved. A
+  bundle that carried only dashboard groups under a cloud's or AD's name would mislead;
 - **its tier has a workflow.**
 
 Apply resolves the selection again on the server, so what gets created is what Entitle
@@ -106,13 +137,15 @@ POST   /api/entitle/persona-bundles/apply              {"keys": [...]}
 DELETE /api/entitle/persona-bundles/sets/{id}
 ```
 
-All of these are administrator-only. Bundle keys are `<persona>-<cloud>`, for example
-`sre-breakglass-gcp`.
+All of these are administrator-only. Bundle keys are `<persona>-<target>`, for example
+`sre-breakglass-gcp` or `itops-ad`. For `cloud=ad`, `cloud-candidates` lists the AD
+directories that have an Entitle integration pinned, and `clouds` accepts only one of
+those.
 
 The audit log records `entitle_cloud_pin`, `entitle_bundles_apply` (with the skipped
 bundles and their reasons) and `entitle_bundles_delete`.
 
 The bundles are created through the `entitleio/entitle` provider's `entitle_bundle`
 resource, as an `entitle_persona_bundles` job. Each bundle gets the category
-`Cloud access` and the tags `persona:<p>`, `cloud:<c>` and `tier:<t>`, so they are easy
+`Cloud access` (or `On-prem access` for AD) and the tags `persona:<p>`, `cloud:<c>` and `tier:<t>`, so they are easy
 to find in Entitle's catalog.

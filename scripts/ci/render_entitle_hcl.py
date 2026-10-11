@@ -54,7 +54,7 @@ def main(out: str) -> None:
     for name, hcl in (("virtual_app", vapp), ("bundles", bhcl)):
         d = os.path.join(out, name)
         os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, "main.tf"), "w") as fh:
+        with open(os.path.join(d, "main.tf"), "w", encoding="utf-8") as fh:
             fh.write(hcl)
         print(d)
 

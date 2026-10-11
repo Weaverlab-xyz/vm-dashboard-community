@@ -4598,9 +4598,9 @@
           <div class="mt-6 pt-5 border-t border-gray-200" x-data="entitleBundles()" x-init="load()">
             <h3 class="text-sm font-semibold text-gray-800 mb-1">Persona access bundles</h3>
             <p class="text-xs text-gray-500 mb-3">
-              One Entitle bundle per job function and cloud: the virtual-app role over the
-              <code>ent-&lt;cloud&gt;-&lt;persona&gt;</code> group, the cloud's own roles, and the matching
-              dashboard-* groups. Preview reads Entitle and shows what each one resolves to; only bundles with
+              One Entitle bundle per job function and cloud — or on-prem AD for the IT, OT and hypervisor
+              roles: the virtual-app role over the <code>ent-&lt;target&gt;-&lt;persona&gt;</code> group, the
+              target's own roles or delegated AD groups, and the matching dashboard-* groups. Preview reads Entitle and shows what each one resolves to; only bundles with
               nothing missing are created. <a href="/docs/integrations/beyondtrust/entitle-persona-bundles"
               class="text-blue-600 hover:underline">How bundles are built</a>.
             </p>
@@ -4612,10 +4612,12 @@
                 <div class="border border-gray-200 rounded-lg p-3 space-y-1">
                   <div class="text-sm font-medium text-gray-700" x-text="cloudLabel[c] + ' integration'"></div>
                   <div class="text-xs text-gray-500" x-show="c === 'oci'">OCI is granted through its group only; no integration needed.</div>
+                  <div class="text-xs text-gray-500" x-show="c === 'ad'">The Entitle integration pinned on an AD directory
+                    (Directories → Entitle). Leave blank to use the only one; pick one when there are several.</div>
                   <div x-show="c !== 'oci'" class="space-y-1">
                     <select x-model="clouds[c].integration_id" @focus="candidates(c)"
                             class="w-full border border-gray-300 rounded px-2 py-1 text-sm">
-                      <option value="">— none (group only) —</option>
+                      <option value="" x-text="c === 'ad' ? '— the only pinned AD directory —' : '— none (group only) —'"></option>
                       <template x-if="clouds[c].integration_id && !(cands[c] || []).some(i => i.id === clouds[c].integration_id)">
                         <option :value="clouds[c].integration_id" x-text="clouds[c].integration_id"></option>
                       </template>
@@ -4623,7 +4625,7 @@
                         <option :value="i.id" x-text="i.name + ' · ' + i.application + (i.suggested ? ' · likely' : '')"></option>
                       </template>
                     </select>
-                    <input type="text" x-model="clouds[c].resource" placeholder="Resource (account / subscription / project) — optional"
+                    <input x-show="c !== 'ad'" type="text" x-model="clouds[c].resource" placeholder="Resource (account / subscription / project) — optional"
                            class="w-full border border-gray-300 rounded px-2 py-1 text-xs">
                     <button @click="pinCloud(c)" class="text-xs border border-gray-300 rounded px-2 py-1">Save</button>
                   </div>
@@ -4645,7 +4647,8 @@
                       <td class="pr-2 whitespace-nowrap" x-text="a.tier_label"></td>
                       <template x-for="c in cloudKeys" :key="c">
                         <td class="pr-2 align-top">
-                          <label class="flex items-start gap-1">
+                          <span x-show="!byKey[a.access + '-' + c]" class="text-gray-300">—</span>
+                          <label x-show="byKey[a.access + '-' + c]" class="flex items-start gap-1">
                             <input type="checkbox" :value="a.access + '-' + c" x-model="picked" class="mt-0.5">
                             <span class="text-gray-500" x-text="(byKey[a.access + '-' + c]?.cloud_roles || []).join(', ') || 'group only'"></span>
                           </label>
@@ -9556,8 +9559,8 @@ function entitleBundles() {
   return {
     loaded: false, configured: false, busy: false, error: '',
     catalog: [], byKey: {}, accesses: [], clouds: {}, cands: {}, sets: [], picked: [], preview: {},
-    cloudKeys: ['aws', 'azure', 'gcp', 'oci'],
-    cloudLabel: { aws: 'AWS', azure: 'Azure', gcp: 'GCP', oci: 'OCI' },
+    cloudKeys: ['aws', 'azure', 'gcp', 'oci', 'ad'],
+    cloudLabel: { aws: 'AWS', azure: 'Azure', gcp: 'GCP', oci: 'OCI', ad: 'On-prem AD' },
     async load() {
       try {
         const r = await API.get('/api/entitle/persona-bundles');

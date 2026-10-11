@@ -6,6 +6,10 @@ What these pin:
   every bundle name fits Entitle's 50 characters, every duration is one the tier's
   workflow will approve, and every dashboard group is a real ``dashboard-<scope>-<level>``;
 - a group named ``ent-<cloud>-<key>`` gets a suggested name, and no other group does;
+- the on-prem AD bundles name only the personas' own delegated ``ent-ad-*`` groups, never
+  a built-in privileged group, and refuse one at run time too;
+- the AD target resolves against the AD directory's pinned integration — the only one,
+  or the one chosen — and never guesses between several;
 - resolution finds the virtual-app role, the cloud integration's roles and the dashboard
   groups; a partial component blocks its bundle, an ambiguous role is reported rather
   than picked, and a bundle with no cloud access is not ready;
@@ -33,7 +37,8 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-entitle-bundle-tests")
 import httpx  # noqa: E402
 
 from web_dashboard.database import (AuditLog, Base, EntitleBundleSet,  # noqa: E402
-                                    EntitleVirtualApp, SessionLocal, engine)
+                                    EntitleVirtualApp, ManagedDirectory, SessionLocal,
+                                    engine)
 from web_dashboard.services import entitle_persona_bundles as bundles  # noqa: E402
 from web_dashboard.services import entitle_public_api as api  # noqa: E402
 from web_dashboard.services import entitle_registration_service as reg  # noqa: E402
@@ -41,7 +46,7 @@ from web_dashboard.services import entitle_tiers  # noqa: E402
 
 Base.metadata.create_all(bind=engine)
 
-AWS_INT, AZ_INT, DASH_INT = "int-aws", "int-azure", "int-entra"
+AWS_INT, AZ_INT, DASH_INT, AD_INT = "int-aws", "int-azure", "int-entra", "int-ad"
 CFG = {"entitle_api_url": "https://api.us.entitle.io/v1", "entitle_api_token": "tok",
        "entitle_workflow_id": "wf-default",
        "entitle_cloud_integration_aws": AWS_INT,
@@ -64,7 +69,13 @@ ROLES = {
              _role("az-r-2", "Reader", "sub-b", AZ_INT)],
     DASH_INT: [_role("d-aws-w", "Member", "dashboard-aws-write", DASH_INT),
                _role("d-img-w", "Member", "dashboard-images-write", DASH_INT),
-               _role("d-aws-r", "Member", "dashboard-aws-read", DASH_INT)],
+               _role("d-aws-r", "Member", "dashboard-aws-read", DASH_INT),
+               _role("d-vms-w", "Member", "dashboard-vms-write", DASH_INT),
+               _role("d-cm-w", "Member", "dashboard-config_mgmt-write", DASH_INT),
+               _role("d-dir-r", "Member", "dashboard-directories-read", DASH_INT)],
+    AD_INT: [_role("ad-itops", "Member", "CN=ent-ad-itops,OU=Groups,DC=corp,DC=example,DC=com",
+                   AD_INT),
+             _role("ad-da", "Member", "Domain Admins", AD_INT)],
 }
 
 
@@ -104,11 +115,12 @@ def test_catalog_stays_inside_the_systems_it_names():
     from web_dashboard.api.auth import PERMISSION_SCOPE_LEVELS
     from web_dashboard.services.personas import VALID_PERSONAS
     rows = bundles.catalog()
-    assert len(rows) == len(bundles.CATALOG) * len(bundles.CLOUDS)
+    assert len(rows) == sum(len(p.targets) for p in bundles.CATALOG)
     assert len({r["key"] for r in rows}) == len(rows)
     for p in bundles.CATALOG:
         assert p.persona in VALID_PERSONAS, p.key
         assert p.tier in entitle_tiers.TIERS
+        assert p.targets and set(p.targets) <= set(bundles.TARGETS), p.key
         assert p.durations(), f"{p.key} offers no duration"
         assert set(p.durations()) <= set(entitle_tiers.TIER_DURATIONS[p.tier]), \
             f"{p.key} offers a duration its tier's workflow rule would not match"
@@ -119,6 +131,13 @@ def test_catalog_stays_inside_the_systems_it_names():
             assert level in PERMISSION_SCOPE_LEVELS.get(scope, ()), f"{g} grants nothing"
         if r["cloud"] == "oci":
             assert not r["cloud_roles"] and r["oci_policy"]
+        if r["cloud"] == bundles.AD:
+            assert r["category"] == "On-prem access"
+            for g in r["cloud_roles"]:
+                assert g.startswith("ent-ad-"), f"{g}: AD bundles use delegated groups only"
+                assert g.casefold() not in bundles.PRIVILEGED_AD_GROUPS, g
+    on_prem = {r["access"] for r in rows if r["cloud"] == bundles.AD}
+    assert {"itops", "ot", "hypervisor"} <= on_prem
 
 
 def test_group_names_suggest_only_on_the_convention():
@@ -162,7 +181,7 @@ def test_resolution_ready_partial_ambiguous_and_no_access():
         assert not az["ready"]
         assert az["components"]["cloud"]["state"] == "absent", "ambiguous parts are not found"
         assert any("2 resources" in m["reason"] for m in az["components"]["cloud"]["missing"])
-        assert any("no cloud access" in b for b in az["blockers"])
+        assert any("no Azure access" in b for b in az["blockers"])
 
         sec = rows["security-aws"]
         assert sec["components"]["dashboard"]["state"] == "partial"
@@ -185,6 +204,53 @@ def test_resource_setting_disambiguates_and_two_tags_are_refused():
         assert "2 virtual-app roles" in row["components"]["group"]["missing"][0]["reason"]
         assert row["components"]["dashboard"]["state"] == "partial"
     finally:
+        db.close()
+
+
+def _ad_dir(db, name, integration):
+    db.add(ManagedDirectory(name=name, cloud="local", provider="onprem_ad",
+                            source="registered", status="available", created_by="root",
+                            entitle_integration_id=integration))
+    db.commit()
+
+
+def test_ad_target_uses_the_pinned_directory_and_never_a_builtin():
+    _setup()
+    db = SessionLocal()
+    try:
+        db.query(ManagedDirectory).delete()
+        db.query(EntitleVirtualApp).delete()
+        db.commit()
+        row = asyncio.run(bundles.resolve(db, ["itops-ad", "itops-aws"]))
+        assert [r["key"] for r in row] == ["itops-ad"], "IT has no cloud bundle"
+        assert not row[0]["ready"] and "pin an AD directory" in row[0]["blockers"][-1]
+
+        _ad_dir(db, "corp.example.com", AD_INT)
+        ok = asyncio.run(bundles.resolve(db, ["itops-ad"]))[0]
+        assert ok["ready"], ok["blockers"]
+        assert ok["role_ids"] == ["ad-itops", "d-vms-w", "d-cm-w", "d-dir-r"]
+        assert ok["components"]["cloud"]["found"][0]["resource"].startswith("CN=ent-ad-itops")
+
+        # A virtual-app role over the same group: granted once, through the app.
+        _vapp(db, [{"key": "k", "name": "IT engineer — On-prem AD", "persona": "itops",
+                    "cloud": "ad", "role_id": "v-itops", "group_name": "CN=ent-ad-itops,OU=Groups,DC=corp,DC=example,DC=com"}])
+        ok = asyncio.run(bundles.resolve(db, ["itops-ad"]))[0]
+        assert ok["role_ids"][0] == "v-itops" and "ad-itops" not in ok["role_ids"]
+
+        _ad_dir(db, "lab.example.com", "int-ad-2")
+        db.query(EntitleVirtualApp).delete()
+        db.commit()
+        two = asyncio.run(bundles.resolve(db, ["itops-ad"]))[0]
+        assert not two["ready"] and any("choose one" in b for b in two["blockers"])
+        _setup(entitle_cloud_integration_ad=AD_INT)
+        assert asyncio.run(bundles.resolve(db, ["itops-ad"]))[0]["ready"]
+
+        assert bundles._match_group(ROLES[AD_INT], "Domain Admins")[0] is None
+        assert "never bundled" in bundles._match_group(ROLES[AD_INT], "domain admins")[1]
+    finally:
+        db.query(ManagedDirectory).delete()
+        db.query(EntitleVirtualApp).delete()
+        db.commit()
         db.close()
 
 
@@ -220,7 +286,8 @@ def test_api_is_admin_only_and_applies_only_ready_bundles():
         assert _client(_User(False)).get("/api/entitle/persona-bundles").status_code == 403
         w = _client(_User(True))
         over = w.get("/api/entitle/persona-bundles").json()
-        assert len(over["catalog"]) == 36 and over["clouds"]["aws"]["integration_id"] == AWS_INT
+        assert len(over["catalog"]) == sum(len(p.targets) for p in bundles.CATALOG)
+        assert over["clouds"]["aws"]["integration_id"] == AWS_INT
         r = w.post("/api/entitle/persona-bundles/apply", json={"keys": ["cloudops-azure"]})
         assert r.status_code == 400, "nothing ready, nothing applied"
         r = w.post("/api/entitle/persona-bundles/apply",
@@ -236,6 +303,12 @@ def test_api_is_admin_only_and_applies_only_ready_bundles():
         assert r.status_code == 400
         r = w.get("/api/entitle/persona-bundles/cloud-candidates?cloud=aws")
         assert r.json()["integrations"][0]["suggested"] is True
+        _ad_dir(db, "corp-api.example.com", AD_INT)
+        r = w.get("/api/entitle/persona-bundles/cloud-candidates?cloud=ad")
+        assert [i["id"] for i in r.json()["integrations"]] == [AD_INT]
+        r = w.put("/api/entitle/persona-bundles/clouds",
+                  json={"cloud": "ad", "integration_id": AWS_INT})
+        assert r.status_code == 400, "only an AD directory's integration may be the AD target"
     finally:
         db.close()
 
