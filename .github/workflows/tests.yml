@@ -150,6 +150,15 @@ jobs:
           TF_EXCLUDE: workload_credentials
         run: scripts/ci/terraform_validate.sh
 
+      # The Entitle virtual-application and bundle HCL is generated at run time, not
+      # kept as a module; render it with the catalog's real shapes and validate it
+      # against the same provider a customer's apply resolves.
+      - name: Validate the generated Entitle HCL
+        run: |
+          out="$RUNNER_TEMP/entitle_hcl"
+          python3 scripts/ci/render_entitle_hcl.py "$out"
+          scripts/ci/terraform_validate.sh "$out"/virtual_app "$out"/bundles
+
       - name: Set up Terraform 1.11 for workload_credentials
         uses: hashicorp/setup-terraform@v3
         with:

@@ -2560,6 +2560,57 @@ class ManagedDirectory(Base):
     expiry_warned_at = Column(DateTime, nullable=True)
 
 
+class EntitleVirtualApp(Base):
+    """An Entitle **Virtual Application** the dashboard created over a directory's groups.
+
+    Each role on it fronts a role Entitle already synced from the directory's pinned
+    integration (a group's membership role), under a friendly name and a tier's workflow.
+    Nothing is created in the directory itself. ``tf_state_json`` is the scrubbed state
+    ``entitle_registration_service.deregister`` destroys it from; the app holds no
+    credential, so the scrub has nothing to remove and is applied anyway.
+
+    ``directory_id`` is not a FK, for the same reason ``linked_directory_id`` is not:
+    unregistering the directory is refused while an app is live, and a dangling id reads
+    as "directory gone" rather than cascading a delete Entitle would never hear about.
+    """
+    __tablename__ = "entitle_virtual_apps"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    directory_id = Column(String(36), nullable=False, index=True)
+    name = Column(String(50), nullable=False)
+    # applying | active | failed | destroying | deleted
+    status = Column(String(16), nullable=False, default="applying", index=True)
+    integration_id = Column(String(64), nullable=True)
+    # JSON list: {key, name, resource, tier, virtualized_role_id, virtualized_role_name,
+    # group_name, persona, cloud, role_id}. role_id is filled once Entitle created it.
+    roles_json = Column(Text, nullable=False, default="[]")
+    tf_state_json = Column(Text, nullable=True)
+    error = Column(Text, nullable=True)
+    created_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class EntitleBundleSet(Base):
+    """One apply of persona × cloud bundles (``services/entitle_persona_bundles``).
+
+    A set rather than a row per bundle because they are applied, and destroyed, as one
+    Terraform state. ``bundles_json`` records what each bundle resolved to at apply time
+    (its role ids, and which components were missing) so the page can show it later
+    without asking Entitle again.
+    """
+    __tablename__ = "entitle_bundle_sets"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    status = Column(String(16), nullable=False, default="applying", index=True)
+    bundles_json = Column(Text, nullable=False, default="[]")
+    tf_state_json = Column(Text, nullable=True)
+    error = Column(Text, nullable=True)
+    created_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class SpireLab(Base):
     """Inventory of dashboard-provisioned SPIRE trust domains for the Password Safe
     SPIFFE SVID plugin's lab.

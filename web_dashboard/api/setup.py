@@ -1482,6 +1482,15 @@ class EntitleFeatureConfig(BaseModel):
     entitle_api_key: str = ""           # entitleio/entitle TF provider key; encrypted at rest
     entitle_owner_id: str = ""          # REQUIRED for registration: Entitle user UUID owning created integrations
     entitle_workflow_id: str = ""       # REQUIRED for registration: default approval workflow UUID
+    # Per-tier workflows for virtual-application roles and persona bundles (services/
+    # entitle_tiers). Blank → entitle_workflow_id, which the UI flags as a fallback.
+    entitle_workflow_auto_approve_id: str = ""
+    entitle_workflow_single_approver_id: str = ""
+    entitle_workflow_two_approver_id: str = ""
+    entitle_virtual_app_slug: str = ""  # catalog name; blank → "virtual application"
+    # The directory integration the dashboard-* groups were adopted from (user-JIT);
+    # lets persona bundles find them without a tenant-wide search.
+    entitle_dashboard_groups_integration_id: str = ""
     entitle_endpoint: str = ""          # optional provider endpoint override; blank → derived from the API URL host
     # Inbound: the secret Entitle presents to /api/entitle/rest/* for user-identity
     # grants. Unset → that endpoint is closed, not open.
