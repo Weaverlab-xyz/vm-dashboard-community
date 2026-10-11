@@ -163,7 +163,8 @@ class ClusterInfo(BaseModel):
     entitle_agent_installed: bool = False
     api_tunnel_jump: bool = False             # true when a direct API TCP tunnel jump exists (config-tracked)
     entra_group_bound: bool = False           # true when an Entra group is bound to a ClusterRole (config-tracked)
-    entra_federation_enabled: bool = False    # true when the cluster trusts Entra as an OIDC IdP (AKS native; EKS via action)
+    entra_federation_enabled: bool = False    # true when the cluster trusts its IdP (AKS native Entra; EKS/GKE via action)
+    federation_provider: str = ""             # entra | okta | pingone | oidc — the IdP people sign in to it with
     # Password Safe token rotation. Ids are not secrets — they are what an operator
     # pastes into the plugin configuration. There is no sync state here: Password Safe
     # keeps the PRA Vault account in step via SyncedAccounts, and whether that link is

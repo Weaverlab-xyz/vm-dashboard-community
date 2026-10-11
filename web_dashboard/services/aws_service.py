@@ -180,27 +180,29 @@ def create_eks_access_entry(cluster_name: str, region: str, *, principal_arn: st
 
 def associate_eks_oidc(cluster_name: str, region: str, *, issuer_url: str, client_id: str,
                        username_claim: str = "oid", groups_claim: str = "groups",
+                       username_prefix: str = "entra:", groups_prefix: str = "",
                        config_name: str = "entra") -> dict:
-    """Associate the Entra OIDC IdP on ``cluster_name``. Idempotent: an existing
-    config of the same name (any status) is treated as success. Async on AWS's side
-    (cluster enters UPDATING) — poll :func:`describe_eks_oidc_status` to ACTIVE."""
+    """Associate an OIDC IdP (Entra by default) on ``cluster_name``. Idempotent: an
+    existing config of the same name (any status) is treated as success. Async on AWS's
+    side (cluster enters UPDATING) — poll :func:`describe_eks_oidc_status` to ACTIVE.
+    An empty ``groups_prefix`` is left off, as it always was for Entra."""
     _require_boto3()
     existing = describe_eks_oidc_status(cluster_name, region, config_name)
     if existing:
         return {"update_id": None, "already": True, "status": existing}
+    oidc = {
+        "identityProviderConfigName": config_name,
+        "issuerUrl": issuer_url,
+        "clientId": client_id,
+        "usernameClaim": username_claim,
+        "usernamePrefix": username_prefix,
+        "groupsClaim": groups_claim,
+    }
+    if groups_prefix:
+        oidc["groupsPrefix"] = groups_prefix
     eks = _get_eks(region)
     try:
-        resp = eks.associate_identity_provider_config(
-            clusterName=cluster_name,
-            oidc={
-                "identityProviderConfigName": config_name,
-                "issuerUrl": issuer_url,
-                "clientId": client_id,
-                "usernameClaim": username_claim,
-                "usernamePrefix": "entra:",
-                "groupsClaim": groups_claim,
-            },
-        )
+        resp = eks.associate_identity_provider_config(clusterName=cluster_name, oidc=oidc)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"EKS associate OIDC identity provider failed: {e}")
     return {"update_id": (resp.get("update") or {}).get("id"), "already": False}

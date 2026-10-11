@@ -2141,6 +2141,17 @@ class Settings(BaseSettings):
     entra_oidc_issuer_url: str = ""                  # blank → https://login.microsoftonline.com/<azure_tenant_id>/v2.0
     entra_oidc_username_claim: str = "oid"           # OIDC username claim (portable Entra user Object ID)
     entra_oidc_groups_claim: str = "groups"          # OIDC groups claim (Entra emits group Object IDs)
+    # Which IdP managed clusters federate with (the "IdP federation" action):
+    # entra (the entra_* keys above, unchanged) | okta | pingone | oidc (any other
+    # spec-compliant issuer). The non-Entra providers share the k8s_oidc_* keys. EKS
+    # and GKE take any of them; AKS only ever trusts Entra (its managed AAD).
+    k8s_oidc_provider: str = "entra"
+    k8s_oidc_issuer_url: str = ""                    # exactly as the IdP's discovery document advertises it
+    k8s_oidc_client_id: str = ""                     # public (native) client kubelogin signs in with = token audience
+    k8s_oidc_username_claim: str = "sub"             # stable per-user id; prefixed <provider>: on EKS
+    k8s_oidc_groups_claim: str = "groups"
+    k8s_oidc_grant_type: str = "device-code"         # device-code | authcode (kubelogin's localhost redirect)
+    k8s_oidc_rbac_group_id: str = ""                 # the group as the groups claim carries it (a name, usually)
     # Dex — how PEOPLE reach on-prem (cloud=local) clusters, and the only way they do
     # (docs/design/agent-and-human-identity.md). The issuer exactly as Dex advertises
     # it; the client is dex-helm.yml's public `kubernetes` client; the CA only for a lab

@@ -10,7 +10,9 @@ supported. Dex earns its place when you also want **clusters** to trust the same
 a person and their groups mean the same thing in the dashboard and in `kubectl`. On-prem
 (k3s) clusters require it for people. Managed clusters (EKS, GKE, OKE, AKS) stay on their
 native authentication: Dex for them is
-[paused](../design/agent-and-human-identity.md#managed-clusters-paused).
+[paused](../design/agent-and-human-identity.md#managed-clusters-paused). To have managed clusters
+trust Okta, PingOne or another IdP directly, see
+[Kubernetes federation with your IdP](k8s-federation.md).
 
 ### Dex as the dashboard's SSO issuer
 

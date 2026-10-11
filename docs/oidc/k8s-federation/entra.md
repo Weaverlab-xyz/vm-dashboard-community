@@ -2,6 +2,10 @@
 
 > **Audience:** operator · **Profile:** `demo` · **Read this when:** you want people signing in to clusters as themselves rather than sharing a kubeconfig.
 
+Part of [Kubernetes federation with your IdP](../k8s-federation.md). Entra is the default
+provider, and the only one AKS trusts. The API tunnel, installing `kubectl oidc-login` and
+the shared settings are on that page.
+
 Bind **one Entra (Azure AD) security group** to cluster RBAC and let its members sign
 in to your clusters **as themselves** — their Entra token carries the group's Object
 ID, which matches a Kubernetes `Group` subject. Entitle's Entra-ID integration
@@ -149,18 +153,8 @@ the same Entra group — only the plumbing differs.
 ## The API tunnel (EKS and AKS only)
 
 EKS and AKS users reach a private API server through the per-cluster **API (TCP)
-tunnel**; GKE does not use it (Connect Gateway instead). The downloaded kubeconfig has
-its `server` repointed to `https://127.0.0.1:<k8s_api_tunnel_local_port>` (default
-**6443**) with `tls-server-name` set to the *original* API hostname, so the cluster's
-own certificate still validates through localhost. The cluster CA is kept verbatim —
-nothing is skipped or made insecure.
-
-Operator: **API tunnel → Create tunnel** on the cluster row, then **connect the
-Protocol Tunnel Jump in the BeyondTrust representative console**. `kubectl` fails until
-that session is live.
-
-> **The local port is one global setting, not per cluster.** Two clusters' tunnels
-> cannot be connected at once — the second collides on 6443. Disconnect one first.
+tunnel**; GKE uses Connect Gateway instead. How the tunnel and its kubeconfig work is
+on the hub: [The API tunnel](../k8s-federation.md#the-api-tunnel-eks-and-aks).
 
 ---
 
@@ -216,12 +210,8 @@ EKS is associated with `usernamePrefix: "entra:"`, so this shows **`entra:<your-
 
 ### Installing `kubectl oidc-login`
 
-This is **int128's** `kubelogin` (`kubectl oidc-login`), **not** Azure's `kubelogin`
-(which is AKS-only). Install the `kubelogin` binary from int128/kubelogin (e.g. `krew
-install oidc-login`, or download the release binary onto `PATH`). The binary must be
-named `kubectl-oidc_login` for `kubectl oidc-login` to resolve it — the release archive
-ships it correctly; renaming it breaks the exec block. The downloaded kubeconfig already
-pins `--grant-type=device-code`, so nothing has to listen on localhost.
+See [Installing `kubectl oidc-login`](../k8s-federation.md#installing-kubectl-oidc-login) on
+the hub. It is **int128's** `kubelogin`, **not** Azure's `kubelogin` (which is AKS-only).
 
 ### Troubleshooting the user's connection (EKS)
 
@@ -518,7 +508,7 @@ an Entitle demo show the opposite of what it claims.
   carrying `container.clusters.impersonate` (one permission is enough — the dashboard's
   **Impersonation access** action creates a least-privilege custom role and binds it). Note
   that permission is in Google's `TESTING` stage. Details and the failure modes are in
-  [Kubernetes → Entitle k8s JIT](../kubernetes.md).
+  [Kubernetes → Entitle k8s JIT](../../kubernetes.md).
 
 ---
 

@@ -144,20 +144,20 @@
                       x-text="c.ps_token_managed ? 'Token rotation ✓' : 'Token rotation'"></button>
               {% endif %}
               <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openEntraGroup(c)"
-                      title="Bind an Entra (AAD) group to a ClusterRole — members get real-identity JIT access when Entitle's Entra-ID integration grants them membership (no impersonation)"
+                      title="Bind an IdP group (Entra, Okta, PingOne…) to a ClusterRole — members get real-identity JIT access when Entitle's directory integration grants them membership (no impersonation)"
                       class="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded font-medium"
-                      x-text="c.entra_group_bound ? 'Entra group ✓' : 'Entra group'"></button>
+                      x-text="idpLabel(c) + ' group' + (c.entra_group_bound ? ' ✓' : '')"></button>
               <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openImpersonator(c)"
-                      title="Grant the Entra group cluster-wide impersonate on users (fine-grained JIT): the group authenticates + can impersonate, but has nothing to impersonate until Entitle's Kubernetes integration JIT-binds entitle:<email> → a role on THIS cluster; the user then runs kubectl --as=<prefix>:<email> — with the email as ENTITLE sanitized it (@ becomes -), so read the entk8s-* clusterrolebinding for the exact subject"
+                      title="Grant the IdP group cluster-wide impersonate on users (fine-grained JIT): the group authenticates + can impersonate, but has nothing to impersonate until Entitle's Kubernetes integration JIT-binds entitle:<email> → a role on THIS cluster; the user then runs kubectl --as=<prefix>:<email> — with the email as ENTITLE sanitized it (@ becomes -), so read the entk8s-* clusterrolebinding for the exact subject"
                       class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium"
                       x-text="c.impersonator_bound ? 'Impersonation ✓' : 'Impersonation access'"></button>
               <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openEntraFed(c)"
-                      title="Make the cluster TRUST Entra as an OIDC identity provider so users authenticate as themselves (EKS via associate-identity-provider-config; AKS is native). Pairs with the Entra group binding + the API tunnel."
+                      title="Make the cluster TRUST your IdP (Settings → Kubernetes → Cluster federation IdP) so users authenticate as themselves (EKS via associate-identity-provider-config; GKE via the workforce pool; AKS is native Entra). Pairs with the IdP group binding + the API tunnel."
                       class="text-xs px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-medium"
-                      x-text="c.entra_federation_enabled ? 'Federated ✓' : 'Entra federation'"></button>
+                      x-text="c.entra_federation_enabled ? 'Federated ✓' : idpLabel(c) + ' federation'"></button>
               <button x-show="(c.status === 'registered' || c.status === 'managed') && c.entra_federation_enabled && c.entra_group_bound" x-cloak
                       @click="downloadEntraKubeconfig(c)"
-                      title="Download this cluster's real-identity kubeconfig — per-cloud (EKS: kubectl oidc-login / AKS: Azure kubelogin / GKE: Connect Gateway). Enabled once the cluster is federated AND the Entra group is bound. EKS/AKS: connect the API tunnel first; the EKS file uses device-code sign-in."
+                      title="Download this cluster's real-identity kubeconfig — per-cloud (EKS: kubectl oidc-login / AKS: Azure kubelogin / GKE: Connect Gateway). Enabled once the cluster is federated AND the IdP group is bound. EKS/AKS: connect the API tunnel first; the EKS file uses device-code sign-in."
                       class="text-xs px-2 py-1 bg-green-600 hover:bg-green-700 text-white rounded font-medium">kubeconfig ⤓</button>
               <button @click="openSecrets(c)"
                       title="In-cluster Password Safe secret delivery (External Secrets Operator, Phase 4)"
@@ -657,18 +657,21 @@
        @click.self="showEntraGroup = false">
     <div class="bg-white rounded-xl shadow-xl w-full max-w-lg">
       <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-        <h3 class="font-semibold text-gray-800">Entra group → cluster RBAC<span x-show="entraTarget" class="text-gray-400 font-normal"> — <span x-text="entraTarget && entraTarget.name"></span></span></h3>
+        <h3 class="font-semibold text-gray-800"><span x-text="idpLabel(entraTarget)"></span> group → cluster RBAC<span x-show="entraTarget" class="text-gray-400 font-normal"> — <span x-text="entraTarget && entraTarget.name"></span></span></h3>
         <button @click="showEntraGroup = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
       </div>
       <div class="px-6 py-4 space-y-4">
         <p class="text-xs text-gray-500">
-          Binds an Entra (AAD) group to a ClusterRole on this cluster. Any member gets that role when they sign in
-          as <strong>themselves</strong> (their AAD token's group id matches the RBAC subject) — so Entitle's
-          <strong>Entra-ID</strong> integration JIT-grants real-identity access, no impersonation and no synthetic
+          Binds an <span x-text="idpLabel(entraTarget)"></span> group to a ClusterRole on this cluster. Any member gets
+          that role when they sign in as <strong>themselves</strong> (their token's group matches the RBAC subject) —
+          so Entitle's directory integration JIT-grants real-identity access, no impersonation and no synthetic
           subject. Leave a field blank to use the default configured on Settings → Kubernetes.
+          <span x-show="entraTarget && entraTarget.cloud === 'aws' && entraTarget.federation_provider && entraTarget.federation_provider !== 'entra'" x-cloak>
+            On EKS the subject is <code x-text="(entraTarget && entraTarget.federation_provider) + ':&lt;group&gt;'"></code>,
+            matching the groups prefix the federation sets.</span>
         </p>
         <div>
-          <label class="block text-xs font-medium text-gray-600 mb-1">Entra group Object ID <span class="text-gray-400">(blank = Settings default)</span></label>
+          <label class="block text-xs font-medium text-gray-600 mb-1"><span x-text="idGroupLabel(entraTarget)"></span> <span class="text-gray-400">(blank = Settings default)</span></label>
           <input type="text" x-model="entraForm.group_id"
                  class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono"
                  placeholder="(configured default)">
@@ -709,13 +712,13 @@
       </div>
       <div class="px-6 py-4 space-y-4">
         <p class="text-xs text-gray-500">
-          Grants the Entra group cluster-wide <strong>impersonate</strong> on <strong>users</strong> (never groups —
+          Grants the IdP group cluster-wide <strong>impersonate</strong> on <strong>users</strong> (never groups —
           <code>system:masters</code> stays blocked). This is the fine-grained tier: a group member authenticates as
           themselves <em>and</em> can impersonate, but has <strong>nothing to impersonate as</strong> until Entitle's
           <strong>Kubernetes</strong> integration JIT-binds <code>&lt;prefix&gt;:&lt;email&gt;</code> → a role on
           <strong>this</strong> cluster. They then run <code>kubectl --as=&lt;prefix&gt;:&lt;email&gt;</code> over the
           <strong>API tunnel</strong> (never the k8s tunnel — that proxy strips impersonation headers; on GKE with a
-          workforce identity it's <strong>Connect Gateway</strong>, which does forward them). Reuses the Entra group
+          workforce identity it's <strong>Connect Gateway</strong>, which does forward them). Reuses the IdP group
           configured on Settings → Kubernetes; leave blank for that default.
         </p>
         <p class="text-xs text-gray-500">
@@ -734,7 +737,7 @@
           (Entitle's are <code>entk8s-*</code>).
         </p>
         <div>
-          <label class="block text-xs font-medium text-gray-600 mb-1">Entra group Object ID <span class="text-gray-400">(blank = Settings default)</span></label>
+          <label class="block text-xs font-medium text-gray-600 mb-1"><span x-text="idGroupLabel(imperTarget)"></span> <span class="text-gray-400">(blank = Settings default)</span></label>
           <input type="text" x-model="imperForm.group_id"
                  class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono"
                  placeholder="(configured default)">
@@ -755,12 +758,12 @@
     </div>
   </div>
 
-  <!-- Entra federation modal (make the cluster TRUST Entra as an OIDC IdP) -->
+  <!-- IdP federation modal (make the cluster TRUST Entra / Okta / PingOne / an OIDC IdP) -->
   <div x-show="showEntraFed" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
        @click.self="showEntraFed = false">
     <div class="bg-white rounded-xl shadow-xl w-full max-w-lg">
       <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-        <h3 class="font-semibold text-gray-800">Entra federation<span x-show="fedTarget" class="text-gray-400 font-normal"> — <span x-text="fedTarget && fedTarget.name"></span></span></h3>
+        <h3 class="font-semibold text-gray-800"><span x-text="idpLabel(fedTarget)"></span> federation<span x-show="fedTarget" class="text-gray-400 font-normal"> — <span x-text="fedTarget && fedTarget.name"></span></span></h3>
         <button @click="showEntraFed = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
       </div>
       <div class="px-6 py-4 space-y-4">
@@ -770,23 +773,25 @@
             <strong>AKS is natively Entra-integrated</strong> — the control plane already trusts Entra tokens,
             so no federation step is needed. Bind an <strong>Entra group</strong>, connect the <strong>API tunnel</strong>,
             and download the Entra kubeconfig to sign in as yourself with <code>kubelogin</code>.
+            AKS trusts <strong>only Entra ID</strong>, whichever IdP Settings choose for EKS and GKE.
           </p>
         </template>
         <!-- EKS: associate an OIDC IdP -->
         <template x-if="fedTarget && fedTarget.cloud === 'aws'">
           <div class="space-y-3">
             <p class="text-xs text-gray-500">
-              Associates the shared Entra app (Settings → Kubernetes → <code>entra_oidc_client_id</code>) as this
-              EKS cluster's <strong>OIDC identity provider</strong>, so a user's Entra token authenticates and its
-              group Object IDs match the <strong>Entra group</strong> RBAC binding — real-identity JIT, no
-              impersonation. EKS makes the association <strong>ACTIVE</strong> over a few minutes (the job polls).
+              Associates the <span x-text="idpLabel(fedTarget)"></span> app (Settings → Kubernetes → Cluster
+              federation IdP) as this EKS cluster's <strong>OIDC identity provider</strong>, so a user's own token
+              authenticates and its groups match the <strong><span x-text="idpLabel(fedTarget)"></span> group</strong>
+              RBAC binding — real-identity JIT, no impersonation. EKS makes the association <strong>ACTIVE</strong> over a few minutes (the job polls).
               Additive to IAM — node bootstrap and console access are unchanged.
             </p>
             <p class="text-[11px] text-amber-600">
               End users need the int128 <code>kubectl oidc-login</code> plugin — install with <code>kubectl krew install oidc-login</code>
               (krew registers the <code>kubectl-oidc_login</code> alias reliably; a plain winget/zip install may not). Connect the API
-              tunnel, then use the downloaded Entra kubeconfig — it uses <strong>device-code</strong> sign-in, so it also works on
-              Entra-joined / cross-tenant machines. EKS allows one OIDC provider per cluster.
+              tunnel, then use the downloaded kubeconfig — by default it uses <strong>device-code</strong> sign-in, so it also works on
+              domain-joined / cross-tenant machines. EKS allows <strong>one</strong> OIDC provider per cluster: to move a federated
+              cluster to another IdP, disable federation first.
             </p>
           </div>
         </template>
@@ -795,13 +800,14 @@
           <div class="space-y-3">
             <p class="text-xs text-gray-500">
               GKE uses <strong>Workforce Identity Federation + Connect Gateway</strong> (not the API tunnel).
-              Enabling registers this cluster to the fleet, turns on Connect Gateway, and grants your Entra
-              group's <code>principalSet</code> the <code>gkehub.gateway</code> IAM roles. Bind the
-              <strong>Entra group</strong> too — its RBAC subject on GKE is the workforce
-              <code>principalSet</code> (same Entra group). Set the pool on Settings → Kubernetes.
+              Enabling registers this cluster to the fleet, turns on Connect Gateway, and grants your
+              <span x-text="idpLabel(fedTarget)"></span> group's <code>principalSet</code> the
+              <code>gkehub.gateway</code> IAM roles. Bind the <strong><span x-text="idpLabel(fedTarget)"></span>
+              group</strong> too — its RBAC subject on GKE is the workforce <code>principalSet</code>. Set the pool
+              (whose OIDC provider is this IdP) on Settings → Kubernetes.
             </p>
             <p class="text-[11px] text-amber-600">
-              End users reach the cluster through Connect Gateway (no tunnel). Sign in as your Entra-federated
+              End users reach the cluster through Connect Gateway (no tunnel). Sign in as your federated
               workforce identity first, then use the downloaded kubeconfig:
             </p>
             <pre class="text-[11px] bg-gray-50 border border-gray-200 rounded p-2 overflow-x-auto">gcloud iam workforce-pools create-login-config \
@@ -814,12 +820,12 @@ gcloud auth login --login-config=login.json</pre>
         <div x-show="fedTarget && fedTarget.entra_federation_enabled" x-cloak
              class="border-t border-gray-100 pt-3">
           <p class="text-xs text-gray-500 mb-2">
-            <span x-show="fedTarget && fedTarget.cloud !== 'gcp'">Real-identity kubeconfig (token-free; authenticates as <em>your</em> Entra identity over the API tunnel):</span>
+            <span x-show="fedTarget && fedTarget.cloud !== 'gcp'">Real-identity kubeconfig (token-free; authenticates as <em>your</em> <span x-text="idpLabel(fedTarget)"></span> identity over the API tunnel):</span>
             <span x-show="fedTarget && fedTarget.cloud === 'gcp'" x-cloak>Connect Gateway kubeconfig (token-free; authenticates as <em>your</em> workforce identity — run the <code>gcloud auth login</code> above first):</span>
           </p>
           <button @click="downloadEntraKubeconfig()"
                   class="px-3 py-1.5 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium">
-            Download <span x-text="fedTarget && fedTarget.cloud === 'gcp' ? 'Connect Gateway' : 'Entra'"></span> kubeconfig
+            Download <span x-text="fedTarget && fedTarget.cloud === 'gcp' ? 'Connect Gateway' : idpLabel(fedTarget)"></span> kubeconfig
           </button>
         </div>
       </div>
@@ -1642,6 +1648,18 @@ function k8sPage() {
       }
     },
 
+    // The IdP people sign in to a cluster with (federation_provider on the row): always
+    // Entra on AKS, otherwise Settings → Kubernetes → Cluster federation IdP.
+    idpLabel(c) {
+      const labels = { entra: 'Entra', okta: 'Okta', pingone: 'PingOne', oidc: 'IdP' };
+      return labels[(c && c.federation_provider) || 'entra'] || 'IdP';
+    },
+
+    idGroupLabel(c) {
+      const p = (c && c.federation_provider) || 'entra';
+      return p === 'entra' ? 'Entra group Object ID' : this.idpLabel(c) + ' group (as the groups claim carries it)';
+    },
+
     openEntraFed(c) {
       this.fedTarget = c;
       this.showEntraFed = true;
@@ -1652,27 +1670,27 @@ function k8sPage() {
       try {
         const r = await API.post(`/api/k8s/clusters/${this.fedTarget.id}/entra-federation`, {});
         this.showEntraFed = false;
-        this.flash('Entra federation job started — opening the job…');
+        this.flash(`${this.idpLabel(this.fedTarget)} federation job started — opening the job…`);
         if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
         await this.refresh();
       } catch (e) {
-        this.flash(e.message || 'Enabling Entra federation failed.', 'error');
+        this.flash(e.message || `Enabling ${this.idpLabel(this.fedTarget)} federation failed.`, 'error');
       } finally {
         this.fedBusy = false;
       }
     },
 
     async disableEntraFed() {
-      if (!confirm(`Disable Entra federation on "${this.fedTarget.name}"? This disassociates the OIDC identity provider.`)) return;
+      if (!confirm(`Disable ${this.idpLabel(this.fedTarget)} federation on "${this.fedTarget.name}"? This disassociates the OIDC identity provider.`)) return;
       this.fedBusy = true;
       try {
         const r = await API.del(`/api/k8s/clusters/${this.fedTarget.id}/entra-federation`);
         this.showEntraFed = false;
-        this.flash('Entra federation removal job started — opening the job…');
+        this.flash(`${this.idpLabel(this.fedTarget)} federation removal job started — opening the job…`);
         if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
         await this.refresh();
       } catch (e) {
-        this.flash(e.message || 'Disabling Entra federation failed.', 'error');
+        this.flash(e.message || `Disabling ${this.idpLabel(this.fedTarget)} federation failed.`, 'error');
       } finally {
         this.fedBusy = false;
       }
@@ -1697,13 +1715,13 @@ function k8sPage() {
         const url = URL.createObjectURL(new Blob([text], { type: 'application/yaml' }));
         const a = document.createElement('a');
         a.href = url;
-        a.download = `${c.name || c.id}-entra.kubeconfig`;
+        a.download = `${c.name || c.id}-${(c.cloud === 'azure' ? 'entra' : c.federation_provider) || 'entra'}.kubeconfig`;
         document.body.appendChild(a); a.click(); a.remove();
         URL.revokeObjectURL(url);
         this.flash(c.cloud === 'gcp'
           ? 'Connect Gateway kubeconfig downloaded — run "gcloud auth login --login-config" first, then point KUBECONFIG at it.'
-          : 'Entra kubeconfig downloaded — connect the API tunnel, then point KUBECONFIG at it. '
-            + 'The first kubectl prints a device code to sign in as yourself.');
+          : `${this.idpLabel(c)} kubeconfig downloaded — connect the API tunnel, then point KUBECONFIG at it. `
+            + 'The first kubectl signs you in as yourself.');
       } catch (e) {
         this.flash(e.message || 'kubeconfig download failed.', 'error');
       }

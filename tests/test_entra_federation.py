@@ -4,7 +4,7 @@ Federation makes a cluster TRUST Entra as an OIDC identity provider so a user's 
 Entra token authenticates and its group Object IDs match the RBAC `Group` binding
 (bind_entra_group) — the real-identity JIT story extended from AKS to EKS. These lock
 in the pure pieces: the shared-app settings resolver (_entra_oidc_settings), and the
-token-free `kubectl oidc-login` kubeconfig transform (_entra_oidc_login_kubeconfig /
+token-free `kubectl oidc-login` kubeconfig transform (_oidc_login_kubeconfig /
 build_entra_oidc_kubeconfig), plus the AKS leg of the same download
 (_entra_aks_user_login_kubeconfig), which flips Azure kubelogin out of the stored
 service-principal mode into an interactive device-code sign-in as the user.
@@ -116,7 +116,7 @@ def _with_cfg(mapping):
 
 
 def test_oidc_login_kubeconfig_swaps_exec_and_carries_no_token():
-    out = k._entra_oidc_login_kubeconfig(_EKS_REPOINTED, _OIDC)
+    out = k._oidc_login_kubeconfig(_EKS_REPOINTED, _OIDC)
     cfg = yaml.safe_load(out)
     exec_blk = cfg["users"][0]["user"]["exec"]
     assert exec_blk["command"] == "kubectl"
@@ -135,7 +135,7 @@ def test_oidc_login_kubeconfig_swaps_exec_and_carries_no_token():
 
 
 def test_oidc_login_kubeconfig_preserves_ca_and_server():
-    out = k._entra_oidc_login_kubeconfig(_EKS_REPOINTED, _OIDC)
+    out = k._oidc_login_kubeconfig(_EKS_REPOINTED, _OIDC)
     cl = yaml.safe_load(out)["clusters"][0]["cluster"]
     assert cl["certificate-authority-data"] == "TEST_CA_B64"   # CA kept verbatim
     assert cl["server"] == "https://127.0.0.1:6443"            # repoint untouched

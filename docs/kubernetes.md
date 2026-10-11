@@ -177,7 +177,7 @@ secrets)**, and **Entitle + Entra federation (Layer 3 — time-boxed access)**.
   (`POST /clusters/{id}/entra-group`, default role `entra_rbac_group_role=cluster-admin`);
   members sign in **as themselves** (group Object ID is the RBAC subject), and Entitle's
   Entra-ID integration JIT-grants membership. Per-provider trust mechanism (full detail in
-  [Entra ↔ Kubernetes federation](oidc/entra-k8s-federation.md); not to be confused
+  [Kubernetes federation: Entra ID](oidc/k8s-federation/entra.md); not to be confused
   with dashboard-login SSO in [oidc.md](oidc.md)):
   - **AKS** — native managed-AAD; federation is a no-op; auth via `kubelogin` over the API
     tunnel.
@@ -188,6 +188,13 @@ secrets)**, and **Entitle + Entra federation (Layer 3 — time-boxed access)**.
   - **GKE** — **Workforce Identity Federation + Connect Gateway** (not the API tunnel). Config:
     `gcp_workforce_pool_id`, `gcp_workforce_provider_id`, `gcp_workforce_location` (`global`).
     EKS and GKE need **separate** Entra app registrations.
+  - **Other IdPs** — EKS and GKE can federate with **Okta, PingOne or any OIDC provider**
+    instead of Entra: `k8s_oidc_provider` (`entra` | `okta` | `pingone` | `oidc`) plus
+    `k8s_oidc_issuer_url`, `k8s_oidc_client_id`, `k8s_oidc_username_claim` (`sub`),
+    `k8s_oidc_groups_claim` (`groups`), `k8s_oidc_grant_type` (`device-code`) and
+    `k8s_oidc_rbac_group_id`. On EKS their groups are prefixed `<provider>:`. AKS stays
+    Entra-only. See [Kubernetes federation with your IdP](oidc/k8s-federation.md),
+    with a page per provider.
 - **Entitle k8s JIT** — `POST /clusters/{id}/entitle-register` registers the cluster as an
   Entitle **Kubernetes** integration; the fine-grained tier is the **impersonator model**
   (`POST /clusters/{id}/impersonator` grants the Entra group cluster-wide `impersonate` on
@@ -211,7 +218,7 @@ secrets)**, and **Entitle + Entra federation (Layer 3 — time-boxed access)**.
       ASSIGNED TO THE WIF ENTERPRISE APP** or it never appears in the token's `groups`
       claim, and *every* binding on it (RBAC and Cloud IAM) silently matches nothing. Read
       the ⚠️ in
-      [the federation guide §1b](oidc/entra-k8s-federation.md#1b-gke-app-registration-eg-gke-entra-wif)
+      [the federation guide §1b](oidc/k8s-federation/entra.md#1b-gke-app-registration-eg-gke-entra-wif)
       before debugging anything else. Until the group was assigned, three escalating IAM
       grants (custom role, custom role + `container.clusters.get`, then
       `roles/container.admin`) all appeared to do nothing, which looked like a GKE

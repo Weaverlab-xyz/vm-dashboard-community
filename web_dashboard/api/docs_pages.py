@@ -174,7 +174,9 @@ _MOVED = {
     # identity (which had lived under remote-agents/ though it is about the clouds).
     "integrations/oidc":                         "oidc",
     "integrations/entra-oauth":                  "oidc/entra-oauth",
-    "integrations/entra-k8s-federation":         "oidc/entra-k8s-federation",
+    "integrations/entra-k8s-federation":         "oidc/k8s-federation/entra",
+    # Kubernetes federation, 2026-10: one hub plus a page per IdP, Entra's among them.
+    "oidc/entra-k8s-federation":                 "oidc/k8s-federation/entra",
     "remote-agents/dashboard-identity":          "oidc/dashboard-identity",
     # Sections, 2026-10: the flat top level grouped into hub + folder sections the way
     # oidc/ is -- cloud/, access/, operations/, editions/, and kubesolo under kubernetes/.
@@ -254,6 +256,7 @@ _INDEX_SECTIONS = {
     "profiles/demo/ot-demo-cell", "oidc", "cloud", "access", "operations", "kubernetes",
     "editions", "directories", "integrations/rancher", "integrations/portainer",
     "integrations/beyondtrust/password-safe", "operations/cloud-hosting",
+    "oidc/k8s-federation",
 }
 
 # Heading text per section. Without this a nested section renders as
@@ -283,6 +286,7 @@ _SECTION_LABELS = {
     "integrations/portainer":     "Portainer",
     "integrations/beyondtrust/password-safe": "BeyondTrust · Password Safe",
     "operations/cloud-hosting":   "Operations · cloud hosting",
+    "oidc/k8s-federation":        "OIDC · Kubernetes federation",
 }
 
 # Titles for docs whose filename is an identifier rather than a phrase. The persona pages are
@@ -346,7 +350,11 @@ _TITLE_OVERRIDES = {
     # The OIDC section. "Oidc" and "Entra K8s Federation" read as filenames.
     "oidc":                              "OIDC and single sign-on",
     "oidc/entra-oauth":                  "Sign in with Microsoft (Entra)",
-    "oidc/entra-k8s-federation":         "Entra → Kubernetes federation",
+    "oidc/k8s-federation":               "Kubernetes federation",
+    "oidc/k8s-federation/entra":         "Kubernetes federation: Entra ID",
+    "oidc/k8s-federation/okta":          "Kubernetes federation: Okta",
+    "oidc/k8s-federation/pingone":       "Kubernetes federation: PingOne",
+    "oidc/k8s-federation/oidc":          "Kubernetes federation: other OIDC",
     "oidc/dashboard-identity":           "The dashboard's own identity",
     "oidc/dex":                          "Dex",
     # The section hubs and their pages. Folder names were dropped from the filenames

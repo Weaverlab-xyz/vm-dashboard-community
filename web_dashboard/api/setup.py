@@ -1759,6 +1759,15 @@ class K8sManagementFeatureConfig(BaseModel):
     entra_oidc_issuer_url: str = ""           # blank → https://login.microsoftonline.com/<azure_tenant_id>/v2.0
     entra_oidc_username_claim: str = "oid"    # OIDC username claim (portable Entra user Object ID)
     entra_oidc_groups_claim: str = "groups"   # OIDC groups claim (Entra emits group Object IDs)
+    # Which IdP managed clusters federate with: entra (the keys above) | okta |
+    # pingone | oidc. The non-Entra providers share the k8s_oidc_* keys. See config.py.
+    k8s_oidc_provider: str = "entra"
+    k8s_oidc_issuer_url: str = ""
+    k8s_oidc_client_id: str = ""
+    k8s_oidc_username_claim: str = "sub"
+    k8s_oidc_groups_claim: str = "groups"
+    k8s_oidc_grant_type: str = "device-code"  # device-code | authcode
+    k8s_oidc_rbac_group_id: str = ""          # the group as the groups claim carries it
     # Dex — how people reach on-prem clusters (the only way). See config.py.
     dex_issuer_url: str = ""
     dex_k8s_client_id: str = "kubernetes"
