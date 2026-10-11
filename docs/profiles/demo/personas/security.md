@@ -1,4 +1,4 @@
-# Security / IAM Analyst
+# Security Analyst
 
 > **Audience:** presenter · **Profile:** `demo` · **Read this when:** you are presenting to whoever has to answer who had access to what, and prove it.
 

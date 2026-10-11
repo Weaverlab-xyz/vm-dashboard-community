@@ -40,11 +40,13 @@ always meant, and `/use-cases` stays ungated on both.
 | [IT engineer](itops.md) | The endpoints and the day-to-day access requests. |
 | [OT / ICS engineer](ot.md) | The plant network — PLCs, the HMI, the historian, and the vendors who need in. |
 | [DBA / data platform](dba.md) | The databases, their credentials, and who gets a session on them. |
-| [Security / IAM analyst](security.md) | Who has access to what, and the proof of it. |
+| [Security analyst](security.md) | Who has access to what, and the proof of it. |
 | [Platform / SRE](sre.md) | The clusters and the services running on them. |
 | [Network / firewall admin](netadmin.md) | The routers and firewalls — the boxes every other demo assumes are already reachable. |
 | [FinOps / cloud governance](finops.md) | The infrastructure nobody decided to keep, and the standing access that made it possible. |
 | [AI / agent platform](aiops.md) | The things that act without a person at the keyboard, and whether you could stop one. |
+| [IAM engineer](iamops.md) | The directories — domains, identity providers, and the groups that grant access. |
+| [Identity architect](idarch.md) | The identity plane — how the directories connect, and where privilege is granted. |
 
 `/docs` lists these in the same order for everybody. The profile-aware view is `/use-cases`,
 behind the auth shell — the docs shell is public, so ordering it by the instance's chosen
