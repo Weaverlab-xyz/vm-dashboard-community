@@ -155,11 +155,17 @@ def test_probe_result_mapping():
                "base_dn": "DC=corp,DC=example,DC=com", "dc_hostname": "dc01.corp.example.com",
                "functional_level": "Windows Server 2016"}
     ok = H.probe_check(row, {"findings": [finding]})
-    assert ok["status"] == "ok" and "dc01.corp.example.com" in ok["detail"]
+    # Exact strings rather than `host in detail`: CodeQL reads a hostname substring
+    # test as URL sanitization (py/incomplete-url-substring-sanitization).
+    target = f"{row.host}:{row.port}"
+    assert ok == {"key": "ldap_probe", "label": "LDAP answers", "status": "ok",
+                  "detail": f"{target} answered (DC dc01.corp.example.com, "
+                            f"Windows Server 2016)."}
     assert H.probe_check(row, {"findings": []})["status"] == "fail"
     assert H.probe_check(row, None, failed=True, error="refused by policy")["status"] == "fail"
     wrong = H.probe_check(row, {"findings": [{**finding, "domain": "other.example.com"}]})
-    assert wrong["status"] == "warn" and "other.example.com" in wrong["detail"]
+    assert wrong["status"] == "warn"
+    assert wrong["detail"] == f"{target} answered for domain other.example.com, not corp.example.com."
 
     ldap = _onprem(db, _agent(db), provider="ldap", name="ldap.example.com",
                    base_dn="dc=example, dc=com")
