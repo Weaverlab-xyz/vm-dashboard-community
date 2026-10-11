@@ -2,6 +2,10 @@
 
 > **Audience:** operator · **Profile:** `demo` · **Read this when:** you want people signing in to clusters as themselves rather than sharing a kubeconfig.
 
+> **Not on Entra?** EKS and GKE can federate with Okta, PingOne or any other OIDC provider
+> instead. See [Kubernetes federation with your IdP](k8s-federation.md). This page covers
+> Entra, which is still the default and the only IdP AKS trusts.
+
 Bind **one Entra (Azure AD) security group** to cluster RBAC and let its members sign
 in to your clusters **as themselves** — their Entra token carries the group's Object
 ID, which matches a Kubernetes `Group` subject. Entitle's Entra-ID integration

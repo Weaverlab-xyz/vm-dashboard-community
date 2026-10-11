@@ -611,12 +611,12 @@ def enable_entra_federation(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "write")),
 ):
-    """Make the cluster TRUST Entra as an OIDC identity provider so users authenticate
-    as themselves (their Entra token's group OIDs match the Entra-group RBAC binding)
-    — enqueues a ``k8s_entra_federation`` job. EKS associates a shared Entra app as the
-    cluster's OIDC IdP (async — the job polls to ACTIVE); AKS is native (no-op). The
-    shared Entra app is set via entra_oidc_client_id on Settings. Open the returned job
-    for status/logs."""
+    """Make the cluster TRUST the configured IdP (k8s_oidc_provider: Entra, Okta,
+    PingOne or another OIDC issuer) so users authenticate as themselves and their
+    groups match the group RBAC binding — enqueues a ``k8s_entra_federation`` job. EKS
+    associates the IdP's app as the cluster's OIDC IdP (async — the job polls to
+    ACTIVE); GKE wires the workforce pool; AKS is native Entra (no-op). Open the
+    returned job for status/logs."""
     cluster = _visible_or_404(db, cluster_id, current_user)
     job = job_service.create_job(
         db, job_type="k8s_entra_federation", created_by=current_user.username,
@@ -653,9 +653,9 @@ def entra_kubeconfig(
     current_user: User = Depends(require_permission("k8s", "read")),
 ):
     """Download a token-free kubeconfig for real-identity access over the API tunnel,
-    authenticating as the USER's own Entra identity. EKS uses ``kubectl oidc-login``
-    (int128 kubelogin) against the shared Entra app; AKS uses the native Azure
-    kubelogin in interactive device-code mode. Both sign in with a device code.
+    authenticating as the USER's own IdP identity. EKS uses ``kubectl oidc-login``
+    (int128 kubelogin) against the federated IdP's app (Entra, Okta, PingOne or another
+    OIDC issuer); AKS uses the native Azure kubelogin in interactive device-code mode.
     Connect the API tunnel first, then point ``KUBECONFIG`` at this file."""
     # Guard BEFORE building anything: the document this returns is a working credential
     # for the cluster, so the ownership check has to precede its construction rather
@@ -663,9 +663,10 @@ def entra_kubeconfig(
     info = _visible_or_404(db, cluster_id, current_user)
     try:
         content = k8s_service.build_entra_oidc_kubeconfig(db, cluster_id)
+        provider = k8s_service.oidc_provider_for(db, cluster_id)
     except K8sError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    filename = f"{info.get('name') or cluster_id}-entra.kubeconfig"
+    filename = f"{info.get('name') or cluster_id}-{provider}.kubeconfig"
     return Response(
         content=content,
         media_type="application/yaml",

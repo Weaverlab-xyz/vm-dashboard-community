@@ -9,6 +9,7 @@ several other places too, each with its own page:
 |---|---|
 | [The dashboard's own identity](oidc/dashboard-identity.md) | you want the dashboard to reach AWS, Azure, GCP or a k3s cluster with a short-lived token instead of a stored key. Here the dashboard is the **issuer**. Its tokens come from the SPIRE server that [Remote Agents](remote-agents/spire-attestation.md) also uses |
 | [Dex](oidc/dex.md) | you want one issuer that both the dashboard and your on-prem clusters trust |
+| [Kubernetes federation with your IdP](oidc/k8s-federation.md) | you want people signing in to managed clusters as themselves through Okta, PingOne or another OIDC provider, and to choose which IdP clusters trust |
 | [Entra → Kubernetes federation](oidc/entra-k8s-federation.md) | you want people signing in to managed clusters as themselves, with their Entra groups as RBAC subjects |
 | [Identity providers](directories/identity-providers.md) | you want to browse or change users and groups in Entra ID, Okta or PingOne, rather than sign in through one. That lives in the [Directories](directories.md) section |
 | [Sign in with Microsoft (Entra OAuth)](oidc/entra-oauth.md) | you already use the legacy Entra-only sign-in button, or are moving from it to the generic path below |
@@ -239,6 +240,7 @@ are configured elsewhere:
 | Feature | What it is | Where |
 |---|---|---|
 | Entra for cluster RBAC | federating **Kubernetes cluster RBAC** to Entra via OIDC | [Entra → Kubernetes federation](oidc/entra-k8s-federation.md) |
+| Okta, PingOne or another IdP for cluster RBAC | the same, with a different IdP | [Kubernetes federation with your IdP](oidc/k8s-federation.md) |
 | Workload tokens | a CI job or service calls the dashboard's API with an access token its own IdP issued; no SSO client needed | [Service accounts → Tokens from your own IdP](access/service-accounts.md#tokens-from-your-own-idp-no-dashboard-secret) |
 | SPIFFE workloads | a workload presents a JWT-SVID at `/api/oauth/token` | [Service accounts → SPIFFE workloads](access/service-accounts.md#spiffe-workloads-authenticate-with-the-svid-hold-nothing) |
 | The dashboard as an issuer | the dashboard publishes `<issuer>/.well-known/openid-configuration` so AWS, Azure, GCP and k3s can trust its own SPIFFE identity | [The dashboard's own identity](oidc/dashboard-identity.md) |

@@ -188,6 +188,12 @@ secrets)**, and **Entitle + Entra federation (Layer 3 — time-boxed access)**.
   - **GKE** — **Workforce Identity Federation + Connect Gateway** (not the API tunnel). Config:
     `gcp_workforce_pool_id`, `gcp_workforce_provider_id`, `gcp_workforce_location` (`global`).
     EKS and GKE need **separate** Entra app registrations.
+  - **Other IdPs** — EKS and GKE can federate with **Okta, PingOne or any OIDC provider**
+    instead of Entra: `k8s_oidc_provider` (`entra` | `okta` | `pingone` | `oidc`) plus
+    `k8s_oidc_issuer_url`, `k8s_oidc_client_id`, `k8s_oidc_username_claim` (`sub`),
+    `k8s_oidc_groups_claim` (`groups`), `k8s_oidc_grant_type` (`device-code`) and
+    `k8s_oidc_rbac_group_id`. On EKS their groups are prefixed `<provider>:`. AKS stays
+    Entra-only. See [Kubernetes federation with your IdP](oidc/k8s-federation.md).
 - **Entitle k8s JIT** — `POST /clusters/{id}/entitle-register` registers the cluster as an
   Entitle **Kubernetes** integration; the fine-grained tier is the **impersonator model**
   (`POST /clusters/{id}/impersonator` grants the Entra group cluster-wide `impersonate` on
