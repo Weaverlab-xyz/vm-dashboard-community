@@ -1179,6 +1179,18 @@ _IAMOPS = Persona(
             requires_flags=("directories_enabled", "password_safe_enabled"),
         ),
         UseCase(
+            id="iamops-is-every-directory-answering",
+            title="Is every directory answering?",
+            summary="One page for whether each domain, domain controller and identity "
+                    "provider is up: the cloud's own health for managed AD, a sign-in to "
+                    "each provider, Entra Connect sync age, and an LDAP probe of each "
+                    "on-prem DC through its agent.",
+            target="/directories/health",
+            minutes=6,
+            docs="directories/health",
+            requires_flags=("directories_enabled",),
+        ),
+        UseCase(
             id="iamops-import-from-password-safe",
             title="Start from the directories Password Safe already manages",
             summary="Import the AD and LDAP directories Password Safe already holds, each "

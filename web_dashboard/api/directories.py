@@ -2,6 +2,8 @@
 Managed Active Directory API (gated by ``directories_enabled``).
 
   GET    /api/directories                       — directories (creator-scoped for non-admins)
+  GET    /api/directories/health                — each directory's last health check
+  POST   /api/directories/{id}/health/check     — check one now (read-only against it)
   GET    /api/directories/options               — editions, costs, what is not configured
   POST   /api/directories                       — build one (record + schedule apply)
   GET    /api/directories/discover?cloud=…      — existing directories in the account
@@ -137,6 +139,43 @@ def list_directories(db: Session = Depends(get_db),
                      user: User = Depends(require_explicit_permission("directories", "read"))):
     rows = [r for r in directory_service.list_directories(db) if _visible(r, user)]
     return {"directories": [directory_service.to_dict(r) for r in rows]}
+
+
+@router.get("/health")
+def directory_health(db: Session = Depends(get_db),
+                     user: User = Depends(require_explicit_permission("directories", "read"))):
+    """Each visible directory's last health check. Reads the stored checks only: no
+    provider is called here, so the page costs one query however many directories
+    there are."""
+    from ..services import directory_health_service
+    rows = [r for r in directory_service.list_directories(db) if _visible(r, user)]
+    return directory_health_service.snapshot(db, rows)
+
+
+# A Check now inside this window returns the stored result instead of asking again, so a
+# double click (or a script) cannot turn into a burst of provider calls or agent jobs.
+_CHECK_NOW_MIN_SECONDS = 60
+
+
+@router.post("/{directory_id}/health/check")
+async def check_directory_health(
+        directory_id: str, db: Session = Depends(get_db),
+        user: User = Depends(require_explicit_permission("directories", "read"))):
+    """Check one directory now. Read-only against the directory: a control-plane read, a
+    sign-in, or an anonymous LDAP probe through its agent."""
+    from datetime import datetime
+    from ..database import DirectoryHealth
+    from ..services import directory_health_service
+    row = _row_or_404(db, directory_id, user)
+    if not directory_health_service.monitored(row):
+        raise HTTPException(status_code=409,
+                            detail=f"{row.name} has no health check of its own: a link to an "
+                                   f"on-prem directory is as healthy as that directory.")
+    health = db.get(DirectoryHealth, row.id)
+    if health and health.checked_at and \
+            (datetime.utcnow() - health.checked_at).total_seconds() < _CHECK_NOW_MIN_SECONDS:
+        return directory_health_service.to_dict(row, health)
+    return await directory_health_service.check(db, row, force=True)
 
 
 @router.get("/options")

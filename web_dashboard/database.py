@@ -2560,6 +2560,38 @@ class ManagedDirectory(Base):
     expiry_warned_at = Column(DateTime, nullable=True)
 
 
+class DirectoryHealth(Base):
+    """The last health check of one :class:`ManagedDirectory`: is it up and answering.
+
+    Infrastructure health only — the control plane's own state, domain controller status,
+    whether the identity provider signs in, whether an on-prem DC answers LDAP. Nothing
+    here describes accounts, groups or privilege: identity posture is BeyondTrust Identity
+    Security Insights' data, and ``services/directory_health_service`` says why it is not
+    duplicated here.
+
+    One row per directory, overwritten by each check, so the page is one query and no
+    provider calls. ``checks`` is a JSON list of ``{key, label, status, detail}``.
+
+    ``pending_job_id`` is the agent_discover job probing an on-prem directory. The probe
+    finishes on the agent's schedule, not the checker's, so its result is folded in when
+    that job completes (``api/agent.complete``) rather than awaited.
+    """
+    __tablename__ = "directory_health"
+
+    # Not a FK: a directory is soft-deleted (status="deleted"), and the health page skips
+    # those rows by joining on the directory, so a stale row here is harmless.
+    directory_id = Column(String(36), primary_key=True)
+    status = Column(String(16), nullable=False, default="unknown")  # ok | warn | fail | unknown
+    checks = Column(Text, nullable=True)
+    checked_at = Column(DateTime, nullable=True, index=True)
+    duration_ms = Column(Integer, nullable=True)
+    pending_job_id = Column(String(36), nullable=True, index=True)
+    pending_since = Column(DateTime, nullable=True)
+    # When the last probe was queued. Separate from checked_at, which every pass moves,
+    # because on-prem probes run on their own, slower cadence.
+    probe_queued_at = Column(DateTime, nullable=True)
+
+
 class SpireLab(Base):
     """Inventory of dashboard-provisioned SPIRE trust domains for the Password Safe
     SPIFFE SVID plugin's lab.

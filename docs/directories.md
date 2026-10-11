@@ -18,6 +18,7 @@ The one page holds two kinds of directory, which this section keeps apart:
 | [Active Directory in the cloud](directories/active-directory.md) | you want Windows servers on AWS, GCP or Azure joined to a managed AD domain, built here or one that already exists |
 | [On-premises directories](directories/on-premises.md) | you want to manage an on-prem AD or LDAP directory through a remote agent, extend your own domain to AWS or GCP, or have cloud servers Entra hybrid joined |
 | [Identity providers](directories/identity-providers.md) | you want to browse users and groups in Entra ID, Okta or PingOne, or change group membership there |
+| [Directory health](directories/health.md) | you want to know whether each directory is up and answering, or why one shows as degraded |
 
 Related: [OIDC and single sign-on](oidc.md) covers people **signing in** to the dashboard
 through an identity provider, which is separate from managing one here.
@@ -58,13 +59,14 @@ All on the **Directories** panel (Settings → Preview features → Directories 
 | `passwordsafe_directory_functional_account` | — | Password Safe functional account on an Active Directory platform |
 | `passwordsafe_directory_change_password_on_register` | on | Rotate the administrator right after onboarding |
 | `directory_idp_page_size` | `50` | Users or groups per page when browsing an identity provider (1–200) |
+| `directory_health_interval_minutes` | `15` | Minutes between [health checks](directories/health.md); 0 turns them off |
 
 ## Permissions
 
 A `directories` scope (read / write / delete):
 
-- **read:** list directories, browse an identity provider's users and groups, and test
-  its connection.
+- **read:** list directories, browse an identity provider's users and groups, test
+  its connection, and view and run health checks.
 - **write:** build, register, import, extend to AWS or GCP, read or reset the
   administrator password, toggle an identity provider's writes, and add or remove group
   members. A Config Management run against an on-prem directory needs it

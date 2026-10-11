@@ -44,6 +44,16 @@ the value in state no longer works.
 
 **Guide:** [Active Directory in the cloud](../../../directories/active-directory.md)
 
+### Is every directory answering?
+
+**Directories → Health** shows whether each domain, domain controller and identity
+provider is up. For managed AD it shows the cloud's own health, and for each provider
+a sign-in. It shows how long ago Entra Connect last synced, and probes each on-prem DC
+over LDAP through its agent. It covers the directory service only. Accounts and privilege
+are left to Identity Security Insights.
+
+**Guide:** [Directory health](../../../directories/health.md)
+
 ### Start from the directories Password Safe already manages
 
 **Directories → Import from Password Safe** lists the AD and LDAP directories Password Safe

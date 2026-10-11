@@ -54,6 +54,9 @@ host.
 | Okta, API Services app | grant `okta.users.read` and `okta.groups.read` | also grant `okta.groups.manage`, which is requested only while writes are on. Turn off **Require DPoP**; the dashboard does not send DPoP proofs |
 | PingOne | worker app with the **Identity Data Read Only** role | **Identity Data Admin** |
 
+To see Entra Connect sync freshness on [Directory health](health.md), an Entra app
+also needs `Organization.Read.All`. It is optional; nothing else uses it.
+
 **Test** on the directory's row signs in afresh. For Entra ID it lists any Graph
 permission the app is missing, for browsing and for writes separately.
 

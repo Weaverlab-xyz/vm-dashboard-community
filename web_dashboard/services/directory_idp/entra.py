@@ -148,6 +148,20 @@ async def test(conn: IdPConnection, header: str) -> dict:
                        + ", ".join(missing) + " (grant them and admin-consent).")}
 
 
+async def sync_status(conn: IdPConnection, header: str) -> dict:
+    """Whether Entra Connect syncs this tenant, and when it last did. Read-only.
+
+    For the directory health page only: it describes the sync SERVICE, not any identity.
+    Needs Organization.Read.All (or Directory.Read.All); without it the call is refused
+    with a 403, which the health check reports as unknown rather than as a failure."""
+    resp = await request(f"{LABEL} sync status", "GET", f"{_BASE}/organization",
+                         headers=_h(header), params={
+                             "$select": "onPremisesSyncEnabled,onPremisesLastSyncDateTime"})
+    org = (resp.json().get("value") or [{}])[0]
+    return {"enabled": bool(org.get("onPremisesSyncEnabled")),
+            "last_sync": org.get("onPremisesLastSyncDateTime") or ""}
+
+
 async def list_users(conn, header, q="", cursor=""):
     params = {"$top": str(page_size(conn)), "$select": _USER_SELECT}
     term = _term(q)
