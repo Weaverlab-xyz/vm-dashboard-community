@@ -4699,7 +4699,11 @@
               </label>
               <button x-show="adDirs.length" @click="createGroups()" :disabled="busy || !picked.length || !grp.directory_id"
                       class="text-xs border border-gray-300 rounded px-3 py-1 disabled:opacity-50">Create groups for the selected bundles</button>
-              <div x-show="grp.result" class="text-xs text-green-700" x-html="grp.result"></div>
+              <div x-show="grp.queued" class="text-xs text-green-700">
+                <span x-text="grp.queued"></span>
+                — <a class="underline" :href="'/jobs/' + grp.job_id">job</a>.
+                Then complete each bundle's Delegation steps.
+              </div>
             </div>
 
             <div x-show="sets.length" class="mt-4 border border-gray-200 rounded-lg divide-y divide-gray-100">
@@ -9589,7 +9593,7 @@ function entitleBundles() {
   return {
     loaded: false, configured: false, busy: false, error: '',
     catalog: [], byKey: {}, accesses: [], clouds: {}, cands: {}, sets: [], picked: [], preview: {},
-    adDirs: [], showDeleg: '', grp: { directory_id: '', ou: '', include_cloud: false, result: '' },
+    adDirs: [], showDeleg: '', grp: { directory_id: '', ou: '', include_cloud: false, queued: '', job_id: '' },
     cloudKeys: ['aws', 'azure', 'gcp', 'oci', 'ad'],
     cloudLabel: { aws: 'AWS', azure: 'Azure', gcp: 'GCP', oci: 'OCI', ad: 'On-prem AD' },
     async load() {
@@ -9641,14 +9645,13 @@ function entitleBundles() {
       const g = this.grp;
       const n = this.picked.length;
       if (!confirm('Create the ent-* groups for ' + n + ' selected bundle(s) in AD? Existing groups are left as they are.')) return;
-      this.busy = true; this.error = ''; g.result = '';
+      this.busy = true; this.error = ''; g.queued = ''; g.job_id = '';
       try {
         const r = await API.post('/api/entitle/persona-bundles/create-groups',
                                  { directory_id: g.directory_id, keys: this.picked, include_cloud: g.include_cloud, ou: g.ou });
-        const esc = t => String(t).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
-        g.result = 'Queued ' + r.groups.length + ' group(s) in ' + esc(r.directory) + ': ' +
-                   r.groups.map(x => esc(x.name)).join(', ') +
-                   ' — <a class="underline" href="/jobs/' + esc(r.job_id) + '">job</a>. Then do each bundle\'s Delegation steps.';
+        g.queued = 'Queued ' + r.groups.length + ' group(s) in ' + r.directory + ': ' +
+                   r.groups.map(x => x.name).join(', ');
+        g.job_id = r.job_id;
       } catch (e) { this.error = e.message; }
       finally { this.busy = false; }
     },
