@@ -2,13 +2,14 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you want access to expire on its own instead of being revoked by someone remembering.
 
-The Entitle integration has three independent tracks that share one Entitle
+The Entitle integration has four independent tracks that share one Entitle
 tenant + API token. You can enable any combination:
 
 | Track | What it does | Default |
 |---|---|---|
 | **Resource registration** (this doc) | As the dashboard builds Linux VMs and cloud databases, it registers each as an Entitle integration so users request **just-in-time access** in Entitle. | Off |
 | **Machine-identity JIT** | Short-TTL, auto-approved cloud-credential elevations for the dashboard's own privileged cloud calls. | Off |
+| **Virtual applications & persona bundles** | Friendly, tiered roles over a registered directory's groups, and one bundle per job function per cloud that combines them with the cloud's own roles. See [virtual applications](entitle-virtual-apps.md) and [persona bundles](entitle-persona-bundles.md). | Off (needs resource registration) |
 | **Dashboard permissions** | Time-boxed permissions **inside the dashboard**, granted by Entitle. Two mechanisms: **REST** (current — any user, takes effect immediately) and **Entra groups** (legacy — Entra only, takes effect at next login). See [entitle-dashboard-permissions.md](entitle-dashboard-permissions.md). | Off |
 
 > The previous **approval-gate** track (which blocked dashboard actions behind an

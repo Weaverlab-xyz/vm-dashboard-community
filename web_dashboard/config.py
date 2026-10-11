@@ -2081,6 +2081,11 @@ class Settings(BaseSettings):
     entitle_endpoint: str = ""
     entitle_owner_id: str = ""                       # REQUIRED: UUID of the Entitle user owning created integrations
     entitle_workflow_id: str = ""                    # REQUIRED: UUID of the default approval workflow for created integrations
+    entitle_workflow_auto_approve_id: str = ""       # tier workflows for virtual apps + persona bundles (blank → entitle_workflow_id)
+    entitle_workflow_single_approver_id: str = ""
+    entitle_workflow_two_approver_id: str = ""
+    entitle_virtual_app_slug: str = ""               # Entitle catalog name of Virtual Application; blank → "virtual application"
+    entitle_dashboard_groups_integration_id: str = ""  # integration the dashboard-* groups were synced from (persona bundles)
     entitle_agent_token_name: str = ""               # Entitle Agent token NAME/identifier for private targets (the token VALUE is supplied to the agent cluster via ESO — see docs/design/entitle-resource-registration.md)
     entitle_agent_token_ref: str = ""                # optional secrets-backend ref where the agent token VALUE is stored (for bootstrap/rotation; not the integration identifier above). Auto-set to config://entitle/agent-token by ensure_agent_token when a token is minted.
     entitle_agent_token_tf_state: str = ""           # terraform.tfstate of an auto-minted agent token (set by ensure_agent_token; enables later destroy/rotation via deregister). DB-only — never an env value.

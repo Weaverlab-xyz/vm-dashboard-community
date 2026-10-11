@@ -666,6 +666,140 @@ output "integration_id" {{
 """
 
 
+# ── Virtual applications and bundles ──────────────────────────────────────────
+#
+# Neither holds a credential: a virtual application only REFERS to roles another
+# integration already synced (a directory group's membership role), and a bundle only
+# lists role ids. So there are no TF_VARs beyond the API key, and Entitle hosts both
+# in its cloud — a virtual application cannot be saved on an agent at all, which is why
+# `_common_attrs_hcl(private=False)` below never emits an agent_token.
+#
+# Attribute names are checked against tests/fixtures/entitle_provider_schema.json, which
+# was dumped from the provider itself (scripts/entitle_provider_schema.sh).
+
+def _virtual_app_slug() -> str:
+    """Catalog name of Entitle's Virtual Application, lowercased (the provider refuses
+    an uppercase letter at plan time). Overridable for a tenant whose catalog differs."""
+    return (_cfg("entitle_virtual_app_slug") or "virtual application").strip().lower()
+
+
+def _hcl_list(nums) -> str:
+    return "[" + ", ".join(str(int(n)) for n in nums) + "]"
+
+
+def _hcl_strs(items) -> str:
+    return "[" + ", ".join(json.dumps(str(i)) for i in items) + "]"
+
+
+def _generate_virtual_app_hcl(*, name: str, resources: list, tags: tuple = (),
+                              fields: Optional[dict] = None) -> str:
+    """One Virtual Application integration, its resources, and one ``entitle_role`` per
+    linked role.
+
+    ``resources`` is ``[{name, description, roles: [{key, name, virtualized_role_id,
+    workflow_id, allowed_durations}]}]``. Each role FRONTS an existing role in another
+    integration (``virtualized_role``) — for a directory that is a group's membership
+    role, so granting the virtual role adds the requester to the group and the group's
+    own provisioning (SSO assignment, cloud role) does the rest.
+
+    Outputs ``integration_id`` and ``role_ids`` (``{key: id}``), the latter so the
+    persona bundles can reference a virtual role without another lookup.
+    """
+    fields = fields or {}
+    owner_id = fields.get("owner_id") or _cfg("entitle_owner_id")
+    if not resources or not any(r.get("roles") for r in resources):
+        raise EntitleRegistrationError("a virtual application needs at least one role")
+    label = "app"
+    body = [_provider_header(fields=fields), f"""
+resource "entitle_integration" "{label}" {{
+  name            = {json.dumps(name[:50])}
+  application     = {{ name = {json.dumps(_virtual_app_slug())} }}
+  connection_json = jsonencode({{}})
+{_common_attrs_hcl(False, allow_creating_accounts=False, fields=fields)}}}
+"""]
+    role_refs = []
+    for ri, res in enumerate(resources):
+        rlabel = f"r{ri}"
+        desc = (res.get("description") or "").strip()
+        body.append(f"""
+resource "entitle_resource" "{rlabel}" {{
+  name        = {json.dumps(str(res["name"])[:50])}
+  requestable = true
+  integration = {{ id = entitle_integration.{label}.id }}
+  owner       = {{ id = {json.dumps(owner_id)} }}
+  user_defined_tags = {_hcl_strs(tags)}
+{f"  user_defined_description = {json.dumps(desc)}" + chr(10) if desc else ""}}}
+""")
+        for role in res.get("roles") or []:
+            key = _safe_name(str(role["key"]))
+            if not role.get("workflow_id"):
+                raise EntitleRegistrationError(
+                    f"role {role.get('name')!r} has no workflow — set the tier's workflow "
+                    "(or entitle_workflow_id) in Settings → Integrations → Entitle")
+            body.append(f"""
+resource "entitle_role" "{key}" {{
+  name              = {json.dumps(str(role["name"])[:50])}
+  requestable       = true
+  resource          = {{ id = entitle_resource.{rlabel}.id }}
+  workflow          = {{ id = {json.dumps(role["workflow_id"])} }}
+  allowed_durations = {_hcl_list(role["allowed_durations"])}
+  virtualized_role  = {{ id = {json.dumps(role["virtualized_role_id"])} }}
+}}
+""")
+            role_refs.append(f"    {json.dumps(key)} = entitle_role.{key}.id")
+    body.append(f"""
+output "integration_id" {{
+  value = entitle_integration.{label}.id
+}}
+
+output "role_ids" {{
+  value = {{
+{chr(10).join(role_refs)}
+  }}
+}}
+""")
+    return "".join(body)
+
+
+def _generate_bundles_hcl(*, bundles: list, fields: Optional[dict] = None) -> str:
+    """One ``entitle_bundle`` per entry of ``bundles`` = ``[{key, name, description,
+    category, tags, workflow_id, allowed_durations, role_ids}]``. Outputs ``bundle_ids``
+    (``{key: id}``). An entry with no role ids is a caller bug, not something to send:
+    Entitle would accept an empty bundle and offer users a request that grants nothing."""
+    if not bundles:
+        raise EntitleRegistrationError("no bundles to apply")
+    body = [_provider_header(fields=fields)]
+    refs = []
+    for b in bundles:
+        key = _safe_name(str(b["key"]))
+        role_ids = [r for r in (b.get("role_ids") or []) if r]
+        if not role_ids:
+            raise EntitleRegistrationError(f"bundle {b['name']!r} has no roles")
+        if not b.get("workflow_id"):
+            raise EntitleRegistrationError(f"bundle {b['name']!r} has no workflow")
+        roles = ", ".join(f"{{ id = {json.dumps(r)} }}" for r in dict.fromkeys(role_ids))
+        cat = f"  category          = {json.dumps(b['category'])}\n" if b.get("category") else ""
+        body.append(f"""
+resource "entitle_bundle" "{key}" {{
+  name              = {json.dumps(str(b["name"])[:50])}
+  description       = {json.dumps(b.get("description") or b["name"])}
+{cat}  tags              = {_hcl_strs(b.get("tags") or ())}
+  workflow          = {{ id = {json.dumps(b["workflow_id"])} }}
+  allowed_durations = {_hcl_list(b["allowed_durations"])}
+  roles             = [{roles}]
+}}
+""")
+        refs.append(f"    {json.dumps(key)} = entitle_bundle.{key}.id")
+    body.append("""
+output "bundle_ids" {
+  value = {
+""" + "\n".join(refs) + """
+  }
+}
+""")
+    return "".join(body)
+
+
 # ── Terraform plumbing ────────────────────────────────────────────────────────
 
 def _run_tf(args: list, work_dir: str, env: dict, timeout: int = 120) -> subprocess.CompletedProcess:
@@ -785,7 +919,7 @@ def _scrub_connection_json(blob: str) -> str:
 
 
 def _apply_hcl_sync(hcl: str, tf_vars: dict, ctx: Optional["EntitleTenantCtx"] = None,
-                    scrub: bool = True) -> dict:
+                    scrub: bool = True, apply_timeout: int = 120) -> dict:
     """Write HCL, init+apply, return ``{integration_id, outputs, tf_state_json}``.
 
     ``outputs`` is the full ``terraform output`` map (values unwrapped); ``integration_id``
@@ -799,7 +933,7 @@ def _apply_hcl_sync(hcl: str, tf_vars: dict, ctx: Optional["EntitleTenantCtx"] =
             raise EntitleRegistrationError(
                 f"terraform init failed: {init.stderr.strip() or init.stdout.strip()}")
 
-        apply = _run_tf(["apply", "-auto-approve"], work_dir, env, timeout=120)
+        apply = _run_tf(["apply", "-auto-approve"], work_dir, env, timeout=apply_timeout)
         if apply.returncode != 0:
             raise EntitleRegistrationError(
                 f"terraform apply failed: {apply.stderr.strip() or apply.stdout.strip()}")
@@ -862,7 +996,12 @@ def _destroy_sync(tf_state_json: str, ctx: Optional["EntitleTenantCtx"] = None) 
         if init.returncode != 0:
             raise EntitleRegistrationError(
                 f"terraform init (destroy) failed: {init.stderr.strip() or init.stdout.strip()}")
-        destroy = _run_tf(["destroy", "-auto-approve"], work_dir, env, timeout=120)
+        # A virtual application or a bundle set is many resources in one state, each a
+        # separate DELETE; scale the budget the way the apply side does.
+        n = sum(len(r.get("instances") or []) for r in
+                (json.loads(safe_state).get("resources") or []))
+        destroy = _run_tf(["destroy", "-auto-approve"], work_dir, env,
+                          timeout=max(120, 30 + 15 * n))
         if destroy.returncode != 0:
             raise EntitleRegistrationError(
                 f"terraform destroy failed: {destroy.stderr.strip() or destroy.stdout.strip()}")
@@ -1212,6 +1351,22 @@ async def register_rancher(*, name: str, server_url: str, api_token: str,
             f"overridable with entitle_rancher_app_slug, though a wrong one fails "
             f"differently, as a 404 'Application not found'."
         ) from exc
+
+
+async def register_virtual_app(*, name: str, resources: list, tags: tuple = ()) -> dict:
+    """Create a Virtual Application over roles another integration already synced.
+    Returns ``{integration_id, outputs, tf_state_json}``; ``outputs["role_ids"]`` maps each
+    role key to its new id. Stash the state so :func:`deregister` can remove it all."""
+    hcl = _generate_virtual_app_hcl(name=name, resources=resources, tags=tags)
+    n = sum(len(r.get("roles") or []) for r in resources)
+    return await asyncio.to_thread(_apply_hcl_sync, hcl, {}, None, True, 120 + 15 * n)
+
+
+async def register_bundles(*, bundles: list) -> dict:
+    """Create one Entitle bundle per entry. Returns ``{outputs, tf_state_json}`` with
+    ``outputs["bundle_ids"]``; :func:`deregister` with the state removes them together."""
+    hcl = _generate_bundles_hcl(bundles=bundles)
+    return await asyncio.to_thread(_apply_hcl_sync, hcl, {}, None, True, 120 + 10 * len(bundles))
 
 
 # ── Agent token (bootstrap for the k8s agent + private-target registration) ─────

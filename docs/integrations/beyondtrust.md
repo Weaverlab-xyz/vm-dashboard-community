@@ -79,6 +79,8 @@ reads from the database only; exporting an equivalently-named env var has no eff
 | Build EPM-L agent packages or mint installation tokens | [EPM-L](beyondtrust/epml.md) |
 | Request just-in-time cloud access | [Entitle](beyondtrust/entitle.md) |
 | Grant dashboard permissions just-in-time, instead of standing admins | [Entitle dashboard permissions](beyondtrust/entitle-dashboard-permissions.md) |
+| Let people request a directory's groups by a clear name, under an approval tier | [Entitle virtual applications](beyondtrust/entitle-virtual-apps.md) |
+| Give each job function one request per cloud | [Entitle persona bundles](beyondtrust/entitle-persona-bundles.md) |
 | Hand a database credential's rotation to Password Safe | [Password Safe for databases](beyondtrust/password-safe/databases.md) — one page per cloud |
 | Pre-condition an image for any of the above | [below](#preparing-images-for-bt-management) |
 

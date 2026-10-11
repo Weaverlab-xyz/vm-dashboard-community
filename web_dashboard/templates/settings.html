@@ -4488,6 +4488,46 @@
           <p class="text-xs text-gray-400 -mt-2">
             Owner ID and Workflow ID are <strong>required</strong> to register VMs &amp; databases in Entitle.
           </p>
+          <p class="text-xs text-gray-500 pt-2 font-medium">Virtual applications &amp; persona bundles</p>
+          <p class="text-xs text-gray-400 -mt-2">Each approval tier routes through its own workflow — the ones
+            <code>terraform/entitle_user_jit</code> creates. A blank tier falls back to the Workflow ID above.
+            See <a href="/docs/integrations/beyondtrust/entitle-virtual-apps" class="text-blue-600 hover:underline">virtual applications</a>
+            and <a href="/docs/integrations/beyondtrust/entitle-persona-bundles" class="text-blue-600 hover:underline">persona bundles</a>.</p>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Auto-approve tier workflow
+              <span class="text-xs text-gray-400">(entitle_workflow_auto_approve_id)</span></label>
+            <input type="text" x-model="panelCfg.entitle_workflow_auto_approve_id"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="UUID (vm-dashboard-auto-approve)">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">One-approver tier workflow
+              <span class="text-xs text-gray-400">(entitle_workflow_single_approver_id)</span></label>
+            <input type="text" x-model="panelCfg.entitle_workflow_single_approver_id"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="UUID (vm-dashboard-single-approver)">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Two-approver tier workflow
+              <span class="text-xs text-gray-400">(entitle_workflow_two_approver_id)</span></label>
+            <input type="text" x-model="panelCfg.entitle_workflow_two_approver_id"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="UUID (vm-dashboard-two-approver)">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Dashboard groups integration
+              <span class="text-xs text-gray-400">(entitle_dashboard_groups_integration_id)</span></label>
+            <input type="text" x-model="panelCfg.entitle_dashboard_groups_integration_id"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="UUID of the directory integration holding the dashboard-* groups (optional)">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Virtual Application catalog name
+              <span class="text-xs text-gray-400">(entitle_virtual_app_slug)</span></label>
+            <input type="text" x-model="panelCfg.entitle_virtual_app_slug"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="(blank → virtual application)">
+          </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Provider endpoint
               <span class="text-xs text-gray-400">(optional)</span></label>
@@ -4551,6 +4591,95 @@
               <input type="text" x-model="panelCfg.entitle_atlas_app_slug"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
                      placeholder="atlas mongodb">
+            </div>
+          </div>
+
+          <!-- ── Persona × cloud access bundles ───────────────────────────── -->
+          <div class="mt-6 pt-5 border-t border-gray-200" x-data="entitleBundles()" x-init="load()">
+            <h3 class="text-sm font-semibold text-gray-800 mb-1">Persona access bundles</h3>
+            <p class="text-xs text-gray-500 mb-3">
+              One Entitle bundle per job function and cloud: the virtual-app role over the
+              <code>ent-&lt;cloud&gt;-&lt;persona&gt;</code> group, the cloud's own roles, and the matching
+              dashboard-* groups. Preview reads Entitle and shows what each one resolves to; only bundles with
+              nothing missing are created. <a href="/docs/integrations/beyondtrust/entitle-persona-bundles"
+              class="text-blue-600 hover:underline">How bundles are built</a>.
+            </p>
+            <div x-show="error" class="text-sm text-red-600 mb-2" x-text="error"></div>
+            <div x-show="!configured && loaded" class="text-sm text-amber-700 mb-2">Set the Entitle API URL and token first.</div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+              <template x-for="c in cloudKeys" :key="c">
+                <div class="border border-gray-200 rounded-lg p-3 space-y-1">
+                  <div class="text-sm font-medium text-gray-700" x-text="cloudLabel[c] + ' integration'"></div>
+                  <div class="text-xs text-gray-500" x-show="c === 'oci'">OCI is granted through its group only; no integration needed.</div>
+                  <div x-show="c !== 'oci'" class="space-y-1">
+                    <select x-model="clouds[c].integration_id" @focus="candidates(c)"
+                            class="w-full border border-gray-300 rounded px-2 py-1 text-sm">
+                      <option value="">— none (group only) —</option>
+                      <template x-if="clouds[c].integration_id && !(cands[c] || []).some(i => i.id === clouds[c].integration_id)">
+                        <option :value="clouds[c].integration_id" x-text="clouds[c].integration_id"></option>
+                      </template>
+                      <template x-for="i in (cands[c] || [])" :key="i.id">
+                        <option :value="i.id" x-text="i.name + ' · ' + i.application + (i.suggested ? ' · likely' : '')"></option>
+                      </template>
+                    </select>
+                    <input type="text" x-model="clouds[c].resource" placeholder="Resource (account / subscription / project) — optional"
+                           class="w-full border border-gray-300 rounded px-2 py-1 text-xs">
+                    <button @click="pinCloud(c)" class="text-xs border border-gray-300 rounded px-2 py-1">Save</button>
+                  </div>
+                </div>
+              </template>
+            </div>
+
+            <div class="overflow-x-auto">
+              <table class="w-full text-xs">
+                <thead><tr class="text-left text-gray-500">
+                  <th class="py-1 pr-2">Persona</th><th class="pr-2">Tier</th>
+                  <template x-for="c in cloudKeys" :key="c"><th class="pr-2" x-text="cloudLabel[c]"></th></template>
+                </tr></thead>
+                <tbody>
+                  <template x-for="a in accesses" :key="a.access">
+                    <tr class="border-t border-gray-100">
+                      <td class="py-1 pr-2"><span class="font-medium text-gray-800" x-text="a.label"></span>
+                        <div class="text-gray-400" x-text="a.purpose"></div></td>
+                      <td class="pr-2 whitespace-nowrap" x-text="a.tier_label"></td>
+                      <template x-for="c in cloudKeys" :key="c">
+                        <td class="pr-2 align-top">
+                          <label class="flex items-start gap-1">
+                            <input type="checkbox" :value="a.access + '-' + c" x-model="picked" class="mt-0.5">
+                            <span class="text-gray-500" x-text="(byKey[a.access + '-' + c]?.cloud_roles || []).join(', ') || 'group only'"></span>
+                          </label>
+                          <template x-if="preview[a.access + '-' + c]">
+                            <div :class="preview[a.access + '-' + c].ready ? 'text-green-700' : 'text-red-600'"
+                                 x-text="preview[a.access + '-' + c].ready ? ('ready · ' + preview[a.access + '-' + c].role_ids.length + ' roles') : preview[a.access + '-' + c].blockers.join('; ')"></div>
+                          </template>
+                        </td>
+                      </template>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+            <div class="flex gap-2 mt-3">
+              <button @click="picked = catalog.map(b => b.key)" class="text-xs border border-gray-300 rounded px-2 py-1">Select all</button>
+              <button @click="picked = []" class="text-xs border border-gray-300 rounded px-2 py-1">Clear</button>
+              <button @click="runPreview()" :disabled="busy || !picked.length" class="text-xs border border-gray-300 rounded px-3 py-1 disabled:opacity-50">Preview</button>
+              <button @click="runApply()" :disabled="busy || !readyCount()"
+                      class="text-xs bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded px-3 py-1"
+                      x-text="'Create ' + readyCount() + ' ready bundle(s)'"></button>
+            </div>
+
+            <div x-show="sets.length" class="mt-4 border border-gray-200 rounded-lg divide-y divide-gray-100">
+              <template x-for="s in sets" :key="s.id">
+                <div class="px-3 py-2 text-xs flex justify-between gap-2">
+                  <div><span class="font-medium" x-text="s.bundles.length + ' bundle(s)'"></span>
+                    <span class="ml-1" :class="s.status === 'active' ? 'text-green-700' : s.status === 'failed' ? 'text-red-600' : 'text-gray-500'" x-text="s.status"></span>
+                    <div class="text-gray-500" x-text="s.bundles.map(b => b.name).join(' · ')"></div>
+                    <div x-show="s.error" class="text-red-600" x-text="s.error"></div></div>
+                  <button x-show="!['applying','destroying'].includes(s.status)" @click="removeSet(s)"
+                          class="border border-red-200 text-red-600 rounded px-2 py-1 h-fit">Remove</button>
+                </div>
+              </template>
             </div>
           </div>
 
@@ -9419,6 +9548,63 @@ function settingsPage() {
       this.toast = msg;
       this.toastType = type;
       setTimeout(() => { this.toast = ''; }, 5000);
+    },
+  };
+}
+
+function entitleBundles() {
+  return {
+    loaded: false, configured: false, busy: false, error: '',
+    catalog: [], byKey: {}, accesses: [], clouds: {}, cands: {}, sets: [], picked: [], preview: {},
+    cloudKeys: ['aws', 'azure', 'gcp', 'oci'],
+    cloudLabel: { aws: 'AWS', azure: 'Azure', gcp: 'GCP', oci: 'OCI' },
+    async load() {
+      try {
+        const r = await API.get('/api/entitle/persona-bundles');
+        this.configured = r.configured; this.catalog = r.catalog || []; this.clouds = r.clouds || {};
+        this.sets = r.sets || [];
+        this.byKey = Object.fromEntries(this.catalog.map(b => [b.key, b]));
+        const seen = {};
+        this.accesses = this.catalog.filter(b => !seen[b.access] && (seen[b.access] = true));
+      } catch (e) { this.error = e.message; }
+      finally { this.loaded = true; }
+    },
+    async candidates(c) {
+      if (this.cands[c]) return;
+      try { const r = await API.get('/api/entitle/persona-bundles/cloud-candidates?cloud=' + c);
+            this.cands = { ...this.cands, [c]: r.integrations || [] };
+            if (r.error) this.error = r.error; }
+      catch (e) { this.error = e.message; }
+    },
+    async pinCloud(c) {
+      try { const r = await API.put('/api/entitle/persona-bundles/clouds',
+                                    { cloud: c, integration_id: this.clouds[c].integration_id || '',
+                                      resource: this.clouds[c].resource || '' });
+            this.clouds = r.clouds; this.preview = {}; }
+      catch (e) { this.error = e.message; }
+    },
+    readyCount() { return this.picked.filter(k => this.preview[k]?.ready).length; },
+    async runPreview() {
+      this.busy = true; this.error = '';
+      try { const r = await API.post('/api/entitle/persona-bundles/preview', { keys: this.picked });
+            this.preview = Object.fromEntries((r.bundles || []).map(b => [b.key, b])); }
+      catch (e) { this.error = e.message; }
+      finally { this.busy = false; }
+    },
+    async runApply() {
+      const keys = this.picked.filter(k => this.preview[k]?.ready);
+      if (!confirm('Create ' + keys.length + ' bundle(s) in Entitle? They become requestable immediately.')) return;
+      this.busy = true; this.error = '';
+      try { const r = await API.post('/api/entitle/persona-bundles/apply', { keys });
+            if (r.skipped?.length) this.error = r.skipped.length + ' bundle(s) were no longer ready and were skipped.';
+            this.preview = {}; this.picked = []; await this.load(); }
+      catch (e) { this.error = e.message; }
+      finally { this.busy = false; }
+    },
+    async removeSet(s) {
+      if (!confirm('Remove these ' + s.bundles.length + ' bundle(s) from Entitle?')) return;
+      try { await API.del('/api/entitle/persona-bundles/sets/' + s.id); await this.load(); }
+      catch (e) { this.error = e.message; }
     },
   };
 }
