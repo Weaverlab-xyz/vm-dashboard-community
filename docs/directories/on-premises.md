@@ -83,6 +83,13 @@ these tasks:
 The agent's `policy.yaml` must list the directory's LDAP port, and 5986 for WinRM, under
 `ansible.targets`.
 
+The dashboard also runs one AD playbook of its own here. **Settings → Integrations →
+Entitle → Persona access bundles → Create missing groups** runs the built-in
+`ad-ensure-groups` playbook through the same agent, to create the empty `ent-*` groups
+that Entitle persona bundles grant. It only ever creates groups. See
+[Creating the groups](../integrations/beyondtrust/entitle-persona-bundles.md#creating-the-groups)
+and the [delegation steps](../integrations/beyondtrust/entitle-persona-bundles.md#delegating-rights).
+
 **Unregister** only forgets the row. It is refused while an AD Connector or DNS link
 extends the directory.
 

@@ -4652,6 +4652,13 @@
                             <input type="checkbox" :value="a.access + '-' + c" x-model="picked" class="mt-0.5">
                             <span class="text-gray-500" x-text="(byKey[a.access + '-' + c]?.cloud_roles || []).join(', ') || 'group only'"></span>
                           </label>
+                          <button x-show="byKey[a.access + '-' + c]" @click="showDeleg = (showDeleg === a.access + '-' + c ? '' : a.access + '-' + c)"
+                                  class="text-blue-600 hover:underline">Delegation</button>
+                          <template x-if="showDeleg === a.access + '-' + c">
+                            <ol class="list-decimal ml-4 mt-1 text-gray-600 space-y-0.5">
+                              <template x-for="step in (byKey[a.access + '-' + c]?.delegation || [])"><li x-text="step"></li></template>
+                            </ol>
+                          </template>
                           <template x-if="preview[a.access + '-' + c]">
                             <div :class="preview[a.access + '-' + c].ready ? 'text-green-700' : 'text-red-600'"
                                  x-text="preview[a.access + '-' + c].ready ? ('ready · ' + preview[a.access + '-' + c].role_ids.length + ' roles') : preview[a.access + '-' + c].blockers.join('; ')"></div>
@@ -4670,6 +4677,29 @@
               <button @click="runApply()" :disabled="busy || !readyCount()"
                       class="text-xs bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded px-3 py-1"
                       x-text="'Create ' + readyCount() + ' ready bundle(s)'"></button>
+            </div>
+
+            <div class="mt-4 border border-gray-200 rounded-lg p-3 space-y-2">
+              <div class="text-sm font-medium text-gray-700">Create missing groups in on-prem AD</div>
+              <p class="text-xs text-gray-500">Creates the selected bundles' <code>ent-ad-*</code> groups — and, if ticked,
+                their <code>ent-&lt;cloud&gt;-*</code> groups for an AD that syncs to your IdP — as empty global security
+                groups, through the directory's remote agent. It never adds members or deletes anything. A new group grants
+                nothing until you complete its <strong>Delegation</strong> steps and Entitle has synced it.</p>
+              <div x-show="!adDirs.length" class="text-xs text-amber-700">Register an on-prem Active Directory with a remote
+                agent on the Directories page first.</div>
+              <div x-show="adDirs.length" class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <select x-model="grp.directory_id" class="border border-gray-300 rounded px-2 py-1 text-sm">
+                  <template x-for="d in adDirs" :key="d.id"><option :value="d.id" x-text="d.name"></option></template>
+                </select>
+                <input type="text" x-model="grp.ou" placeholder="OU (optional) — OU=Entitle,DC=corp,DC=example,DC=com"
+                       class="sm:col-span-2 border border-gray-300 rounded px-2 py-1 text-xs font-mono">
+              </div>
+              <label x-show="adDirs.length" class="flex items-center gap-2 text-xs text-gray-600">
+                <input type="checkbox" x-model="grp.include_cloud"> Also create the cloud bundles' groups (AD synced to your IdP)
+              </label>
+              <button x-show="adDirs.length" @click="createGroups()" :disabled="busy || !picked.length || !grp.directory_id"
+                      class="text-xs border border-gray-300 rounded px-3 py-1 disabled:opacity-50">Create groups for the selected bundles</button>
+              <div x-show="grp.result" class="text-xs text-green-700" x-html="grp.result"></div>
             </div>
 
             <div x-show="sets.length" class="mt-4 border border-gray-200 rounded-lg divide-y divide-gray-100">
@@ -9559,6 +9589,7 @@ function entitleBundles() {
   return {
     loaded: false, configured: false, busy: false, error: '',
     catalog: [], byKey: {}, accesses: [], clouds: {}, cands: {}, sets: [], picked: [], preview: {},
+    adDirs: [], showDeleg: '', grp: { directory_id: '', ou: '', include_cloud: false, result: '' },
     cloudKeys: ['aws', 'azure', 'gcp', 'oci', 'ad'],
     cloudLabel: { aws: 'AWS', azure: 'Azure', gcp: 'GCP', oci: 'OCI', ad: 'On-prem AD' },
     async load() {
@@ -9566,6 +9597,8 @@ function entitleBundles() {
         const r = await API.get('/api/entitle/persona-bundles');
         this.configured = r.configured; this.catalog = r.catalog || []; this.clouds = r.clouds || {};
         this.sets = r.sets || [];
+        this.adDirs = r.ad_directories || [];
+        if (!this.grp.directory_id && this.adDirs.length) this.grp.directory_id = this.adDirs[0].id;
         this.byKey = Object.fromEntries(this.catalog.map(b => [b.key, b]));
         const seen = {};
         this.accesses = this.catalog.filter(b => !seen[b.access] && (seen[b.access] = true));
@@ -9602,6 +9635,21 @@ function entitleBundles() {
             if (r.skipped?.length) this.error = r.skipped.length + ' bundle(s) were no longer ready and were skipped.';
             this.preview = {}; this.picked = []; await this.load(); }
       catch (e) { this.error = e.message; }
+      finally { this.busy = false; }
+    },
+    async createGroups() {
+      const g = this.grp;
+      const n = this.picked.length;
+      if (!confirm('Create the ent-* groups for ' + n + ' selected bundle(s) in AD? Existing groups are left as they are.')) return;
+      this.busy = true; this.error = ''; g.result = '';
+      try {
+        const r = await API.post('/api/entitle/persona-bundles/create-groups',
+                                 { directory_id: g.directory_id, keys: this.picked, include_cloud: g.include_cloud, ou: g.ou });
+        const esc = t => String(t).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+        g.result = 'Queued ' + r.groups.length + ' group(s) in ' + esc(r.directory) + ': ' +
+                   r.groups.map(x => esc(x.name)).join(', ') +
+                   ' — <a class="underline" href="/jobs/' + esc(r.job_id) + '">job</a>. Then do each bundle\'s Delegation steps.';
+      } catch (e) { this.error = e.message; }
       finally { this.busy = false; }
     },
     async removeSet(s) {

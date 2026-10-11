@@ -261,6 +261,220 @@ CATALOG = (
 _BY_KEY = {p.key: p for p in CATALOG}
 
 
+# ── Delegation: what gives each ent-* group its rights ───────────────────────
+#
+# Creating a group grants nothing. These are the steps that make ent-<target>-<persona>
+# mean something, shown per bundle on the settings card and printed in full in
+# docs/integrations/beyondtrust/entitle-persona-bundles.md#delegating-rights. One source
+# for both, so they cannot disagree. "{group}" is the bundle's group name.
+
+AD_DELEGATION = {
+    "itops": (
+        "Delegate on the user OUs: Reset password, and Read/Write pwdLastSet and "
+        "lockoutTime — `dsacls \"OU=Users,DC=corp,DC=example,DC=com\" /I:S /G "
+        "\"CORP\\{group}:CA;Reset Password;user\"`.",
+        "Delegate on the server and workstation OUs: Create/Delete Computer objects, and "
+        "Validated write to DNS host name and service principal name.",
+        "Let the group read Windows LAPS passwords on those OUs: "
+        "`Set-LapsADReadPasswordPermission -Identity \"OU=Servers,DC=corp,DC=example,DC=com\" "
+        "-AllowedPrincipals \"CORP\\{group}\"`.",
+        "Make the group local Administrators on the managed servers with a GPO (Computer "
+        "Configuration → Preferences → Local Users and Groups) linked only to those OUs.",
+        "Never nest it in Domain Admins, Account Operators or Server Operators.",
+    ),
+    "ot": (
+        "Add the group to the local Remote Desktop Users group on the OT jump hosts and "
+        "engineering workstations, with a GPO linked only to the OT OU.",
+        "In that GPO grant \"Allow log on through Remote Desktop Services\" to the group; on "
+        "the rest of the domain deny it (\"Deny log on through Remote Desktop Services\").",
+        "In Privileged Remote Access, map the group to the OT jump group's group policy, so "
+        "PRA sessions follow the same membership.",
+    ),
+    "ot-breakglass": (
+        "Add the group to the local Administrators group on the OT jump hosts and "
+        "engineering workstations, with a GPO linked only to the OT OU.",
+        "Allow RDP for it there as for ent-ad-ot; deny interactive logon everywhere else.",
+        "Alert on any membership change of this group (event 4728/4729 on the DCs).",
+    ),
+    "hypervisor": (
+        "vCenter: add AD as an identity source (Administration → Single Sign On → "
+        "Configuration), then Administration → Global Permissions → add CORP\\{group} with "
+        "the Administrator role and \"Propagate to children\".",
+        "Hyper-V: add the group to each host's LOCAL Hyper-V Administrators group with a "
+        "GPO linked to the Hyper-V hosts' OU — not to the domain built-in group.",
+        "Proxmox: Datacenter → Permissions → Realms → add an Active Directory realm, sync "
+        "groups, then give {group} the Administrator role on path /.",
+        "Nutanix Prism Central: Authentication → add the AD directory, then Role Mapping → "
+        "{group} → Cluster Admin.",
+        "XCP-ng (Xen Orchestra): Settings → Plugins → auth-ldap pointed at AD, then give "
+        "{group} the admin permission.",
+    ),
+}
+
+CLOUD_DELEGATION = {
+    "aws": (
+        "If AD is your IAM Identity Center source (AD Connector / Managed AD) or syncs to "
+        "your IdP, wait for {group} to appear in Identity Center.",
+        "IAM Identity Center → AWS accounts → the account(s) → Assign users or groups → "
+        "{group} → a permission set holding: {roles}.",
+    ),
+    "azure": (
+        "Let Entra Connect / Cloud Sync carry {group} to Entra ID (or create it there).",
+        "Subscription or resource group → Access control (IAM) → Add role assignment → "
+        "{roles} → assign to the group {group}.",
+    ),
+    "gcp": (
+        "Sync {group} to your Workforce Identity pool's IdP (Entra, Okta) or to Cloud "
+        "Identity with Google Cloud Directory Sync.",
+        "Grant the roles to the group: `gcloud projects add-iam-policy-binding PROJECT "
+        "--member=\"principalSet://iam.googleapis.com/locations/global/workforcePools/POOL/"
+        "group/{group}\" --role=ROLE` for each of: {roles}.",
+    ),
+    "oci": (
+        "Federate the OCI identity domain with your IdP (or AD through it) and map "
+        "{group} to an identity-domain group of the same name.",
+        "Identity → Policies → a policy allowing the group: {roles}.",
+    ),
+}
+
+
+def delegation_steps(p: "PersonaAccess", target: str) -> tuple:
+    """The steps that give this bundle's group its rights, with names filled in."""
+    group = group_name(p.key, target)
+    if target == AD:
+        steps = AD_DELEGATION.get(p.key, ())
+        roles = ""
+    else:
+        steps = CLOUD_DELEGATION.get(target, ())
+        roles = "; ".join(p.oci_policy if target == "oci" else p.cloud_roles(target))
+    return tuple(s.replace("{group}", group).replace("{roles}", roles) for s in steps)
+
+
+# ── Creating the groups in on-prem AD ────────────────────────────────────────
+#
+# Only names this catalog produces, only on an on-prem AD reached by its remote agent,
+# and only ever created — never given members, never deleted. The playbook
+# (builtin_playbooks/ad-ensure-groups.yml) re-checks the name pattern on the agent side.
+
+GROUP_JOB_ASSET = "builtin:ad-ensure-groups"
+GROUP_NAME_RE = r"^ent-(ad|aws|azure|gcp|oci)-[a-z0-9-]+$"
+_OU_RE = r"^(OU|CN)=[^,\"'\r\n\;<>]+(,(OU|CN|DC)=[^,\"'\r\n\;<>]+)*$"
+
+
+class GroupCreationError(Exception):
+    """A request the operator can fix. The message is shown as-is."""
+
+
+def plan_groups(keys: list, *, include_cloud: bool) -> list:
+    """``[{name, description, target, persona}]`` to ensure, from the selected bundle keys.
+    The AD target's groups always; a cloud target's only with ``include_cloud`` (for AD
+    that syncs to the IdP). Unknown keys are ignored; duplicates collapse."""
+    import re
+    out, seen = [], set()
+    for k in dict.fromkeys(keys or ()):
+        access, _, target = str(k).rpartition("-")
+        p = _BY_KEY.get(access)
+        if not p or target not in p.targets:
+            continue
+        if target != AD and not include_cloud:
+            continue
+        names = [group_name(p.key, target)]
+        if target == AD:
+            names += list(p.ad_extra)
+        for name in names:
+            name = name.lower()
+            if name in seen:
+                continue
+            if not re.match(GROUP_NAME_RE, name) or name.casefold() in PRIVILEGED_AD_GROUPS:
+                raise GroupCreationError(f"{name} is not a group this dashboard may create")
+            seen.add(name)
+            out.append({"name": name, "target": target, "persona": p.key,
+                        "description": (f"{p.label} — {TARGET_LABELS[target]}: {p.purpose} "
+                                        "Created by VM Dashboard for an Entitle bundle; "
+                                        "rights are delegated separately.")[:1024]})
+    return out
+
+
+def onprem_ad_directories(db) -> list:
+    """On-prem AD rows a group-creation run can target: registered, with an agent."""
+    from ..database import ManagedDirectory
+    rows = (db.query(ManagedDirectory)
+            .filter(ManagedDirectory.cloud == "local",
+                    ManagedDirectory.provider == "onprem_ad",
+                    ManagedDirectory.status == "available",
+                    ManagedDirectory.agent_id.isnot(None)).all())
+    return [{"id": r.id, "name": r.name, "host": r.host or ""} for r in rows]
+
+
+def _domain_dn(domain: str) -> str:
+    return ",".join(f"DC={part}" for part in (domain or "").split(".") if part)
+
+
+def check_ou(ou: str, domain: str) -> str:
+    """The OU DN, cleaned, or "" for the default container. Refuses anything that is not
+    a plain DN inside this domain."""
+    import re
+    ou = (ou or "").strip()
+    if not ou:
+        return ""
+    if len(ou) > 512 or not re.match(_OU_RE, ou, re.I):
+        raise GroupCreationError("The OU must be a distinguished name such as "
+                                 "OU=Entitle,OU=Groups,DC=corp,DC=example,DC=com.")
+    if not ou.lower().endswith(_domain_dn(domain).lower()):
+        raise GroupCreationError(f"The OU must be inside {domain} "
+                                 f"(end with {_domain_dn(domain)}).")
+    return ou
+
+
+def queue_group_creation(db, *, directory_id: str, keys: list, include_cloud: bool,
+                         ou: str, created_by: str) -> dict:
+    """Queue one ``agent_ansible`` run of ``ad-ensure-groups`` on the directory's agent.
+    Returns ``{job_id, groups, directory}``."""
+    from . import agent_ansible_meta, agent_service, job_service
+    from ..database import ManagedDirectory, RemoteAgent
+    row = db.query(ManagedDirectory).filter(ManagedDirectory.id == directory_id).first()
+    if not row or row.status == "deleted":
+        raise GroupCreationError("That directory is not registered.")
+    if row.cloud != "local" or row.provider != "onprem_ad":
+        raise GroupCreationError(
+            f"{row.name} is not an on-premises Active Directory reached through a remote "
+            "agent. Create the groups there with its own tools (AWS Managed AD: the "
+            "delegated admin account; GCP / Entra Domain Services: their admin consoles).")
+    if not row.host:
+        raise GroupCreationError(f"{row.name} has no domain controller host recorded.")
+    agent = db.query(RemoteAgent).filter(RemoteAgent.id == (row.agent_id or ""),
+                                         RemoteAgent.is_active.is_(True)).first()
+    if not agent:
+        raise GroupCreationError(f"{row.name} has no active remote agent.")
+    if "agent_ansible" not in agent_service.allowed_job_types(agent):
+        raise GroupCreationError(f"Agent '{agent.name}' is not granted Config Management, "
+                                 "which runs the group creation.")
+    if not agent_service.supports_directory(agent):
+        raise GroupCreationError(agent_service.directory_upgrade_hint(agent))
+    groups = plan_groups(keys, include_cloud=include_cloud)
+    if not groups:
+        raise GroupCreationError("None of the selected bundles has a group to create here "
+                                 "(tick 'also cloud groups' for the cloud bundles).")
+    path = check_ou(ou, row.name)
+    meta = agent_ansible_meta.normalize({
+        "description": f"Create {len(groups)} Entitle group(s) in {row.name} "
+                       f"(agent: {agent.name})",
+        "run_kind": "directory", "transport": "winrm",
+        "target_host": row.host, "target_port": 5986,
+        "target_id": row.id, "target_label": f"onprem_ad/{row.name}",
+        "asset": GROUP_JOB_ASSET, "asset_backend": "",
+        "extra_vars": {"ad_groups": [{"name": g["name"], "description": g["description"]}
+                                     for g in groups],
+                       "ad_groups_path": path},
+    })
+    problem = agent_ansible_meta.check(meta)
+    if problem:
+        raise GroupCreationError(problem)
+    job = job_service.create_job(db, job_type="agent_ansible", created_by=created_by,
+                                 workgroup="ansible", metadata=meta, agent_id=agent.id)
+    return {"job_id": job.id, "groups": groups, "directory": row.name, "ou": path}
+
+
 def bundle_key(access_key: str, cloud: str) -> str:
     return f"{access_key}-{cloud}"
 
@@ -288,6 +502,7 @@ def catalog() -> list:
                 "oci_policy": list(p.oci_policy) if cloud == "oci" else [],
                 "dashboard_groups": list(p.dashboard_groups(cloud)),
                 "category": CATEGORIES[cloud],
+                "delegation": list(delegation_steps(p, cloud)),
             })
     return out
 

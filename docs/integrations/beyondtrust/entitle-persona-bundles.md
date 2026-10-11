@@ -53,6 +53,9 @@ on-premises, so their bundles target **on-prem AD** instead of a cloud:
 | OT break-glass | `ent-ad-ot-breakglass` | full control of the OT cell | `ot-delete`, `connections-read` | two approvers · 1 h |
 | Hypervisor admin | `ent-ad-hypervisor` | the admin role in vCenter, Hyper-V, Proxmox, Nutanix and XCP-ng, through their AD identity source | `vsphere-write`, `hyperv-write`, `proxmox-write`, `nutanix-write`, `xcpng-write` | one approver · 1–12 h |
 
+The exact steps for each group are under [Delegating rights](#delegating-rights), and
+the bundle card can [create the groups](#creating-the-groups) for you.
+
 **Only your own delegated groups.** The AD bundles never include a built-in group. The
 catalog is pinned to `ent-ad-*` names by a test. At run time, resolution also refuses to
 match the built-in groups that are tier 0 or reach domain controllers, even if one is
@@ -84,12 +87,11 @@ dashboard registers when it builds a database. See [Entitle](entitle.md).
 
 ## Setting it up
 
-1. **Create the groups** in your directory: `ent-aws-cloudops`, `ent-azure-dba`, and so
-   on, for the bundles you want. Map each one to the cloud's access through SSO:
-   - **AWS:** an IAM Identity Center assignment of the matching permission set.
-   - **Azure:** an Azure role assignment to the group.
-   - **GCP:** a Workforce Identity Federation principal set, bound to the roles.
-   - **OCI:** an identity domain group, with the policy above.
+1. **Create the groups** — `ent-aws-cloudops`, `ent-azure-dba`, `ent-ad-itops` and so on,
+   for the bundles you want. On an on-premises AD, the bundle card can do this for you
+   (see [Creating the groups](#creating-the-groups)); elsewhere, create them in your IdP
+   or directory. Then give each group its rights — see
+   [Delegating rights](#delegating-rights). A group with no delegation grants nothing.
 2. **Create a virtual application** over those groups (see
    [Entitle virtual applications](entitle-virtual-apps.md)). Groups that follow the
    naming convention are tagged with their persona and cloud automatically, and that tag
@@ -105,11 +107,117 @@ dashboard registers when it builds a database. See [Entitle](entitle.md).
    the tenant.
 5. Set the three **tier workflows**, as described in
    [virtual applications](entitle-virtual-apps.md#tiers).
-6. **For the on-prem AD bundles:** create the `ent-ad-<persona>` groups and delegate
-   their rights (see the table above). Register the AD on **Directories** and pin its
+6. **For the on-prem AD bundles:** register the AD on **Directories** and pin its
    Entitle integration. If exactly one AD directory has an integration pinned, the AD
    target uses it automatically. If several do, pick one in the **On-prem AD** box of the
    bundle card. Until you do, the AD bundles report the ambiguity rather than picking one.
+
+## Creating the groups
+
+**Create missing groups in on-prem AD**, on the bundle card, creates the groups for the
+bundles you have ticked:
+
+- always the `ent-ad-*` groups of the ticked on-prem AD bundles;
+- with **Also create the cloud bundles' groups** ticked, the `ent-aws-*`, `ent-azure-*`,
+  `ent-gcp-*` and `ent-oci-*` groups of the ticked cloud bundles too. Tick this when your
+  AD is the source your IdP syncs from (Entra Connect or Cloud Sync, the Okta AD agent,
+  Google Cloud Directory Sync), so the cloud groups are mastered in AD like the rest.
+
+Each is created as an empty **global security group**, in the OU you name (blank = the
+domain's default Users container), with a description naming the bundle. Pick the
+directory from the on-premises Active Directory rows that have a remote agent.
+
+How it runs: one Config Management job, `builtin:ad-ensure-groups`, on the directory's
+remote agent, over WinRM HTTPS (5986) to the directory's domain controller — the same
+path the dashboard uses to join servers to the domain. WinRM and the AD module both use
+the directory's Password Safe account, checked out for that run only. **That account
+needs *Create group objects* (and *Write description*) on the target OU** — delegate it
+with **Active Directory Users and Computers → the OU → Delegate Control**, or:
+
+```powershell
+dsacls "OU=Entitle,OU=Groups,DC=corp,DC=example,DC=com" /G "CORP\svc-dashboard:CC;group"
+dsacls "OU=Entitle,OU=Groups,DC=corp,DC=example,DC=com" /I:S /G "CORP\svc-dashboard:WP;description;group"
+```
+
+What it never does:
+
+- **set members** — membership is Entitle's to grant;
+- **delete or rename a group**, or change an existing group other than its description —
+  running it twice is a no-op;
+- **create any name outside `ent-<target>-<persona>`** — names come from the catalog for
+  the bundles you ticked, never from the request, and the playbook re-checks the pattern
+  on the agent before it touches AD;
+- **run against managed AD** (AWS Managed Microsoft AD, GCP Managed AD, Entra Domain
+  Services) — those are not reached through a remote agent. Create the groups there with
+  the service's delegated admin account.
+
+The dashboard does not create groups in Entra ID, Okta or PingOne (see
+[identity providers](../../directories/identity-providers.md)), nor the `dashboard-*`
+groups, which come from the [user-JIT bootstrap](entitle-dashboard-permissions.md).
+
+The run is audited as `entitle_groups_create`, with the directory, OU, job and group
+names. After it finishes, wait for Entitle's next sync of the AD integration (or trigger
+one), then do the delegation below and **Preview** again.
+
+## Delegating rights
+
+A new group grants nothing until it is given rights where the work happens. These are
+the steps for each bundle; the same text is shown under **Delegation** on each cell of
+the bundle card. Replace `CORP`, the OU paths, accounts and projects with your own.
+
+### IT engineer — On-prem AD (`ent-ad-itops`)
+
+1. Delegate on the user OUs: Reset password, and Read/Write pwdLastSet and lockoutTime — `dsacls "OU=Users,DC=corp,DC=example,DC=com" /I:S /G "CORP\ent-ad-itops:CA;Reset Password;user"`.
+2. Delegate on the server and workstation OUs: Create/Delete Computer objects, and Validated write to DNS host name and service principal name.
+3. Let the group read Windows LAPS passwords on those OUs: `Set-LapsADReadPasswordPermission -Identity "OU=Servers,DC=corp,DC=example,DC=com" -AllowedPrincipals "CORP\ent-ad-itops"`.
+4. Make the group local Administrators on the managed servers with a GPO (Computer Configuration → Preferences → Local Users and Groups) linked only to those OUs.
+5. Never nest it in Domain Admins, Account Operators or Server Operators.
+
+### OT / ICS engineer — On-prem AD (`ent-ad-ot`)
+
+1. Add the group to the local Remote Desktop Users group on the OT jump hosts and engineering workstations, with a GPO linked only to the OT OU.
+2. In that GPO grant "Allow log on through Remote Desktop Services" to the group; on the rest of the domain deny it ("Deny log on through Remote Desktop Services").
+3. In Privileged Remote Access, map the group to the OT jump group's group policy, so PRA sessions follow the same membership.
+
+### OT break-glass — On-prem AD (`ent-ad-ot-breakglass`)
+
+1. Add the group to the local Administrators group on the OT jump hosts and engineering workstations, with a GPO linked only to the OT OU.
+2. Allow RDP for it there as for ent-ad-ot; deny interactive logon everywhere else.
+3. Alert on any membership change of this group (event 4728/4729 on the DCs).
+
+### Hypervisor admin — On-prem AD (`ent-ad-hypervisor`)
+
+1. vCenter: add AD as an identity source (Administration → Single Sign On → Configuration), then Administration → Global Permissions → add CORP\ent-ad-hypervisor with the Administrator role and "Propagate to children".
+2. Hyper-V: add the group to each host's LOCAL Hyper-V Administrators group with a GPO linked to the Hyper-V hosts' OU — not to the domain built-in group.
+3. Proxmox: Datacenter → Permissions → Realms → add an Active Directory realm, sync groups, then give ent-ad-hypervisor the Administrator role on path /.
+4. Nutanix Prism Central: Authentication → add the AD directory, then Role Mapping → ent-ad-hypervisor → Cluster Admin.
+5. XCP-ng (Xen Orchestra): Settings → Plugins → auth-ldap pointed at AD, then give ent-ad-hypervisor the admin permission.
+
+### Cloud bundles
+
+The cloud groups get their rights on the cloud side. The steps are the same for every
+persona; only the group and its roles change (the roles are in [the catalog](#the-catalog)).
+Using Cloud Ops as the example:
+
+**AWS** (`ent-aws-cloudops`)
+
+1. If AD is your IAM Identity Center source (AD Connector / Managed AD) or syncs to your IdP, wait for ent-aws-cloudops to appear in Identity Center.
+2. IAM Identity Center → AWS accounts → the account(s) → Assign users or groups → ent-aws-cloudops → a permission set holding: AmazonEC2FullAccess; ReadOnlyAccess.
+
+**Azure** (`ent-azure-cloudops`)
+
+1. Let Entra Connect / Cloud Sync carry ent-azure-cloudops to Entra ID (or create it there).
+2. Subscription or resource group → Access control (IAM) → Add role assignment → Virtual Machine Contributor; Reader → assign to the group ent-azure-cloudops.
+
+**GCP** (`ent-gcp-cloudops`)
+
+1. Sync ent-gcp-cloudops to your Workforce Identity pool's IdP (Entra, Okta) or to Cloud Identity with Google Cloud Directory Sync.
+2. Grant the roles to the group: `gcloud projects add-iam-policy-binding PROJECT --member="principalSet://iam.googleapis.com/locations/global/workforcePools/POOL/group/ent-gcp-cloudops" --role=ROLE` for each of: roles/compute.instanceAdmin.v1; roles/viewer.
+
+**OCI** (`ent-oci-cloudops`)
+
+1. Federate the OCI identity domain with your IdP (or AD through it) and map ent-oci-cloudops to an identity-domain group of the same name.
+2. Identity → Policies → a policy allowing the group: manage instance-family in compartment <c>; read all-resources in compartment <c>.
 
 ## Why a bundle is not ready
 
@@ -135,6 +243,7 @@ PUT    /api/entitle/persona-bundles/clouds             {"cloud", "integration_id
 POST   /api/entitle/persona-bundles/preview            {"keys": ["cloudops-aws", ...]}
 POST   /api/entitle/persona-bundles/apply              {"keys": [...]}
 DELETE /api/entitle/persona-bundles/sets/{id}
+POST   /api/entitle/persona-bundles/create-groups      {"directory_id", "keys", "include_cloud", "ou"}
 ```
 
 All of these are administrator-only. Bundle keys are `<persona>-<target>`, for example
@@ -142,7 +251,7 @@ All of these are administrator-only. Bundle keys are `<persona>-<target>`, for e
 directories that have an Entitle integration pinned, and `clouds` accepts only one of
 those.
 
-The audit log records `entitle_cloud_pin`, `entitle_bundles_apply` (with the skipped
+The audit log records `entitle_cloud_pin`, `entitle_groups_create`, `entitle_bundles_apply` (with the skipped
 bundles and their reasons) and `entitle_bundles_delete`.
 
 The bundles are created through the `entitleio/entitle` provider's `entitle_bundle`

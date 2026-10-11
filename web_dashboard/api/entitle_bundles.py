@@ -6,6 +6,7 @@
   POST   /api/entitle/persona-bundles/preview            — resolve the selected bundles
   POST   /api/entitle/persona-bundles/apply              — resolve again, apply the ready ones
   DELETE /api/entitle/persona-bundles/sets/{id}          — remove an applied set
+  POST   /api/entitle/persona-bundles/create-groups      — create missing ent-* groups in AD
 
 Administrator-only, like the rest of the Entitle panel: a bundle is standing
 infrastructure in the tenant that decides what people can request. ``apply`` resolves the
@@ -43,6 +44,13 @@ class KeysRequest(BaseModel):
     keys: List[str]
 
 
+class CreateGroupsRequest(BaseModel):
+    directory_id: str
+    keys: List[str]
+    include_cloud: bool = False
+    ou: str = ""
+
+
 class CloudPin(BaseModel):
     cloud: str
     integration_id: str = ""
@@ -57,6 +65,7 @@ def overview(db: Session = Depends(get_db), user: User = Depends(require_admin))
         "catalog": bundles.catalog(),
         "clouds": bundles.cloud_settings(),
         "sets": bundles.list_sets(db),
+        "ad_directories": bundles.onprem_ad_directories(db),
         "tiers": [{"id": t, "label": entitle_tiers.TIER_LABELS[t],
                    "workflow_set": bool(flows[t]["id"]),
                    "workflow_fallback": flows[t]["fallback"]} for t in entitle_tiers.TIERS],
@@ -162,3 +171,20 @@ def delete_set(set_id: str, db: Session = Depends(get_db), user: User = Depends(
     job_service.log_audit(db, user.username, "entitle_bundles_delete",
                           details={"set_id": bset.id})
     return {"set": bundles.set_to_dict(bset), "job_id": job.id}
+
+
+@router.post("/create-groups", status_code=202)
+def create_groups(req: CreateGroupsRequest, db: Session = Depends(get_db),
+                  user: User = Depends(require_admin)):
+    """Queue the built-in ``ad-ensure-groups`` run on the directory's remote agent. Group
+    names come from the catalog for the selected bundles, never from the request."""
+    try:
+        out = bundles.queue_group_creation(
+            db, directory_id=req.directory_id, keys=req.keys,
+            include_cloud=req.include_cloud, ou=req.ou, created_by=user.username)
+    except bundles.GroupCreationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    job_service.log_audit(db, user.username, "entitle_groups_create", details={
+        "directory": out["directory"], "ou": out["ou"], "job_id": out["job_id"],
+        "groups": [g["name"] for g in out["groups"]]})
+    return out

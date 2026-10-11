@@ -14,7 +14,11 @@ What these pin:
   groups; a partial component blocks its bundle, an ambiguous role is reported rather
   than picked, and a bundle with no cloud access is not ready;
 - the API is administrator-only, applies only the bundles that are ready, and the job
-  stores the bundle ids.
+  stores the bundle ids;
+- every bundle carries delegation steps, and group creation takes names only from the
+  catalog, runs only on an on-prem AD through its agent, accepts only an OU inside the
+  domain, and queues the built-in ad-ensure-groups playbook — which never sets members
+  or removes a group.
 
 Real temp SQLite; Entitle stubbed with httpx.MockTransport; Terraform never runs.
 
@@ -250,6 +254,150 @@ def test_ad_target_uses_the_pinned_directory_and_never_a_builtin():
     finally:
         db.query(ManagedDirectory).delete()
         db.query(EntitleVirtualApp).delete()
+        db.commit()
+        db.close()
+
+
+# ── Delegation and group creation ────────────────────────────────────────────
+
+def test_every_bundle_has_delegation_steps_with_names_filled_in():
+    for r in bundles.catalog():
+        assert r["delegation"], f"{r['key']} has no delegation steps"
+        text = " ".join(r["delegation"])
+        assert "{group}" not in text and "{roles}" not in text
+        assert r["group"] in text or r["cloud"] == "ad", r["key"]
+
+
+def test_the_docs_print_exactly_the_catalogs_delegation_steps():
+    path = os.path.join(_ROOT, "docs", "integrations", "beyondtrust", "entitle-persona-bundles.md")
+    with open(path, encoding="utf-8") as fh:
+        doc = fh.read()
+    for p in bundles.CATALOG:
+        targets = [bundles.AD] if bundles.AD in p.targets else []
+        if p.key == "cloudops":
+            targets += list(bundles.CLOUDS)
+        for t in targets:
+            for step in bundles.delegation_steps(p, t):
+                assert step in doc, f"docs lack {p.key}/{t} step: {step[:60]}"
+
+
+def test_plan_groups_only_from_the_catalog():
+    import re
+    ad_only = bundles.plan_groups(["itops-ad", "cloudops-aws", "nope-ad", "itops-ad"],
+                                  include_cloud=False)
+    assert [g["name"] for g in ad_only] == ["ent-ad-itops"]
+    both = bundles.plan_groups(["itops-ad", "cloudops-aws", "dba-oci"], include_cloud=True)
+    assert [g["name"] for g in both] == ["ent-ad-itops", "ent-aws-cloudops", "ent-oci-dba"]
+    for g in bundles.plan_groups([b["key"] for b in bundles.catalog()], include_cloud=True):
+        assert re.match(bundles.GROUP_NAME_RE, g["name"]), g["name"]
+        assert g["name"] not in bundles.PRIVILEGED_AD_GROUPS
+
+
+def test_check_ou_accepts_only_a_dn_inside_the_domain():
+    ok = "OU=Entitle,OU=Groups,DC=corp,DC=example,DC=com"
+    assert bundles.check_ou(ok, "corp.example.com") == ok
+    assert bundles.check_ou("", "corp.example.com") == ""
+    for bad in ('OU=x",DC=corp,DC=example,DC=com', "OU=x\nDC=corp,DC=example,DC=com",
+                "OU=x,DC=other,DC=com", "Entitle", "OU=a;rm,DC=corp,DC=example,DC=com"):
+        try:
+            bundles.check_ou(bad, "corp.example.com")
+        except bundles.GroupCreationError:
+            continue
+        raise AssertionError(f"accepted OU {bad!r}")
+
+
+def _agent(db, version="2.8.0"):
+    import uuid
+    from datetime import datetime
+    from web_dashboard.database import RemoteAgent
+    a = RemoteAgent(id=str(uuid.uuid4()), name=f"agent-{uuid.uuid4().hex[:6]}",
+                    agent_version=version, is_active=True,
+                    public_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIent",
+                    last_seen_at=datetime.utcnow(), created_at=datetime.utcnow())
+    db.add(a)
+    db.commit()
+    return a
+
+
+def test_group_creation_queues_the_builtin_on_the_directorys_agent():
+    _setup()
+    from web_dashboard.database import Job
+    db = SessionLocal()
+    try:
+        agent = _agent(db)
+        onprem = ManagedDirectory(name="corp.example.com", cloud="local", provider="onprem_ad",
+                                  source="registered", status="available", created_by="root",
+                                  host="dc1.corp.example.com", agent_id=agent.id)
+        managed = ManagedDirectory(name="aws.example.com", cloud="aws",
+                                   provider="aws_managed_ad", source="registered",
+                                   status="available", created_by="root")
+        db.add_all([onprem, managed])
+        db.commit()
+        assert [d["id"] for d in bundles.onprem_ad_directories(db)] == [onprem.id]
+
+        out = bundles.queue_group_creation(
+            db, directory_id=onprem.id, keys=["itops-ad", "cloudops-aws"],
+            include_cloud=True, ou="OU=Entitle,DC=corp,DC=example,DC=com", created_by="root")
+        job = db.query(Job).filter(Job.id == out["job_id"]).one()
+        meta = job.metadata_dict
+        assert job.job_type == "agent_ansible" and job.agent_id == agent.id
+        assert meta["asset"] == "builtin:ad-ensure-groups"
+        assert meta["run_kind"] == "directory" and meta["transport"] == "winrm"
+        assert meta["target_host"] == "dc1.corp.example.com" and meta["target_id"] == onprem.id
+        assert [g["name"] for g in meta["extra_vars"]["ad_groups"]] == \
+            ["ent-ad-itops", "ent-aws-cloudops"]
+        assert meta["extra_vars"]["ad_groups_path"] == "OU=Entitle,DC=corp,DC=example,DC=com"
+
+        for kwargs, why in (
+                ({"directory_id": managed.id}, "not an on-premises"),
+                ({"directory_id": onprem.id, "keys": ["cloudops-aws"]}, "None of the selected"),
+                ({"directory_id": onprem.id, "ou": "OU=x,DC=evil,DC=com"}, "inside")):
+            args = {"keys": ["itops-ad"], "include_cloud": False, "ou": "",
+                    "created_by": "root", **kwargs}
+            try:
+                bundles.queue_group_creation(db, **args)
+            except bundles.GroupCreationError as e:
+                assert why in str(e), (why, str(e))
+            else:
+                raise AssertionError(f"queued: {why}")
+    finally:
+        db.query(ManagedDirectory).delete()
+        db.commit()
+        db.close()
+
+
+def test_the_builtin_playbook_only_ever_creates():
+    from web_dashboard.services import agent_ansible_bundle
+    assert "ad-ensure-groups" in agent_ansible_bundle.BUILTIN_PLAYBOOKS
+    text = agent_ansible_bundle.builtin_playbook("builtin:ad-ensure-groups")
+    body = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+    assert "members:" not in body and "state: absent" not in body
+    assert "state: present" in body and "no_log: true" in body
+    assert bundles.GROUP_NAME_RE in body, "the agent side re-checks the same name pattern"
+
+
+def test_create_groups_api_is_admin_only_and_audited():
+    _setup()
+    db = SessionLocal()
+    try:
+        agent = _agent(db)
+        row = ManagedDirectory(name="corp.example.com", cloud="local", provider="onprem_ad",
+                               source="registered", status="available", created_by="root",
+                               host="dc1.corp.example.com", agent_id=agent.id)
+        db.add(row)
+        db.commit()
+        body = {"directory_id": row.id, "keys": ["ot-ad"]}
+        assert _client(_User(False)).post("/api/entitle/persona-bundles/create-groups",
+                                          json=body).status_code == 403
+        r = _client(_User(True)).post("/api/entitle/persona-bundles/create-groups", json=body)
+        assert r.status_code == 202, r.text
+        assert [g["name"] for g in r.json()["groups"]] == ["ent-ad-ot"]
+        db.expire_all()
+        assert db.query(AuditLog).filter(AuditLog.action == "entitle_groups_create").count() == 1
+        over = _client(_User(True)).get("/api/entitle/persona-bundles").json()
+        assert over["ad_directories"][0]["id"] == row.id
+    finally:
+        db.query(ManagedDirectory).delete()
         db.commit()
         db.close()
 
