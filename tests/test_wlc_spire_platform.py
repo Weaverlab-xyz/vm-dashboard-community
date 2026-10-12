@@ -68,9 +68,9 @@ def test_the_token_file_is_read_fresh_every_call():
     os.environ["SPIFFE_TOKEN_DIR"] = d
     try:
         with _config(**ON):
-            open(path, "w").write("a.b.c\n")
+            open(path, "w", encoding="utf-8").write("a.b.c\n")
             assert wlc._workload_token() == "a.b.c"
-            open(path, "w").write("d.e.f")
+            open(path, "w", encoding="utf-8").write("d.e.f")
             assert wlc._workload_token() == "d.e.f"
             assert wlc._auth_headers() == {"Authorization": "Bearer d.e.f",
                                            "X-BT-Service-Name": "svc"}
