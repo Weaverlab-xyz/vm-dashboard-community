@@ -8,10 +8,19 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .collectors import agents, bt_tenants, directories, entitle, pra_gateways, ps_accounts
+from .collectors import (agents, bt_tenants, directories, entitle, pra_gateways, ps_accounts,
+                         resources)
 from .core import Collector
 
 COLLECTORS = (
+    Collector(
+        area="resources", label="Resources", collect=resources.collect,
+        interval_minutes=30,
+        personas=("cloudops", "devops", "dba", "sre", "finops", "hypervisor", "itops",
+                  "aiops"),
+        description="Everything the dashboard built or registered: whether the cloud still "
+                    "has it and it is running, and its Password Safe, PRA and Entitle "
+                    "wiring."),
     Collector(
         area="beyondtrust", label="BeyondTrust tenants", collect=bt_tenants.collect,
         interval_minutes=30, flags=("pra_enabled", "password_safe_enabled"),

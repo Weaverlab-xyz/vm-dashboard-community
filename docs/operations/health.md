@@ -17,6 +17,7 @@ An area appears once the integration it covers is turned on.
 
 | Area | Checks | Every | Shown when |
 |---|---|---|---|
+| **Resources** | everything on [Inventory](../inventory.md) except directories: whether the cloud still has it and it is running, and its access wiring (see [below](#resources)) | 30 min | always |
 | **BeyondTrust tenants** | each PRA and Password Safe credential still gets a token, the same handshake as **Verify** on the tenant. The result is recorded on the tenant too | 30 min | PRA or Password Safe is on |
 | **PRA Gateways** | each Gateway PRA knows about has a connected node, and each Gateway host the dashboard deployed is running (the reconcile pass's *degraded* and *missing* included) | 15 min | PRA is on |
 | **Password Safe accounts** | every account the dashboard onboarded still exists and is rotating: database accounts, Kubernetes tokens, directory administrators, lab and workload accounts | 60 min | Password Safe is on |
@@ -26,6 +27,38 @@ An area appears once the integration it covers is turned on.
 
 On an estate instance with no BeyondTrust tenant rows, the tenant and Gateway areas check
 the PRA and Password Safe settings the instance already uses.
+
+## Resources
+
+Every object the dashboard built or registered gets a row under the same id as on
+**Inventory**.
+
+| Object | Infrastructure check | Read from |
+|---|---|---|
+| Cloud VMs (AWS, Azure, GCP, OCI) | still exists, running, and on AWS the system and instance status checks and any scheduled event | one `DescribeInstances` and `DescribeInstanceStatus` per region; the Azure instance view; one aggregated instance list per GCP project; the OCI instance |
+| Managed databases | the server's state | one `DescribeDBInstances` per region (RDS); the Cloud SQL instance list; the Azure Flexible Server or SQL server resource |
+| Managed Kubernetes | the cluster's status and each node group or pool | EKS `DescribeCluster` and node groups; the GKE cluster; one AKS list per subscription |
+| Hypervisor VMs | power state as of the last inventory sync | the hypervisor sync's cache, with no extra call |
+| Labs, workload credentials, functions, desktops, POVs | the state the dashboard recorded | the dashboard's own rows |
+
+**Stopped VMs.** A stopped VM is healthy when something in the dashboard stopped it: a
+power action from the dashboard, a suspend schedule, or a spend cap. A VM stopped
+anywhere else is degraded. A VM the cloud no longer has is failing, because the
+dashboard still lists it and still manages access to it.
+
+Each object also shows its access wiring, where it was set up:
+
+- Password Safe onboarding;
+- the PRA jump item or tunnel;
+- the Entitle integration.
+
+Wiring that was never asked for is not reported. A recorded onboarding failure, an
+auto-delete less than a day away, or a spend cap reached makes the object degraded.
+Whether a Password Safe account is actually rotating is the **Password Safe accounts**
+area's job.
+
+If a cloud cannot be asked (an expired credential, a missing permission), its objects
+show unknown for that run. They are not marked failed.
 
 ## Reading it
 

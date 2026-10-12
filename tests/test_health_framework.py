@@ -175,7 +175,7 @@ def test_the_snapshot_orders_by_persona_and_hides_nothing():
         iam = [a["area"] for a in runner.snapshot(db, persona="iamops")["areas"]]
     assert sorted(plain) == sorted(iam), "a persona changed WHICH areas are shown"
     assert iam[:3] == ["password_safe", "remote_agents", "directories"], iam
-    assert plain[0] == "beyondtrust"
+    assert plain[0] == "resources"
     db.close()
 
 
