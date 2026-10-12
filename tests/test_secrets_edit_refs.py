@@ -90,6 +90,7 @@ class _FakeGcp:
 
 sbs._azure_kv_client = lambda: (_FakeKv(), "https://kv.example/")
 sbs._gcp_client = lambda: _FakeGcp()
+sbs._aws_sm_client = lambda region: _FakeSm()
 
 
 def _reset(**cfg):
