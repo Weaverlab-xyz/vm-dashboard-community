@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Optional
 
 from .collectors import (agents, bt_tenants, cloud_ops, directories, entitle, hypervisors,
-                         pra_gateways, ps_accounts, resources)
+                         pra_gateways, ps_accounts, resources, workloads)
 from .core import Collector
 
 COLLECTORS = (
@@ -58,6 +58,16 @@ COLLECTORS = (
         personas=("cloudops", "finops", "dba", "security", "idarch"),
         description="Whether just-in-time access is reconciling, and the virtual "
                     "applications and bundles the dashboard applied."),
+    Collector(
+        area="workloads", label="Workload credentials", collect=workloads.collect,
+        interval_minutes=30,
+        flags=("workload_credentials_enabled", "password_safe_enabled", "spire_lab_enabled",
+               "agentcell_enabled", "mcp_server_enabled"),
+        personas=("sre", "devops", "aiops", "security"),
+        description="Whether the credentials the dashboard hands to workloads are being "
+                    "issued and rotated: Workload Credentials leases, Kubernetes "
+                    "ServiceAccount tokens in Password Safe, SPIRE labs, agent cells and "
+                    "integration tokens."),
     Collector(
         area="remote_agents", label="Remote agents", collect=agents.collect,
         interval_minutes=5, flags=("remote_agents_enabled",),
