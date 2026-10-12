@@ -2592,6 +2592,46 @@ class DirectoryHealth(Base):
     probe_queued_at = Column(DateTime, nullable=True)
 
 
+class HealthCheck(Base):
+    """The last health of one object, in one health area (``services/health``).
+
+    The general form of :class:`DirectoryHealth`: one row per ``(area, object_id)``,
+    overwritten by the area's collector, so the Health page is one query and no provider
+    calls. ``object_id`` is the collector's own stable id for the object (a tenant id, a
+    gateway id, an inventory item id). ``checks`` is a JSON list of
+    ``{key, label, status, detail}``, exactly as on DirectoryHealth.
+
+    Infrastructure health only, by the same rule: nothing here describes accounts, groups
+    or privilege. That is BeyondTrust Identity Security Insights' data.
+    """
+    __tablename__ = "health_checks"
+
+    area = Column(String(32), primary_key=True)
+    object_id = Column(String(160), primary_key=True)
+    name = Column(String(255), nullable=False, default="")
+    kind = Column(String(64), nullable=True)          # what the object is, for display
+    href = Column(String(255), nullable=True)         # where to act on it
+    status = Column(String(16), nullable=False, default="unknown", index=True)
+    checks = Column(Text, nullable=True)
+    checked_at = Column(DateTime, nullable=True)
+
+
+class HealthArea(Base):
+    """When each health area's collector last ran, and how that went.
+
+    Separate from the rows because a collector can fail as a whole -- Password Safe down,
+    say -- and that must read as "could not check", not as every account failing. A failed
+    run records ``last_error`` here and leaves the area's rows as they were.
+    """
+    __tablename__ = "health_areas"
+
+    area = Column(String(32), primary_key=True)
+    last_run_at = Column(DateTime, nullable=True)
+    last_ok_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+
+
 class EntitleVirtualApp(Base):
     """An Entitle **Virtual Application** the dashboard created over a directory's groups.
 

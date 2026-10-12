@@ -172,6 +172,9 @@
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/agents') or request.url.path == '/connections' %}{{ nav_active }}{% endif %}">Agents</a>
 {% endif %}
+<a x-show="$store.auth.isAdmin" data-nav="health" href="/health"
+   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+   {% if request.url.path == '/health' %}{{ nav_active }}{% endif %}">Health</a>
 <a x-show="$store.auth.isAdmin" data-nav="audit" href="/audit"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/audit') %}{{ nav_active }}{% endif %}">Audit</a>
