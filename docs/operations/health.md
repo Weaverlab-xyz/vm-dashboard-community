@@ -24,6 +24,7 @@ An area appears once the integration it covers is turned on.
 | **PRA Gateways** | each Gateway PRA knows about has a connected node, and each Gateway host the dashboard deployed is running (the reconcile pass's *degraded* and *missing* included) | 15 min | PRA is on |
 | **Password Safe accounts** | every account the dashboard onboarded still exists and is rotating: database accounts, Kubernetes tokens, directory administrators, lab and workload accounts | 60 min | Password Safe is on |
 | **Entitle** | the just-in-time reconciliation sweep is running, has no failing cloud leg and no orphaned grants, and the virtual applications and persona bundles the dashboard applied are not *failed* | 15 min | Entitle is on |
+| **Workload credentials** | the credentials the dashboard hands to workloads. Each Workload Credentials lease the dashboard runs on: failing while its issue attempts fail (with when it retries), degraded when it expired and was not renewed. Each Kubernetes ServiceAccount token in Password Safe: failing when the vault holds the placeholder rather than a working token, or the PRA Vault mirror is unlinked; degraded when there is no mirror (one Password Safe read per cluster). Each SPIRE lab: admin SVID expired (failing) or inside a day (degraded), no trust bundle, the k3s link or federation failed. Each agent cell: its agent's token revoked or expired (failing) or inside a day (degraded). Integration tokens used in the last 30 days that expire within a week, by name only | 30 min | Workload Credentials, Password Safe, SPIRE lab, agent cells or the MCP server is on |
 | **Remote agents** | each agent is polling, and is new enough for the directories bound to it | 5 min | Remote agents are on |
 | **Directories** | the [Directory health](../directories/health.md) page's results, shown here too. That page keeps its own schedule | 5 min | Directories is on |
 
@@ -101,5 +102,6 @@ directories. No area is ever hidden by a focus.
 
 It never lists accounts, groups, roles, grants or privilege. A Password Safe row names
 the resource whose account it is and says whether it is rotating, never the account or
-its credential. Identity posture is BeyondTrust Identity Security Insights' data, and the
+its credential. The integration tokens row names tokens, never who owns them, and
+ignores tokens nobody uses. Identity posture is BeyondTrust Identity Security Insights' data, and the
 dashboard does not collect a second copy of it.
