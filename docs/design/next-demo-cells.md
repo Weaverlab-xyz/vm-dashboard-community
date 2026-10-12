@@ -428,10 +428,11 @@ Three details the build turned up:
 * **The file platforms are never memoised.** The platform rotates a projected token in
   place, the read is local, and a memo would be the only thing capable of serving a stale
   one.
-* **ECS cannot use this mode at all**, and that is the one real limit. An ECS task — like a
+* **ECS has no platform token**, and that is the one real limit. An ECS task — like a
   plain EC2 instance — gets SigV4 credentials and a signed instance identity document, and
   no endpoint there issues an OIDC token. Only EKS projects one, via IRSA or Pod Identity.
-  A dashboard on ECS stays on a stored PAT; the panel says so before the choice is made and
+  A dashboard on ECS uses the `spire` platform (its own SPIFFE identity) or stays on a stored
+  PAT; the panel says so before the choice is made and
   the error says so after.
 
 ### Still unproven

@@ -154,23 +154,23 @@ running as a managed container on Azure Container Apps, GCP Cloud Run or AWS ECS
 | `gcp` | the metadata server's instance identity endpoint | returns the JWT as **plain text** |
 | `aws` | a projected token file — `AWS_WEB_IDENTITY_TOKEN_FILE` (IRSA) or `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` (Pod Identity) | **EKS only**, see below |
 | `file` | any other projected token on disk | the Kubernetes ServiceAccount token every cluster mounts |
+| `spire` | `wlc.jwt`, which the dashboard's own SPIRE server mints | **no cloud needed**: on-prem, Docker on a VM, ECS. See [the dashboard's own identity](../oidc/dashboard-identity.md#beyondtrust-workload-credentials) |
 
-> **ECS cannot use this mode.** An ECS task and a plain EC2 instance get SigV4
-> credentials and a signed instance identity document — neither is an OIDC token,
-> and no endpoint there will issue one. Only EKS projects a real one. A dashboard
-> on ECS stays on a stored PAT, and the error says so rather than reporting a
-> missing file.
+> **ECS cannot use the `aws` platform.** An ECS task and a plain EC2 instance get
+> SigV4 credentials and a signed instance identity document — neither is an OIDC
+> token, and no endpoint there will issue one. Only EKS projects a real one. A
+> dashboard on ECS uses the `spire` platform or stays on a stored PAT, and the
+> error says so rather than reporting a missing file.
 
 The older spelling `entra` for this mode still reads as `workload`, so an install
 configured before it covered more than Azure keeps working untouched. The same
 goes for `wlc_entra_resource`, which is read as the audience when
 `wlc_identity_audience` is unset.
 
-> **The agent cell's worker is ahead of this table, and goes further than reading.**
-> `examples/playbooks/agent/files/mcp_agent.py` offers a fifth platform the dashboard
-> does not — `spire`, a JWT-SVID from the SPIRE agent on its own host, which needs no
-> cloud underneath it at all — and it calls **`generate`**, not just the static reads
-> above. `--cloud-episode` mints a short-lived AWS or Azure credential against a dynamic
+> **The agent cell's worker goes further than reading.**
+> `examples/playbooks/agent/files/mcp_agent.py` has its own `spire` platform — a
+> JWT-SVID from the SPIRE agent on its own host, for the agent's identity rather than
+> the dashboard's — and it calls **`generate`**, not just the static reads above. `--cloud-episode` mints a short-lived AWS or Azure credential against a dynamic
 > secret on whichever of those five platforms vouches for the machine. Neither the
 > extra platform nor the mint has run against a live tenant; both need the same manual
 > Pathfinder registration described below.
@@ -184,9 +184,9 @@ design: something that could register its own trust would be holding a
 credential that creates credentials. Pathfinder offers three issuer categories —
 **GitHub Actions** (a CI workflow, pinned to `owner/repo` and optionally to
 immutable org/repo IDs), **Azure Entra ID**, and **Custom IDP** (any OIDC issuer,
-scoped by explicit AND-matched claim conditions). The dashboard wires the Azure
-one, because the thing being authenticated is an Azure-hosted container; the
-other two describe workloads that are not this process.
+scoped by explicit AND-matched claim conditions). The Azure platform registers
+as Azure Entra ID; every other platform, the dashboard's own SPIFFE identity
+included, registers as a Custom IDP.
 
 Full walkthrough, including the v1-versus-v2 issuer trap that makes a perfectly
 valid token silently fail to match:
@@ -351,7 +351,7 @@ Preview features. `secrets_wlc_folder` is also on the Secrets page.
 | `wlc_api_path_version` | blank | An optional version segment in the path (such as `v1`) |
 | `wlc_auth_mode` | `pat` | `pat`, or `workload` to authenticate with the container's own cloud identity and store no credential ([How the dashboard authenticates](#how-the-dashboard-authenticates)) |
 | `wlc_pat` | blank | The Personal Access Token, for `pat` mode. A secret, and the one secret that cannot be migrated into WC |
-| `wlc_identity_platform` | `azure` | `workload` mode: `azure`, `gcp`, `aws` (EKS only) or `file` |
+| `wlc_identity_platform` | `azure` | `workload` mode: `azure`, `gcp`, `aws` (EKS only), `file` or `spire` (the dashboard's own SPIFFE identity) |
 | `wlc_service_name` | blank | `workload` mode: the registration's Service Name, sent as `X-BT-Service-Name`. Required |
 | `wlc_identity_audience` | blank | `workload` mode on `azure` and `gcp`: the identity token's `aud` |
 | `wlc_identity_token_file` | blank: the platform default | `workload` mode on `aws` and `file`: where the projected token is mounted |

@@ -2,7 +2,7 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you want the dashboard to authenticate to a cloud with a short-lived token from its own SPIRE server instead of a stored key, or you are checking why a token file is missing or refused.
 
-Part of [OIDC and single sign-on](../oidc.md). The dashboard publishes an OIDC issuer of its own, and AWS, Azure, GCP and k3s can trust the short-lived tokens it signs instead of a stored key. The tokens come from the same SPIRE server that [attests remote agents](../remote-agents/spire-attestation.md).
+Part of [OIDC and single sign-on](../oidc.md). The dashboard publishes an OIDC issuer of its own, and AWS, Azure, GCP, k3s and BeyondTrust Workload Credentials can trust the short-lived tokens it signs instead of a stored key. The tokens come from the same SPIRE server that [attests remote agents](../remote-agents/spire-attestation.md).
 
 **Preview.** The dashboard keeps a short-lived JWT-SVID per audience in a file, publishes
 the discovery document and keys a cloud fetches to verify it, and — once you retire a
@@ -172,6 +172,50 @@ dashboard identity?** on the cluster's row; the button shows the command with th
 filled in. The API server must be able to fetch `<issuer>/.well-known/openid-configuration`
 and `<issuer>/keys`; for an issuer with a private CA, pass it as `dashboard_issuer_ca_pem`.
 Details and the break-glass are in [Kubernetes](../kubernetes.md#access--identity).
+
+### BeyondTrust Workload Credentials
+
+Pathfinder's **Workload Identity federation** accepts any OIDC issuer as a **Custom IDP**,
+so it can trust this one the way the clouds do. The dashboard then authenticates to
+Workload Credentials with its own SPIFFE token instead of a stored Personal Access Token
+(PAT), and needs no cloud identity underneath. That makes it the PAT-free option for the
+installs the other identity platforms cannot serve: on-prem, Docker on a VM, and AWS ECS.
+
+1. **Choose an audience**, any string, for example `beyondtrust-wlc`. Under
+   **Settings → Integrations → Workload Credentials**, set **Authentication** to *Workload
+   identity (nothing stored)*, **Identity platform** to *The dashboard's own SPIFFE identity*, and
+   **Token audience** to that string.
+2. **Tick the audience** under **Settings → Integrations → Remote Agents → Give the
+   dashboard its own SPIFFE identity → Workload Credentials**. The app keeps
+   `/run/spiffe-tokens/wlc.jwt` with that `aud`. The worker reads the same file, so jobs
+   authenticate the same way.
+3. **Register the trust in Pathfinder:** **Administration → Workload Identities →
+   Register Workload Identity**, type **Custom IDP**:
+
+   | Field | Value |
+   |---|---|
+   | Issuer | the issuer from the panel, for example `https://agents.example.com/spiffe` |
+   | Claim condition | `sub` equals `spiffe://<trust domain>/dashboard` |
+   | Claim condition | `aud` equals the audience from step 1 |
+   | Site | the site in `wlc_site_id` |
+
+   Copy the registration's **Service Name** into **Service name** on the Workload
+   Credentials panel. It travels as `X-BT-Service-Name` on every request.
+4. **Test connection** on the Workload Credentials panel. Then clear the stored PAT.
+
+Pathfinder is a hosted service, so the issuer must be reachable from the internet with a
+publicly trusted certificate, as for AWS and Azure (see
+[where it has to be reachable from](#where-it-has-to-be-reachable-from)).
+
+**Not yet run against a live Pathfinder tenant.** The token, the issuer and the request are
+the same ones the clouds use. Whether a Custom IDP registration fetches the keys from
+`<issuer>/keys` through the discovery document, as the clouds do, is unconfirmed.
+
+**What it concentrates.** On this platform, Workload Credentials and every lease it issues
+rest on the SPIRE server's signing key. Whoever controls the app can mint the token (see
+[what it does not protect against](#what-it-does-not-protect-against)), and a PAT carries the
+same exposure. [Protect the SPIRE server's CA key](#protect-the-spire-servers-ca-key)
+applies with more force here.
 
 ## Pin the subject, never the trust domain
 

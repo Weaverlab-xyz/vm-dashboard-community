@@ -155,7 +155,16 @@ def _missing() -> list:
     if auth_mode() == AUTH_MODE_WORKLOAD:
         if not _cfg("wlc_service_name"):
             out.append("wlc_service_name")
-        if identity_platform() in FILE_PLATFORMS:
+        platform = identity_platform()
+        if platform == PLATFORM_SPIRE:
+            # The dashboard mints this token itself, for the audience set here, and
+            # only while its identity and the Workload Credentials audience are on.
+            if not identity_audience():
+                out.append("wlc_identity_audience")
+            for key in SPIRE_SETTINGS:
+                if _cfg(key).strip().lower() not in ("1", "true", "yes", "on"):
+                    out.append(key)
+        elif platform in FILE_PLATFORMS:
             # The audience is not this container's to choose on these platforms —
             # it is baked into the projected token by whoever configured the
             # service account. What CAN be missing is the token itself.
@@ -251,16 +260,28 @@ VALID_AUTH_MODES = (AUTH_MODE_PAT, AUTH_MODE_WORKLOAD)
 #          nothing to read and `pat` remains the only mode. `_missing` says so.
 #   file   Any other projected token on disk, the Kubernetes ServiceAccount
 #          token being the one every cluster already mounts.
+#   spire  The dashboard's OWN SPIFFE identity: ``wlc.jwt`` in the token directory,
+#          minted by the dashboard's SPIRE server for ``spiffe://<td>/dashboard``
+#          (``dashboard_identity``). Needs no cloud underneath it, so it is the one
+#          platform an on-prem or ECS install can use. Pathfinder trusts it as a
+#          Custom IDP whose issuer is the dashboard's public ``/spiffe`` URL.
 PLATFORM_AZURE = "azure"
 PLATFORM_GCP = "gcp"
 PLATFORM_AWS = "aws"
 PLATFORM_FILE = "file"
+PLATFORM_SPIRE = "spire"
 VALID_IDENTITY_PLATFORMS = (PLATFORM_AZURE, PLATFORM_GCP, PLATFORM_AWS,
-                            PLATFORM_FILE)
+                            PLATFORM_FILE, PLATFORM_SPIRE)
 # The platforms whose token is a file rather than an HTTP call. Re-read every
 # time rather than memoised: the platform rotates these in place, the read is
 # local, and a memo would be the only thing capable of serving a stale one.
-FILE_PLATFORMS = (PLATFORM_AWS, PLATFORM_FILE)
+FILE_PLATFORMS = (PLATFORM_AWS, PLATFORM_FILE, PLATFORM_SPIRE)
+# What dashboard_identity keeps for the Workload Credentials audience, and the two
+# settings that make it keep it. Copied rather than imported so this module still
+# loads with nothing but the stdlib; a test pins them to dashboard_identity's own.
+SPIRE_TOKEN_DIR = "/run/spiffe-tokens"
+SPIRE_TOKEN_NAME = "wlc.jwt"
+SPIRE_SETTINGS = ("dashboard_spiffe_identity_enabled", "dashboard_spiffe_aud_wlc")
 
 # Azure's link-local instance-metadata endpoint. The FALLBACK, not the default:
 # Container Apps and App Service inject a per-replica ``IDENTITY_ENDPOINT`` plus
@@ -349,7 +370,8 @@ def identity_audience() -> str:
 def identity_token_path(platform: str = "", env: Optional[dict] = None) -> str:
     """The projected-token file for a file-based platform, or ``""``. Pure.
 
-    An explicit ``wlc_identity_token_file`` wins; otherwise the variables the
+    On ``spire`` it is always the dashboard's own ``wlc.jwt``. Elsewhere an explicit
+    ``wlc_identity_token_file`` wins; otherwise the variables the
     platform itself sets. Empty means this container has no projected token —
     which on AWS is the ordinary state of an ECS task and is why ``_missing``
     treats it as a configuration problem rather than letting the read fail later.
@@ -357,6 +379,11 @@ def identity_token_path(platform: str = "", env: Optional[dict] = None) -> str:
     import os
     env = os.environ if env is None else env
     platform = platform or identity_platform()
+    if platform == PLATFORM_SPIRE:
+        # A fixed path the dashboard writes, not a mount: a token-file override left
+        # over from another platform must not point it somewhere else.
+        directory = (env.get("SPIFFE_TOKEN_DIR") or "").strip() or SPIRE_TOKEN_DIR
+        return os.path.join(directory, SPIRE_TOKEN_NAME)
     explicit = _cfg("wlc_identity_token_file")
     if explicit:
         return explicit
@@ -499,9 +526,14 @@ _IDENTITY_HINTS = {
                    "and only EKS projects one (IRSA, or Pod Identity). ECS and "
                    "plain EC2 get SigV4 credentials and an instance identity "
                    "document, neither of which is an OIDC token, so a dashboard "
-                   "on ECS has to stay on a stored Personal Access Token"),
+                   "on ECS has to stay on a stored Personal Access Token, or use "
+                   "the spire platform: the dashboard's own SPIFFE identity"),
     PLATFORM_FILE: (" — no projected token was found. Set wlc_identity_token_file "
                     "to the path your platform mounts it at"),
+    PLATFORM_SPIRE: (" — the dashboard writes this token itself. Tick Give the "
+                     "dashboard its own SPIFFE identity and its Workload Credentials "
+                     "audience (Settings -> Integrations -> Remote Agents), with the "
+                     "SPIRE overlay running"),
 }
 
 
@@ -540,6 +572,10 @@ def _projected_token(path: str, platform: str) -> str:
         with open(path, encoding="utf-8") as fh:
             token = fh.read().strip()
     except OSError as exc:
+        if platform == PLATFORM_SPIRE:
+            raise WorkloadCredentialsError(
+                f"no SPIFFE token at {path}" + _IDENTITY_HINTS[PLATFORM_SPIRE]
+                + f": {exc}") from exc
         raise WorkloadCredentialsError(
             f"no projected identity token at {path} — on {platform} this file is "
             "written by the platform, so an absent one means the workload "
