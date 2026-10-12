@@ -1344,12 +1344,16 @@ async def _main() -> None:
     # Directories is off or its interval is 0.
     dirhealth = asyncio.create_task(directory_health_service.check_loop(),
                                     name="directory-health")
+    # And the estate-wide health areas (services/health): BeyondTrust tenants, Gateways,
+    # Password Safe, Entitle, agents. Each area is a no-op while its feature is off.
+    from .services.health import runner as health_runner
+    health = asyncio.create_task(health_runner.run_loop(), name="health")
     try:
         await _run_loop(shutdown=shutdown)   # returns once shutdown is set and jobs drain
     finally:
-        for task in (drain, stats, dirhealth):
+        for task in (drain, stats, dirhealth, health):
             task.cancel()
-        for task in (drain, stats, dirhealth):
+        for task in (drain, stats, dirhealth, health):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         # Non-blocking: a poller's thread still parked in time.sleep() would otherwise

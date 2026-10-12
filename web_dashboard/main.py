@@ -1049,6 +1049,7 @@ from .api import expiry as expiry_api  # noqa: E402
 from .api import notifications as notifications_api  # noqa: E402
 from .api import agent as agent_api  # noqa: E402
 from .api import worker as worker_api  # noqa: E402
+from .api import health_checks as health_checks_api  # noqa: E402
 from .api.mcp_server import MOUNT_PATH as MCP_MOUNT_PATH, get_mcp_asgi_app  # noqa: E402
 
 
@@ -1150,6 +1151,7 @@ app.include_router(workgroups_api.router)
 app.include_router(workgroup_overrides_api.router)
 app.include_router(jobs.router)
 app.include_router(audit_api.router)
+app.include_router(health_checks_api.router)
 app.include_router(spend_api.router)
 app.include_router(preflight_api.router)
 app.include_router(budgets_api.router)
@@ -1704,6 +1706,13 @@ async def schedules_page(request: Request):
     who reaches the URL and the API it reads scopes what they actually see — a page that
     404s for the wrong user is an existence oracle, and one that renders empty is not."""
     return templates.TemplateResponse(request, "schedules/index.html", {"request": request})
+
+
+@app.get("/health", response_class=HTMLResponse, include_in_schema=False)
+async def health_page(request: Request):
+    """Health across the estate. Admin-only, enforced by the API the page reads, the same
+    shape as /audit."""
+    return templates.TemplateResponse(request, "health/index.html", {"request": request})
 
 
 @app.get("/audit", response_class=HTMLResponse, include_in_schema=False)
