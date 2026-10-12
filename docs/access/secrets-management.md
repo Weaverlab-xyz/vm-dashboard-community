@@ -100,15 +100,23 @@ by calling the vault API, caches the result for 5 minutes, and discards it.
 
 | Backend | Reference prefix | Auth method |
 |---|---|---|
-| **AWS Secrets Manager** | `aws_sm://` | IAM credentials already configured in the dashboard |
-| **Azure Key Vault** | `azure_kv://` | Service principal already configured in the dashboard |
-| **GCP Secret Manager** | `gcp_sm://` | Service account already configured in the dashboard |
+| **AWS Secrets Manager** | `aws_sm://` | The dashboard's AWS credential: a Workload Credentials lease, the stored key, or its SPIFFE identity |
+| **Azure Key Vault** | `azure_kv://` | The dashboard's Azure app: the stored secret or its SPIFFE identity |
+| **GCP Secret Manager** | `gcp_sm://` | The dashboard's service account: the stored key or its SPIFFE identity |
 | **BeyondTrust Secrets Safe** | `bt_safe://` | ps-cli credentials already configured in the dashboard |
 | **BeyondTrust Workload Credentials** | `wlc://` | Site ID, plus either a personal access token or the container's own Azure workload identity (preview — see below) |
 
 Each backend reuses the cloud provider credentials you have already entered —
 no additional IAM setup is needed beyond granting the existing SP / SA / IAM
-user access to the vault.
+user access to the vault. On a key-less install, where the dashboard reaches a
+cloud with [its own SPIFFE identity](../oidc/dashboard-identity.md), grant the
+federated role, app or service account instead. With no dashboard credential at all,
+AWS Secrets Manager falls back to boto3's default chain (environment, instance role).
+
+The OCI API signing key and its passphrase are on the list too. OCI has no backend
+here, so they move to one of the vaults above, which keeps the PEM out of the
+dashboard's database. Every OCI path (the console pages, Packer, Terraform, image
+promotion) reads it through the same resolver.
 
 ### How to migrate a secret
 

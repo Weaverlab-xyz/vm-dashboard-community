@@ -34,6 +34,8 @@ SECRET_REGISTRY: list = [
     ("azure_client_secret",       "Azure Service Principal Client Secret"),
     ("azure_oauth_client_secret", "Azure OAuth App Client Secret"),
     ("gcp_service_account_json",  "GCP Service Account JSON Key"),
+    ("oci_private_key",           "OCI API Signing Private Key"),
+    ("oci_private_key_passphrase", "OCI API Signing Key Passphrase"),
     ("pscli_client_secret",       "BeyondTrust ps-cli Client Secret"),
     ("bt_client_secret",          "BeyondTrust Privileged Remote Access Client Secret"),
     ("epml_pat",                  "BeyondTrust EPM-L Personal Access Token"),
@@ -63,7 +65,6 @@ SECRET_REGISTRY: list = [
 # name looks secret is in neither this list nor its short, reasoned allowlist.
 SECRET_KEYS: frozenset = frozenset(k for k, _ in SECRET_REGISTRY) | frozenset({
     # cloud credentials
-    "oci_private_key", "oci_private_key_passphrase",
     "azure_acr_password", "ansible_aci_acr_password",
     # BeyondTrust Gateway deploy keys, one per runtime
     "aws_ecs_docker_deploy_key", "azure_aci_docker_deploy_key",

@@ -13,6 +13,7 @@ The "database" backend is handled entirely by config_service itself and does
 not appear here.
 """
 import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -202,12 +203,39 @@ def _ps_run(args: list, timeout: int = 30):
 
 # ── AWS Secrets Manager ───────────────────────────────────────────────────────
 
+_aws_sm_resolving = contextvars.ContextVar("aws_sm_resolving", default=False)
+
+
+def _aws_sm_client(region: str | None):
+    """A Secrets Manager client signed with the dashboard's own AWS identity.
+
+    The same credential every other AWS call uses (``aws_service.aws_client``): a
+    Workload Credentials lease, then the stored key, then the SPIFFE identity, then
+    boto3's default chain (environment, instance role). The region is the caller's:
+    the vault's region is its own setting, not the wizard's ``aws_region``.
+
+    That credential is itself read from config, so an ``aws_sm://`` reference there
+    (pasted by hand: migration holds those keys back) would ask this function for
+    itself. Refused by name instead of recursing.
+    """
+    if _aws_sm_resolving.get():
+        raise ValueError(
+            "AWS Secrets Manager signs with the dashboard's AWS credential, and that "
+            "credential is itself an aws_sm:// reference. Store it in the database or "
+            "another backend.")
+    from . import aws_service
+    token = _aws_sm_resolving.set(True)
+    try:
+        return aws_service.aws_client("secretsmanager", region or "", pinned=True)
+    finally:
+        _aws_sm_resolving.reset(token)
+
+
 def test_aws_sm() -> dict:
     region, _ = _aws_cfg()
     if not region:
         raise ValueError("AWS region is not configured. Set it in Setup → AWS or Secrets → AWS Secrets Manager.")
-    import boto3
-    client = boto3.client("secretsmanager", region_name=region)
+    client = _aws_sm_client(region)
     client.list_secrets(MaxResults=1)
     return {"ok": True, "message": f"Connected to AWS Secrets Manager in region {region}."}
 
@@ -222,8 +250,7 @@ def _aws_secret_name(key: str) -> str:
 def write_aws_sm(key: str, value: str) -> str:
     region, _ = _aws_cfg()
     secret_name = _aws_secret_name(key)
-    import boto3
-    client = boto3.client("secretsmanager", region_name=region)
+    client = _aws_sm_client(region)
     try:
         client.create_secret(
             Name=secret_name,
@@ -240,7 +267,6 @@ def read_aws_sm(ref: str, vault_id: str | None = None) -> str:
     """Read an AWS SM secret. When vault_id is given and a SecretVault row
     exists for it, the row's endpoint is interpreted as the region.
     Otherwise the legacy `aws_region` config is used."""
-    import boto3
     region = None
     if vault_id:
         from ..database import SessionLocal, SecretVault
@@ -256,7 +282,7 @@ def read_aws_sm(ref: str, vault_id: str | None = None) -> str:
             region = row.endpoint
     if region is None:
         region, _ = _aws_cfg()
-    client = boto3.client("secretsmanager", region_name=region)
+    client = _aws_sm_client(region)
     resp = client.get_secret_value(SecretId=ref)
     return resp.get("SecretString", "")
 
@@ -268,7 +294,6 @@ def aws_sm_arn(ref: str, vault_id: str | None = None) -> str:
     execution role fetches the value at launch), which needs the secret's full
     ARN — including the random suffix Secrets Manager appends — so a describe is
     required. Region/vault resolution mirrors read_aws_sm()."""
-    import boto3
     region = None
     if vault_id:
         from ..database import SessionLocal, SecretVault
@@ -284,7 +309,7 @@ def aws_sm_arn(ref: str, vault_id: str | None = None) -> str:
             region = row.endpoint
     if region is None:
         region, _ = _aws_cfg()
-    client = boto3.client("secretsmanager", region_name=region)
+    client = _aws_sm_client(region)
     return client.describe_secret(SecretId=ref)["ARN"]
 
 
@@ -303,8 +328,8 @@ def write_aws_sm_ephemeral(name: str, value: str, exec_role_arn: str = "",
     """
     from . import ephemeral_secrets as _eph
     region, _ = _aws_cfg()
-    import boto3, json as _json
-    client = boto3.client("secretsmanager", region_name=region)
+    import json as _json
+    client = _aws_sm_client(region)
     kwargs = {
         "Name": name,
         "SecretString": value,
@@ -338,8 +363,7 @@ def list_aws_sm_ephemeral() -> list:
     for the GC sweeper."""
     from . import ephemeral_secrets as _eph
     region, _ = _aws_cfg()
-    import boto3
-    client = boto3.client("secretsmanager", region_name=region)
+    client = _aws_sm_client(region)
     out = []
     paginator = client.get_paginator("list_secrets")
     filters = [{"Key": "tag-key", "Values": [_eph.TAG_KEY]}]
@@ -1075,7 +1099,6 @@ def _naive_utc(dt):
 
 
 def describe_aws_sm(ref: str, vault_id: str | None = None):
-    import boto3
     region = None
     if vault_id:
         from ..database import SessionLocal, SecretVault
@@ -1089,7 +1112,7 @@ def describe_aws_sm(ref: str, vault_id: str | None = None):
             region = row.endpoint
     if region is None:
         region, _ = _aws_cfg()
-    resp = boto3.client("secretsmanager", region_name=region).describe_secret(SecretId=ref)
+    resp = _aws_sm_client(region).describe_secret(SecretId=ref)
     return _naive_utc(resp.get("LastChangedDate") or resp.get("LastRotatedDate")
                       or resp.get("CreatedDate"))
 
@@ -1186,8 +1209,7 @@ def validate_json_value(value: str) -> None:
 
 def list_aws_sm() -> list[dict]:
     region, prefix = _aws_cfg()
-    import boto3
-    client = boto3.client("secretsmanager", region_name=region)
+    client = _aws_sm_client(region)
     out: list[dict] = []
     next_token = None
     while True:
@@ -1220,8 +1242,7 @@ def delete_aws_sm(ref: str) -> None:
     later in the module would silently win over this one.
     """
     region, _ = _aws_cfg()
-    import boto3
-    client = boto3.client("secretsmanager", region_name=region)
+    client = _aws_sm_client(region)
     # ForceDeleteWithoutRecovery skips the 7-day retention window — the
     # dashboard's "Delete" button is an intentional admin action, not a
     # mistake-recovery affordance.
@@ -1676,8 +1697,7 @@ def update_aws_sm(ref: str, value: str) -> str:
     configured prefix, so ``_aws_secret_name`` must not run on it again.
     """
     region, _ = _aws_cfg()
-    import boto3
-    client = boto3.client("secretsmanager", region_name=region)
+    client = _aws_sm_client(region)
     client.put_secret_value(SecretId=ref, SecretString=value)
     logger.info("AWS SM: updated secret %s", ref)
     return ref
