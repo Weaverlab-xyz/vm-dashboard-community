@@ -305,12 +305,21 @@ def _cross_storage_check(src: str, target: str) -> dict:
 def _aws_creds_configured() -> dict:
     from . import config_service
     have = bool(config_service.get("aws_access_key_id")) and bool(config_service.get("aws_secret_access_key"))
+    detail = "AWS credentials present in config."
+    if not have:
+        # No stored key is not no credential: the lease or the SPIFFE identity serve it.
+        from . import cloud_federation, workload_credential_lease
+        if workload_credential_lease.dynamic_enabled("aws"):
+            have, detail = True, "AWS credentials come from BeyondTrust Workload Credentials."
+        elif cloud_federation.active("aws"):
+            have, detail = True, "AWS credentials come from the dashboard's SPIFFE identity."
     return {
         "name":   "Target credentials configured",
         "status": "pass" if have else "fail",
         "detail": (
-            "AWS credentials present in config." if have
-            else "aws_access_key_id / aws_secret_access_key not set. Configure in the setup wizard."
+            detail if have
+            else "No AWS credential: set a key in the setup wizard, or use Workload "
+                 "Credentials or the dashboard's SPIFFE identity."
         ),
     }
 

@@ -5670,6 +5670,23 @@
                       <span x-show="entry[1].error" class="text-red-700" x-text="entry[1].error"></span>
                     </div>
                   </template>
+                  <!-- The clouds fetch discovery and keys from the issuer's public URL when a
+                       token is presented; this fetches them the same way before a key is
+                       retired, so a private name or an untrusted certificate shows up here
+                       rather than as a 403 from every cloud. -->
+                  <div class="pt-1">
+                    <button type="button" @click="checkSpiffeIssuer()" :disabled="spiffeIssuerCheck.running"
+                            class="text-xs bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-2.5 py-1 rounded-lg disabled:opacity-50"
+                            x-text="spiffeIssuerCheck.running ? 'Checking…' : 'Check the issuer is reachable'"></button>
+                    <template x-for="c in (spiffeIssuerCheck.result ? spiffeIssuerCheck.result.checks : [])" :key="c.name">
+                      <div>
+                        <span :class="c.ok ? 'text-green-700' : 'text-red-700'" x-text="c.ok ? '✓' : '✗'"></span>
+                        <span class="font-medium text-gray-700" x-text="c.name"></span>
+                        <span class="text-gray-500" x-text="c.detail"></span>
+                      </div>
+                    </template>
+                    <p x-show="spiffeIssuerCheck.error" class="text-red-700" x-text="spiffeIssuerCheck.error"></p>
+                  </div>
                 </div>
               </template>
             </div>
@@ -7657,6 +7674,21 @@
                 the default and changes nothing.
               </p>
             </div>
+            <div class="mt-4">
+              <label class="block text-sm font-medium text-gray-700 mb-1">AWS — everyday credential</label>
+              <select x-model="panelCfg.wlc_aws_everyday_source"
+                      class="w-full sm:w-2/3 border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="lease">A Workload Credentials lease (the everyday secret above, or the provisioning one)</option>
+                <option value="federation">The dashboard's SPIFFE identity (lease only in jobs)</option>
+              </select>
+              <p class="text-[11px] text-gray-400 mt-1">
+                With the SPIFFE identity, pages and API calls assume the role in
+                <code>aws_federation_role_arn</code> (Remote Agents → the dashboard's own SPIFFE
+                identity), and the provisioning lease is minted only when a job needs it. No
+                everyday dynamic secret is needed. If federation is not usable, AWS calls outside
+                jobs fail rather than fall back to the lease.
+              </p>
+            </div>
 
             <label class="flex items-start gap-2 mt-4 mb-2">
               <input type="checkbox" x-model="panelCfg.wlc_azure_enabled"
@@ -7682,6 +7714,34 @@
                 <input type="text" x-model="panelCfg.wlc_azure_secret_name"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
                        placeholder="dashboard-azure">
+              </div>
+            </div>
+
+            <div class="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Azure — everyday credential</label>
+                <select x-model="panelCfg.wlc_azure_everyday_source"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="lease">The Workload Credentials lease (everything)</option>
+                  <option value="federation">The dashboard's SPIFFE identity (lease only in jobs)</option>
+                </select>
+                <p class="text-[11px] text-gray-400 mt-1">
+                  With the SPIFFE identity, pages and API calls use the app in
+                  <code>azure_client_id</code> through its federated credential, and the
+                  Workload Credentials password, which carries role-assignment rights, is
+                  minted only when a job needs it. If federation is not usable, Azure calls
+                  outside jobs fail rather than fall back to the lease.
+                </p>
+              </div>
+              <div x-show="panelCfg.wlc_azure_everyday_source === 'federation'" x-cloak>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Everyday identity's object id</label>
+                <input type="text" x-model="panelCfg.azure_everyday_principal_id"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="az ad sp show --id &lt;azure_client_id&gt; --query id">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  Granted cluster admin on AKS clusters a job builds, so the Kubernetes pages
+                  can still reach them.
+                </p>
               </div>
             </div>
 
@@ -7752,6 +7812,14 @@
                         <!-- One line per purpose. Reporting only `provision` is what let a
                              failing everyday lease read as "no usable lease yet" here
                              while every AWS call on the site was 401ing. -->
+                        <template x-if="c.everyday">
+                          <div class="flex items-baseline gap-1.5">
+                            <span class="font-mono text-[10px] text-gray-600 font-semibold">everyday</span>
+                            <span x-show="!c.everyday.problem" x-text="c.everyday.source"></span>
+                            <span x-show="c.everyday.problem" class="text-red-600"
+                                  x-text="c.everyday.source + ' not usable: ' + c.everyday.problem"></span>
+                          </div>
+                        </template>
                         <template x-for="l in (c.leases || [])" :key="l.purpose">
                           <div class="flex items-baseline gap-1.5">
                             <span class="font-mono text-[10px]"
@@ -8197,6 +8265,7 @@ function settingsPage() {
     entitleAgentToken: '',   // read-only display of the auto-minted Entitle agent token name
     agentAudience: null,     // read-only view of the pinned agent signing audience (Remote Agents panel)
     spiffeIdentity: null,    // read-only status of the dashboard's own SPIFFE token files (Remote Agents panel)
+    spiffeIssuerCheck: { running: false, result: null, error: '' },
     agentAudienceResetting: false,
     // Password Safe panel: the per-region DB-Ops services and the audience each one
     // resolves to. Read-only — never merged into panelCfg, so a stale open panel
@@ -9487,6 +9556,16 @@ function settingsPage() {
 
     // Read back the stored lease state for each cloud. Note this does NOT authenticate:
     // it reports what the last mint recorded, which is why testWlcConnection() exists.
+    async checkSpiffeIssuer() {
+      this.spiffeIssuerCheck = { running: true, result: null, error: '' };
+      try {
+        const result = await API.post('/api/spiffe-identity/check-issuer', {});
+        this.spiffeIssuerCheck = { running: false, result, error: '' };
+      } catch (e) {
+        this.spiffeIssuerCheck = { running: false, result: null, error: e.message };
+      }
+    },
+
     async checkWlcSources() {
       this.wlcSources = { running: true, error: '', clouds: [] };
       try {

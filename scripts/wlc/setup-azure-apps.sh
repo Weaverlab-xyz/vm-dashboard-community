@@ -19,6 +19,13 @@
 #      accepts users but not service principals.
 #   4. The target SP's Azure RBAC, **copied from a reference service principal** rather
 #      than hardcoded.
+#   5. Optionally (--everyday-sp), the same copy onto the app the dashboard's SPIFFE
+#      identity is federated to, **minus every role that can write role assignments**
+#      (Owner, User Access Administrator, Role Based Access Control Administrator, and any
+#      custom role whose actions reach Microsoft.Authorization/roleAssignments/write).
+#      That is the wlc_azure_everyday_source = federation split: pages and API calls run
+#      as the federated app, and the Workload Credentials password, which keeps the
+#      role-assignment rights, is minted only inside jobs. No second target app needed.
 #
 # Why the RBAC is copied rather than listed
 # -----------------------------------------
@@ -52,6 +59,7 @@ source "$_HERE/../sandbox/Linux/lib/common.sh"
 
 PREFIX="vm-dashboard-wlc"
 REFERENCE_SP=""
+EVERYDAY_SP=""
 KEY_VAULT=""
 SECRET_YEARS="1"
 DRY_RUN=0
@@ -67,6 +75,10 @@ Usage: setup-azure-apps.sh --reference-sp <appId|objectId> [options]
                       (azure_client_id in its settings). Required unless --no-rbac.
   --prefix NAME       Name prefix for the two app registrations.
                       Default: vm-dashboard-wlc
+  --everyday-sp ID    The app the dashboard's SPIFFE identity is federated to (its
+                      azure_client_id with wlc_azure_everyday_source = federation).
+                      Gets the reference SP's roles minus any that can write role
+                      assignments. Its federated credential is not created here.
   --key-vault NAME    Also copy the reference SP's Key Vault secret permissions to the
                       target. Only needed for access-policy vaults; RBAC vaults are
                       already covered by the role-assignment copy.
@@ -81,6 +93,7 @@ USAGE
 while (( $# )); do
   case "$1" in
     --reference-sp) REFERENCE_SP="${2:?}"; shift 2 ;;
+    --everyday-sp)  EVERYDAY_SP="${2:?}";  shift 2 ;;
     --prefix)       PREFIX="${2:?}";       shift 2 ;;
     --key-vault)    KEY_VAULT="${2:?}";    shift 2 ;;
     --secret-years) SECRET_YEARS="${2:?}"; shift 2 ;;
@@ -229,6 +242,63 @@ fi
 
 # ── Copy the reference SP's role assignments ───────────────────────────────────
 
+# Whether a role can write role assignments, i.e. hand out more access than it holds.
+# Built-ins by name; anything else by its definition's actions minus notActions, so a
+# custom role is judged on what it grants, not on what it is called.
+grants_rbac_write() {
+  local role_id="$1" role_name="$2"
+  case "$role_name" in
+    "Owner"|"User Access Administrator"|"Role Based Access Control Administrator")
+      return 0 ;;
+  esac
+  az role definition list --name "${role_id##*/}" -o json 2>/dev/null | jq -e '
+    [.[0].permissions[]? |
+      ((.actions // []) | map(test("^(\\*|Microsoft\\.Authorization/(\\*|\\*/write|roleAssignments/(\\*|write)))$"; "i")) | any) and
+      ((.notActions // []) | map(test("^Microsoft\\.Authorization/(\\*|\\*/write|roleAssignments/(\\*|write))$"; "i")) | any | not)
+    ] | any' >/dev/null
+}
+
+# copy_roles <assignee object id> <label> <skip role-assignment writers: 0|1>
+copy_roles() {
+  local assignee="$1" label="$2" skip_writers="$3"
+  # roleDefinitionId rather than roleDefinitionName: a custom role's name is not
+  # guaranteed to resolve, and this deployment uses at least one ("Dashboard Image
+  # Promoter" for an external image gallery).
+  while IFS=$'\t' read -r role_id role_name scope; do
+    [[ -z "$role_id" ]] && continue
+    if (( skip_writers )) && grants_rbac_write "$role_id" "$role_name"; then
+      info "$label: NOT granting '$role_name' at $scope (it can write role assignments)"
+      continue
+    fi
+    if (( DRY_RUN )); then
+      info "$label: would grant '$role_name' at $scope"
+      continue
+    fi
+    if az role assignment list --assignee "$assignee" \
+         --scope "$scope" --query "[?roleDefinitionId=='$role_id'] | length(@)" \
+         -o tsv 2>/dev/null | grep -qx "1"; then
+      ok "$label: already granted: $role_name at $scope"
+      continue
+    fi
+    # PrincipalNotFound here is Entra replication, not a permissions problem.
+    if retry 8 5 az role assignment create \
+        --assignee-object-id "$assignee" \
+        --assignee-principal-type ServicePrincipal \
+        --role "$role_id" --scope "$scope" >/dev/null; then
+      ok "$label: granted: $role_name at $scope"
+    else
+      warn "$label: could NOT grant '$role_name' at $scope"
+      warn "  Creating an assignment needs Microsoft.Authorization/roleAssignments/write"
+      warn "  at that scope — Owner or User Access Administrator. Grant it by hand:"
+      warn "    az role assignment create --assignee-object-id $assignee \\"
+      warn "      --assignee-principal-type ServicePrincipal \\"
+      warn "      --role '$role_name' --scope '$scope'"
+    fi
+  done < <(jq -r '.[] | [.roleDefinitionId, .roleDefinitionName, .scope] | @tsv' \
+             <<<"$ASSIGNMENTS")
+}
+
+
 if (( ! COPY_RBAC )); then
   warn "Skipping the RBAC copy (--no-rbac). The target app has NO permissions yet;"
   warn "grant it before enabling the Azure dynamic tier or every call will 403."
@@ -241,37 +311,15 @@ else
   COUNT="$(jq 'length' <<<"$ASSIGNMENTS")"
   (( COUNT )) || warn "the reference SP holds NO role assignments — is it the right one?"
 
-  # roleDefinitionId rather than roleDefinitionName: a custom role's name is not
-  # guaranteed to resolve, and this deployment uses at least one ("Dashboard Image
-  # Promoter" for an external image gallery).
-  while IFS=$'\t' read -r role_id role_name scope; do
-    [[ -z "$role_id" ]] && continue
-    if (( DRY_RUN )); then
-      info "would grant '$role_name' at $scope"
-      continue
-    fi
-    if az role assignment list --assignee "$TARGET_SP_OBJECT_ID" \
-         --scope "$scope" --query "[?roleDefinitionId=='$role_id'] | length(@)" \
-         -o tsv 2>/dev/null | grep -qx "1"; then
-      ok "already granted: $role_name at $scope"
-      continue
-    fi
-    # PrincipalNotFound here is Entra replication, not a permissions problem.
-    if retry 8 5 az role assignment create \
-        --assignee-object-id "$TARGET_SP_OBJECT_ID" \
-        --assignee-principal-type ServicePrincipal \
-        --role "$role_id" --scope "$scope" >/dev/null; then
-      ok "granted: $role_name at $scope"
-    else
-      warn "could NOT grant '$role_name' at $scope"
-      warn "  Creating an assignment needs Microsoft.Authorization/roleAssignments/write"
-      warn "  at that scope — Owner or User Access Administrator. Grant it by hand:"
-      warn "    az role assignment create --assignee-object-id $TARGET_SP_OBJECT_ID \\"
-      warn "      --assignee-principal-type ServicePrincipal \\"
-      warn "      --role '$role_name' --scope '$scope'"
-    fi
-  done < <(jq -r '.[] | [.roleDefinitionId, .roleDefinitionName, .scope] | @tsv' \
-             <<<"$ASSIGNMENTS")
+  copy_roles "$TARGET_SP_OBJECT_ID" "target" 0
+
+  if [[ -n "$EVERYDAY_SP" ]]; then
+    EVERYDAY_OBJECT_ID="$(retry 6 5 az ad sp show --id "$EVERYDAY_SP" --query id -o tsv)" \
+      || die "could not resolve --everyday-sp '$EVERYDAY_SP' to a service principal"
+    info "Copying the same roles onto the everyday app $EVERYDAY_OBJECT_ID," \
+         "without role-assignment rights"
+    copy_roles "$EVERYDAY_OBJECT_ID" "everyday" 1
+  fi
 fi
 
 # ── Key Vault access policy ───────────────────────────────────────────────────
@@ -289,10 +337,12 @@ if [[ -n "$KEY_VAULT" ]]; then
     if [[ "$KV_RBAC" == "true" ]]; then
       ok "Key Vault $KEY_VAULT is RBAC-mode; its access came with the role copy above"
     else
-      retry 8 5 az keyvault set-policy -n "$KEY_VAULT" \
-        --object-id "$TARGET_SP_OBJECT_ID" \
-        --secret-permissions get list set delete >/dev/null
-      ok "Granted the target SP get/list/set/delete on Key Vault $KEY_VAULT"
+      for kv_oid in "$TARGET_SP_OBJECT_ID" ${EVERYDAY_OBJECT_ID:-}; do
+        retry 8 5 az keyvault set-policy -n "$KEY_VAULT" \
+          --object-id "$kv_oid" \
+          --secret-permissions get list set delete >/dev/null
+        ok "Granted $kv_oid get/list/set/delete on Key Vault $KEY_VAULT"
+      done
     fi
   fi
 fi

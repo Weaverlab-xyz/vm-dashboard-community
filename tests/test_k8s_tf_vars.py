@@ -145,6 +145,31 @@ def test_azure_uses_vm_size_and_resource_group():
     assert "node_desired" not in tf and "machine_type" not in tf
 
 
+def test_azure_grants_the_everyday_identity_cluster_admin_in_federation_mode():
+    """With the everyday credential federated, the apply runs as the Workload Credentials
+    provisioning app; without this the k8s pages could not reach the cluster."""
+    CONF.clear()
+    CONF.update({"wlc_azure_everyday_source": "federation",
+                 "azure_everyday_principal_id": "everyday-oid"})
+    try:
+        assert _build("azure")["extra_admin_principal_ids"] == ["everyday-oid"]
+        CONF["wlc_azure_everyday_source"] = "lease"
+        assert "extra_admin_principal_ids" not in _build("azure"), \
+            "granted a second principal outside federation mode"
+        CONF.update({"wlc_azure_everyday_source": "federation",
+                     "azure_everyday_principal_id": ""})
+        assert "extra_admin_principal_ids" not in _build("azure")
+    finally:
+        CONF.clear()
+
+
+def test_the_aks_module_declares_and_grants_the_extra_principals():
+    src = open(os.path.join(_ROOT, "terraform", "k8s_cluster", "azure_aks", "main.tf"),
+               encoding="utf-8").read()
+    assert 'variable "extra_admin_principal_ids"' in src
+    block = src.split('resource "azurerm_role_assignment" "everyday_admin"', 1)[1].split("\n}", 1)[0]
+    assert "for_each" in block and "Azure Kubernetes Service RBAC Cluster Admin" in block
+
 # ── GCP / GKE ────────────────────────────────────────────────────────────────
 
 def test_gcp_uses_machine_type_and_project():

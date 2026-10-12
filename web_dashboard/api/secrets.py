@@ -221,6 +221,12 @@ async def get_credential_sources(request: Request):
                 lease["on_demand"] = purpose in on_demand
                 lease["serving_requests"] = purpose == serving
                 entry["leases"].append(lease)
+            if leases.everyday_from_federation(cloud):
+                # No everyday lease to report: say what serves requests instead, and
+                # why it cannot, since outside jobs that is every call to the cloud.
+                from ..services import cloud_federation
+                entry["everyday"] = {"source": cloud_federation.SOURCE,
+                                     "problem": cloud_federation.reason(cloud)}
         out.append(entry)
     return {"clouds": out}
 

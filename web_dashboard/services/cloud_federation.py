@@ -165,12 +165,18 @@ def aws_credentials(now: Optional[float] = None) -> Optional[dict]:
     """
     if not active("aws"):
         return None
+    creds, _ = _aws_assume(now)
+    return creds
+
+
+def _aws_assume(now: Optional[float] = None) -> tuple:
+    """``(creds, expires_at epoch)`` for the federated role, from the cache or STS."""
     now = time.time() if now is None else now
     role = _cfg(AWS_ROLE_ARN)
     with _aws_lock:
         if (_aws_cache["creds"] and _aws_cache["key"] == role
                 and now < _aws_cache["expires_at"] - _AWS_MARGIN_S):
-            return dict(_aws_cache["creds"])
+            return dict(_aws_cache["creds"]), _aws_cache["expires_at"]
     token = _read_token("aws")
     try:
         resp = _sts_client(_cfg("aws_region")).assume_role_with_web_identity(
@@ -190,7 +196,46 @@ def aws_credentials(now: Optional[float] = None) -> Optional[dict]:
              "session_token": c["SessionToken"]}
     with _aws_lock:
         _aws_cache.update(key=role, creds=creds, expires_at=expires_at)
-    return dict(creds)
+    return dict(creds), expires_at
+
+
+_aws_refreshable: dict = {}
+
+
+def aws_refreshable_credentials():
+    """Shared botocore ``RefreshableCredentials`` for the federated role.
+
+    A client built from :func:`aws_credentials` keeps that snapshot for its whole life,
+    and a job that creates one and sits in a long waiter can outlive the role session.
+    This re-assumes before expiry instead, from whichever thread is calling. The refresh
+    windows match ``_AWS_MARGIN_S``: botocore asks for a new one five minutes out, which
+    is exactly when the cache above stops serving the old one.
+
+    Keyed on the role, so a changed role gets a new object. Raises FederationError when
+    federation is not usable, never returns a credential from anywhere else.
+    """
+    from botocore.credentials import RefreshableCredentials
+    why = reason("aws")
+    if why:
+        raise FederationError(f"AWS SPIFFE federation is not usable: {why}")
+    role = _cfg(AWS_ROLE_ARN)
+    with _aws_lock:
+        creds = _aws_refreshable.get(role)
+    if creds is not None:
+        return creds
+
+    def refresh():
+        c, expires_at = _aws_assume()
+        return {"access_key": c["access_key_id"], "secret_key": c["secret_access_key"],
+                "token": c["session_token"],
+                "expiry_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires_at))}
+
+    creds = RefreshableCredentials.create_from_metadata(
+        metadata=refresh(), refresh_using=refresh, method="vmdash-spiffe")
+    creds._advisory_refresh_timeout = _AWS_MARGIN_S
+    creds._mandatory_refresh_timeout = 120
+    with _aws_lock:
+        return _aws_refreshable.setdefault(role, creds)
 
 
 def aws_subprocess_env() -> Optional[dict]:
@@ -294,3 +339,4 @@ def sources() -> dict:
 def clear_cache() -> None:
     with _aws_lock:
         _aws_cache.update(key="", creds=None, expires_at=0.0)
+        _aws_refreshable.clear()

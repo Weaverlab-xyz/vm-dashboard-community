@@ -2475,6 +2475,16 @@ class Settings(BaseSettings):
     wlc_azure_enabled: bool = False
     wlc_azure_folder: str = ""
     wlc_azure_secret_name: str = ""
+    # "lease" (default): every Azure call uses the Workload Credentials lease.
+    # "federation": the everyday credential is the dashboard's SPIFFE identity (the app in
+    # azure_client_id, federated) and the lease is asked for only inside a job.
+    wlc_azure_everyday_source: str = "lease"
+    # The same for AWS: "federation" makes the everyday credential the role in
+    # aws_federation_role_arn, assumed with the dashboard's SPIFFE identity.
+    wlc_aws_everyday_source: str = "lease"
+    # Object id of the everyday identity's service principal, granted AKS cluster admin
+    # on clusters a job builds (the apply itself runs as the provisioning app).
+    azure_everyday_principal_id: str = ""
     # Regenerate once less than this % of a lease's TTL remains. Clamped to
     # 1..99 by the caller: 0 would mean "never refresh" and 100 would bill an
     # issuance on every check.

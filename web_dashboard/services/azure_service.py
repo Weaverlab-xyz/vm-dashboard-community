@@ -96,11 +96,12 @@ def _require_azure():
 
 # ── Credential cache ──────────────────────────────────────────────────────────
 
-_cred_cache: Optional["ClientSecretCredential"] = None
-_sub_id_cache: Optional[str] = None
-# The material the cached credential was built from. Comparing it is what lets the cache
-# expire — see _ensure_creds.
-_cred_key: Optional[tuple] = None
+# Credentials by the material they were built from: (client_id, secret, tenant, sub).
+# A dict, not one slot: with wlc_azure_everyday_source = federation the request path and
+# a job in the same process use different credentials, and a single slot would rebuild
+# each on every alternation and drop its token cache. Bounded, oldest out.
+_cred_cache: dict = {}
+_CRED_CACHE_MAX = 4
 
 
 def _resolve_azure_credentials_sync() -> tuple:
@@ -112,6 +113,9 @@ def _resolve_azure_credentials_sync() -> tuple:
     falls through to the static ladder.
     """
     from . import workload_credential_lease as leases
+    if (leases.dynamic_enabled("azure") and leases.everyday_from_federation("azure")
+            and leases.default_purpose("azure") != leases.PURPOSE_PROVISION):
+        return _everyday_federation()
     try:
         quad = leases.azure_credentials()
     except leases.LeaseUnavailable as exc:
@@ -130,6 +134,28 @@ def _resolve_azure_credentials_sync() -> tuple:
             quad["subscription_id"], "Workload Credentials")
 
 
+def _everyday_federation() -> tuple:
+    """The everyday credential when it is the dashboard's SPIFFE identity.
+
+    **Fails closed.** If federation is not usable this raises rather than falling back to
+    the lease: the lease is the privileged credential, and handing it to the request path
+    because the everyday one broke is exactly what this mode exists to stop.
+    """
+    from ..config import settings
+    from . import cloud_federation, config_service
+    why = cloud_federation.reason("azure")
+    if why:
+        raise AzureError(
+            "Azure's everyday credential is the dashboard's SPIFFE identity "
+            "(wlc_azure_everyday_source = federation), but federation is not usable: "
+            f"{why}. Workload Credentials is used only inside jobs.")
+    return ((config_service.get("azure_client_id") or settings.azure_client_id),
+            None,
+            (config_service.get("azure_tenant_id") or settings.azure_tenant_id),
+            (config_service.get("azure_subscription_id") or settings.azure_subscription_id),
+            cloud_federation.SOURCE)
+
+
 async def _ensure_creds() -> tuple:
     """Return (ClientSecretCredential, subscription_id).
 
@@ -144,7 +170,6 @@ async def _ensure_creds() -> tuple:
     Comparing the material means a rotated or re-minted credential is picked up on the
     next call, and it fixes wizard rotation for free.
     """
-    global _cred_cache, _sub_id_cache, _cred_key
     _require_azure()
 
     # Off the event loop, on AZURE's pool rather than the shared default executor: the
@@ -192,17 +217,18 @@ async def _ensure_creds() -> tuple:
             )
 
     key = (client_id, client_secret, tenant_id, sub_id)
-    if _cred_cache is None or _cred_key != key:
+    cred = _cred_cache.get(key)
+    if cred is None:
         from . import cloud_federation
         try:
-            _cred_cache = cloud_federation.azure_credential(tenant_id, client_id,
-                                                            client_secret)
+            cred = cloud_federation.azure_credential(tenant_id, client_id, client_secret)
         except cloud_federation.FederationError as exc:
             raise AzureError(str(exc)) from exc
-        _sub_id_cache = sub_id
-        _cred_key = key
+        while len(_cred_cache) >= _CRED_CACHE_MAX:
+            _cred_cache.pop(next(iter(_cred_cache)))
+        _cred_cache[key] = cred
         logger.info("Azure credentials loaded from %s.", source)
-    return _cred_cache, _sub_id_cache
+    return cred, sub_id
 
 
 def invalidate_credentials() -> None:
@@ -212,10 +238,7 @@ def invalidate_credentials() -> None:
     the material — and it always was process-local, so it never reached a sibling worker.
     Kept because clearing on an explicit save is cheap and makes the intent obvious.
     """
-    global _cred_cache, _sub_id_cache, _cred_key
-    _cred_cache = None
-    _sub_id_cache = None
-    _cred_key = None
+    _cred_cache.clear()
     logger.info("Azure credential cache cleared.")
 
 
@@ -253,8 +276,8 @@ def aks_get_token(server_id: str = AKS_AAD_SERVER_APP_ID) -> str:
     from . import cloud_federation
     if client_id and tenant_id and (client_secret or cloud_federation.active("azure")):
         cred = cloud_federation.azure_credential(tenant_id, client_id, client_secret)
-    elif _cred_cache is not None:
-        cred = _cred_cache
+    elif _cred_cache:
+        cred = next(reversed(_cred_cache.values()))
     else:
         raise AzureError("Azure credentials not configured for AKS token minting")
     return cred.get_token(f"{server_id}/.default").token

@@ -386,6 +386,84 @@ def discovery_document() -> dict:
     }
 
 
+def _fetch_json(url: str) -> tuple:
+    """``(status, json or None)`` for an anonymous GET, verifying TLS the way a cloud does."""
+    import httpx
+    with httpx.Client(timeout=10.0, follow_redirects=False, verify=True) as client:
+        resp = client.get(url, headers={"Accept": "application/json"})
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    return resp.status_code, body
+
+
+def _fetch_problem(exc: Exception) -> str:
+    """A fixed sentence per failure kind; the exception text stays in the log."""
+    text = str(exc)
+    if "CERTIFICATE_VERIFY_FAILED" in text or "certificate" in text.lower():
+        return ("the TLS certificate is not trusted. AWS and Azure require a certificate "
+                "from a public CA on the issuer")
+    if "timed out" in text.lower() or type(exc).__name__.endswith("Timeout"):
+        return "the request timed out"
+    return f"could not connect ({type(exc).__name__}): check DNS, the firewall and TLS"
+
+
+def check_issuer(fetch=None) -> dict:
+    """Whether a cloud could validate this dashboard's tokens: the issuer's discovery
+    document and keys, fetched anonymously over its public URL with TLS verified.
+
+    The clouds fetch the same two documents from the internet when a token is
+    presented, so this is the check the design asks for before anyone retires a key.
+    Run from inside the dashboard, so it proves the public name resolves and serves this
+    dashboard's keys; it cannot prove the internet can reach it, which a firewall that
+    allows the dashboard itself out but not the world in would hide.
+    """
+    fetch = fetch or _fetch_json
+    checks = []
+
+    def add(name, ok, detail):
+        checks.append({"name": name, "ok": bool(ok), "detail": detail})
+        return ok
+
+    iss = issuer()
+    if not add("Issuer", iss.startswith("https://"),
+               iss or "No issuer: set one, or pin the agent gateway's audience."):
+        return {"ok": False, "issuer": iss, "checks": checks}
+    try:
+        status_code, doc = fetch(f"{iss}/.well-known/openid-configuration")
+    except Exception as exc:  # noqa: BLE001 -- httpx's error zoo
+        logger.info("issuer check: discovery fetch failed: %s", exc)
+        add("Discovery document", False, _fetch_problem(exc))
+        return {"ok": False, "issuer": iss, "checks": checks}
+    if not add("Discovery document", status_code == 200 and isinstance(doc, dict),
+               f"HTTP {status_code}" if status_code != 200 else "Served."):
+        return {"ok": False, "issuer": iss, "checks": checks}
+    add("Issuer matches", doc.get("issuer") == iss,
+        "Matches." if doc.get("issuer") == iss else
+        f"The document names {doc.get('issuer')!r}; a cloud rejects every token unless "
+        f"it is exactly {iss!r}.")
+    jwks_uri = doc.get("jwks_uri") or ""
+    try:
+        status_code, keys = fetch(jwks_uri) if jwks_uri.startswith("https://") else (0, None)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("issuer check: keys fetch failed: %s", exc)
+        add("Signing keys", False, _fetch_problem(exc))
+        return {"ok": False, "issuer": iss, "checks": checks}
+    served = [k.get("kid") for k in (keys or {}).get("keys", [])] if isinstance(keys, dict) else []
+    add("Signing keys", status_code == 200 and served,
+        f"{len(served)} key(s) served." if served else
+        (f"HTTP {status_code} from {jwks_uri}" if jwks_uri.startswith("https://")
+         else "jwks_uri is missing or not https"))
+    ours = {k.get("kid") for k in jwks()}
+    if served and ours:
+        add("Keys are this dashboard's", ours <= set(served),
+            "The public URL serves this dashboard's current keys." if ours <= set(served)
+            else "The public URL serves different keys: it reaches another deployment, "
+                 "or a stale cache.")
+    return {"ok": all(c["ok"] for c in checks), "issuer": iss, "checks": checks}
+
+
 def clear_cache() -> None:
     with _jwks_lock:
         _jwks_cache.update(at=0.0, keys=None)

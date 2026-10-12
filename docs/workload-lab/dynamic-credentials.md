@@ -119,6 +119,41 @@ long-lived and wrong for one that expires — the process would have pinned a de
 until restart, and that invalidation is process-local so a sibling worker would have kept
 its own dead copy anyway.
 
+#### The everyday credential from the SPIFFE identity
+
+This works for **AWS and Azure**. On AWS it replaces the everyday dynamic secret; on Azure,
+which has one dynamic secret, it avoids the second target app registration a lease split
+would need. Set `wlc_aws_everyday_source` or `wlc_azure_everyday_source` to `federation`
+(Settings → Workload Credentials → *everyday credential*). On AWS the everyday calls then
+assume the role in `aws_federation_role_arn`; apply
+[`terraform/dashboard_federation/aws`](../../terraform/dashboard_federation/README.md) with
+`everyday_only = true` so that role carries the same deny on creating and passing roles as
+the everyday secret. On Azure:
+
+- **Pages and API calls** run as the app in `azure_client_id`, through the federated
+  credential that trusts the dashboard's [SPIFFE identity](../design/dashboard-workload-identity.md).
+  No secret, and no lease.
+- **Jobs** (inside the provisioning scope) mint the Workload Credentials password, which
+  keeps the role-assignment rights. Nothing pre-mints it, so between jobs there is no live
+  privileged password at all.
+- **It fails closed.** If federation is not usable outside a job (the SPIFFE identity is
+  off, the Azure audience is not ticked, the token file is missing, or a stored
+  `azure_client_secret` is still set), Azure calls fail with that reason. They never fall
+  back to the lease, which would hand the request path the privileged credential.
+
+Grant the two identities differently. `scripts/wlc/setup-azure-apps.sh --everyday-sp
+<azure_client_id>` copies the reference service principal's roles onto the federated app
+**except** any role that can write role assignments: Owner, User Access Administrator, Role
+Based Access Control Administrator, and custom roles whose actions reach
+`Microsoft.Authorization/roleAssignments/write`. The target app keeps the full set.
+
+One grant follows from the split. A job's Terraform runs as the provisioning app, and the
+AKS module grants cluster admin to whoever runs the apply. Set
+*Everyday identity's object id* (`azure_everyday_principal_id`, from
+`az ad sp show --id <azure_client_id> --query id`) and new AKS clusters grant it the same
+role, so the Kubernetes pages can reach them. Clusters built before the switch need that
+assignment added by hand.
+
 If AWS is on the dynamic tier and no lease can be issued, cloud calls **fail**
 rather than falling back to a static key. That is deliberate: an operator who has
 retired their static key should not silently get some other credential from the

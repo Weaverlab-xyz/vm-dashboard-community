@@ -49,6 +49,13 @@ from a reference service principal, then prints the four `-var` values this modu
 Note the grants do **not** arrive by themselves: `setup-azure.sh` grants its *own*
 principal, so a fresh app registration starts with nothing.
 
+You don't need a second Azure dynamic secret for an everyday credential. Point the
+dashboard's everyday Azure calls at its SPIFFE identity instead
+(`wlc_azure_everyday_source = federation`) and pass `--everyday-sp <azure_client_id>` to the
+script: that app gets the same roles minus anything that can write role assignments, and
+this module's one dynamic secret is minted only inside jobs. See
+[the everyday credential from the SPIFFE identity](../../docs/workload-lab/dynamic-credentials.md#the-everyday-credential-from-the-spiffe-identity).
+
 ## Prerequisites
 
 - **Terraform ≥ 1.11.** The BeyondTrust provider uses a write-only attribute, which is a

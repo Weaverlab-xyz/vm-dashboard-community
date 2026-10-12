@@ -665,6 +665,15 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
         # (setup_entitle_agent). cluster_id is passed on destroy too (row.id), so the
         # vault name stays stable.
         tf["cluster_id"] = cluster_id
+        # With the everyday credential federated, the apply runs as the Workload
+        # Credentials provisioning app; the request path, which drives the k8s pages,
+        # needs cluster admin too. Config-backed, so destroy keeps the same set.
+        # The same test as workload_credential_lease.everyday_from_federation, read
+        # directly: this builder stays free of the lease module's database imports.
+        everyday = _cfg("azure_everyday_principal_id")
+        federated = (_cfg("wlc_azure_everyday_source") or "").strip().lower() == "federation"
+        if everyday and federated:
+            tf["extra_admin_principal_ids"] = [everyday]
         tf["agent_namespace"] = _cfg("entitle_agent_namespace", "entitle")
         tf["agent_service_account"] = _cfg("entitle_agent_service_account", "entitle-agent-sa")
         # Peer the AKS VNet back to the sandbox VNet so an in-cluster agent (Entitle
