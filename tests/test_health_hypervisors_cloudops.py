@@ -124,8 +124,7 @@ def test_direct_and_agent_bound_connections():
             items = {i.name: i for i in asyncio.run(HV.collect(db))}
     finally:
         proxmox_service.list_nodes, proxmox_service.list_storage = real
-    assert "10.0.0.9" not in calls, f"an agent-bound connection was dialled: {calls}"
-    assert "pve.example.com" in calls
+    assert calls == ["pve.example.com"], f"only the direct connection should be dialled: {calls}"
     assert "vc" not in items, "a disabled hypervisor was checked"
     assert items["lab-pve"].status == "ok"
     db.refresh(direct)
