@@ -594,10 +594,10 @@ async def promote_to_aws_automated(
     try:
         _say(92, f"Cleaning up staged S3 object s3://{dest_bucket}/{dest_key}")
         import asyncio
-        from .aws_service import _aws_kwargs
+        from .aws_service import aws_client
         import boto3
         await asyncio.to_thread(
-            lambda: boto3.client("s3", **_aws_kwargs(target_region)).delete_object(
+            lambda: aws_client("s3", target_region).delete_object(
                 Bucket=dest_bucket, Key=dest_key,
             )
         )

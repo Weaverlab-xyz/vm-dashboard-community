@@ -86,6 +86,32 @@ terraform -chdir=terraform/workload_credentials apply \
 `azure_integration_client_secret` is best passed as `TF_VAR_azure_integration_client_secret`
 so it stays out of shell history.
 
+## The two TTLs
+
+| Variable | Secret | Default | Why |
+|---|---|---|---|
+| `aws_provision_ttl_seconds` | `dashboard-provision` | 1800 | Minted when a job starts and never pre-warmed. AWS cannot revoke it early, so its TTL is how long a credential carrying `iam:PassRole` outlives the job. Shorter costs few extra issuances |
+| `aws_ttl_seconds` | `dashboard-everyday` | 3600 | Kept warm and renewed at the refresh margin, so a shorter TTL only multiplies issuances |
+
+Nothing the dashboard runs holds a fixed copy of the credential, so any job can outlast
+the provisioning lease and 900 (the STS minimum) is safe. In-process AWS calls go through
+one client factory whose clients carry refreshable credentials: they ask the dashboard for
+the lease again a few minutes before each one expires, mid-waiter included. A Terraform or
+Packer run can outlast the provisioning lease too. The dashboard gives them an
+AWS profile whose `credential_process` calls back into it, and the AWS SDK inside the
+provider, the S3 state backend and Packer's Amazon plugin runs that command again shortly
+before each credential expires. So a forty-minute AMI build works on a thirty-minute
+lease, and each renewal is one more issuance.
+
+With `wlc_subprocess_credential_process` turned off, they get fixed keys instead, handed
+over only while at least `wlc_subprocess_min_remaining_pct` of the lease remains (80% by
+default, minting a fresh one otherwise). That is 24 minutes at 1800, so a longer run then
+needs a longer TTL.
+
+The one cost of a short provisioning TTL is outage tolerance: a job renews when about half
+the lease is left, so a Workload Credentials outage longer than about half the TTL (7.5
+minutes at 900, 15 at 1800) fails the jobs in flight.
+
 ## Before you raise the TTL
 
 The default `aws_ttl_seconds` is exactly 3600, and that is deliberate. This is a role
@@ -145,8 +171,10 @@ dashboard's default behaviour and changes nothing about how it works today.
 
 Dynamic credential issuances are **metered**; static secrets are not. The defaults here
 are chosen accordingly — a one-hour TTL renewed at 50% means roughly 48 issuances a day
-per lease, where a 15-minute TTL would mean nearly 200. AWS credentials cannot be revoked
-early, so a short TTL buys no security to offset that.
+for the warm everyday lease, where a 15-minute TTL would mean nearly 200. The provisioning
+lease is different: it is minted per job (or burst of jobs), not kept warm, so its shorter
+TTL adds few issuances, and since AWS credentials cannot be revoked early, its TTL is the
+window a privileged credential stays valid after the job.
 
 ## After applying
 

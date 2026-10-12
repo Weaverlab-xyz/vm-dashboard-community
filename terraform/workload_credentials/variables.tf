@@ -139,11 +139,13 @@ variable "aws_max_session_duration" {
 
 variable "aws_ttl_seconds" {
   description = <<-EOT
-    TTL requested for a minted AWS credential.
+    TTL requested for the everyday AWS credential (dashboard-everyday). The provisioning
+    secret has its own, aws_provision_ttl_seconds.
 
-    Prefer an hour. AWS credentials cannot be revoked early, so a short TTL buys no
-    security and multiplies the metered issuance count — at 15 minutes that is roughly
-    70,000 issuances a year for one cloud.
+    Prefer an hour. The everyday lease is kept warm and renewed at the refresh margin,
+    and AWS credentials cannot be revoked early, so a short TTL here multiplies the
+    metered issuance count — at 15 minutes that is roughly 70,000 issuances a year for
+    one cloud.
 
     UNVERIFIED, AND THE REASON THE DEFAULT IS EXACTLY AN HOUR: this is a role CHAIN
     (BeyondTrust assumes the bridge, the bridge assumes the integration role, that
@@ -172,6 +174,40 @@ variable "aws_ttl_seconds" {
   validation {
     condition     = var.aws_ttl_seconds <= var.aws_max_session_duration
     error_message = "aws_ttl_seconds cannot exceed aws_max_session_duration - STS would silently clamp it and issue a shorter credential."
+  }
+}
+
+variable "aws_provision_ttl_seconds" {
+  description = <<-EOT
+    TTL requested for the provisioning AWS credential (dashboard-provision), the one
+    carrying the role's full permissions, iam:PassRole and iam:CreateRole included.
+
+    Shorter than the everyday lease because, unlike it, the TTL is the exposure here: the
+    dashboard mints this when a job starts and never pre-warms it, and AWS cannot revoke
+    it early, so whatever is left of it after the job ends is a privileged credential
+    nobody is using. A shorter TTL costs few extra issuances for the same reason.
+
+    A job longer than this is fine, and 900 is safe: the dashboard's own AWS clients
+    carry refreshable credentials, and Terraform and Packer get an AWS profile whose
+    credential_process asks the dashboard for a fresh lease before each one expires. What
+    a shorter TTL costs is outage tolerance: a Workload Credentials outage longer than
+    about half the TTL fails the jobs in flight.
+    Only with wlc_subprocess_credential_process turned off do they hold fixed keys, and
+    then the longest single run is the floor (the dashboard hands them a lease with at
+    least wlc_subprocess_min_remaining_pct, 80% by default, of it left: 24 minutes at
+    1800).
+  EOT
+  type        = number
+  default     = 1800
+
+  validation {
+    condition     = var.aws_provision_ttl_seconds >= 900 && var.aws_provision_ttl_seconds <= 43200
+    error_message = "assumed_role credentials allow 900-43200 seconds (15 minutes to 12 hours)."
+  }
+
+  validation {
+    condition     = var.aws_provision_ttl_seconds <= var.aws_max_session_duration
+    error_message = "aws_provision_ttl_seconds cannot exceed aws_max_session_duration - STS would silently clamp it and issue a shorter credential."
   }
 }
 

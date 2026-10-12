@@ -71,7 +71,30 @@ than a second role and trust policy.
 One thing it deliberately does not do: it does not revoke the provisioning lease when the
 job ends. AWS refuses early revocation, so that credential lives to its TTL regardless;
 dropping the row early would only hide it from the dashboard, at the cost of a fresh
-billable issuance per job rather than per TTL window.
+billable issuance per job rather than per TTL window. That is why the provisioning secret
+has a shorter TTL than the everyday one (30 minutes against an hour in the
+[Terraform module](../../terraform/workload_credentials/README.md#the-two-ttls)): its TTL
+is how long it outlives the job.
+
+Nothing on AWS is handed a fixed copy of the credential, so a job can outlast its lease.
+The dashboard's own calls go through one client factory (`aws_service.aws_client`) whose
+clients carry botocore refreshable credentials: a few minutes before each lease expires,
+the next call fetches the lease again, so a client created at the start of a deploy and
+left in a ten-minute waiter keeps working. The purpose is fixed when the client is made.
+
+Terraform and Packer runs can last longer than that too, so on AWS they are not handed keys.
+They get an AWS profile whose `credential_process` is the dashboard itself
+(`web_dashboard/wlc_credential_process.py`), and the AWS SDK in the provider, the S3 state
+backend and Packer's Amazon plugin runs it again a few minutes before each credential
+expires. The profile file holds the command, never a credential. The purpose is fixed
+when the job writes it, so a deploy keeps the provisioning lease all the way through.
+
+Turn `wlc_subprocess_credential_process` off to hand them fixed keys instead. Those are
+handed over only while at least `wlc_subprocess_min_remaining_pct` (80% by default) of the
+lease remains, otherwise the dashboard issues a fresh one first, and a run longer than
+what is left fails on an expired credential. Azure has no equivalent: an Azure run gets
+the service principal's secret, which outlives any one run at the Azure TTL floor of an
+hour.
 
 ### How Azure differs
 
@@ -249,10 +272,13 @@ calls.
 
 Practical consequences:
 
-- **Prefer a TTL of an hour or more** on the dynamic secret. AWS credentials
-  cannot be revoked early anyway, so a short TTL buys no security and multiplies
-  the issuance count — a 15-minute TTL is roughly 70,000 issuances a year for one
-  cloud.
+- **Prefer a TTL of an hour or more** on the everyday (or only) dynamic secret,
+  which the dashboard keeps warm. AWS credentials cannot be revoked early anyway,
+  so a short TTL there buys no security and multiplies the issuance count — a
+  15-minute TTL is roughly 70,000 issuances a year for one cloud. The
+  provisioning secret is the exception: it is minted per job rather than kept
+  warm, so a shorter TTL (30 minutes by default) costs little and shortens how
+  long a privileged credential outlives the job.
 - **There is no renew endpoint.** At expiry the dashboard generates a fresh
   lease; leases are not extended.
 - **AWS leases cannot be revoked** (`400 lease_not_revocable`); Azure leases can,

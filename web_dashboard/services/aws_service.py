@@ -7,6 +7,7 @@ AWS starving the other providers. See services/cloud_executor.py.
 import base64
 import json
 import logging
+import threading
 from typing import Optional
 from datetime import datetime, timezone
 
@@ -105,6 +106,63 @@ def _aws_kwargs(region: str) -> dict:
     return kwargs
 
 
+def aws_client(service: str, region: str = "", *, pinned: bool = False):
+    """A boto3 client for ``service``: the one way to make one in this codebase.
+
+    Off the Workload Credentials tier this is exactly ``boto3.client`` with the kwargs
+    from ``_aws_kwargs`` (``_aws_kwargs_pinned`` with ``pinned``), so a stored key and the
+    SPIFFE identity behave as before.
+
+    On it, the client signs with the lease's refreshable credentials instead of a fixed
+    copy, so a client created at the start of a job and used in a ten-minute waiter
+    renews its credential rather than outliving it. ``_aws_kwargs`` still runs first: it
+    resolves the region and fails fast, as AWSError, when no lease can be issued.
+    """
+    kwargs = _aws_kwargs_pinned(region) if pinned else _aws_kwargs(region)
+    from . import workload_credential_lease as _leases
+    if not _leases.dynamic_enabled("aws"):
+        return boto3.client(service, **kwargs)
+    try:
+        creds = _leases.aws_refreshable_credentials()
+    except _lease_unavailable() as exc:
+        raise AWSError(
+            "AWS is configured to use BeyondTrust Workload Credentials, but no "
+            "credential could be issued: %s" % exc) from exc
+    return _refreshing_session(creds).client(service, region_name=kwargs.get("region_name"))
+
+
+_session_local = threading.local()
+
+
+def _refreshing_session(creds):
+    """A boto3 Session, one per thread and credentials object, that signs with ``creds``.
+
+    Per thread because a boto3 Session is not safe to build clients from concurrently;
+    the clients it returns are. The credentials go in through the resolver's public
+    provider hook, ahead of every other source, so nothing in the environment can win.
+    """
+    cache = getattr(_session_local, "sessions", None)
+    if cache is None:
+        cache = _session_local.sessions = {}
+    hit = cache.get(id(creds))
+    if hit is not None and hit[0] is creds:
+        return hit[1]
+    import botocore.session
+    from botocore.credentials import CredentialProvider
+
+    class _LeaseProvider(CredentialProvider):
+        METHOD = "vmdash-wlc"
+
+        def load(self):
+            return creds
+
+    core = botocore.session.get_session()
+    core.get_component("credential_provider").insert_before("env", _LeaseProvider())
+    session = boto3.Session(botocore_session=core)
+    cache[id(creds)] = (creds, session)
+    return session
+
+
 def _lease_unavailable():
     """The LeaseUnavailable class, resolved lazily.
 
@@ -124,7 +182,7 @@ def eks_get_token(cluster_name: str, region: str) -> str:
     The token is valid ~15 min — ample for a one-shot apply/helm. Reuses the same
     credential resolution as every other AWS call (:func:`_aws_kwargs`)."""
     _require_boto3()
-    sts = boto3.client("sts", **_aws_kwargs(region))
+    sts = aws_client("sts", region)
     # EKS binds the token to a specific cluster via this signed header.
     sts.meta.events.register(
         "before-sign.sts.GetCallerIdentity",
@@ -137,7 +195,7 @@ def eks_get_token(cluster_name: str, region: str) -> str:
 
 def _get_eks(region: str):
     _require_boto3()
-    return boto3.client("eks", **_aws_kwargs(region))
+    return aws_client("eks", region)
 
 
 def create_eks_access_entry(cluster_name: str, region: str, *, principal_arn: str,
@@ -243,19 +301,19 @@ def disassociate_eks_oidc(cluster_name: str, region: str, config_name: str = "en
 
 def _get_ec2(region: str):
     _require_boto3()
-    return boto3.client("ec2", **_aws_kwargs(region))
+    return aws_client("ec2", region)
 
 
 def _get_sm(region: str):
     _require_boto3()
-    return boto3.client("secretsmanager", **_aws_kwargs(region))
+    return aws_client("secretsmanager", region)
 
 
 # ── Secrets Manager ────────────────────────────────────────────────────────────
 
 def _get_secret_sync(secret_name: str, region: str) -> str:
     _require_boto3()
-    sm = boto3.client("secretsmanager", **_aws_kwargs(region))
+    sm = aws_client("secretsmanager", region)
     resp = sm.get_secret_value(SecretId=secret_name)
     if "SecretString" in resp:
         return resp["SecretString"]
@@ -860,7 +918,7 @@ async def terminate_instance(region: str, instance_id: str) -> dict:
 
 def _get_ssm_parameter_sync(region: str, name: str) -> str:
     _require_boto3()
-    ssm = boto3.client("ssm", **_aws_kwargs(region))
+    ssm = aws_client("ssm", region)
     return ssm.get_parameter(Name=name)["Parameter"]["Value"]
 
 
@@ -909,7 +967,7 @@ def _run_ssm_document_sync(region: str, instance_id: str, document: str,
     Returns {status, response_code, stdout, stderr, command_id}."""
     import time
     _require_boto3()
-    ssm = boto3.client("ssm", **_aws_kwargs(region))
+    ssm = aws_client("ssm", region)
     send = ssm.send_command(
         InstanceIds=[instance_id],
         DocumentName=document,
@@ -957,7 +1015,7 @@ async def ssm_send_document(region: str, instance_id: str, document: str,
 
 def _ssm_ping_status_sync(region: str, instance_id: str) -> str:
     _require_boto3()
-    ssm = boto3.client("ssm", **_aws_kwargs(region))
+    ssm = aws_client("ssm", region)
     resp = ssm.describe_instance_information(
         Filters=[{"Key": "InstanceIds", "Values": [instance_id]}])
     info = resp.get("InstanceInformationList") or []
@@ -2379,7 +2437,7 @@ async def find_ssm_endpoints(region: str, *, vpc_id: str, service_names: list) -
 
 def _count_vpc_lambdas_sync(region: str, vpc_id: str) -> int:
     _require_boto3()
-    lam = boto3.client("lambda", **_aws_kwargs(region))
+    lam = aws_client("lambda", region)
     n = 0
     for page in lam.get_paginator("list_functions").paginate():
         for fn in page.get("Functions", []):
@@ -2607,12 +2665,12 @@ _BUDGETS_REGION = "us-east-1"
 
 def _get_budgets():
     _require_boto3()
-    return boto3.client("budgets", **_aws_kwargs(_BUDGETS_REGION))
+    return aws_client("budgets", _BUDGETS_REGION)
 
 
 def _account_id_sync() -> str:
     _require_boto3()
-    sts = boto3.client("sts", **_aws_kwargs(_BUDGETS_REGION))
+    sts = aws_client("sts", _BUDGETS_REGION)
     return sts.get_caller_identity()["Account"]
 
 
@@ -2817,7 +2875,7 @@ def _aws_kwargs_pinned(region: str) -> dict:
 
 def _get_db_options_sync(region: str) -> dict:
     _require_boto3()
-    rds = boto3.client("rds", **_aws_kwargs_pinned(region))
+    rds = aws_client("rds", region, pinned=True)
 
     groups, marker = [], None
     while True:  # DescribeDBSubnetGroups paginates via Marker
@@ -2837,7 +2895,7 @@ def _get_db_options_sync(region: str) -> dict:
             break
 
     # Same dict shape as the EC2 deploy form's list so the picker markup matches.
-    ec2 = boto3.client("ec2", **_aws_kwargs_pinned(region))
+    ec2 = aws_client("ec2", region, pinned=True)
     raw_sgs = ec2.describe_security_groups().get("SecurityGroups", [])
     security_groups = [
         {
@@ -3012,7 +3070,7 @@ async def get_ami_status(region: str, ami_id: str) -> dict:
 
 def _get_ecs(region: str):
     _require_boto3()
-    return boto3.client("ecs", **_aws_kwargs(region))
+    return aws_client("ecs", region)
 
 
 def _ensure_task_definition_sync(
@@ -3119,7 +3177,7 @@ def _run_ecs_task_sync(
 
     # Ensure the ECS service-linked role exists (required before first ECS use in an account)
     try:
-        iam = boto3.client("iam", **_aws_kwargs(region))
+        iam = aws_client("iam", region)
         iam.create_service_linked_role(AWSServiceName="ecs.amazonaws.com")
     except ClientError as e:
         # "InvalidInput" means the role already exists — that's fine
@@ -3307,7 +3365,7 @@ def _run_ecs_ansible_sync(
     target is a Windows server over OpenSSH (ansible_vm_cmd.WINDOWS_SSH_VARS)."""
     import time
     ecs = _get_ecs(region)
-    logs_client = boto3.client("logs", **_aws_kwargs(region))
+    logs_client = aws_client("logs", region)
     log_group = "/ecs/ansible-runner"
     log_stream_prefix = f"ansible/{job_id[:8]}"
 
@@ -3518,7 +3576,7 @@ def _run_ecs_k8s_sync(
     import time
     import uuid
     ecs = _get_ecs(region)
-    logs_client = boto3.client("logs", **_aws_kwargs(region))
+    logs_client = aws_client("logs", region)
     log_group = "/ecs/k8s-runner"
     # Unique per invocation when there is no job to name it after, matching the
     # GCP/Azure launchers. ECS itself never collided the way a named Cloud Run job
@@ -3692,7 +3750,7 @@ def _run_ecs_ansible_local_sync(
     import time
     from .ansible_localhost_cmd import build_localhost_command
     ecs = _get_ecs(region)
-    logs_client = boto3.client("logs", **_aws_kwargs(region))
+    logs_client = aws_client("logs", region)
     log_group = "/ecs/ansible-runner"
     log_stream_prefix = f"ansible-local/{job_id[:8]}" if job_id else "ansible-local/adhoc"
 
@@ -4440,7 +4498,7 @@ def _run_promote_runner_ecs_sync(
     """
     import time
     ecs = _get_ecs(region)
-    logs_client = boto3.client("logs", **_aws_kwargs(region))
+    logs_client = aws_client("logs", region)
     log_group = "/ecs/promote-runner"
     log_stream_prefix = f"promote/{job_id[:8]}"
 
@@ -4600,7 +4658,7 @@ def _deploy_compose_ecs_sync(
     to per-container `memoryReservation` when present. awslogs is configured so
     container output is reachable from CloudWatch like the other runners."""
     ecs = _get_ecs(region)
-    logs_client = boto3.client("logs", **_aws_kwargs(region))
+    logs_client = aws_client("logs", region)
     log_group = "/ecs/compose"
     try:
         logs_client.create_log_group(logGroupName=log_group)

@@ -223,8 +223,9 @@ def test_azure_source_reads_its_own_keys():
 def test_subprocess_env_carries_the_session_token():
     # The field all four call sites were missing. Without it terraform and Packer fail
     # InvalidClientTokenId while boto3 calls succeed.
+    _stub_cfg(values={"wlc_subprocess_credential_process": "false"})
     original = lease.credentials
-    lease.credentials = lambda cloud, purpose=None: {
+    lease.credentials = lambda cloud, purpose=None, **kw: {
         "access_key_id": "ASIA", "secret_access_key": "s", "session_token": "tok"}
     try:
         env = lease.aws_subprocess_env()
@@ -237,11 +238,311 @@ def test_subprocess_env_carries_the_session_token():
 
 def test_subprocess_env_is_none_when_not_on_the_dynamic_tier():
     original = lease.credentials
-    lease.credentials = lambda cloud, purpose=None: None
+    lease.credentials = lambda cloud, purpose=None, **kw: None
     try:
         assert lease.aws_subprocess_env() is None
     finally:
         lease.credentials = original
+
+
+
+# ── Subprocess credentials need most of their life ahead of them ────────────
+# Terraform and Packer read the credential once, as environment variables, so a lease
+# served near its end dies mid-apply. This is what lets the provisioning lease be short.
+
+def test_a_fresh_lease_is_fresh_enough():
+    snap = _snap(issued_at=NOW - timedelta(minutes=5), expires_at=NOW + timedelta(minutes=25))
+    assert lease._fresh_enough(snap, NOW, 80) is True
+
+
+def test_a_lease_past_its_first_fifth_is_not_fresh_enough_at_80():
+    snap = _snap(issued_at=NOW - timedelta(minutes=10), expires_at=NOW + timedelta(minutes=20))
+    assert lease._fresh_enough(snap, NOW, 80) is False
+
+
+def test_an_unusable_or_undated_lease_is_never_fresh_enough():
+    assert lease._fresh_enough(None, NOW, 1) is False
+    assert lease._fresh_enough(_snap(issued_at=None), NOW, 1) is False
+    assert lease._fresh_enough(_snap(expires_at=NOW + timedelta(seconds=30)), NOW, 1) is False
+
+
+def test_the_subprocess_floor_defaults_to_80_and_is_clamped():
+    _stub_cfg()
+    assert lease.subprocess_min_remaining_pct() == 80
+    _stub_cfg(values={"wlc_subprocess_min_remaining_pct": "100"})
+    assert lease.subprocess_min_remaining_pct() == 95
+    _stub_cfg(values={"wlc_subprocess_min_remaining_pct": "0"})
+    assert lease.subprocess_min_remaining_pct() == 1
+    _stub_cfg(values={"wlc_subprocess_min_remaining_pct": "-5"})
+    assert lease.subprocess_min_remaining_pct() == 1
+    _stub_cfg(values={"wlc_subprocess_min_remaining_pct": "lots"})
+    assert lease.subprocess_min_remaining_pct() == 80
+
+
+def test_both_subprocess_helpers_ask_for_a_fresh_lease():
+    _stub_cfg(values={"azure_subscription_id": "sub"})
+    seen = []
+    original = lease.credentials
+
+    def fake(cloud, purpose="", **kw):
+        seen.append((cloud, kw.get("min_remaining_pct")))
+        return {"access_key_id": "A", "secret_access_key": "s", "session_token": "t",
+                "client_id": "c", "client_secret": "x", "tenant_id": "t"}
+    lease.credentials = fake
+    try:
+        lease.aws_subprocess_env()
+        lease.azure_subprocess_env()
+    finally:
+        lease.credentials = original
+    assert seen == [("aws", 80), ("azure", 80)], seen
+
+
+def _serve_fresh_with(snap):
+    """Run _serve_fresh against a stored snapshot; report whether it minted."""
+    calls = []
+    real = (lease._stored_snap, lease._serve_or_mint, lease._values_of, lease._utcnow)
+    lease._stored_snap = lambda cloud, purpose: snap
+    lease._values_of = lambda s: {"access_key_id": "stored"}
+    lease._utcnow = lambda: NOW
+
+    def mint(cloud, purpose, name, *, force):
+        calls.append(force)
+        return {"access_key_id": "minted"}
+    lease._serve_or_mint = mint
+    try:
+        return lease._serve_fresh("aws", "provision", "dashboard-provision", 80), calls
+    finally:
+        lease._stored_snap, lease._serve_or_mint, lease._values_of, lease._utcnow = real
+
+
+def test_a_fresh_stored_lease_is_served_without_a_mint():
+    _reset()
+    values, calls = _serve_fresh_with(_snap(issued_at=NOW - timedelta(minutes=2),
+                                            expires_at=NOW + timedelta(minutes=28)))
+    assert values == {"access_key_id": "stored"} and calls == []
+
+
+def test_a_stale_stored_lease_is_replaced_by_a_forced_mint():
+    _reset()
+    values, calls = _serve_fresh_with(_snap(issued_at=NOW - timedelta(minutes=20),
+                                            expires_at=NOW + timedelta(minutes=10)))
+    assert values == {"access_key_id": "minted"} and calls == [True]
+
+
+
+# ── credential_process: runs that renew their own credential ─────────────────
+# Verified against a real terraform binary: the S3 backend reports
+# credentials_source=ProcessProvider, re-runs the command as each Expiration nears, and
+# an empty AWS_ACCESS_KEY_ID is what stops a static key in the container env winning.
+
+def _creds(**kw):
+    return {"access_key_id": "ASIA", "secret_access_key": "s", "session_token": "tok"}
+
+
+def test_credential_process_is_on_unless_turned_off():
+    _stub_cfg()
+    assert lease.credential_process_enabled() is True
+    for off in ("false", "0", "off", "no", "False"):
+        _stub_cfg(values={"wlc_subprocess_credential_process": off})
+        assert lease.credential_process_enabled() is False, off
+
+
+def test_the_subprocess_gets_a_profile_not_keys():
+    _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision"})
+    original = lease.credentials
+    lease.credentials = lambda cloud, purpose="", **kw: _creds()
+    try:
+        env = lease.aws_subprocess_env()
+    finally:
+        lease.credentials = original
+    assert env["AWS_PROFILE"] == "vmdash-wlc-provision"
+    assert env["AWS_SDK_LOAD_CONFIG"] == "1"
+    # Blank, not absent: env credentials beat a profile in every AWS SDK.
+    for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+        assert env[key] == "", key
+    text = _read_file(env["AWS_CONFIG_FILE"])
+    assert text.startswith("[profile vmdash-wlc-provision]")
+    assert "credential_process = " in text and "--purpose provision" in text
+    assert "ASIA" not in text and "tok" not in text, "a credential was written to disk"
+
+
+def _read_file(path):
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_a_subprocess_still_fails_fast_when_no_lease_can_be_had():
+    """The lease is fetched up front even in profile mode, so a broken configuration
+    fails the job with the lease's own message, not as an opaque SDK error later."""
+    _stub_cfg()
+    original = lease.credentials
+
+    def boom(cloud, purpose="", **kw):
+        raise lease.LeaseUnavailable("no usable aws credential for provision")
+    lease.credentials = boom
+    try:
+        try:
+            lease.aws_subprocess_env()
+            raise AssertionError("expected LeaseUnavailable")
+        except lease.LeaseUnavailable:
+            pass
+    finally:
+        lease.credentials = original
+
+
+def test_the_purpose_is_resolved_in_the_job_and_written_into_the_command():
+    # The callback is a fresh process and cannot see the provisioning marker.
+    _stub_cfg(values={"wlc_aws_secret_name": "p", "wlc_aws_readonly_secret_name": "e"},
+              flags={"workload_credentials_enabled": True, "wlc_aws_enabled": True})
+    with lease.provisioning():
+        inside = lease.aws_process_env()
+    outside = lease.aws_process_env()
+    assert inside["AWS_PROFILE"] == "vmdash-wlc-provision"
+    assert outside["AWS_PROFILE"] == "vmdash-wlc-readonly"
+    assert "--purpose provision" in _read_file(inside["AWS_CONFIG_FILE"])
+
+
+def test_the_command_quotes_its_paths():
+    cfg = lease._process_config("provision")
+    line = [ln for ln in cfg.splitlines() if ln.startswith("credential_process")][0]
+    import shlex
+    argv = shlex.split(line.split("=", 1)[1])
+    assert argv[0] == sys.executable and argv[1].endswith("wlc_credential_process.py")
+    assert argv[2:] == ["--cloud", "aws", "--purpose", "provision"]
+    assert os.path.isfile(argv[1])
+
+
+def test_the_output_reports_an_early_expiration():
+    _reset()
+    _stub_cfg()
+    real = (lease.credentials, lease._utcnow)
+    expires = NOW + timedelta(minutes=30)
+
+    def fake(cloud, purpose="", **kw):
+        assert kw.get("min_remaining_pct") == lease.PROCESS_MIN_REMAINING_PCT
+        lease._memo_put("aws", "provision", _creds(), expires)
+        return _creds()
+    lease.credentials, lease._utcnow = fake, (lambda: NOW)
+    try:
+        out = lease.credential_process_output("aws", "provision")
+    finally:
+        lease.credentials, lease._utcnow = real
+    assert out["Version"] == 1 and out["AccessKeyId"] == "ASIA"
+    assert out["SessionToken"] == "tok"
+    assert out["Expiration"] == "2026-08-20T12:25:00Z", out   # five minutes early
+
+
+def test_a_nearly_spent_lease_is_reported_proportionally_early():
+    # Five minutes early on a lease with four left would be a time in the past, and the
+    # SDK would call again in a loop.
+    _reset()
+    _stub_cfg()
+    real = (lease.credentials, lease._utcnow)
+
+    def fake(cloud, purpose="", **kw):
+        lease._memo_put("aws", "provision", _creds(), NOW + timedelta(minutes=4))
+        return _creds()
+    lease.credentials, lease._utcnow = fake, (lambda: NOW)
+    try:
+        out = lease.credential_process_output("aws", "provision")
+    finally:
+        lease.credentials, lease._utcnow = real
+    assert out["Expiration"] == "2026-08-20T12:03:12Z", out
+
+
+def test_credential_process_is_aws_only():
+    try:
+        lease.credential_process_output("azure", "provision")
+        raise AssertionError("expected LeaseUnavailable")
+    except lease.LeaseUnavailable:
+        pass
+
+
+def test_the_script_keeps_stdout_for_the_credential():
+    src = _read("web_dashboard", "wlc_credential_process.py")
+    assert 'os.write(1, json.dumps(out).encode("utf-8"))' in src
+    assert "sys.stdout" not in src.split("def main", 1)[1]
+    # Every other print goes to stderr.
+    for line in src.splitlines():
+        if "print(" in line:
+            assert "file=sys.stderr" in line or "file=sys.stderr" in src[src.index(line):][:300]
+
+
+def test_the_packer_archive_carries_the_session_token():
+    src = _read("web_dashboard", "services", "packer_service.py")
+    assert 'aws_session_token=credentials.get("aws_session_token")' in src
+    build = _read("web_dashboard", "services", "packer_build_service.py")
+    assert 'env["AWS_ACCESS_KEY_ID"]' not in build.split("def _archive_credentials")[0].split(
+        "archive_to_s3(")[-1], "the archive reads keys a profile-mode env does not carry"
+
+
+
+# ── Refreshable credentials: in-process clients renew their own ──────────────
+
+def _with_fresh(fn):
+    """Run ``fn`` with _fresh_lease returning a fixed lease; return its result and calls."""
+    calls = []
+    real = lease._fresh_lease
+
+    def fresh(cloud, purpose):
+        calls.append((cloud, purpose))
+        return _creds(), NOW + timedelta(minutes=30)
+    lease._fresh_lease = fresh
+    try:
+        return fn(), calls
+    finally:
+        lease._fresh_lease = real
+
+
+def test_refresh_metadata_carries_the_real_expiry():
+    meta, _ = _with_fresh(lambda: lease._refresh_metadata("aws", "provision"))
+    assert meta == {"access_key": "ASIA", "secret_key": "s", "token": "tok",
+                    "expiry_time": "2026-08-20T12:30:00Z"}
+
+
+def test_one_refreshable_object_per_purpose_bound_at_creation():
+    _reset()
+    _stub_cfg(values={"wlc_aws_secret_name": "p", "wlc_aws_readonly_secret_name": "e"},
+              flags={"workload_credentials_enabled": True, "wlc_aws_enabled": True})
+
+    def build():
+        with lease.provisioning():
+            job = lease.aws_refreshable_credentials()
+        request = lease.aws_refreshable_credentials()
+        return job, request, lease.aws_refreshable_credentials()
+    (job, request, again), calls = _with_fresh(build)
+    assert job is not request and request is again
+    assert calls == [("aws", "provision"), ("aws", "readonly")], calls
+    # The refresh callback keeps the purpose it was built with, whatever context it
+    # later runs in: a deploy must not drift onto the everyday lease.
+    _, later = _with_fresh(lambda: job._refresh_using())
+    assert later == [("aws", "provision")], later
+    _reset()
+
+
+def test_the_refresh_windows_fit_a_short_lease():
+    """botocore's 15/10-minute defaults would keep a 15-minute lease permanently inside
+    the window and re-read it on every call. The attributes are botocore internals,
+    pinned with boto3 in requirements.txt; an upgrade that renames them fails here."""
+    _reset()
+    _stub_cfg()
+    creds, _ = _with_fresh(lambda: lease.aws_refreshable_credentials("provision"))
+    assert creds._advisory_refresh_timeout == lease._ADVISORY_REFRESH_SECONDS == 300
+    assert creds._mandatory_refresh_timeout == lease._MANDATORY_REFRESH_SECONDS == 120
+    from botocore.credentials import RefreshableCredentials
+    assert hasattr(RefreshableCredentials, "_advisory_refresh_timeout")
+    assert hasattr(RefreshableCredentials, "_mandatory_refresh_timeout")
+    _reset()
+
+
+def test_invalidate_drops_the_refreshable_object():
+    _reset()
+    _stub_cfg()
+    first, _ = _with_fresh(lambda: lease.aws_refreshable_credentials("provision"))
+    lease.invalidate("aws")
+    second, _ = _with_fresh(lambda: lease.aws_refreshable_credentials("provision"))
+    assert first is not second
+    _reset()
 
 
 # ── Fail-safe defaults ───────────────────────────────────────────────────────
@@ -545,7 +846,7 @@ def test_the_passrole_hint_never_offers_iam_surgery_for_a_session_policy_deny():
 def _stub_azure_lease(values, subscription=""):
     """Point `credentials` at a fixed Azure lease and config at a subscription."""
     original = lease.credentials
-    lease.credentials = lambda cloud, purpose="": values if cloud == "azure" else None
+    lease.credentials = lambda cloud, purpose="", **kw: values if cloud == "azure" else None
     lease._cfg = lambda key, default="": (subscription if key == "azure_subscription_id"
                                           else default)
     return original
@@ -584,7 +885,7 @@ def test_a_missing_subscription_raises_rather_than_returning_three_quarters():
 
 def test_the_azure_quad_is_none_when_azure_is_not_on_the_dynamic_tier():
     original = lease.credentials
-    lease.credentials = lambda cloud, purpose="": None
+    lease.credentials = lambda cloud, purpose="", **kw: None
     try:
         assert lease.azure_credentials() is None
         assert lease.azure_subprocess_env() is None

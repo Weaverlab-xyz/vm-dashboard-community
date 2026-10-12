@@ -2479,6 +2479,14 @@ class Settings(BaseSettings):
     # 1..99 by the caller: 0 would mean "never refresh" and 100 would bill an
     # issuance on every check.
     wlc_refresh_margin_pct: int = 50
+    # Terraform and Packer get the credential once, as env vars, so they are handed a
+    # lease only while at least this % of its lifetime remains; otherwise a fresh one is
+    # minted. Clamped to 1..95 by the caller. What lets the provisioning lease be short.
+    wlc_subprocess_min_remaining_pct: int = 80
+    # Hand Terraform and Packer an AWS profile whose credential_process calls back into
+    # the dashboard, so a run longer than the lease renews its own credential. Off falls
+    # back to fixed AWS_* env vars.
+    wlc_subprocess_credential_process: bool = True
     # Folder used by the `wlc://` static-secret backend (Secrets page CRUD),
     # matching secrets_aws_prefix / secrets_gcp_prefix.
     secrets_wlc_folder: str = "dashboard"

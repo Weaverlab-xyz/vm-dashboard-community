@@ -242,7 +242,7 @@ def _client():
     from . import aws_service
     aws_service._require_boto3()
     import boto3
-    return boto3.client("pricing", **aws_service._aws_kwargs(_PRICING_REGION))
+    return aws_service.aws_client("pricing", _PRICING_REGION)
 
 
 def _cached(key: str):

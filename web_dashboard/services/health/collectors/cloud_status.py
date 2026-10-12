@@ -21,7 +21,7 @@ def aws_instances(region: str, instance_ids: list) -> dict:
     """
     import boto3
     from ... import aws_service
-    ec2 = boto3.client("ec2", **aws_service._aws_kwargs(region))
+    ec2 = aws_service.aws_client("ec2", region)
     out: dict = {}
     for i in range(0, len(instance_ids), _AWS_CHUNK):
         chunk = instance_ids[i:i + _AWS_CHUNK]
@@ -54,7 +54,7 @@ def aws_databases(region: str) -> dict:
     depending on its version."""
     import boto3
     from ... import aws_service
-    rds = boto3.client("rds", **aws_service._aws_kwargs(region))
+    rds = aws_service.aws_client("rds", region)
     out: dict = {}
     for page in rds.get_paginator("describe_db_instances").paginate():
         for db in page.get("DBInstances") or []:
@@ -70,7 +70,7 @@ def aws_cluster(region: str, name: str) -> dict:
     or ``{}`` when it does not exist."""
     import boto3
     from ... import aws_service
-    eks = boto3.client("eks", **aws_service._aws_kwargs(region))
+    eks = aws_service.aws_client("eks", region)
     try:
         cluster = eks.describe_cluster(name=name)["cluster"]
     except eks.exceptions.ResourceNotFoundException:

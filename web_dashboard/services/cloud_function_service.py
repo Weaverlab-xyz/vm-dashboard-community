@@ -888,7 +888,7 @@ async def _upload_package(*, cloud: str, fn_id: str, workload: str,
     if cloud == "aws":
         import boto3
         from . import aws_service
-        client = boto3.client("s3", **aws_service._aws_kwargs(_cfg("aws_region")))
+        client = aws_service.aws_client("s3", _cfg("aws_region"))
         await asyncio.to_thread(client.put_object, Bucket=location["bucket"],
                                 Key=key, Body=blob)
         return {**location, "sha256_b64": sha256_b64}
