@@ -296,7 +296,11 @@ def test_the_result_is_folded_in_when_the_agent_completes():
     row = _ad(db, _agent(db))
     asyncio.run(H.check(db, row))
     job = _deep_jobs(db, row)[0]
-    for line in _lines(_report(), size=60):
+    # apply_deep judges replication against the real clock, so the link must be recent
+    # now, not at NOW.
+    recent = (datetime.utcnow() - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    report = _report(replication=[dict(_report()["replication"][0], last_success=recent)])
+    for line in _lines(report, size=60):
         job_service.append_job_log(db, job.id, line)
     assert H.apply_deep(db, job, status="completed")
     health = db.get(DirectoryHealth, row.id)
