@@ -599,6 +599,7 @@ To run these plays outside the dashboard, set the `dir_*` vars yourself, plus
 | `ad-audit-stale-accounts.yml` | Enabled users with no logon in N days (default 90) or never logged on, plus "password never expires" and "password not required" |
 | `ad-audit-privileged-groups.yml` | Recursive members of Domain Admins, Enterprise Admins, Schema Admins, Administrators and the other operator groups |
 | `ad-audit-stale-computers.yml` | Enabled computer accounts with no logon in N days. Clean them up with `ad-remove-computer.yml` |
+| `ad-dc-health.yml` | Domain controller health: replication, FSMO holders, and per DC its core services, clock offset, SYSVOL state and LDAPS certificate. The [Directory health](../../docs/directories/health.md#the-domain-controller-check) page runs it as `builtin:ad-dc-health` and reads its report back |
 
 The reports print a summary and record it with `set_stats`, so it is in the job's
 output. Every play supports `--check`.

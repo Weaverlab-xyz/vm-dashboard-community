@@ -66,6 +66,7 @@
           </div>
           <div class="flex items-center gap-3 text-xs text-gray-500">
             <span x-show="d.probe_pending">Probe queued on the agent</span>
+            <span x-show="d.deep_pending">Domain controller check running</span>
             <span x-text="d.checked_at ? 'Checked ' + ago(d.checked_at) : 'Not checked yet'"></span>
             <button @click="checkNow(d)" :disabled="busy[d.directory_id]"
                     class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-2.5 py-1 rounded-lg disabled:opacity-50"

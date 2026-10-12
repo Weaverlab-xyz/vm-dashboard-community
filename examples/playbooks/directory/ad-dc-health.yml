@@ -1,0 +1,146 @@
+# Domain controller health for the Directory health page (read-only).
+# Target: a domain controller of an on-prem Active Directory domain, over WinRM HTTPS
+# (5986), from the directory's remote agent. Queued by services/directory_health_service
+# on its own cadence and by Check now on /directories/health.
+#
+# Through the dashboard: WinRM logs on as the directory's Password Safe account
+# (dir_bind_dn / dir_bind_password, checked out for this run only), and the script passes
+# the same credential to every remote call, so nothing depends on a second hop.
+#
+# Reads the directory SERVICE only, never the identities in it:
+#   - FSMO role holders (Get-ADDomain, Get-ADForest)
+#   - every DC, its site and GC flag (Get-ADDomainController)
+#   - inbound replication per DC and partner (Get-ADReplicationPartnerMetadata)
+#   - per DC over CIM: core service state, clock offset, SYSVOL (DFSR) state
+#   - per DC: the LDAPS (636) certificate's expiry
+# Changes nothing. A DC the account cannot reach over CIM is reported with the error
+# rather than failing the run. Rights needed for each part: docs/directories/health.md.
+#
+# The report is printed as base64 chunks, "DIRHEALTH_B64:<i>/<n>:<chunk>", which the
+# dashboard reassembles from the job's log lines (Ansible's default output quotes JSON;
+# base64 survives it, and chunks stay under the agent's per-line cap).
+- name: Domain controller health (read-only)
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: winrm
+  tasks:
+    - name: Fail early without the directory credential
+      ansible.builtin.assert:
+        that:
+          - dir_bind_dn is defined and dir_bind_dn | length > 0
+          - dir_host is defined and dir_host | length > 0
+        fail_msg: This playbook runs through the dashboard with the directory credential.
+
+    - name: Collect the health report
+      ansible.windows.win_powershell:
+        parameters:
+          BindDn: "{{ dir_bind_dn }}"
+          BindPassword: "{{ dir_bind_password }}"
+          Server: "{{ dir_host }}"
+        script: |
+          param([string]$BindDn, [string]$BindPassword, [string]$Server)
+          $ErrorActionPreference = 'Stop'
+          $Ansible.Changed = $false
+          $report = [ordered]@{ v = 1; collected_at = (Get-Date).ToUniversalTime().ToString('o');
+                                domain = ''; fsmo = [ordered]@{}; dcs = @(); replication = @();
+                                errors = @() }
+          try {
+            $secure = ConvertTo-SecureString $BindPassword -AsPlainText -Force
+            $cred = New-Object System.Management.Automation.PSCredential($BindDn, $secure)
+            Import-Module ActiveDirectory
+
+            try {
+              $dom = Get-ADDomain -Server $Server -Credential $cred
+              $for = Get-ADForest -Server $Server -Credential $cred
+              $report.domain = [string]$dom.DNSRoot
+              $report.fsmo = [ordered]@{
+                PDCEmulator = [string]$dom.PDCEmulator; RIDMaster = [string]$dom.RIDMaster
+                InfrastructureMaster = [string]$dom.InfrastructureMaster
+                SchemaMaster = [string]$for.SchemaMaster
+                DomainNamingMaster = [string]$for.DomainNamingMaster }
+            } catch { $report.errors += "fsmo: $($_.Exception.Message)" }
+
+            $dcs = @()
+            try {
+              $dcs = @(Get-ADDomainController -Filter * -Server $Server -Credential $cred |
+                       Select-Object -First 50)
+            } catch { $report.errors += "domain controllers: $($_.Exception.Message)" }
+
+            if ($report.domain) {
+              try {
+                $meta = @(Get-ADReplicationPartnerMetadata -Target $report.domain -Scope Domain `
+                            -PartnerType Inbound -Credential $cred | Select-Object -First 300)
+                foreach ($m in $meta) {
+                  $report.replication += [ordered]@{
+                    server = [string]$m.Server
+                    partner = ([string]$m.Partner -replace '^CN=NTDS Settings,CN=([^,]+),.*$', '$1')
+                    last_success = $(if ($m.LastReplicationSuccess) {
+                      $m.LastReplicationSuccess.ToUniversalTime().ToString('o') } else { '' })
+                    last_result = [int64]$m.LastReplicationResult
+                    failures = [int]$m.ConsecutiveReplicationFailures }
+                }
+              } catch { $report.errors += "replication: $($_.Exception.Message)" }
+            }
+
+            $serviceFilter = (@('NTDS', 'DNS', 'Netlogon', 'Kdc', 'W32Time', 'DFSR') |
+                              ForEach-Object { "Name='$_'" }) -join ' OR '
+            foreach ($dc in $dcs) {
+              $name = [string]$dc.HostName
+              $e = [ordered]@{ name = $name; site = [string]$dc.Site; gc = [bool]$dc.IsGlobalCatalog
+                               services = [ordered]@{}; offset_s = $null; sysvol_state = $null
+                               ldaps_not_after = ''; errors = @() }
+              $cs = $null
+              try { $cs = New-CimSession -ComputerName $name -Credential $cred -OperationTimeoutSec 20 }
+              catch { $e.errors += "cim: $($_.Exception.Message)" }
+              if ($cs) {
+                try {
+                  foreach ($s in @(Get-CimInstance -CimSession $cs -ClassName Win32_Service -Filter $serviceFilter)) {
+                    $e.services[[string]$s.Name] = [string]$s.State }
+                } catch { $e.errors += "services: $($_.Exception.Message)" }
+                try {
+                  $t = Get-CimInstance -CimSession $cs -ClassName Win32_UTCTime
+                  $remote = New-Object DateTime($t.Year, $t.Month, $t.Day, $t.Hour, $t.Minute, $t.Second, [DateTimeKind]::Utc)
+                  $e.offset_s = [math]::Round(($remote - (Get-Date).ToUniversalTime()).TotalSeconds, 1)
+                } catch { $e.errors += "time: $($_.Exception.Message)" }
+                try {
+                  $f = @(Get-CimInstance -CimSession $cs -Namespace 'root/microsoftdfs' `
+                           -ClassName DfsrReplicatedFolderInfo -Filter "ReplicatedFolderName='SYSVOL Share'")
+                  if ($f.Count -gt 0) { $e.sysvol_state = [int]$f[0].State }
+                } catch { $e.errors += "sysvol: $($_.Exception.Message)" }
+                Remove-CimSession $cs
+              }
+              $tcp = $null
+              try {
+                $tcp = New-Object Net.Sockets.TcpClient
+                $iar = $tcp.BeginConnect($name, 636, $null, $null)
+                if (-not $iar.AsyncWaitHandle.WaitOne(5000)) { throw 'no answer on 636 within 5s' }
+                $tcp.EndConnect($iar)
+                # The certificate is read, not trusted: this only asks when it expires.
+                $accept = [Net.Security.RemoteCertificateValidationCallback] { $true }
+                $ssl = New-Object Net.Security.SslStream($tcp.GetStream(), $false, $accept)
+                $ssl.AuthenticateAsClient($name)
+                $cert = New-Object Security.Cryptography.X509Certificates.X509Certificate2($ssl.RemoteCertificate)
+                $e.ldaps_not_after = $cert.NotAfter.ToUniversalTime().ToString('o')
+                $ssl.Dispose()
+              } catch { $e.errors += "ldaps: $($_.Exception.Message)" }
+              finally { if ($tcp) { $tcp.Dispose() } }
+              $report.dcs += $e
+            }
+          } catch { $report.errors += "collector: $($_.Exception.Message)" }
+
+          $json = $report | ConvertTo-Json -Depth 6 -Compress
+          $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+          for ($i = 0; $i -lt $b64.Length; $i += 3000) {
+            $b64.Substring($i, [math]::Min(3000, $b64.Length - $i))
+          }
+      register: _dc_health
+      no_log: true              # module args carry the bind password
+
+    - name: Print the report for the dashboard
+      ansible.builtin.debug:
+        msg: "DIRHEALTH_B64:{{ idx + 1 }}/{{ _dc_health.output | length }}:{{ item }}"
+      loop: "{{ _dc_health.output }}"
+      loop_control:
+        index_var: idx
+        label: "{{ idx + 1 }}"

@@ -60,6 +60,7 @@ All on the **Directories** panel (Settings → Preview features → Directories 
 | `passwordsafe_directory_change_password_on_register` | on | Rotate the administrator right after onboarding |
 | `directory_idp_page_size` | `50` | Users or groups per page when browsing an identity provider (1–200) |
 | `directory_health_interval_minutes` | `15` | Minutes between [health checks](directories/health.md); 0 turns them off |
+| `directory_health_deep_interval_hours` | `6` | Hours between [domain controller checks](directories/health.md#the-domain-controller-check) of on-prem AD; 0 turns them off |
 
 ## Permissions
 

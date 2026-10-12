@@ -48,9 +48,11 @@ the value in state no longer works.
 
 **Directories → Health** shows whether each domain, domain controller and identity
 provider is up. For managed AD it shows the cloud's own health, and for each provider
-a sign-in. It shows how long ago Entra Connect last synced, and probes each on-prem DC
-over LDAP through its agent. It covers the directory service only. Accounts and privilege
-are left to Identity Security Insights.
+a sign-in. It shows how long ago Entra Connect last synced. For an on-prem domain it
+checks every domain controller through the agent, as the directory's Password Safe
+account: replication, FSMO holders, core services, clock skew, SYSVOL and the LDAPS
+certificate. It covers the directory service only. Accounts and privilege are left to
+Identity Security Insights.
 
 **Guide:** [Directory health](../../../directories/health.md)
 

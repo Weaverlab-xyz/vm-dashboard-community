@@ -2590,6 +2590,12 @@ class DirectoryHealth(Base):
     # When the last probe was queued. Separate from checked_at, which every pass moves,
     # because on-prem probes run on their own, slower cadence.
     probe_queued_at = Column(DateTime, nullable=True)
+    # The domain controller deep check (builtin:ad-dc-health, an agent_ansible run): the job
+    # in flight, since when, and when the last one was queued. Its own cadence again --
+    # it checks out a Password Safe credential per run, so it runs hours apart.
+    deep_job_id = Column(String(36), nullable=True, index=True)
+    deep_since = Column(DateTime, nullable=True)
+    deep_queued_at = Column(DateTime, nullable=True)
 
 
 class HealthCheck(Base):
@@ -4948,6 +4954,11 @@ def init_db():
             "ALTER TABLE managed_directories ADD COLUMN base_dn VARCHAR(255)",
             "ALTER TABLE managed_directories ADD COLUMN credentials_ref TEXT",
             "ALTER TABLE managed_directories ADD COLUMN linked_directory_id VARCHAR(36)",
+            # Directory health's domain controller deep check (directory_health_service).
+            "ALTER TABLE directory_health ADD COLUMN deep_job_id VARCHAR(36)",
+            "CREATE INDEX ix_directory_health_deep_job_id ON directory_health(deep_job_id)",
+            "ALTER TABLE directory_health ADD COLUMN deep_since TIMESTAMP",
+            "ALTER TABLE directory_health ADD COLUMN deep_queued_at TIMESTAMP",
             "CREATE INDEX ix_managed_directories_linked_directory_id ON managed_directories(linked_directory_id)",
             # Cloud identity providers (directory_service.register_idp). NULL on every
             # existing row, and writes_enabled NULL reads as False.
