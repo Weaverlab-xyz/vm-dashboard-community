@@ -188,6 +188,20 @@ def secret_name_for(cloud: str, purpose: str) -> str:
     return _cfg(f"wlc_{cloud}_secret_name")
 
 
+def everyday_from_federation(cloud: str) -> bool:
+    """Whether ``cloud``'s everyday credential is the dashboard's SPIFFE identity rather
+    than a lease (``wlc_azure_everyday_source = federation``). Azure only.
+
+    Azure's lease is a password minted onto one app registration, so an AWS-style split
+    would need a second target app. Instead the everyday calls use the app the SPIFFE
+    identity is federated to, and Workload Credentials is asked only inside a job, when
+    privilege is needed. There is then no everyday lease at all: no row, no warm mint.
+    """
+    if cloud != "azure":
+        return False
+    return (_cfg("wlc_azure_everyday_source") or "").strip().lower() == "federation"
+
+
 def has_distinct_readonly(cloud: str) -> bool:
     """Whether `cloud` has a read-only dynamic secret of its own."""
     return bool(_cfg(f"wlc_{cloud}_readonly_secret_name"))
@@ -224,7 +238,9 @@ def default_purpose(cloud: str) -> str:
     explicit = _purpose_ctx.get()
     if explicit:
         return explicit
-    return PURPOSE_READONLY if has_distinct_readonly(cloud) else PURPOSE_PROVISION
+    if has_distinct_readonly(cloud) or everyday_from_federation(cloud):
+        return PURPOSE_READONLY
+    return PURPOSE_PROVISION
 
 
 def warm_purposes_for(cloud: str) -> tuple:
@@ -245,6 +261,9 @@ def warm_purposes_for(cloud: str) -> tuple:
     job rather than per TTL window. Eager release is available as further hardening if
     the row at rest matters more than the issuance count.
     """
+    if everyday_from_federation(cloud):
+        # The everyday credential is federated, and provision is never pre-minted.
+        return ()
     configured = purposes_for(cloud)
     if PURPOSE_READONLY in configured:
         return (PURPOSE_READONLY,)
@@ -257,7 +276,8 @@ def _effective_purpose(cloud: str, purpose: str) -> str:
     Applied before any row lookup, so the collapsed pair share one row rather than
     silently duplicating one.
     """
-    if purpose == PURPOSE_READONLY and not has_distinct_readonly(cloud):
+    if (purpose == PURPOSE_READONLY and not has_distinct_readonly(cloud)
+            and not everyday_from_federation(cloud)):
         return PURPOSE_PROVISION
     return purpose
 
@@ -576,6 +596,10 @@ def credentials(cloud: str, purpose: str = "", *,
         return None
 
     purpose = _effective_purpose(cloud, purpose or default_purpose(cloud))
+    if purpose == PURPOSE_READONLY and everyday_from_federation(cloud):
+        # Not a lease: the caller falls through to the SPIFFE identity, and must not
+        # fall back to this tier (azure_service fails closed rather than doing so).
+        return None
     now = _utcnow()
     hit = _memo_get(cloud, purpose, now)
     if hit is not None:

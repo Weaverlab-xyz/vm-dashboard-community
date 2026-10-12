@@ -165,6 +165,12 @@ variable "agent_service_account" {
   description = "ServiceAccount the Entitle agent pod uses (federated-credential subject; the chart's default)."
 }
 
+variable "extra_admin_principal_ids" {
+  description = "Object ids granted AKS RBAC Cluster Admin alongside the identity running the apply: the dashboard's everyday identity when it differs."
+  type        = list(string)
+  default     = []
+}
+
 # ── Networking (self-contained VNet + subnet; egress via managed outbound LB) ──
 
 locals {
@@ -331,6 +337,17 @@ resource "azurerm_role_assignment" "dashboard_admin" {
   scope                = azurerm_kubernetes_cluster.this.id
   role_definition_name = "Azure Kubernetes Service RBAC Cluster Admin"
   principal_id         = data.azurerm_client_config.current.object_id
+}
+
+# The same grant for the dashboard's everyday identity when it is not the one running
+# this apply: with wlc_azure_everyday_source = federation the apply runs as the Workload
+# Credentials provisioning app, and the k8s pages run as the SPIFFE-federated app. Without
+# this the request path would be refused every verb on a cluster it just built.
+resource "azurerm_role_assignment" "everyday_admin" {
+  for_each             = toset(var.extra_admin_principal_ids)
+  scope                = azurerm_kubernetes_cluster.this.id
+  role_definition_name = "Azure Kubernetes Service RBAC Cluster Admin"
+  principal_id         = each.value
 }
 
 # ── Entitle agent identity + per-cluster Key Vault (azure_secret_manager) ──────

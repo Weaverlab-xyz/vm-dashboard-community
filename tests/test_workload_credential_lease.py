@@ -545,6 +545,77 @@ def test_invalidate_drops_the_refreshable_object():
     _reset()
 
 
+
+# ── Azure: everyday credential from the SPIFFE identity ──────────────────────
+# wlc_azure_everyday_source = federation: no everyday lease at all, and the privileged
+# password is minted only inside a job.
+
+_AZ_FED = {"wlc_azure_secret_name": "dashboard-azure", "wlc_azure_everyday_source": "federation",
+           "azure_subscription_id": "sub"}
+_AZ_ON = {"workload_credentials_enabled": True, "wlc_azure_enabled": True}
+
+
+def test_federation_mode_is_azure_only_and_opt_in():
+    _stub_cfg(values=_AZ_FED, flags=_AZ_ON)
+    assert lease.everyday_from_federation("azure") is True
+    assert lease.everyday_from_federation("aws") is False
+    _stub_cfg(values={"wlc_azure_secret_name": "dashboard-azure"}, flags=_AZ_ON)
+    assert lease.everyday_from_federation("azure") is False
+
+
+def test_in_federation_mode_there_is_no_everyday_lease_and_no_warm_mint():
+    _stub_cfg(values=_AZ_FED, flags=_AZ_ON)
+    assert lease.purposes_for("azure") == (lease.PURPOSE_PROVISION,)
+    assert lease.warm_purposes_for("azure") == (), "the privileged password was pre-minted"
+    assert lease.default_purpose("azure") == lease.PURPOSE_READONLY
+    with lease.provisioning():
+        assert lease.default_purpose("azure") == lease.PURPOSE_PROVISION
+
+
+def test_outside_a_job_the_lease_answers_none_and_mints_nothing():
+    _reset()
+    _stub_cfg(values=_AZ_FED, flags=_AZ_ON)
+    real = lease._serve_or_mint
+
+    def boom(*a, **k):
+        raise AssertionError("a lease was minted for the everyday purpose")
+    lease._serve_or_mint = boom
+    try:
+        assert lease.credentials("azure") is None
+        assert lease.azure_credentials() is None
+        assert lease.azure_subprocess_env() is None
+    finally:
+        lease._serve_or_mint = real
+
+
+def test_inside_a_job_the_lease_is_the_provisioning_one():
+    _reset()
+    _stub_cfg(values=_AZ_FED, flags=_AZ_ON)
+    seen = []
+    real = lease._serve_or_mint
+
+    def mint(cloud, purpose, name, *, force):
+        seen.append((cloud, purpose, name))
+        return {"client_id": "target", "client_secret": "pw", "tenant_id": "t"}
+    lease._serve_or_mint = mint
+    try:
+        with lease.provisioning():
+            quad = lease.azure_credentials()
+    finally:
+        lease._serve_or_mint = real
+        _reset()
+    assert seen == [("azure", "provision", "dashboard-azure")], seen
+    assert quad["client_id"] == "target" and quad["subscription_id"] == "sub"
+
+
+def test_lease_mode_is_unchanged():
+    _reset()
+    _stub_cfg(values={"wlc_azure_secret_name": "dashboard-azure"}, flags=_AZ_ON)
+    assert lease.default_purpose("azure") == lease.PURPOSE_PROVISION
+    assert lease.warm_purposes_for("azure") == (lease.PURPOSE_PROVISION,)
+    assert lease._effective_purpose("azure", lease.PURPOSE_READONLY) == lease.PURPOSE_PROVISION
+
+
 # ── Fail-safe defaults ───────────────────────────────────────────────────────
 
 def test_with_no_config_reachable_nothing_is_on_the_dynamic_tier():
@@ -939,9 +1010,9 @@ def test_the_azure_credential_cache_is_keyed_on_the_material():
     copy regardless.
     """
     src = _read("web_dashboard", "services", "azure_service.py")
-    assert "_cred_key" in src
     body = src.split("async def _ensure_creds", 1)[1].split("\ndef ", 1)[0]
-    assert "_cred_key != key" in body
+    assert "key = (client_id, client_secret, tenant_id, sub_id)" in body
+    assert "_cred_cache.get(key)" in body
     # And it must not go back to the populated-only check.
     assert "if _cred_cache is None:" not in body
 
