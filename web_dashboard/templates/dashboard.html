@@ -253,6 +253,21 @@
     </div>
   </div>
 
+  <!-- Estate health (services/health): admins only, and only when something needs a look.
+       Its own component and fetch, so the tiles below never wait on it. -->
+  <div x-data="healthBand()" x-init="fetchSummary()" x-show="shown()" x-cloak
+       class="mb-6 bg-white border border-gray-200 rounded-xl px-4 py-3 flex flex-col gap-2
+              sm:flex-row sm:items-center sm:justify-between">
+    <div class="text-sm text-gray-700">
+      <span class="font-medium">Health:</span>
+      <span x-show="counts.fail" class="text-red-600" x-text="counts.fail + ' failing'"></span>
+      <span x-show="counts.fail && counts.warn" class="text-gray-400">·</span>
+      <span x-show="counts.warn" class="text-amber-600" x-text="counts.warn + ' degraded'"></span>
+      <span class="text-gray-500" x-text="areasText()"></span>
+    </div>
+    <a href="/health" class="text-sm text-blue-600 hover:underline shrink-0">Open Health</a>
+  </div>
+
   <!-- The band below is absent on a POV instance, and by a different axis than the one
        its own comment describes.
 
@@ -433,6 +448,27 @@
 
 {% block scripts %}
 <script>
+  function healthBand() {
+    return {
+      counts: {}, areas: [],
+      // Not `init`: Alpine would call that by itself as well, and the dashboard guard
+      // suites find dashboard()'s own init() by name.
+      async fetchSummary() {
+        if (!Alpine.store('auth').isAdmin) return;
+        try {
+          const r = await API.get('/api/estate-health?summary=1');
+          if (r) { this.counts = r.counts || {}; this.areas = r.areas || []; }
+        } catch (e) { this.counts = {}; }
+      },
+      shown() { return (this.counts.fail || 0) + (this.counts.warn || 0) > 0; },
+      areasText() {
+        const names = this.areas.filter(a => (a.counts.fail || 0) + (a.counts.warn || 0) > 0)
+                                .map(a => a.label);
+        return names.length ? ' in ' + names.join(', ') : '';
+      },
+    };
+  }
+
   function dashboard() {
     return {
       // Feature flags loaded from /api/features

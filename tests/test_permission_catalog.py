@@ -151,6 +151,9 @@ _NAV_EXEMPT = {
     "use_cases": "renders /api/pov/managed, governed by pov:read",
     # Vault administration stays on the admin flag; `secrets` is the `use` level only.
     "secrets": "vault administration (require_admin)",
+    # One page over every area's health -- tenants, every onboarded account, every agent,
+    # across workgroups -- so it answers to the admin flag, like Audit's data does.
+    "health": "estate-wide health view (require_admin)",
     # api/jobs.py filters rows by can_audit_jobs (jobs:read) rather than gating the route.
     "jobs": "row-filtered via can_audit_jobs",
     # Same shape as `jobs`, and exempt for the same reason: api/schedules.py scopes every

@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}Health{% endblock %}
+
+{# Health across the estate (services/health). Backed by GET /api/estate-health, which
+   reads stored results only, and POST /api/estate-health/{area}/run for Check now.
+   Areas that list the active persona come first; none is ever hidden by it.
+   Administrator-only, enforced by the API. Infrastructure only: identity posture is
+   Identity Security Insights' data and is deliberately not shown. #}
+
+{% block content %}
+<div class="max-w-6xl mx-auto py-8 px-4" x-data="estateHealthPage()" x-init="init()">
+
+  <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3 sm:mb-1">
+    <h1 class="text-2xl font-bold text-gray-800">Health</h1>
+    <button @click="load()"
+            class="self-start bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium px-3 py-1.5 rounded-lg">
+      Reload
+    </button>
+  </div>
+  <p class="text-sm text-gray-500 mb-6">
+    Whether what the dashboard built is still there and running, and whether the
+    infrastructure it depends on is working: its cloud credentials and cost controls,
+    hypervisors, BeyondTrust tenants, Gateways, the Password Safe accounts it onboarded,
+    Entitle, remote agents and directories. Each area is checked on its own schedule in the background; this page
+    shows the last result. Accounts, groups and privilege are not shown here.
+  </p>
+
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
+
+  <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+    <template x-for="s in summary" :key="s.status">
+      <div class="bg-white rounded-xl shadow-sm border border-gray-200 px-4 py-3">
+        <div class="text-xs text-gray-500" x-text="s.label"></div>
+        <div class="text-2xl font-semibold" :class="s.text" x-text="(data.counts || {})[s.status] || 0"></div>
+      </div>
+    </template>
+  </div>
+
+  <div x-show="loading" class="text-sm text-gray-500">Loading…</div>
+  <div x-show="!loading && !(data.areas || []).length" x-cloak
+       class="bg-white rounded-xl border border-gray-200 px-4 py-6 text-sm text-gray-500">
+    Nothing to check yet. Areas appear here as the integrations they cover are turned on in Settings.
+  </div>
+
+  <div class="space-y-6">
+    <template x-for="a in (data.areas || [])" :key="a.area">
+      <section class="bg-white rounded-xl shadow-sm border border-gray-200">
+        <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between px-4 py-3 border-b border-gray-100">
+          <div class="min-w-0">
+            <h2 class="font-semibold text-gray-800" x-text="a.label"></h2>
+            <p class="text-xs text-gray-500" x-text="a.description"></p>
+          </div>
+          <div class="flex items-center gap-3 text-xs text-gray-500 shrink-0">
+            <span x-show="a.counts.fail" class="text-red-600" x-text="a.counts.fail + ' failing'"></span>
+            <span x-show="a.counts.warn" class="text-amber-600" x-text="a.counts.warn + ' degraded'"></span>
+            <span x-text="a.last_run_at ? 'Checked ' + ago(a.last_run_at) : 'Not checked yet'"></span>
+            <button @click="runNow(a)" :disabled="busy[a.area] || !a.enabled"
+                    class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-2.5 py-1 rounded-lg disabled:opacity-50"
+                    x-text="busy[a.area] ? 'Checking…' : 'Check now'"></button>
+          </div>
+        </div>
+        <div x-show="a.last_error" class="px-4 py-2 text-sm bg-amber-50 text-amber-800 border-b border-amber-100"
+             x-text="a.last_error + ' The results below are from the run before.'"></div>
+        <div x-show="!a.items.length" class="px-4 py-3 text-sm text-gray-500">Nothing to check in this area.</div>
+        <ul class="divide-y divide-gray-100">
+          <template x-for="it in a.items" :key="it.object_id">
+            <li class="px-4 py-2.5">
+              <div class="flex items-center gap-3">
+                <span class="inline-block text-xs font-semibold px-2 py-0.5 rounded-full shrink-0"
+                      :class="badge(it.status)" x-text="statusLabel(it.status)"></span>
+                <a :href="it.href || '#'" class="font-medium text-gray-800 hover:underline truncate" x-text="it.name"></a>
+                <span class="text-xs text-gray-400 truncate" x-text="it.kind"></span>
+              </div>
+              <ul class="mt-1 ml-1 space-y-0.5">
+                <template x-for="c in it.checks" :key="c.key">
+                  <li class="flex items-start gap-2 text-sm">
+                    <span class="mt-1.5 inline-block w-2 h-2 rounded-full shrink-0" :class="dot(c.status)"></span>
+                    <div class="min-w-0">
+                      <span class="text-gray-700" x-text="c.label"></span>
+                      <span class="text-gray-500" x-text="c.detail ? ' — ' + c.detail : ''"></span>
+                    </div>
+                  </li>
+                </template>
+              </ul>
+            </li>
+          </template>
+        </ul>
+      </section>
+    </template>
+  </div>
+</div>
+
+<script>
+function estateHealthPage() {
+  return {
+    data: {}, loading: true, busy: {},
+    toast: '', toastType: 'success',
+    summary: [
+      {status: 'fail', label: 'Failing', text: 'text-red-600'},
+      {status: 'warn', label: 'Degraded', text: 'text-amber-600'},
+      {status: 'ok', label: 'Healthy', text: 'text-green-600'},
+      {status: 'unknown', label: 'Unknown', text: 'text-gray-500'},
+    ],
+
+    async init() {
+      requireAuth();
+      await this.load();
+    },
+
+    async load() {
+      this.loading = true;
+      try { this.data = (await API.get('/api/estate-health')) || {}; }
+      catch (e) { this.note(e.message, 'error'); }
+      finally { this.loading = false; }
+    },
+
+    async runNow(a) {
+      this.busy = {...this.busy, [a.area]: true};
+      try {
+        const r = await API.post(`/api/estate-health/${a.area}/run`, {});
+        if (r && r.throttled) this.note(a.label + ' was checked less than a minute ago.');
+        await this.load();
+      } catch (e) { this.note(e.message, 'error'); }
+      finally { this.busy = {...this.busy, [a.area]: false}; }
+    },
+
+    statusLabel(s) { return {ok: 'Healthy', warn: 'Degraded', fail: 'Failing'}[s] || 'Unknown'; },
+    badge(s) {
+      return {ok: 'bg-green-100 text-green-800', warn: 'bg-amber-100 text-amber-800',
+              fail: 'bg-red-100 text-red-800'}[s] || 'bg-gray-100 text-gray-700';
+    },
+    dot(s) {
+      return {ok: 'bg-green-500', warn: 'bg-amber-500', fail: 'bg-red-500'}[s] || 'bg-gray-300';
+    },
+    ago(iso) {
+      const secs = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+      if (secs < 90) return 'just now';
+      const mins = Math.round(secs / 60);
+      if (mins < 90) return mins + ' min ago';
+      const hours = Math.round(mins / 60);
+      return hours < 48 ? hours + ' h ago' : Math.round(hours / 24) + ' d ago';
+    },
+    note(msg, type = 'success') {
+      this.toast = msg; this.toastType = type;
+      setTimeout(() => { this.toast = ''; }, 6000);
+    },
+  };
+}
+</script>
+{% endblock %}

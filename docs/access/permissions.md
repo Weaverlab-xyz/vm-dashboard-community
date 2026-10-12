@@ -325,6 +325,8 @@ a way to become an administrator:
   it (see [The sections](#the-sections)).
 - **Virtual Desktops**, while it is a preview.
 - **Worker concurrency and preflight**, which are instance-wide plumbing.
+- **[Health](../operations/health.md)**, one view over every tenant, onboarded account
+  and agent across all workgroups.
 
 Two more have no scope for narrower reasons:
 
