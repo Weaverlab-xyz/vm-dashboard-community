@@ -254,7 +254,7 @@ def test_the_api_ties_the_forced_deep_check_to_write():
     src = open(os.path.join(_ROOT, "web_dashboard", "api", "directories.py"),
                encoding="utf-8").read()
     body = src.split("async def check_directory_health(", 1)[1].split("\n@router", 1)[0]
-    assert 'force_deep=has_permission(user, "directories", "write")' in body
+    assert 'force_deep=has_explicit_permission(user, "directories", "write")' in body
 
 
 def test_it_runs_again_after_the_interval():

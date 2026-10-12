@@ -63,7 +63,8 @@ from sqlalchemy.orm import Session
 from ..database import User, get_db
 from ..services import directory_service, job_service
 from ..services.directory_service import DirectoryError
-from .auth import get_current_user, has_permission, require_explicit_permission
+from .auth import (get_current_user, has_explicit_permission, has_permission,
+                   require_explicit_permission)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/directories", tags=["directories"])
@@ -182,7 +183,7 @@ async def check_directory_health(
     # The domain controller check checks out the directory's Password Safe credential,
     # so only someone who may change the directory can start one on demand.
     return await directory_health_service.check(
-        db, row, force=True, force_deep=has_permission(user, "directories", "write"))
+        db, row, force=True, force_deep=has_explicit_permission(user, "directories", "write"))
 
 
 @router.get("/options")
