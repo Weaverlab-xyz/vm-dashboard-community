@@ -460,7 +460,8 @@ def test_credential_process_is_aws_only():
 
 def test_the_script_keeps_stdout_for_the_credential():
     src = _read("web_dashboard", "wlc_credential_process.py")
-    assert "sys.stdout.write(json.dumps(out))" in src
+    assert 'os.write(1, json.dumps(out).encode("utf-8"))' in src
+    assert "sys.stdout" not in src.split("def main", 1)[1]
     # Every other print goes to stderr.
     for line in src.splitlines():
         if "print(" in line:

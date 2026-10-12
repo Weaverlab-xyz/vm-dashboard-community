@@ -36,8 +36,9 @@ def main(argv=None) -> int:
         print(f"vm-dashboard credential_process: {type(exc).__name__}: {exc}",
               file=sys.stderr)
         return 1
-    sys.stdout.write(json.dumps(out))
-    sys.stdout.flush()
+    # Straight to file descriptor 1, the pipe the SDK reads: this is the protocol's
+    # channel, not a log, and nothing else is ever written to it.
+    os.write(1, json.dumps(out).encode("utf-8"))
     return 0
 
 
