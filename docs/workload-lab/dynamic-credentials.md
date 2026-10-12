@@ -121,9 +121,14 @@ its own dead copy anyway.
 
 #### The everyday credential from the SPIFFE identity
 
-Azure has one dynamic secret, so an AWS-style split would need a second target app
-registration. Instead, set `wlc_azure_everyday_source` to `federation` (Settings → Workload
-Credentials → *Azure — everyday credential*):
+This works for **AWS and Azure**. On AWS it replaces the everyday dynamic secret; on Azure,
+which has one dynamic secret, it avoids the second target app registration a lease split
+would need. Set `wlc_aws_everyday_source` or `wlc_azure_everyday_source` to `federation`
+(Settings → Workload Credentials → *everyday credential*). On AWS the everyday calls then
+assume the role in `aws_federation_role_arn`; apply
+[`terraform/dashboard_federation/aws`](../../terraform/dashboard_federation/README.md) with
+`everyday_only = true` so that role carries the same deny on creating and passing roles as
+the everyday secret. On Azure:
 
 - **Pages and API calls** run as the app in `azure_client_id`, through the federated
   credential that trusts the dashboard's [SPIFFE identity](../design/dashboard-workload-identity.md).

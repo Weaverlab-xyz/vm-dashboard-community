@@ -2241,6 +2241,7 @@ class WorkloadCredentialsFeatureConfig(BaseModel):
     wlc_azure_folder: str = ""
     wlc_azure_secret_name: str = ""
     wlc_azure_everyday_source: str = "lease"
+    wlc_aws_everyday_source: str = "lease"
     azure_everyday_principal_id: str = ""
     wlc_refresh_margin_pct: int = 50
     wlc_subprocess_min_remaining_pct: int = 80

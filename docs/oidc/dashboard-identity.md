@@ -62,9 +62,19 @@ is not this identity, why not.
 
 ## Making each cloud trust it
 
-Replace `agents.example.com/spiffe` with your issuer and `dashboard.example.com` with your
-trust domain. In every case the condition is on the **exact subject**
-`spiffe://<trust domain>/dashboard` — see the next section for why.
+**With Terraform:** [`terraform/dashboard_federation`](../../terraform/dashboard_federation/README.md)
+has one small module per cloud (`aws/`, `gcp/`, `azure/`). Each creates the trust below and
+outputs the values to paste into the panel. Apply only the clouds you use.
+
+**By hand:** the commands below do the same. Replace `agents.example.com/spiffe` with your
+issuer and `dashboard.example.com` with your trust domain. In every case the condition is
+on the **exact subject** `spiffe://<trust domain>/dashboard` — see the next section for why.
+
+This works **with or without BeyondTrust Workload Credentials**. Without it, the federated
+identity is the dashboard's only cloud credential and nothing secret is stored. With it,
+the federated identity can be the everyday credential while jobs take a Workload
+Credentials lease (`wlc_aws_everyday_source` / `wlc_azure_everyday_source` set to
+`federation`; see [dynamic credentials](../workload-lab/dynamic-credentials.md)).
 
 ### AWS
 
@@ -175,6 +185,13 @@ every key rotation (weekly by default).
 
 These documents carry public keys and nothing else. Do not put them behind SSO: every cloud
 that trusts the issuer would stop accepting the dashboard's tokens at once.
+
+**Check before retiring a key.** On the panel, **Check the issuer is reachable** fetches both
+documents over the issuer's public URL with TLS verified, the way a cloud does. It reports
+whether the name resolves, the certificate is publicly trusted, the document names exactly
+this issuer, and the keys served are this dashboard's current ones. It runs from inside the
+dashboard, so a firewall that lets the dashboard out but not the internet in can still pass
+it; the first token a cloud accepts is the final proof.
 
 The SPIRE server also serves its trust bundle on **tcp/8082**, a SPIFFE bundle endpoint.
 That is a different thing from the issuer: another SPIRE server fetches it once a

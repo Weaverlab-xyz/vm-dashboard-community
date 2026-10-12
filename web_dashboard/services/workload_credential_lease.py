@@ -190,16 +190,17 @@ def secret_name_for(cloud: str, purpose: str) -> str:
 
 def everyday_from_federation(cloud: str) -> bool:
     """Whether ``cloud``'s everyday credential is the dashboard's SPIFFE identity rather
-    than a lease (``wlc_azure_everyday_source = federation``). Azure only.
+    than a lease (``wlc_<cloud>_everyday_source = federation``). AWS and Azure.
 
-    Azure's lease is a password minted onto one app registration, so an AWS-style split
-    would need a second target app. Instead the everyday calls use the app the SPIFFE
-    identity is federated to, and Workload Credentials is asked only inside a job, when
-    privilege is needed. There is then no everyday lease at all: no row, no warm mint.
+    The everyday calls then use what the SPIFFE identity is federated to (the AWS role in
+    ``aws_federation_role_arn``, the Azure app in ``azure_client_id``), and Workload
+    Credentials is asked only inside a job, when privilege is needed. There is no everyday
+    lease at all: no row, no warm mint, and no live privileged credential between jobs.
+    On Azure this also avoids the second target app registration a lease split needs.
     """
-    if cloud != "azure":
+    if cloud not in CLOUDS:
         return False
-    return (_cfg("wlc_azure_everyday_source") or "").strip().lower() == "federation"
+    return (_cfg(f"wlc_{cloud}_everyday_source") or "").strip().lower() == "federation"
 
 
 def has_distinct_readonly(cloud: str) -> bool:
@@ -222,6 +223,9 @@ def purposes_for(cloud: str) -> tuple:
     """
     if not dynamic_enabled(cloud) or not _cfg(f"wlc_{cloud}_secret_name"):
         return ()
+    if everyday_from_federation(cloud):
+        # The everyday purpose is federated, so a readonly secret, if named, is unused.
+        return (PURPOSE_PROVISION,)
     if has_distinct_readonly(cloud):
         return (PURPOSE_PROVISION, PURPOSE_READONLY)
     return (PURPOSE_PROVISION,)

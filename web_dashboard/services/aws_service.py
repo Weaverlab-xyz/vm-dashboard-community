@@ -86,6 +86,18 @@ def _aws_kwargs(region: str) -> dict:
         kwargs["aws_session_token"]     = dynamic["session_token"]
         return kwargs
 
+    if _leases.dynamic_enabled("aws") and _everyday_federated():
+        # The everyday credential is the SPIFFE identity, and it fails closed: the lease
+        # is the privileged credential, and neither it nor a stored key may stand in for
+        # a broken federation on the request path.
+        from . import cloud_federation
+        why = cloud_federation.reason("aws")
+        if why:
+            raise AWSError(
+                "AWS's everyday credential is the dashboard's SPIFFE identity "
+                "(wlc_aws_everyday_source = federation), but federation is not usable: "
+                f"{why}. Workload Credentials is used only inside jobs.")
+
     if key_id and secret:
         kwargs["aws_access_key_id"]     = key_id
         kwargs["aws_secret_access_key"] = secret
@@ -119,16 +131,33 @@ def aws_client(service: str, region: str = "", *, pinned: bool = False):
     resolves the region and fails fast, as AWSError, when no lease can be issued.
     """
     kwargs = _aws_kwargs_pinned(region) if pinned else _aws_kwargs(region)
+    from . import cloud_federation
     from . import workload_credential_lease as _leases
-    if not _leases.dynamic_enabled("aws"):
+    if _leases.dynamic_enabled("aws") and not _everyday_federated():
+        try:
+            creds = _leases.aws_refreshable_credentials()
+        except _lease_unavailable() as exc:
+            raise AWSError(
+                "AWS is configured to use BeyondTrust Workload Credentials, but no "
+                "credential could be issued: %s" % exc) from exc
+    elif kwargs.get("aws_session_token") and cloud_federation.active("aws"):
+        # _aws_kwargs answered from the SPIFFE identity (federation is active only with
+        # no stored key): sign with the role's refreshable credentials, not a snapshot.
+        try:
+            creds = cloud_federation.aws_refreshable_credentials()
+        except cloud_federation.FederationError as exc:
+            raise AWSError(str(exc)) from exc
+    else:
         return boto3.client(service, **kwargs)
-    try:
-        creds = _leases.aws_refreshable_credentials()
-    except _lease_unavailable() as exc:
-        raise AWSError(
-            "AWS is configured to use BeyondTrust Workload Credentials, but no "
-            "credential could be issued: %s" % exc) from exc
     return _refreshing_session(creds).client(service, region_name=kwargs.get("region_name"))
+
+
+def _everyday_federated() -> bool:
+    """True when this call is an everyday one and AWS's everyday credential is the
+    SPIFFE identity (``wlc_aws_everyday_source = federation``), not a lease."""
+    from . import workload_credential_lease as _leases
+    return (_leases.everyday_from_federation("aws")
+            and _leases.default_purpose("aws") != _leases.PURPOSE_PROVISION)
 
 
 _session_local = threading.local()

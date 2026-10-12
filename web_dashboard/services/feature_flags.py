@@ -297,6 +297,21 @@ def flags() -> dict:
         "cloud_pages":          profile_page_allowed("cloud_pages"),
     }
 
+def _keyless_aws() -> bool:
+    """AWS with no stored key: Workload Credentials or the dashboard's SPIFFE identity.
+
+    Without this a deployment that retired its key (the point of both) read as having
+    no AWS at all: tiles hidden, node routes refused. Lazy and fail-safe, because this is
+    consulted while building every page's feature map.
+    """
+    try:
+        from . import cloud_federation, workload_credential_lease
+        return bool(workload_credential_lease.dynamic_enabled("aws")
+                    or cloud_federation.active("aws"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def cloud_configured(cloud: str) -> bool:
     """Whether ``cloud`` has usable credentials.
 
@@ -307,8 +322,10 @@ def cloud_configured(cloud: str) -> bool:
     """
     cloud = (cloud or "").strip().lower()
     if cloud == "aws":
-        return bool(config_service.get("aws_access_key_id")
-                    or os.environ.get("AWS_ACCESS_KEY_ID", ""))
+        if (config_service.get("aws_access_key_id")
+                or os.environ.get("AWS_ACCESS_KEY_ID", "")):
+            return True
+        return _keyless_aws()
     if cloud == "azure":
         return bool(
             (config_service.get("azure_client_id") or settings.azure_client_id)

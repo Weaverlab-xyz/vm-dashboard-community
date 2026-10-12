@@ -92,7 +92,9 @@ def _gcp_creds():
     except ImportError:
         raise GCPError("google-auth is not installed — run: pip install google-auth")
 
-    raw = _cfg("gcp_service_account_json")
+    # Both keys, as cloud_federation._stored_key and the Terraform env read them: with
+    # only gcp_credentials_json set, SDK calls fell to ADC while Terraform used the key.
+    raw = _cfg("gcp_service_account_json") or _cfg("gcp_credentials_json")
     if not raw:
         from . import cloud_federation
         return cloud_federation.gcp_credentials()  # None → ADC fallback

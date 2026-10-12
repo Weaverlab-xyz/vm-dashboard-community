@@ -360,6 +360,7 @@ Preview features. `secrets_wlc_folder` is also on the Secrets page.
 | `wlc_aws_enabled` / `wlc_azure_enabled` | off | Per-cloud opt-in for [dynamic credentials](dynamic-credentials.md). GCP is not covered by WC |
 | `wlc_aws_folder` / `wlc_azure_folder` | blank | The folder holding that cloud's dynamic secret |
 | `wlc_aws_secret_name` / `wlc_azure_secret_name` | blank | The provisioning dynamic secret |
+| `wlc_aws_everyday_source` | `lease` | `federation`: AWS calls outside jobs assume the role in `aws_federation_role_arn` with the dashboard's SPIFFE identity, and the provisioning lease is minted only inside jobs. No everyday dynamic secret is needed. Fails closed when federation is not usable |
 | `wlc_azure_everyday_source` | `lease` | `federation`: Azure calls outside jobs use the dashboard's SPIFFE identity (the app in `azure_client_id`), and the lease is minted only inside jobs. Fails closed when federation is not usable. See [the everyday credential from the SPIFFE identity](dynamic-credentials.md#the-everyday-credential-from-the-spiffe-identity) |
 | `azure_everyday_principal_id` | blank | With `federation`: the everyday app's service principal object id, granted AKS cluster admin on clusters a job builds |
 | `wlc_aws_readonly_secret_name` | blank | Optional read-only dynamic secret for the job-boundary split |

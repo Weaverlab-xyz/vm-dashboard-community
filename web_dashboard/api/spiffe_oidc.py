@@ -5,6 +5,7 @@ docs/design/dashboard-workload-identity.md, Slice 1.
     GET /spiffe/.well-known/openid-configuration   public
     GET /spiffe/keys                               public — JWT signing keys, public members only
     GET /api/spiffe-identity                       agents:read — what Settings shows
+    POST /api/spiffe-identity/check-issuer         agents:write — can a cloud read them?
 
 **Public by construction, and deliberately so.** AWS, Azure and GCP fetch these two
 documents anonymously from the internet when they validate a token this dashboard
@@ -63,3 +64,10 @@ def keys():
 @admin_router.get("")
 def identity_status(current_user: User = Depends(require_explicit_permission("agents", "read"))):
     return dashboard_identity.status()
+
+
+@admin_router.post("/check-issuer")
+def check_issuer(current_user: User = Depends(require_explicit_permission("agents", "write"))):
+    """Fetch the issuer's discovery document and keys over its public URL, as a cloud
+    would. agents:write rather than read: it makes outbound requests on demand."""
+    return dashboard_identity.check_issuer()
