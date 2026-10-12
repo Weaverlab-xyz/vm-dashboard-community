@@ -119,8 +119,17 @@ az ad app federated-credential create --id <application client id> --parameters 
 ```
 
 Then tick **Azure** and clear the Azure client secret. Every Azure call, Key Vault, Blob
-storage and Terraform (`ARM_USE_OIDC`) then use the identity. **The Packer azure-arm build
-does not yet**: it still needs the secret.
+storage and Terraform (`ARM_USE_OIDC`) then use the identity.
+
+**Packer image builds** use it too, differently. The azure-arm builder reads its credential
+once, from a template variable, and signs in again whenever its Azure token runs out, so
+the 15-minute token file would expire mid-build. Each build instead gets its own client
+assertion (`client_jwt`): the same identity, audience and checks, minted for that build
+with a lifetime set by *Packer image builds: assertion lifetime* (default 120 minutes,
+15–480). Set it above your longest Azure image build. The assertion lives only in the
+build's environment as a sensitive variable, never in the template file or the log. It is
+a bearer credential for its lifetime, which is still far less than a permanent secret. A
+Workload Credentials lease or a stored secret, when there is one, is used instead.
 
 ### GCP
 

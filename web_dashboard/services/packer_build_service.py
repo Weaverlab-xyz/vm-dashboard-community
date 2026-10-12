@@ -299,6 +299,53 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
         db.close()
 
 
+def _azure_build_credentials() -> tuple:
+    """``(client_id, client_secret, client_jwt, tenant_id, subscription_id)`` for an
+    azure-arm build, with exactly one of the secret and the assertion set.
+
+    Order: a Workload Credentials lease (inside the job), the stored secret, then the
+    dashboard's SPIFFE identity as a build-scoped client assertion. Raises PackerError
+    naming what is missing.
+    """
+    # Azure credentials
+    # The dynamic tier first. Packer gets the credential wired into the template
+    # rather than the environment (see the PKR_VAR_* block below), so a lease has to
+    # be resolved here explicitly — there is no ambient path it could fall back to.
+    from .workload_credential_lease import azure_credentials as _wlc_azure
+    _quad = _wlc_azure() or {}
+    client_id = _quad.get("client_id") or _cfg("azure_client_id")
+    client_secret = _quad.get("client_secret") or _cfg("azure_client_secret")
+    tenant_id = _quad.get("tenant_id") or _cfg("azure_tenant_id")
+    subscription_id = _quad.get("subscription_id") or _cfg("azure_subscription_id")
+
+    # The azure-arm builder needs the service principal wired into the
+    # template (it does NOT read ARM_* env vars) — fail fast with a clear
+    # message instead of letting Packer fall back to Managed Identity and
+    # time out against IMDS (169.254.169.254) after 30s on this non-Azure host.
+    #
+    # With no lease and no stored secret, the dashboard's SPIFFE identity: a client
+    # assertion minted for this build (client_jwt), long enough to outlast it.
+    client_jwt = ""
+    if not client_secret and client_id and tenant_id and subscription_id:
+        from . import cloud_federation
+        if cloud_federation.active("azure"):
+            try:
+                client_jwt = cloud_federation.azure_build_assertion()
+            except cloud_federation.FederationError as exc:
+                raise PackerError(str(exc)) from exc
+    if not all([client_id, client_secret or client_jwt, tenant_id, subscription_id]):
+        from . import cloud_federation
+        why = cloud_federation.reason("azure")
+        raise PackerError(
+            "Azure credentials for the Packer build were not found. It needs "
+            "azure_client_id, azure_tenant_id and azure_subscription_id, and one of: a "
+            "Workload Credentials lease, a stored azure_client_secret, or the "
+            "dashboard's SPIFFE identity federated to that app"
+            + (f" (federation is not in use: {why})." if why else ".")
+        )
+    return client_id, client_secret or "", client_jwt, tenant_id, subscription_id
+
+
 async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by: str = "system") -> None:
     db = _get_db_session()
     build_dir = packer_service.BUILDS_DIR / job_id
@@ -306,42 +353,24 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
         job_service.set_running(db, job_id)
         build_dir.mkdir(parents=True, exist_ok=True)
 
-        # Azure credentials
-        # The dynamic tier first. Packer gets the credential wired into the template
-        # rather than the environment (see the PKR_VAR_* block below), so a lease has to
-        # be resolved here explicitly — there is no ambient path it could fall back to.
-        from .workload_credential_lease import azure_credentials as _wlc_azure
-        _quad = _wlc_azure() or {}
-        client_id = _quad.get("client_id") or _cfg("azure_client_id")
-        client_secret = _quad.get("client_secret") or _cfg("azure_client_secret")
-        tenant_id = _quad.get("tenant_id") or _cfg("azure_tenant_id")
-        subscription_id = _quad.get("subscription_id") or _cfg("azure_subscription_id")
+        client_id, client_secret, client_jwt, tenant_id, subscription_id = (
+            _azure_build_credentials())
         resource_group = _cfg("azure_resource_group") or "dashboard-rg"
         location = _cfg("azure_location") or "centralus"
-
-        # The azure-arm builder needs the service principal wired into the
-        # template (it does NOT read ARM_* env vars) — fail fast with a clear
-        # message instead of letting Packer fall back to Managed Identity and
-        # time out against IMDS (169.254.169.254) after 30s on this non-Azure host.
-        if not all([client_id, client_secret, tenant_id, subscription_id]):
-            raise PackerError(
-                "Azure service-principal credentials not found in the config store or .env "
-                "(azure_client_id / azure_client_secret / azure_tenant_id / azure_subscription_id). "
-                "Packer needs them explicitly. (Creds sourced only from BeyondTrust Password Safe "
-                "are not yet wired into the Packer build path, and neither is the dashboard's "
-                "SPIFFE federation: the azure-arm builder takes its credential through the "
-                "template, and that path has not been verified.)"
-            )
 
         env = _base_env()
         # ARM_* kept for any subprocess that honors them; the azure-arm builder
         # itself reads the credentials from the source block via these PKR_VAR_*.
         env["ARM_CLIENT_ID"] = client_id
-        env["ARM_CLIENT_SECRET"] = client_secret
         env["ARM_TENANT_ID"] = tenant_id
         env["ARM_SUBSCRIPTION_ID"] = subscription_id
+        if client_secret:
+            env["ARM_CLIENT_SECRET"] = client_secret
         env["PKR_VAR_client_id"] = client_id
-        env["PKR_VAR_client_secret"] = client_secret
+        env["PKR_VAR_client_secret"] = client_secret or ""
+        # Never logged and never in the template file: a sensitive var, in this
+        # subprocess's environment only.
+        env["PKR_VAR_client_jwt"] = client_jwt
         env["PKR_VAR_tenant_id"] = tenant_id
         env["PKR_VAR_subscription_id"] = subscription_id
         env["PKR_VAR_resource_group"] = resource_group

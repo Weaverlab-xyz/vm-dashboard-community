@@ -268,6 +268,48 @@ def azure_credential(tenant_id: str, client_id: str, client_secret: str = ""):
                                      func=lambda: _read_token("azure"))
 
 
+# Packer's azure-arm builder reads its credential once, from a template variable, and
+# authenticates with it again whenever its Azure token runs out. The 15-minute token file
+# would expire mid-build, so a build gets its own assertion that lives as long as the
+# longest build. Bounded either side: under 15 minutes is not a build, and a bearer
+# assertion that outlives a working day is too close to the secret it replaces.
+PACKER_ASSERTION_TTL = "packer_azure_assertion_ttl_minutes"
+_PACKER_ASSERTION_MIN_M = 15
+_PACKER_ASSERTION_MAX_M = 480
+
+
+def packer_assertion_ttl_s() -> int:
+    """The build-scoped assertion's lifetime in seconds: the setting, clamped."""
+    try:
+        minutes = int(_cfg(PACKER_ASSERTION_TTL) or 120)
+    except (TypeError, ValueError):
+        minutes = 120
+    return 60 * max(_PACKER_ASSERTION_MIN_M, min(_PACKER_ASSERTION_MAX_M, minutes))
+
+
+def azure_build_assertion() -> str:
+    """A JWT-SVID for Entra's federated credential, minted for one Packer build.
+
+    The same identity, audience and checks as the token file, with a lifetime that covers
+    the build. Returned to the caller only, for the build's environment: never written to
+    disk and never logged. Raises FederationError when federation is not usable.
+    """
+    why = reason("azure")
+    if why:
+        raise FederationError(f"Azure SPIFFE federation is not usable: {why}")
+    from . import dashboard_spire
+    try:
+        td = dashboard_spire.trust_domain()
+        token = dashboard_spire.mint_jwt(dashboard_identity.AZURE_AUDIENCE,
+                                         packer_assertion_ttl_s(), td)
+        dashboard_identity._check_minted(token, dashboard_identity.AZURE_AUDIENCE,
+                                         dashboard_spire.dashboard_id(td),
+                                         dashboard_identity.issuer())
+    except (dashboard_spire.DashboardSpireError, dashboard_identity.IdentityError) as exc:
+        raise FederationError(f"could not mint a build assertion: {exc}") from exc
+    return token
+
+
 def azure_subprocess_env() -> Optional[dict]:
     """Terraform's azurerm provider (and its state backend) reading the token file."""
     if not active("azure"):

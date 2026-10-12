@@ -5634,6 +5634,16 @@
                 Uses the Azure setup's client id and tenant id, as a federated credential on
                 that app registration. Clear its client secret to switch.
               </p>
+              <div x-show="panelCfg.dashboard_spiffe_aud_azure" x-cloak class="pl-6">
+                <label class="block text-[11px] text-gray-600 mb-0.5">Packer image builds: assertion lifetime (minutes)</label>
+                <input type="number" min="15" max="480" x-model.number="panelCfg.packer_azure_assertion_ttl_minutes"
+                       class="w-24 border border-gray-300 rounded-lg px-2 py-1 text-sm font-mono">
+                <p class="text-[11px] text-gray-400 mt-0.5">
+                  Packer's azure-arm builder reads its credential once, so with no secret and no
+                  Workload Credentials lease each build gets its own signed assertion that lasts
+                  this long. Set it above your longest Azure image build (15–480).
+                </p>
+              </div>
               <label class="flex items-center gap-2 text-sm text-gray-700">
                 <input type="checkbox" x-model="panelCfg.dashboard_spiffe_aud_wlc" class="rounded border-gray-300 text-blue-600">
                 Workload Credentials <span class="text-[11px] text-gray-500">its identity audience → <span class="font-mono">wlc.jwt</span></span>

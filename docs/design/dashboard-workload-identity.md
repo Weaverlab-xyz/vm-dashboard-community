@@ -243,8 +243,11 @@ constructor, `azure_credential`, whose assertion re-reads the token file per req
 Terraform gets `ARM_USE_OIDC`; GCP gets an `external_account` config, written beside the
 token for subprocesses. **A correction to the table below:** Terraform and Packer run as
 local subprocesses of the app and worker, not as sibling containers, so nothing has to be
-passed into another container — they read the files directly. **Not covered:** the Packer
-azure-arm build (credential through the template, unverified) and OCI.
+passed into another container — they read the files directly. The Packer azure-arm
+build takes a build-scoped client assertion (`client_jwt`, minted per build with a lifetime
+that covers it), since it reads its credential once from the template. Checked with
+`packer validate` against the azure plugin 2.6.4: it accepts `client_jwt` with an empty
+`client_secret`, and refuses both at once. **Not covered:** OCI.
 
 The largest credential this removes. On PaaS hosting, Workload Credentials and the
 platform's managed identity already avoid stored keys. A self-hosted Docker install has no
