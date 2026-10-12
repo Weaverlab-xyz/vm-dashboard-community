@@ -93,6 +93,26 @@ def test_the_max_session_duration_default_exceeds_the_ttl_default():
         block = src.split(f'variable "{name}"', 1)[1].split("\n}", 1)[0]
         return int(re.search(r"default\s*=\s*(\d+)", block).group(1))
     assert default_of("aws_max_session_duration") >= default_of("aws_ttl_seconds")
+    assert default_of("aws_max_session_duration") >= default_of("aws_provision_ttl_seconds")
+
+
+def test_the_provisioning_secret_has_its_own_shorter_ttl():
+    """The provisioning lease carries iam:PassRole and is never pre-warmed, and AWS cannot
+    revoke it early, so its TTL is how long it outlives the job. The everyday lease is
+    kept warm, where a short TTL only multiplies issuances. They must not share a value."""
+    import re
+    src = _read("variables.tf")
+
+    def default_of(name):
+        block = src.split(f'variable "{name}"', 1)[1].split("\n}", 1)[0]
+        return int(re.search(r"default\s*=\s*(\d+)", block).group(1))
+    assert default_of("aws_provision_ttl_seconds") == 1800
+    assert default_of("aws_provision_ttl_seconds") < default_of("aws_ttl_seconds")
+    aws = _uncommented(_read("aws.tf"))
+    provision = aws.split('"provision" {', 1)[1].split("\n}", 1)[0]
+    everyday = aws.split('"everyday" {', 1)[1].split("\n}", 1)[0]
+    assert "ttl             = var.aws_provision_ttl_seconds" in provision
+    assert "ttl             = var.aws_ttl_seconds" in everyday
 
 
 def test_the_external_id_is_read_back_not_supplied():
@@ -242,6 +262,7 @@ def test_the_ttl_cannot_exceed_the_roles_max_session_duration():
     """
     src = _uncommented(_read("variables.tf"))
     assert "var.aws_ttl_seconds <= var.aws_max_session_duration" in src
+    assert "var.aws_provision_ttl_seconds <= var.aws_max_session_duration" in src
 
 
 def test_the_azure_identifiers_are_required_only_when_azure_is_enabled():

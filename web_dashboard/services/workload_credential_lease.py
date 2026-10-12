@@ -49,6 +49,7 @@ import json
 import logging
 import os
 import socket
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -550,7 +551,8 @@ def clear_backoff(cloud: str = "", purpose: str = "") -> int:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def credentials(cloud: str, purpose: str = "") -> Optional[dict]:
+def credentials(cloud: str, purpose: str = "", *,
+                min_remaining_pct: int = 0) -> Optional[dict]:
     """The credential values for `cloud`, or None when it is not on the dynamic tier.
 
     None means "use the static credential" and is the normal answer for most deployments.
@@ -560,6 +562,11 @@ def credentials(cloud: str, purpose: str = "") -> Optional[dict]:
 
     Synchronous, and on the hot path for every boto3 client, so the common case is a
     process-local memo hit with no database access at all.
+
+    ``min_remaining_pct`` is for a caller that cannot refresh: a subprocess handed the
+    credential as environment variables. The lease is served only if at least that share
+    of its lifetime is still ahead of it; otherwise a fresh one is minted. The memo is
+    skipped, because it does not know when the lease was issued.
     """
     if not dynamic_enabled(cloud):
         return None
@@ -576,8 +583,57 @@ def credentials(cloud: str, purpose: str = "") -> Optional[dict]:
             f"{cloud} is set to use Workload Credentials but no dynamic secret name is "
             f"configured (wlc_{cloud}_secret_name)")
 
+    if min_remaining_pct:
+        return _serve_fresh(cloud, purpose, name, min_remaining_pct)
     values = _serve_or_mint(cloud, purpose, name, force=False)
     return values
+
+
+def _fresh_enough(snap, now: datetime, pct: int) -> bool:
+    """Whether at least ``pct`` percent of the lease's lifetime is still ahead of it."""
+    if not _usable(snap, now) or not snap["issued_at"]:
+        return False
+    lifetime = (snap["expires_at"] - snap["issued_at"]).total_seconds()
+    return (snap["expires_at"] - now).total_seconds() >= lifetime * pct / 100.0
+
+
+def _serve_fresh(cloud: str, purpose: str, name: str, pct: int) -> dict:
+    """Serve the stored lease if it has ``pct`` percent of its life left, else mint.
+
+    A mint that cannot happen (backoff, or another process holds the claim) still serves
+    a usable lease rather than failing the job; see :func:`_serve_or_mint`.
+    """
+    now = _utcnow()
+    snap = _stored_snap(cloud, purpose)
+    if _fresh_enough(snap, now, pct):
+        values = _values_of(snap)
+        if values is not None:
+            _memo_put(cloud, purpose, values, snap["expires_at"])
+            return values
+    return _serve_or_mint(cloud, purpose, name, force=True)
+
+
+def _stored_snap(cloud: str, purpose: str):
+    from ..database import SessionLocal
+    db = SessionLocal()
+    try:
+        return _snap(_row(db, cloud, purpose))
+    finally:
+        db.close()
+
+
+def subprocess_min_remaining_pct() -> int:
+    """``wlc_subprocess_min_remaining_pct``, clamped to 1..95.
+
+    Terraform and Packer read their credential once, at start, and a deploy can outlast
+    a short lease. Requiring most of the lifetime up front is what lets the provisioning
+    lease be short. 95 is the ceiling because 100 would mint on every subprocess.
+    """
+    try:
+        pct = int(_cfg("wlc_subprocess_min_remaining_pct", "80") or 80)
+    except (TypeError, ValueError):
+        pct = 80
+    return max(1, min(95, pct))
 
 
 def refresh(cloud: str, purpose: str = PURPOSE_PROVISION, *, force: bool = False) -> bool:
@@ -708,10 +764,18 @@ def aws_subprocess_env(purpose: str = ""):
     rather than the mapping written out three times. The session token is the reason: it
     is the field every one of those sites currently lacks, and a copy that forgets it
     fails with ``InvalidClientTokenId`` in a way that looks like a bad key.
+
+    With ``wlc_subprocess_credential_process`` on (the default) the subprocess gets a
+    profile whose ``credential_process`` calls back into this module instead of fixed
+    keys, so a run longer than the lease renews its own credential. See
+    :func:`aws_process_env`.
     """
-    values = credentials("aws", purpose)
+    values = credentials("aws", purpose,
+                         min_remaining_pct=subprocess_min_remaining_pct())
     if not values:
         return None
+    if credential_process_enabled():
+        return aws_process_env(purpose)
     return {
         "AWS_ACCESS_KEY_ID":     values["access_key_id"],
         "AWS_SECRET_ACCESS_KEY": values["secret_access_key"],
@@ -719,7 +783,112 @@ def aws_subprocess_env(purpose: str = ""):
     }
 
 
-def azure_credentials(purpose: str = ""):
+# ── credential_process: subprocesses that renew their own credential ─────────
+#
+# Terraform's AWS provider, its S3 state backend and Packer's Amazon plugin all accept an
+# AWS profile whose `credential_process` prints a credential with an `Expiration`. The SDK
+# caches it and runs the command again before that time, so a forty-minute Packer build
+# keeps working on a thirty-minute lease. Fixed environment variables cannot do that,
+# which is what used to make the provisioning lease's TTL the floor for the longest run.
+#
+# The command is this module, run as a script by the same interpreter, so it reads the
+# same lease row with the same database and key the subprocess inherited. The profile
+# file holds only the command, never a credential.
+
+PROCESS_MIN_REMAINING_PCT = 50       # what the callback serves: at least half a lease
+_PROCESS_EARLY_SECONDS = 300         # tell the SDK to renew this long before expiry
+_PROCESS_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "wlc_credential_process.py")
+
+
+def credential_process_enabled() -> bool:
+    """``wlc_subprocess_credential_process``; on unless explicitly turned off."""
+    raw = str(_cfg("wlc_subprocess_credential_process", "true") or "true").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _profile_name(purpose: str) -> str:
+    return f"vmdash-wlc-{purpose}"
+
+
+def _process_config(purpose: str) -> str:
+    """The AWS config file text for one purpose. Holds a command, not a credential."""
+    import shlex
+    cmd = " ".join(shlex.quote(p) for p in (
+        sys.executable, _PROCESS_SCRIPT, "--cloud", "aws", "--purpose", purpose))
+    return f"[profile {_profile_name(purpose)}]\ncredential_process = {cmd}\n"
+
+
+def _write_process_config(purpose: str) -> str:
+    """Write the profile file for ``purpose`` atomically and return its path."""
+    import tempfile
+    folder = os.path.join(tempfile.gettempdir(), "vmdash-wlc")
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    path = os.path.join(folder, f"aws-{purpose}.config")
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(_process_config(purpose))
+    os.replace(tmp, path)
+    return path
+
+
+def aws_process_env(purpose: str = "") -> dict:
+    """Env for a subprocess that fetches its AWS credential through ``credential_process``.
+
+    The purpose is resolved HERE, in the job's context, and written into the command: the
+    callback runs in a fresh process that cannot see this task's provisioning marker.
+
+    The key variables are set to empty rather than left out. Environment credentials beat
+    a profile in every AWS SDK, so a static key in the container's own environment would
+    otherwise win; the SDKs treat an empty value as unset.
+    """
+    resolved = _effective_purpose("aws", purpose or default_purpose("aws"))
+    return {
+        "AWS_CONFIG_FILE": _write_process_config(resolved),
+        "AWS_PROFILE": _profile_name(resolved),
+        "AWS_SDK_LOAD_CONFIG": "1",
+        "AWS_SHARED_CREDENTIALS_FILE": os.devnull,
+        "AWS_ACCESS_KEY_ID": "",
+        "AWS_SECRET_ACCESS_KEY": "",
+        "AWS_SESSION_TOKEN": "",
+    }
+
+
+def credential_process_output(cloud: str, purpose: str) -> dict:
+    """What ``credential_process`` prints: the lease, and when the SDK should ask again.
+
+    Serves a lease with at least half its life left, minting otherwise, and reports an
+    ``Expiration`` a little before the real one so the SDK renews before a call can land
+    on a dead credential. Raises :class:`LeaseUnavailable` when nothing can be served.
+    """
+    if cloud != "aws":
+        raise LeaseUnavailable(f"credential_process is AWS-only, not {cloud!r}")
+    values = credentials(cloud, purpose, min_remaining_pct=PROCESS_MIN_REMAINING_PCT)
+    if not values:
+        raise LeaseUnavailable("AWS is not on the Workload Credentials tier")
+    expires_at = _memo_expiry(cloud, _effective_purpose(cloud, purpose), values)
+    if expires_at is None:
+        raise LeaseUnavailable("the served AWS lease has no expiry")
+    now = _utcnow()
+    early = min(_PROCESS_EARLY_SECONDS, max(0.0, (expires_at - now).total_seconds() * 0.2))
+    report = expires_at - timedelta(seconds=early)
+    return {"Version": 1,
+            "AccessKeyId": values["access_key_id"],
+            "SecretAccessKey": values["secret_access_key"],
+            "SessionToken": values["session_token"],
+            "Expiration": report.strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+
+def _memo_expiry(cloud: str, purpose: str, values: dict):
+    """The expiry the memo holds for exactly these values, or None."""
+    with _memo_lock:
+        hit = _memo.get((cloud, purpose))
+    if not hit or hit[0] != values:
+        return None
+    return hit[1]
+
+
+def azure_credentials(purpose: str = "", *, min_remaining_pct: int = 0):
     """The Azure service-principal quad, or None when Azure is not on the dynamic tier.
 
     Workload Credentials mints a password onto an app registration. It has no idea which
@@ -728,7 +897,7 @@ def azure_credentials(purpose: str = ""):
     from configuration. Miss that and you get a client that authenticates successfully
     and then acts on nothing, which is a confusing way to fail.
     """
-    values = credentials("azure", purpose)
+    values = credentials("azure", purpose, min_remaining_pct=min_remaining_pct)
     if not values:
         return None
     subscription_id = _cfg("azure_subscription_id")
@@ -751,7 +920,7 @@ def azure_subprocess_env(purpose: str = ""):
     same reason as :func:`aws_subprocess_env`: three hand-written copies of the mapping
     are three chances to omit one of the four variables.
     """
-    quad = azure_credentials(purpose)
+    quad = azure_credentials(purpose, min_remaining_pct=subprocess_min_remaining_pct())
     if not quad:
         return None
     return {

@@ -1005,6 +1005,7 @@ async def archive_to_s3(
             "s3",
             aws_access_key_id=credentials.get("aws_access_key_id"),
             aws_secret_access_key=credentials.get("aws_secret_access_key"),
+            aws_session_token=credentials.get("aws_session_token"),
             region_name=credentials.get("aws_region", "us-east-2"),
         )
         client.put_object(

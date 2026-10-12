@@ -362,6 +362,8 @@ Preview features. `secrets_wlc_folder` is also on the Secrets page.
 | `wlc_aws_secret_name` / `wlc_azure_secret_name` | blank | The provisioning dynamic secret |
 | `wlc_aws_readonly_secret_name` | blank | Optional read-only dynamic secret for the job-boundary split |
 | `wlc_refresh_margin_pct` | `50` | Regenerate a lease once less than this percentage of its TTL remains (1–99) |
+| `wlc_subprocess_credential_process` | on | Give Terraform and Packer an AWS profile whose `credential_process` asks the dashboard for the lease, so a run longer than the lease renews its own credential. Off hands them fixed keys |
+| `wlc_subprocess_min_remaining_pct` | `80` | Terraform and Packer get a lease only while at least this percentage of its TTL remains, otherwise a fresh one is issued (1–95). Matters most with `wlc_subprocess_credential_process` off, when the keys they start with are the keys they finish with |
 | `secrets_wlc_folder` | `dashboard` | The folder the `wlc://` static-secret backend uses |
 
 The Terraform provider manages folders, static secrets, AWS and Azure

@@ -2240,6 +2240,8 @@ class WorkloadCredentialsFeatureConfig(BaseModel):
     wlc_azure_folder: str = ""
     wlc_azure_secret_name: str = ""
     wlc_refresh_margin_pct: int = 50
+    wlc_subprocess_min_remaining_pct: int = 80
+    wlc_subprocess_credential_process: bool = True
     # Folder for the `wlc://` static-secret backend on the Secrets page.
     secrets_wlc_folder: str = "dashboard"
 

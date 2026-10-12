@@ -271,9 +271,7 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
                     uri = await packer_service.archive_to_s3(
                         build_dir / "build.pkr.hcl",
                         job_id, req.image_name, bucket,
-                        {"aws_access_key_id": env["AWS_ACCESS_KEY_ID"],
-                         "aws_secret_access_key": env["AWS_SECRET_ACCESS_KEY"],
-                         "aws_region": region},
+                        _archive_credentials(env, region),
                     )
                     result["template_archive"] = uri
                     job_service.update_progress(db, job_id, 98, f"Template archived: {uri}")
@@ -735,6 +733,29 @@ async def _run_oci_build(job_id: str, req: OCIPackerBuildRequest, created_by: st
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
+
+def _archive_credentials(env: dict, region: str) -> dict:
+    """boto3 credentials for the template archive, from the env the build ran with.
+
+    The build env may carry no keys at all: on Workload Credentials it is an AWS profile
+    whose credential_process the Packer plugin runs. The archive is uploaded in-process,
+    so it asks the lease directly instead (still inside the job, so the provisioning
+    lease). The session token rides along either way: a dynamic key without it is
+    refused as InvalidClientTokenId.
+    """
+    key_id = env.get("AWS_ACCESS_KEY_ID") or ""
+    secret = env.get("AWS_SECRET_ACCESS_KEY") or ""
+    token = env.get("AWS_SESSION_TOKEN") or ""
+    if not key_id and env.get("AWS_PROFILE"):
+        from .workload_credential_lease import credentials
+        values = credentials("aws") or {}
+        key_id = values.get("access_key_id", "")
+        secret = values.get("secret_access_key", "")
+        token = values.get("session_token", "")
+    # None, not "": boto3 then falls back to its own chain rather than signing with blanks.
+    return {"aws_access_key_id": key_id or None, "aws_secret_access_key": secret or None,
+            "aws_session_token": token or None, "aws_region": region}
+
 
 def _base_env() -> dict:
     """Start from the current process env so PATH, HOME, etc. are inherited."""

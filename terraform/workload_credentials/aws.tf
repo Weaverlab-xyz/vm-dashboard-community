@@ -143,7 +143,8 @@ resource "beyondtrust_workload_credentials_aws_integration" "this" {
 }
 
 # The provisioning lease: the full permission set. The dashboard mints this when a job
-# starts and never pre-warms it.
+# starts and never pre-warms it, so its TTL (var.aws_provision_ttl_seconds) is how long
+# it outlives the job.
 resource "beyondtrust_workload_credentials_aws_dynamic_secret" "provision" {
   count            = local.aws_enabled
   name             = "dashboard-provision"
@@ -152,7 +153,7 @@ resource "beyondtrust_workload_credentials_aws_dynamic_secret" "provision" {
 
   credential_type = "assumed_role"
   role_arn        = aws_iam_role.target[0].arn
-  ttl             = var.aws_ttl_seconds
+  ttl             = var.aws_provision_ttl_seconds
 
   # Session tags, so CloudTrail attributes each API call to the secret that issued the
   # credential. This is why the trust policies above allow sts:TagSession.

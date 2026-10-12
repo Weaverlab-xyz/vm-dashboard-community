@@ -7686,6 +7686,29 @@
                 0 would pin a dead lease and 100 would bill an issuance on every check.
               </p>
             </div>
+            <div class="mt-4">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Life left for Terraform and Packer (%)</label>
+              <input type="number" min="1" max="95" x-model.number="panelCfg.wlc_subprocess_min_remaining_pct"
+                     class="w-32 border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Terraform and Packer read their credential once, at start, so they are given a
+                lease only while at least this share of its lifetime remains; otherwise a fresh
+                one is issued. Keeps a short provisioning lease from expiring mid-apply.
+                Clamped to 1–95.
+              </p>
+            </div>
+            <label class="flex items-start gap-2 mt-4">
+              <input type="checkbox" x-model="panelCfg.wlc_subprocess_credential_process"
+                     class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+              <span class="text-sm text-gray-700">
+                <span class="font-medium">Let Terraform and Packer renew their AWS credential</span>
+                <span class="block text-[11px] text-gray-400">
+                  Gives them an AWS profile whose <code>credential_process</code> asks the
+                  dashboard for the lease, so a run longer than the lease keeps working.
+                  Off hands them fixed keys that last as long as the lease they started with.
+                </span>
+              </span>
+            </label>
             <div class="mt-5 border-t border-gray-100 pt-4">
               <div class="flex items-center justify-between">
                 <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Active credential source</p>
