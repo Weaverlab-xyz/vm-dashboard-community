@@ -972,6 +972,7 @@ class RemoteAgentsFeatureConfig(BaseModel):
     dashboard_spiffe_issuer: str = ""
     dashboard_spiffe_aud_aws: bool = False
     dashboard_spiffe_aud_azure: bool = False
+    packer_azure_assertion_ttl_minutes: int = 120
     dashboard_spiffe_aud_gcp: str = ""
     dashboard_spiffe_aud_wlc: bool = False
     # Where those tokens are federated to (services/cloud_federation). Azure reuses its

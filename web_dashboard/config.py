@@ -394,6 +394,9 @@ class Settings(BaseSettings):
     dashboard_spiffe_issuer: str = ""     # blank = <agent audience>/spiffe; must equal SPIRE_JWT_ISSUER
     dashboard_spiffe_aud_aws: bool = False
     dashboard_spiffe_aud_azure: bool = False
+    # Lifetime of the client assertion minted for each Azure Packer build when the
+    # identity is the only Azure credential (clamped 15-480 by the caller).
+    packer_azure_assertion_ttl_minutes: int = 120
     dashboard_spiffe_aud_gcp: str = ""    # the workload identity provider's full resource name
     dashboard_spiffe_aud_wlc: bool = False
     # Federation targets for those tokens (services/cloud_federation). Azure reuses

@@ -193,9 +193,18 @@ def generate_aws_template(
 # times out hitting IMDS (169.254.169.254) on any non-Azure host. They arrive as
 # sensitive Packer vars (PKR_VAR_* on the build subprocess) so the secret never
 # lands in the template file — including the archived copy.
+#
+# Exactly one of client_secret and client_jwt is set per build, the other left empty,
+# which the plugin treats as unset. client_jwt is a signed client assertion (RFC 7523):
+# the dashboard's SPIFFE identity, minted for this build, for an install that holds no
+# Azure secret at all (cloud_federation.azure_build_assertion).
 _AZURE_SP_VAR_DECLS = (
     'variable "client_id"       { default = "" }\n'
     'variable "client_secret" {\n'
+    '  default   = ""\n'
+    '  sensitive = true\n'
+    '}\n'
+    'variable "client_jwt" {\n'
     '  default   = ""\n'
     '  sensitive = true\n'
     '}\n'
@@ -205,6 +214,7 @@ _AZURE_SP_VAR_DECLS = (
 _AZURE_SP_SOURCE_FIELDS = (
     '  client_id       = var.client_id\n'
     '  client_secret   = var.client_secret\n'
+    '  client_jwt      = var.client_jwt\n'
     '  tenant_id       = var.tenant_id\n'
     '  subscription_id = var.subscription_id\n\n'
 )
