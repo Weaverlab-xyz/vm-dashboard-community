@@ -255,7 +255,7 @@
 
   <!-- Estate health (services/health): admins only, and only when something needs a look.
        Its own component and fetch, so the tiles below never wait on it. -->
-  <div x-data="healthBand()" x-init="init()" x-show="shown()" x-cloak
+  <div x-data="healthBand()" x-init="fetchSummary()" x-show="shown()" x-cloak
        class="mb-6 bg-white border border-gray-200 rounded-xl px-4 py-3 flex flex-col gap-2
               sm:flex-row sm:items-center sm:justify-between">
     <div class="text-sm text-gray-700">
@@ -451,7 +451,9 @@
   function healthBand() {
     return {
       counts: {}, areas: [],
-      async init() {
+      // Not `init`: Alpine would call that by itself as well, and the dashboard guard
+      // suites find dashboard()'s own init() by name.
+      async fetchSummary() {
         if (!Alpine.store('auth').isAdmin) return;
         try {
           const r = await API.get('/api/estate-health?summary=1');

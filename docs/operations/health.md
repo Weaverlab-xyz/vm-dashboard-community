@@ -24,7 +24,7 @@ An area appears once the integration it covers is turned on.
 | **Remote agents** | each agent is polling, and is new enough for the directories bound to it | 5 min | Remote agents are on |
 | **Directories** | the [Directory health](../directories/health.md) page's results, shown here too. That page keeps its own schedule | 5 min | Directories is on |
 
-For a demo instance with no BeyondTrust tenant rows, the tenant and Gateway areas check
+On an estate instance with no BeyondTrust tenant rows, the tenant and Gateway areas check
 the PRA and Password Safe settings the instance already uses.
 
 ## Reading it
