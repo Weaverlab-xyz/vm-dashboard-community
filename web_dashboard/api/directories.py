@@ -179,7 +179,10 @@ async def check_directory_health(
     if health and health.checked_at and \
             (datetime.utcnow() - health.checked_at).total_seconds() < _CHECK_NOW_MIN_SECONDS:
         return directory_health_service.to_dict(row, health)
-    return await directory_health_service.check(db, row, force=True)
+    # The domain controller check checks out the directory's Password Safe credential,
+    # so only someone who may change the directory can start one on demand.
+    return await directory_health_service.check(
+        db, row, force=True, force_deep=has_permission(user, "directories", "write"))
 
 
 @router.get("/options")

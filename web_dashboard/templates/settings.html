@@ -7203,6 +7203,15 @@
                 0 turns scheduled checks off.</p>
             </div>
             <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Domain controller check interval (hours)</label>
+              <input type="number" min="0" max="168" x-model.number="panelCfg.directory_health_deep_interval_hours"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="6">
+              <p class="text-[11px] text-gray-400 mt-1">How often an on-prem AD domain is checked for
+                replication, FSMO roles, clock skew, DC services, SYSVOL and LDAPS certificates. Each
+                check is a Config Management run that checks out the directory's Password Safe
+                account. 0 turns scheduled checks off; Check now still runs one.</p>
+            </div>
+            <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">GCP domain-join service account</label>
               <input type="text" x-model="panelCfg.gcp_domain_join_service_account"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="ad-join@project.iam.gserviceaccount.com">

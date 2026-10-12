@@ -250,7 +250,7 @@ def _remote_fetch_playbook(asset: str) -> str:
 # package so they need no storage backend. Named "builtin:<name>"; a closed set, so an
 # asset string can never reach the filesystem beyond it.
 _BUILTIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "builtin_playbooks")
-BUILTIN_PLAYBOOKS = ("ad-join-computer", "ad-ensure-groups")
+BUILTIN_PLAYBOOKS = ("ad-join-computer", "ad-ensure-groups", "ad-dc-health")
 
 
 def builtin_playbook(asset: str) -> str:

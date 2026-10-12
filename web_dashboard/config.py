@@ -1278,6 +1278,7 @@ class Settings(BaseSettings):
     directory_join_default_ou: str = ""                # OU distinguished name for joined servers ("" = Computers)
     directory_idp_page_size: int = 50                  # Entra ID / Okta / PingOne browse page (1-200)
     directory_health_interval_minutes: int = 15        # health checks (services/directory_health_service); 0 = off
+    directory_health_deep_interval_hours: int = 6      # on-prem AD domain controller deep check; 0 = off
     # GCE domain join runs as the VM's service account, which needs
     # roles/managedidentities.domainJoin. Blank = no service account → no GCP join.
     gcp_domain_join_service_account: str = ""

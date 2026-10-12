@@ -22,12 +22,20 @@ How a check reaches the page:
   scoped to the one host and port — the same anonymous rootDSE read the Discover dialog
   uses, so it needs no credential and no new agent build. The job finishes on the
   agent's schedule; :func:`apply_probe` folds its result in when it completes.
+* An on-prem **AD** domain registered with a Password Safe account also gets the domain
+  controller check, every few hours: ``builtin:ad-dc-health``, a read-only Config
+  Management run over WinRM that reports replication, FSMO holders and each DC's
+  services, clock, SYSVOL and LDAPS certificate. It prints its report as base64 chunks
+  in the job's log; :func:`apply_deep` reads them back when the job completes.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
+import re
 import time
 from datetime import datetime, timedelta
 from typing import Optional
@@ -58,6 +66,28 @@ SYNC_WARN_AFTER = timedelta(hours=1)
 SYNC_FAIL_AFTER = timedelta(hours=3)
 
 _PROBE_KEY = "ldap_probe"
+
+# The domain controller deep check: builtin:ad-dc-health, an agent_ansible run over WinRM on
+# an on-prem AD domain, with the directory's Password Safe account checked out per run.
+DEEP_ASSET = "builtin:ad-dc-health"
+DEFAULT_DEEP_INTERVAL_HOURS = 6
+DEEP_PENDING_TIMEOUT = timedelta(minutes=60)
+_DEEP_KEY = "deep_health"
+_DC_PREFIX = "ad_dc:"           # not "dc:", which the AWS checks use for their DCs
+CORE_SERVICES = ("NTDS", "DNS", "Netlogon", "Kdc", "W32Time", "DFSR")
+# Kerberos refuses tickets beyond 5 minutes of skew; warn well before that.
+SKEW_WARN_S, SKEW_FAIL_S = 60, 240
+REPL_WARN_AGE, REPL_FAIL_AGE = timedelta(hours=3), timedelta(hours=24)
+REPL_FAIL_FAILURES = 3
+CERT_WARN_DAYS, CERT_FAIL_DAYS = 30, 7
+# DfsrReplicatedFolderInfo.State: 0 uninitialised, 1 initialised, 2 initial sync,
+# 3 auto recovery, 4 normal, 5 in error.
+SYSVOL_STATES = {0: "uninitialised", 1: "initialised", 2: "initial sync",
+                 3: "auto recovery", 4: "normal", 5: "in error"}
+_CHUNK_RE = re.compile(r"DIRHEALTH_B64:(\d{1,4})/(\d{1,4}):([A-Za-z0-9+/=]{1,8000})")
+MAX_REPORT_BYTES = 2_000_000
+MAX_REPORT_DCS = 50
+MAX_REPORT_LINKS = 300
 
 
 def _check(key: str, label: str, status: str, detail: str = "") -> dict:
@@ -333,7 +363,7 @@ def _probe_meta(row: ManagedDirectory) -> dict:
 
 
 def _onprem(db: Session, row: ManagedDirectory, health: DirectoryHealth,
-            previous: list, *, force: bool) -> list:
+            previous: list, *, force: bool, force_deep: bool = False) -> list:
     from . import agent_service, job_service
     agent = db.get(RemoteAgent, row.agent_id) if row.agent_id else None
     if agent is None:
@@ -361,27 +391,324 @@ def _onprem(db: Session, row: ManagedDirectory, health: DirectoryHealth,
 
     if refusal:
         out.append(_check(_PROBE_KEY, "LDAP answers", UNKNOWN, refusal))
-        return out
+    else:
+        now = datetime.utcnow()
+        waiting = health.pending_job_id and health.pending_since and \
+            now - health.pending_since < PENDING_TIMEOUT
+        due = force or not health.probe_queued_at or \
+            now - health.probe_queued_at >= timedelta(minutes=ONPREM_MIN_INTERVAL_MINUTES)
+        if not waiting and due:
+            job = job_service.create_job(db, job_type="agent_discover",
+                                         created_by="directory-health",
+                                         metadata=_probe_meta(row), agent_id=agent.id)
+            health.pending_job_id, health.pending_since = job.id, now
+            health.probe_queued_at = now
+            waiting = True
+        if last_probe:
+            out.append(last_probe)
+        else:
+            out.append(_check(_PROBE_KEY, "LDAP answers", UNKNOWN,
+                              "Waiting for the agent to probe the directory."
+                              if waiting else "Not probed yet."))
+
+    if row.provider == "onprem_ad":
+        out.extend(_deep(db, row, agent, state, health, previous, force=force_deep))
+    return out
+
+
+# ── the domain controller deep check (on-prem AD only) ────────────────────────
+
+def deep_interval_hours() -> int:
+    """Hours between deep checks. 0 turns the scheduled ones off; Check now still runs."""
+    try:
+        value = int(config_service.get("directory_health_deep_interval_hours")
+                    or DEFAULT_DEEP_INTERVAL_HOURS)
+    except (TypeError, ValueError):
+        value = DEFAULT_DEEP_INTERVAL_HOURS
+    return max(0, value)
+
+
+def _is_deep(check: dict) -> bool:
+    key = str(check.get("key") or "")
+    return key in ("replication", "fsmo", _DEEP_KEY) or key.startswith(_DC_PREFIX)
+
+
+def _deep_refusal(row: ManagedDirectory, agent: RemoteAgent, state: str) -> str:
+    from . import agent_service, directory_service
+    if not (row.credentials_ref or "").startswith(directory_service._MANAGED_REF_PREFIX):
+        return ("The directory has no Password Safe account to run the check as. "
+                "Register it with one to see replication, FSMO and DC health.")
+    if state != "online":
+        return "The agent is not online, so the domain controller check was not queued."
+    if "agent_ansible" not in agent_service.allowed_job_types(agent):
+        return (f"Agent '{agent.name}' is not granted Config Management, which runs the "
+                f"domain controller check.")
+    if not agent_service.supports_directory(agent):
+        return agent_service.directory_upgrade_hint(agent)
+    if not row.host:
+        return "The directory has no domain controller host recorded."
+    return ""
+
+
+def _deep_meta(row: ManagedDirectory, agent: RemoteAgent) -> dict:
+    from . import agent_ansible_meta
+    return agent_ansible_meta.normalize({
+        "description": f"Directory health: domain controller check of {row.name} "
+                       f"(agent: {agent.name})",
+        "run_kind": "directory", "transport": "winrm",
+        "target_host": row.host, "target_port": 5986,
+        "target_id": row.id, "target_label": f"onprem_ad/{row.name}",
+        "asset": DEEP_ASSET, "asset_backend": "", "extra_vars": {},
+    })
+
+
+def _deep(db: Session, row: ManagedDirectory, agent: RemoteAgent, state: str,
+          health: DirectoryHealth, previous: list, *, force: bool) -> list:
+    """Queue the deep check when it is due, and carry its last results forward."""
+    from . import agent_ansible_meta, job_service
+    kept = [c for c in previous if _is_deep(c) and c.get("key") != _DEEP_KEY]
+    refusal = _deep_refusal(row, agent, state)
+    if refusal:
+        return kept + [_check(_DEEP_KEY, "Domain controller check", UNKNOWN, refusal)]
 
     now = datetime.utcnow()
-    waiting = health.pending_job_id and health.pending_since and \
-        now - health.pending_since < PENDING_TIMEOUT
-    due = force or not health.probe_queued_at or \
-        now - health.probe_queued_at >= timedelta(minutes=ONPREM_MIN_INTERVAL_MINUTES)
+    waiting = bool(health.deep_job_id and health.deep_since
+                   and now - health.deep_since < DEEP_PENDING_TIMEOUT)
+    hours = deep_interval_hours()
+    due = force or (hours > 0 and (not health.deep_queued_at or
+                                   now - health.deep_queued_at >= timedelta(hours=hours)))
     if not waiting and due:
-        job = job_service.create_job(db, job_type="agent_discover",
-                                     created_by="directory-health",
-                                     metadata=_probe_meta(row), agent_id=agent.id)
-        health.pending_job_id, health.pending_since = job.id, now
-        health.probe_queued_at = now
+        meta = _deep_meta(row, agent)
+        problem = agent_ansible_meta.check(meta)
+        if problem:
+            return kept + [_check(_DEEP_KEY, "Domain controller check", UNKNOWN, problem)]
+        job = job_service.create_job(db, job_type="agent_ansible",
+                                     created_by="directory-health", workgroup="ansible",
+                                     metadata=meta, agent_id=agent.id)
+        health.deep_job_id, health.deep_since, health.deep_queued_at = job.id, now, now
         waiting = True
-    if last_probe:
-        out.append(last_probe)
-    else:
-        out.append(_check(_PROBE_KEY, "LDAP answers", UNKNOWN,
-                          "Waiting for the agent to probe the directory."
-                          if waiting else "Not probed yet."))
+    if kept:
+        return kept
+    previous_status = next((c for c in previous if c.get("key") == _DEEP_KEY), None)
+    if previous_status and not waiting:
+        return [previous_status]
+    return [_check(_DEEP_KEY, "Domain controller check", UNKNOWN,
+                   "Waiting for the agent to run the domain controller check."
+                   if waiting else "Not run yet.")]
+
+
+def parse_report(lines) -> Optional[dict]:
+    """The dc-health report from a job's log lines, or None. The lines came from a
+    domain controller through the agent, so everything here is untrusted: sizes are
+    capped, the base64 must be strict, and the shape is checked before use."""
+    chunks: dict = {}
+    total = 0
+    for line in lines:
+        for m in _CHUNK_RE.finditer(str(line or "")):
+            i, n, data = int(m.group(1)), int(m.group(2)), m.group(3)
+            if i == 1 or n != total:
+                chunks, total = {}, n          # a new set starts; keep only the latest
+            chunks[i] = data
+    if not total or any(i not in chunks for i in range(1, total + 1)):
+        return None
+    joined = "".join(chunks[i] for i in range(1, total + 1))
+    if len(joined) > MAX_REPORT_BYTES:
+        return None
+    try:
+        report = json.loads(base64.b64decode(joined, validate=True).decode("utf-8"))
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(report, dict) or report.get("v") != 1:
+        return None
+    for key, kind in (("dcs", list), ("replication", list), ("fsmo", dict), ("errors", list)):
+        value = report.get(key)
+        if value is None:
+            report[key] = kind()
+        elif not isinstance(value, kind):
+            return None
+    report["dcs"] = [d for d in report["dcs"] if isinstance(d, dict)][:MAX_REPORT_DCS]
+    report["replication"] = [r for r in report["replication"]
+                             if isinstance(r, dict)][:MAX_REPORT_LINKS]
+    return report
+
+
+def _text(value, limit: int = 200) -> str:
+    return re.sub(r"[\x00-\x1f\x7f]", " ", str(value if value is not None else ""))[:limit]
+
+
+def _int(value) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _when(value) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        from datetime import timezone
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _short_name(host: str) -> str:
+    return (host or "").split(".")[0].lower()
+
+
+def _worst(statuses) -> str:
+    return overall([{"status": s} for s in statuses])
+
+
+def _errors_for(report: dict, prefix: str) -> str:
+    found = [_text(e, 300) for e in report.get("errors") or []
+             if str(e).lower().startswith(prefix)]
+    return found[0] if found else ""
+
+
+def _replication_check(report: dict, now: datetime) -> dict:
+    links = report.get("replication") or []
+    if not links:
+        err = _errors_for(report, "replication")
+        if err:
+            return _check("replication", "AD replication", UNKNOWN, f"Could not read: {err}")
+        if len(report.get("dcs") or []) <= 1:
+            return _check("replication", "AD replication", OK,
+                          "One domain controller, so there is nothing to replicate.")
+        return _check("replication", "AD replication", UNKNOWN,
+                      "No replication partners were reported.")
+    worst, worst_detail = OK, ""
+    for link in links:
+        failures = _int(link.get("failures")) or 0
+        result = _int(link.get("last_result")) or 0
+        last = _when(link.get("last_success"))
+        age = (now - last) if last else None
+        if failures >= REPL_FAIL_FAILURES or age is None or age > REPL_FAIL_AGE:
+            status = FAIL
+        elif failures or result or age > REPL_WARN_AGE:
+            status = WARN
+        else:
+            continue
+        if _worst([worst, status]) != worst or not worst_detail:
+            worst = _worst([worst, status])
+            ago = f"{int(age.total_seconds() // 3600)}h ago" if age else "never"
+            worst_detail = (f"{_text(link.get('server'))} from {_text(link.get('partner'))}: "
+                            f"{failures} consecutive failure(s), last result {result}, "
+                            f"last success {ago}")
+    if worst == OK:
+        return _check("replication", "AD replication", OK,
+                      f"{len(links)} inbound link(s) replicating.")
+    return _check("replication", "AD replication", worst,
+                  f"{worst_detail} ({len(links)} inbound link(s) checked).")
+
+
+def _fsmo_check(report: dict) -> dict:
+    fsmo = report.get("fsmo") or {}
+    if not fsmo:
+        err = _errors_for(report, "fsmo")
+        return _check("fsmo", "FSMO roles", UNKNOWN,
+                      f"Could not read: {err}" if err else "No role holders were reported.")
+    known = {_short_name(d.get("name")) for d in report.get("dcs") or []}
+    holders: dict = {}
+    missing = []
+    for role, holder in fsmo.items():
+        holder = _text(holder)
+        holders.setdefault(holder, []).append(_text(role, 40))
+        if known and _short_name(holder) not in known:
+            missing.append(f"{role} on {holder}")
+    if missing:
+        return _check("fsmo", "FSMO roles", FAIL,
+                      "Held by a server that is not a current domain controller: "
+                      + "; ".join(missing) + ".")
+    return _check("fsmo", "FSMO roles", OK,
+                  "; ".join(f"{h}: {', '.join(r)}" for h, r in holders.items()) + ".")
+
+
+def _dc_check(dc: dict, now: datetime) -> dict:
+    name = _text(dc.get("name"), 120) or "unknown"
+    parts, statuses = [], []
+    errors = [_text(e, 200) for e in (dc.get("errors") or []) if isinstance(e, str)]
+
+    services = dc.get("services") if isinstance(dc.get("services"), dict) else {}
+    stopped = [f"{svc} {_text(state, 20).lower()}" for svc, state in services.items()
+               if svc in CORE_SERVICES and str(state) != "Running"]
+    if stopped:
+        statuses.append(FAIL)
+        parts.append("stopped: " + ", ".join(stopped))
+    elif services:
+        statuses.append(OK)
+        parts.append("services running")
+
+    offset = dc.get("offset_s")
+    if isinstance(offset, (int, float)):
+        skew = abs(float(offset))
+        statuses.append(FAIL if skew > SKEW_FAIL_S else WARN if skew > SKEW_WARN_S else OK)
+        parts.append(f"clock offset {offset:+.0f}s")
+
+    sysvol = _int(dc.get("sysvol_state"))
+    if sysvol is not None:
+        statuses.append(OK if sysvol == 4 else FAIL if sysvol == 5 else WARN)
+        parts.append(f"SYSVOL {SYSVOL_STATES.get(sysvol, f'state {sysvol}')}")
+
+    not_after = _when(dc.get("ldaps_not_after"))
+    if not_after:
+        days = (not_after - now).days
+        statuses.append(FAIL if days < CERT_FAIL_DAYS else WARN if days < CERT_WARN_DAYS else OK)
+        parts.append(f"LDAPS certificate expired {-days} day(s) ago" if days < 0
+                     else f"LDAPS certificate expires in {days} day(s)")
+
+    if errors:
+        parts.append("could not read " + "; ".join(errors))
+    status = _worst(statuses) if statuses else UNKNOWN
+    site = _text(dc.get("site"), 80)
+    label = f"Domain controller {name}" + (f" ({site})" if site else "")
+    return _check(f"{_DC_PREFIX}{name.lower()}", label, status,
+                  ("; ".join(parts) or "Nothing could be read.") + ".")
+
+
+def dc_health_checks(report: dict, *, now: Optional[datetime] = None) -> list:
+    """Checks from a parsed dc-health report. Pure."""
+    now = now or datetime.utcnow()
+    out = [_replication_check(report, now), _fsmo_check(report)]
+    out.extend(_dc_check(dc, now) for dc in report.get("dcs") or [])
+    if not report.get("dcs"):
+        err = _errors_for(report, "domain controllers") or _errors_for(report, "collector")
+        out.append(_check(_DEEP_KEY, "Domain controller check", UNKNOWN,
+                          f"No domain controllers were read: {err}" if err else
+                          "No domain controllers were read."))
     return out
+
+
+def apply_deep(db: Session, job, *, status: str, error: str = "") -> bool:
+    """Fold a finished deep check into its directory's health. ``True`` if ``job`` was one.
+
+    Called from ``api/agent.complete`` for every ``agent_ansible`` job; anything not
+    queued by :func:`_deep` matches no row and returns ``False`` untouched. The report
+    is read from the job's log lines, which the agent pushes before it completes.
+    """
+    from . import job_service
+    health = db.query(DirectoryHealth).filter(
+        DirectoryHealth.deep_job_id == job.id).first()
+    if health is None:
+        return False
+    health.deep_job_id, health.deep_since = None, None
+    if status != "completed":
+        fresh = [_check(_DEEP_KEY, "Domain controller check", FAIL,
+                        f"The check failed (job {job.id}): {_text(error, 300) or 'no reason given'}.")]
+    else:
+        report = parse_report(line for _seq, line in job_service.get_job_logs(db, job.id))
+        fresh = dc_health_checks(report) if report else [
+            _check(_DEEP_KEY, "Domain controller check", FAIL,
+                   f"The check finished but printed no readable report (job {job.id}).")]
+    checks = [c for c in _loads(health.checks) if not _is_deep(c)] + fresh
+    health.checks = json.dumps(checks)
+    health.status = overall(checks)
+    db.commit()
+    return True
 
 
 def apply_probe(db: Session, job, *, status: str, result: Optional[dict],
@@ -432,8 +759,13 @@ def monitored(row: ManagedDirectory) -> bool:
     return row.status != "deleted" and row.provider not in UNMONITORED_PROVIDERS
 
 
-async def check(db: Session, row: ManagedDirectory, *, force: bool = False) -> dict:
-    """Check one directory now, store the result, and return it as :func:`to_dict`."""
+async def check(db: Session, row: ManagedDirectory, *, force: bool = False,
+                force_deep: bool = False) -> dict:
+    """Check one directory now, store the result, and return it as :func:`to_dict`.
+
+    ``force`` re-runs the cheap checks now. ``force_deep`` also queues the domain
+    controller check now, and is separate because that run checks out the directory's
+    Password Safe credential: the API grants it only to ``directories:write``."""
     from . import directory_service
     health = _health_row(db, row.id)
     previous = _loads(health.checks)
@@ -445,7 +777,7 @@ async def check(db: Session, row: ManagedDirectory, *, force: bool = False) -> d
         elif row.provider in directory_service.IDP_PROVIDERS:
             checks = await _idp(row)
         elif row.provider in directory_service.ONPREM_PROVIDERS:
-            checks = _onprem(db, row, health, previous, force=force)
+            checks = _onprem(db, row, health, previous, force=force, force_deep=force_deep)
         elif row.cloud == "aws":
             checks = await _aws(row)
         elif row.cloud == "gcp":
@@ -526,6 +858,7 @@ def to_dict(row: ManagedDirectory, health: Optional[DirectoryHealth]) -> dict:
         if health and health.checked_at else None,
         "duration_ms": health.duration_ms if health else None,
         "probe_pending": bool(health and health.pending_job_id),
+        "deep_pending": bool(health and health.deep_job_id),
     }
 
 

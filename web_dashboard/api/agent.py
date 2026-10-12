@@ -602,6 +602,14 @@ async def complete(job_id: str, body: CompleteRequest, request: Request,
                                                  result=result, error=body.error)
         except Exception:  # noqa: BLE001 — a finished job must not fail on its follow-up
             logger.exception("could not record directory health from job %s", job.id)
+    elif job.job_type == "agent_ansible":
+        # The domain controller deep check is a built-in Config Management run; its
+        # report is in the job's log lines. Matches nothing for any other run.
+        try:
+            directory_health_service.apply_deep(db, job, status=body.status,
+                                                error=body.error)
+        except Exception:  # noqa: BLE001 — a finished job must not fail on its follow-up
+            logger.exception("could not record directory health from job %s", job.id)
 
     # Re-read the inventory the operator just changed, on their behalf. The dashboard
     # has no route to an agent-bound hypervisor, so a start or a stop left the page

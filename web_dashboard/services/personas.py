@@ -1183,8 +1183,8 @@ _IAMOPS = Persona(
             title="Is every directory answering?",
             summary="One page for whether each domain, domain controller and identity "
                     "provider is up: the cloud's own health for managed AD, a sign-in to "
-                    "each provider, Entra Connect sync age, and an LDAP probe of each "
-                    "on-prem DC through its agent.",
+                    "each provider, Entra Connect sync age, and for on-prem AD the "
+                    "replication, FSMO, clock, SYSVOL and LDAPS state of every DC.",
             target="/directories/health",
             minutes=6,
             docs="directories/health",
