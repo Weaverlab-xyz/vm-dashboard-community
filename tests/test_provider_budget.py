@@ -357,7 +357,7 @@ def test_the_budgets_client_is_global_not_regional():
     """AWS Budgets lives at us-east-1 and is account-scoped. Passing the configured
     region works by accident on a us-east-1 deployment and fails everywhere else."""
     assert '_BUDGETS_REGION = "us-east-1"' in _AWS_SRC
-    assert "_aws_kwargs(_BUDGETS_REGION)" in _AWS_SRC
+    assert 'aws_client("budgets", _BUDGETS_REGION)' in _AWS_SRC
 
 
 def _run_tests():

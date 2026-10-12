@@ -197,6 +197,10 @@ def _install_stubs():
     aws.AWSError = _AWSError
     aws._require_boto3 = lambda: None
     aws._aws_kwargs = lambda region: {}
+    # The real factory, minus the dynamic tier: boto3 is looked up at call time so the
+    # tests' own boto3 stub is the one that answers.
+    aws.aws_client = lambda service, region="", pinned=False: sys.modules["boto3"].client(
+        service, **aws._aws_kwargs(region))
     sys.modules["web_dashboard.services.aws_service"] = aws
 
     az = types.ModuleType("web_dashboard.services.azure_service")

@@ -195,7 +195,7 @@ async def get_aws_mtd_cost() -> MtdCost:
     def _query() -> MtdCost:
         import boto3
         from botocore.exceptions import BotoCoreError, ClientError
-        ce = boto3.client("ce", **aws_service._aws_kwargs(""))
+        ce = aws_service.aws_client("ce", "")
         try:
             resp = ce.get_cost_and_usage(
                 TimePeriod={"Start": start, "End": end},
@@ -468,7 +468,7 @@ async def get_aws_managed_breakdown() -> dict:
     def _query() -> dict:
         import boto3
         from botocore.exceptions import BotoCoreError, ClientError
-        ce = boto3.client("ce", **aws_service._aws_kwargs(""))
+        ce = aws_service.aws_client("ce", "")
         amounts, currency = {}, "USD"
         token = None
         # Pagination is not optional now the filter is gone. Without it a response past

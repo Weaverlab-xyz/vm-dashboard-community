@@ -127,7 +127,7 @@ def computer_name(cloud: str, *, instance_name: str = "", ssm_computer_name: str
 def _ssm_computer_name_sync(region: str, instance_id: str) -> str:
     import boto3
     from . import aws_service
-    ssm = boto3.client("ssm", **aws_service._aws_kwargs(region))
+    ssm = aws_service.aws_client("ssm", region)
     out = ssm.describe_instance_information(
         Filters=[{"Key": "InstanceIds", "Values": [instance_id]}])
     rows = out.get("InstanceInformationList") or []

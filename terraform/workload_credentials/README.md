@@ -93,7 +93,11 @@ so it stays out of shell history.
 | `aws_provision_ttl_seconds` | `dashboard-provision` | 1800 | Minted when a job starts and never pre-warmed. AWS cannot revoke it early, so its TTL is how long a credential carrying `iam:PassRole` outlives the job. Shorter costs few extra issuances |
 | `aws_ttl_seconds` | `dashboard-everyday` | 3600 | Kept warm and renewed at the refresh margin, so a shorter TTL only multiplies issuances |
 
-A Terraform or Packer run can outlast the provisioning lease. The dashboard gives them an
+Nothing the dashboard runs holds a fixed copy of the credential, so any job can outlast
+the provisioning lease and 900 (the STS minimum) is safe. In-process AWS calls go through
+one client factory whose clients carry refreshable credentials: they ask the dashboard for
+the lease again a few minutes before each one expires, mid-waiter included. A Terraform or
+Packer run can outlast the provisioning lease too. The dashboard gives them an
 AWS profile whose `credential_process` calls back into it, and the AWS SDK inside the
 provider, the S3 state backend and Packer's Amazon plugin runs that command again shortly
 before each credential expires. So a forty-minute AMI build works on a thirty-minute
@@ -103,6 +107,10 @@ With `wlc_subprocess_credential_process` turned off, they get fixed keys instead
 over only while at least `wlc_subprocess_min_remaining_pct` of the lease remains (80% by
 default, minting a fresh one otherwise). That is 24 minutes at 1800, so a longer run then
 needs a longer TTL.
+
+The one cost of a short provisioning TTL is outage tolerance: a job renews when about half
+the lease is left, so a Workload Credentials outage longer than about half the TTL (7.5
+minutes at 900, 15 at 1800) fails the jobs in flight.
 
 ## Before you raise the TTL
 

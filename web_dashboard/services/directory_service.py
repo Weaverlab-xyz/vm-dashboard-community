@@ -547,7 +547,7 @@ def connector_username(account_name: str) -> str:
 def _aws_connect_sync(row: ManagedDirectory, password: str, username: str) -> str:
     import boto3
     from . import aws_service
-    ds = boto3.client("ds", **aws_service._aws_kwargs(row.region))
+    ds = aws_service.aws_client("ds", row.region)
     kw = dict(
         Name=row.name, Password=password, Size=row.edition or "Small",
         Description=f"AD Connector for on-prem {row.name}"[:128],
@@ -567,7 +567,7 @@ def _aws_wait_active_sync(region: str, directory_id: str, *, timeout: int = 1800
     import boto3
     from . import aws_service
     sleep = sleep or time.sleep
-    ds = boto3.client("ds", **aws_service._aws_kwargs(region))
+    ds = aws_service.aws_client("ds", region)
     waited = 0
     while True:
         desc = (ds.describe_directories(DirectoryIds=[directory_id])
@@ -590,7 +590,7 @@ def _aws_wait_active_sync(region: str, directory_id: str, *, timeout: int = 1800
 def _aws_delete_sync(region: str, directory_id: str) -> None:
     import boto3
     from . import aws_service
-    ds = boto3.client("ds", **aws_service._aws_kwargs(region))
+    ds = aws_service.aws_client("ds", region)
     try:
         ds.delete_directory(DirectoryId=directory_id)
     except ds.exceptions.EntityDoesNotExistException:
@@ -712,7 +712,7 @@ def _read_outputs(row: ManagedDirectory, outputs: dict) -> None:
 def _aws_reset_admin_sync(region: str, directory_id: str, password: str) -> None:
     import boto3
     from . import aws_service
-    ds = boto3.client("ds", **aws_service._aws_kwargs(region))
+    ds = aws_service.aws_client("ds", region)
     ds.reset_user_password(DirectoryId=directory_id, UserName=AWS_ADMIN_USER,
                            NewPassword=password)
 
@@ -1039,7 +1039,7 @@ async def reset_admin_password(db: Session, *, directory_id: str) -> dict:
 def _aws_describe_sync(region: str) -> list:
     import boto3
     from . import aws_service
-    ds = boto3.client("ds", **aws_service._aws_kwargs(region))
+    ds = aws_service.aws_client("ds", region)
     out, token = [], None
     while True:
         kw = {"NextToken": token} if token else {}

@@ -187,8 +187,11 @@ variable "aws_provision_ttl_seconds" {
     it early, so whatever is left of it after the job ends is a privileged credential
     nobody is using. A shorter TTL costs few extra issuances for the same reason.
 
-    A run longer than this is fine: Terraform and Packer get an AWS profile whose
-    credential_process asks the dashboard for a fresh lease before each one expires.
+    A job longer than this is fine, and 900 is safe: the dashboard's own AWS clients
+    carry refreshable credentials, and Terraform and Packer get an AWS profile whose
+    credential_process asks the dashboard for a fresh lease before each one expires. What
+    a shorter TTL costs is outage tolerance: a Workload Credentials outage longer than
+    about half the TTL fails the jobs in flight.
     Only with wlc_subprocess_credential_process turned off do they hold fixed keys, and
     then the longest single run is the floor (the dashboard hands them a lease with at
     least wlc_subprocess_min_remaining_pct, 80% by default, of it left: 24 minutes at

@@ -76,7 +76,13 @@ has a shorter TTL than the everyday one (30 minutes against an hour in the
 [Terraform module](../../terraform/workload_credentials/README.md#the-two-ttls)): its TTL
 is how long it outlives the job.
 
-Terraform and Packer runs can last longer than that, so on AWS they are not handed keys.
+Nothing on AWS is handed a fixed copy of the credential, so a job can outlast its lease.
+The dashboard's own calls go through one client factory (`aws_service.aws_client`) whose
+clients carry botocore refreshable credentials: a few minutes before each lease expires,
+the next call fetches the lease again, so a client created at the start of a deploy and
+left in a ten-minute waiter keeps working. The purpose is fixed when the client is made.
+
+Terraform and Packer runs can last longer than that too, so on AWS they are not handed keys.
 They get an AWS profile whose `credential_process` is the dashboard itself
 (`web_dashboard/wlc_credential_process.py`), and the AWS SDK in the provider, the S3 state
 backend and Packer's Amazon plugin runs it again a few minutes before each credential

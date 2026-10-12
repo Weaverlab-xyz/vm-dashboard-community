@@ -509,6 +509,10 @@ def invalidate(cloud: str = "", purpose: str = "") -> None:
         for key in [k for k in _memo
                     if (not cloud or k[0] == cloud) and (not purpose or k[1] == purpose)]:
             _memo.pop(key, None)
+    if not cloud or cloud == "aws":
+        with _refreshable_lock:
+            for key in [k for k in _refreshable if not purpose or k == purpose]:
+                _refreshable.pop(key, None)
 
 
 def clear_backoff(cloud: str = "", purpose: str = "") -> int:
@@ -863,12 +867,7 @@ def credential_process_output(cloud: str, purpose: str) -> dict:
     """
     if cloud != "aws":
         raise LeaseUnavailable(f"credential_process is AWS-only, not {cloud!r}")
-    values = credentials(cloud, purpose, min_remaining_pct=PROCESS_MIN_REMAINING_PCT)
-    if not values:
-        raise LeaseUnavailable("AWS is not on the Workload Credentials tier")
-    expires_at = _memo_expiry(cloud, _effective_purpose(cloud, purpose), values)
-    if expires_at is None:
-        raise LeaseUnavailable("the served AWS lease has no expiry")
+    values, expires_at = _fresh_lease(cloud, purpose)
     now = _utcnow()
     early = min(_PROCESS_EARLY_SECONDS, max(0.0, (expires_at - now).total_seconds() * 0.2))
     report = expires_at - timedelta(seconds=early)
@@ -877,6 +876,72 @@ def credential_process_output(cloud: str, purpose: str) -> dict:
             "SecretAccessKey": values["secret_access_key"],
             "SessionToken": values["session_token"],
             "Expiration": report.strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+
+def _fresh_lease(cloud: str, purpose: str) -> tuple:
+    """``(values, expires_at)`` for a lease with at least half its life left.
+
+    What both renewing paths serve: the ``credential_process`` callback and the
+    refreshable credentials behind every in-process boto3 client. Minting otherwise.
+    """
+    values = credentials(cloud, purpose, min_remaining_pct=PROCESS_MIN_REMAINING_PCT)
+    if not values:
+        raise LeaseUnavailable(f"{cloud} is not on the Workload Credentials tier")
+    expires_at = _memo_expiry(cloud, _effective_purpose(cloud, purpose), values)
+    if expires_at is None:
+        raise LeaseUnavailable(f"the served {cloud} lease has no expiry")
+    return values, expires_at
+
+
+# ── Refreshable credentials: in-process clients that renew their own ─────────
+#
+# The boto3 counterpart of credential_process. A client built with fixed keys keeps them
+# for its whole life, and a job that creates one and then sits in a waiter for ten
+# minutes can outlive a short lease. botocore's RefreshableCredentials calls back here
+# before expiry instead, from whichever thread is making the call; it has its own lock,
+# so one object per purpose serves every pool thread.
+
+# botocore's defaults are 15 and 10 minutes, which would put a 15-minute lease inside
+# the refresh window for its whole life and re-read the lease on every API call.
+_ADVISORY_REFRESH_SECONDS = 300
+_MANDATORY_REFRESH_SECONDS = 120
+
+_refreshable: dict = {}
+_refreshable_lock = threading.Lock()
+
+
+def _refresh_metadata(cloud: str, purpose: str) -> dict:
+    """What botocore's refresh callback must return, from a fresh-enough lease."""
+    values, expires_at = _fresh_lease(cloud, purpose)
+    return {"access_key": values["access_key_id"],
+            "secret_key": values["secret_access_key"],
+            "token": values["session_token"],
+            "expiry_time": expires_at.strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+
+def aws_refreshable_credentials(purpose: str = ""):
+    """Shared ``RefreshableCredentials`` for the AWS lease of ``purpose``.
+
+    The purpose is resolved HERE, in the caller's context, and bound into the refresh
+    callback: a later refresh may run on a thread that never saw the job's provisioning
+    marker, and must not quietly switch a deploy onto the everyday lease.
+    """
+    from botocore.credentials import RefreshableCredentials
+    resolved = _effective_purpose("aws", purpose or default_purpose("aws"))
+    with _refreshable_lock:
+        creds = _refreshable.get(resolved)
+        if creds is not None:
+            return creds
+
+    def refresh():
+        return _refresh_metadata("aws", resolved)
+
+    creds = RefreshableCredentials.create_from_metadata(
+        metadata=refresh(), refresh_using=refresh, method="vmdash-wlc")
+    creds._advisory_refresh_timeout = _ADVISORY_REFRESH_SECONDS
+    creds._mandatory_refresh_timeout = _MANDATORY_REFRESH_SECONDS
+    with _refreshable_lock:
+        return _refreshable.setdefault(resolved, creds)
 
 
 def _memo_expiry(cloud: str, purpose: str, values: dict):

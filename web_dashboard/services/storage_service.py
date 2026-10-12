@@ -187,10 +187,10 @@ def _s3_client():
         import boto3  # noqa: F401
     except ImportError:
         raise StorageError("boto3 is not installed")
-    from .aws_service import _aws_kwargs
+    from .aws_service import aws_client
     region = _cfg("storage_s3_region") or _cfg("aws_region")
     import boto3
-    return boto3.client("s3", **_aws_kwargs(region))
+    return aws_client("s3", region)
 
 
 def _s3_prefix() -> str:

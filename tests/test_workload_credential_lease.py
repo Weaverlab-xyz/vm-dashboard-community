@@ -475,6 +475,75 @@ def test_the_packer_archive_carries_the_session_token():
         "archive_to_s3(")[-1], "the archive reads keys a profile-mode env does not carry"
 
 
+
+# ── Refreshable credentials: in-process clients renew their own ──────────────
+
+def _with_fresh(fn):
+    """Run ``fn`` with _fresh_lease returning a fixed lease; return its result and calls."""
+    calls = []
+    real = lease._fresh_lease
+
+    def fresh(cloud, purpose):
+        calls.append((cloud, purpose))
+        return _creds(), NOW + timedelta(minutes=30)
+    lease._fresh_lease = fresh
+    try:
+        return fn(), calls
+    finally:
+        lease._fresh_lease = real
+
+
+def test_refresh_metadata_carries_the_real_expiry():
+    meta, _ = _with_fresh(lambda: lease._refresh_metadata("aws", "provision"))
+    assert meta == {"access_key": "ASIA", "secret_key": "s", "token": "tok",
+                    "expiry_time": "2026-08-20T12:30:00Z"}
+
+
+def test_one_refreshable_object_per_purpose_bound_at_creation():
+    _reset()
+    _stub_cfg(values={"wlc_aws_secret_name": "p", "wlc_aws_readonly_secret_name": "e"},
+              flags={"workload_credentials_enabled": True, "wlc_aws_enabled": True})
+
+    def build():
+        with lease.provisioning():
+            job = lease.aws_refreshable_credentials()
+        request = lease.aws_refreshable_credentials()
+        return job, request, lease.aws_refreshable_credentials()
+    (job, request, again), calls = _with_fresh(build)
+    assert job is not request and request is again
+    assert calls == [("aws", "provision"), ("aws", "readonly")], calls
+    # The refresh callback keeps the purpose it was built with, whatever context it
+    # later runs in: a deploy must not drift onto the everyday lease.
+    _, later = _with_fresh(lambda: job._refresh_using())
+    assert later == [("aws", "provision")], later
+    _reset()
+
+
+def test_the_refresh_windows_fit_a_short_lease():
+    """botocore's 15/10-minute defaults would keep a 15-minute lease permanently inside
+    the window and re-read it on every call. The attributes are botocore internals,
+    pinned with boto3 in requirements.txt; an upgrade that renames them fails here."""
+    _reset()
+    _stub_cfg()
+    creds, _ = _with_fresh(lambda: lease.aws_refreshable_credentials("provision"))
+    assert creds._advisory_refresh_timeout == lease._ADVISORY_REFRESH_SECONDS == 300
+    assert creds._mandatory_refresh_timeout == lease._MANDATORY_REFRESH_SECONDS == 120
+    from botocore.credentials import RefreshableCredentials
+    assert hasattr(RefreshableCredentials, "_advisory_refresh_timeout")
+    assert hasattr(RefreshableCredentials, "_mandatory_refresh_timeout")
+    _reset()
+
+
+def test_invalidate_drops_the_refreshable_object():
+    _reset()
+    _stub_cfg()
+    first, _ = _with_fresh(lambda: lease.aws_refreshable_credentials("provision"))
+    lease.invalidate("aws")
+    second, _ = _with_fresh(lambda: lease.aws_refreshable_credentials("provision"))
+    assert first is not second
+    _reset()
+
+
 # ── Fail-safe defaults ───────────────────────────────────────────────────────
 
 def test_with_no_config_reachable_nothing_is_on_the_dynamic_tier():
