@@ -20,6 +20,7 @@ reachable by path.
 |---|---|
 | [Cloud-DB Password Safe plugin setup](clouddb-password-safe-plugin-setup.md) | you are standing up database credential rotation and need the one-time manual setup. |
 | [SPIRE lab standup + the attribute probe](spire-lab-standup.md) | you are standing up the SPIFFE SVID plugin's lab on a cloud VM, and need to settle whether BeyondInsight populates plugin attributes. |
+| [SPIFFE federation: proving it against real clouds](spiffe-federation-verification.md) | you are setting up the dashboard to hold no stored cloud secret, and need to prove AWS, Azure and GCP accept its SPIFFE identity, with and without Workload Credentials. |
 
 ## Cloud-identity JIT
 
