@@ -7480,6 +7480,7 @@
                   <option value="gcp">GCP — Cloud Run, GCE, GKE</option>
                   <option value="aws">AWS — EKS only (IRSA / Pod Identity)</option>
                   <option value="file">Other — a projected token on disk</option>
+                  <option value="spire">The dashboard's own SPIFFE identity (its SPIRE server)</option>
                 </select>
                 <p class="text-[11px] text-gray-400 mt-1">
                   Which platform vouches for this container. Azure and GCP each answer on their
@@ -7491,6 +7492,12 @@
                   In Pathfinder, Azure registers as <strong>Azure Entra ID</strong>; GCP and AWS
                   register as a <strong>Custom IDP</strong> with a claim condition on
                   <code>sub</code>.
+                  <strong>SPIFFE identity</strong> needs no cloud at all, so it also works on
+                  ECS and on-prem: the dashboard's own SPIRE server mints the token, and
+                  Pathfinder trusts it as a <strong>Custom IDP</strong> whose issuer is the
+                  dashboard's public <code>/spiffe</code> URL.
+                  <a href="/docs/oidc/dashboard-identity#beyondtrust-workload-credentials"
+                     target="_blank" class="text-blue-600 hover:underline">How to register it</a>.
                 </p>
               </div>
               <div>
@@ -7524,15 +7531,15 @@
                 <label class="block text-sm font-medium text-gray-700 mb-1">
                   Token audience
                   <span class="text-gray-400 font-normal"
-                        x-text="panelCfg.wlc_identity_platform === 'gcp' ? '(audience string)' : '(App ID URI)'"></span>
+                        x-text="panelCfg.wlc_identity_platform === 'azure' ? '(App ID URI)' : '(audience string)'"></span>
                 </label>
                 <input type="text" x-model="panelCfg.wlc_identity_audience"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
-                       :placeholder="panelCfg.wlc_identity_platform === 'gcp'
-                                     ? 'e.g. beyondtrust-wlc'
-                                     : 'api://vm-dashboard-wlc'">
+                       :placeholder="panelCfg.wlc_identity_platform === 'azure'
+                                     ? 'api://vm-dashboard-wlc'
+                                     : 'e.g. beyondtrust-wlc'">
                 <p class="text-[11px] text-gray-400 mt-1"
-                   x-show="panelCfg.wlc_identity_platform !== 'gcp'">
+                   x-show="panelCfg.wlc_identity_platform === 'azure'">
                   What the managed identity requests a token <em>for</em>; it becomes the
                   token's <code>aud</code>. Use an app registration in your own tenant with
                   <code>accessTokenAcceptedVersion: 2</code> — that is what makes the issuer
@@ -7544,6 +7551,14 @@
                   Any string, as long as it matches the audience your Custom IDP registration in
                   Pathfinder expects. The metadata server signs a token with this as its
                   <code>aud</code>; the issuer is <code>https://accounts.google.com</code>.
+                </p>
+                <p class="text-[11px] text-gray-400 mt-1"
+                   x-show="panelCfg.wlc_identity_platform === 'spire'">
+                  Any string, as long as it matches the <code>aud</code> condition of your Custom
+                  IDP registration in Pathfinder. The dashboard mints <code>wlc.jwt</code> for it
+                  once <strong>Give the dashboard its own SPIFFE identity</strong> and its
+                  <strong>Workload Credentials</strong> audience are ticked under
+                  Settings → Integrations → Remote Agents.
                 </p>
               </div>
               <div x-show="panelCfg.wlc_identity_platform === 'azure'" x-cloak>

@@ -76,7 +76,7 @@ differences from the sketch below, both deliberate:
 
 Every consumer below reads a JWT from a file: boto3's `AWS_WEB_IDENTITY_TOKEN_FILE`, a GCP
 `external_account` credential's `credential_source.file`, Terraform's
-`ARM_OIDC_TOKEN_FILE_PATH`, and Workload Credentials' `file` platform. So:
+`ARM_OIDC_TOKEN_FILE_PATH`, and Workload Credentials' `spire` platform. So:
 
 - **One file per audience** on a tmpfs volume, `spiffe_tokens`, mounted read-only into
   `app`, `worker` and any sibling runner container that runs a cloud CLI (Terraform,
@@ -259,7 +259,7 @@ every major cloud can federate with.
 | **AWS** | `AWS_ROLE_ARN` + `AWS_WEB_IDENTITY_TOKEN_FILE` → `sts:AssumeRoleWithWebIdentity` | role trust: `<issuer>:sub` = `spiffe://<td>/dashboard`, `<issuer>:aud` = `sts.amazonaws.com` | **None.** `aws_service._aws_kwargs` passes no credentials when none are stored, so boto3's default chain picks the variables up. `terraform_provider_env.aws_env` returns `None` the same way. (Its docstring says it never falls back; the code does. Fix the docstring.) |
 | **GCP** | `GOOGLE_APPLICATION_CREDENTIALS` → an `external_account` config whose `credential_source.file` is the token file | provider attribute condition on `assertion.sub` | **Mostly none.** `gcp_service._gcp_creds` and `secrets_backend_service._gcp_client` fall back to ADC. **`packer_service` does not:** its GCS upload reads `gcp_service_account_json` unconditionally. It also derives the project from the key's `project_id`, so federation needs `gcp_project_id` set explicitly. |
 | **Azure** | a federated credential on the app registration → `ClientAssertionCredential` reading the token file; Terraform `ARM_USE_OIDC=true` + `ARM_OIDC_TOKEN_FILE_PATH` | issuer, subject `spiffe://<td>/dashboard`, audience `api://AzureADTokenExchange` | **Yes, small.** Every `ClientSecretCredential(` site (`azure_service`, `storage_service`, `secrets_backend_service`, `packer_service`) needs the assertion branch, and `terraform_provider_env.azure_env` the OIDC variables |
-| **Workload Credentials** | `wlc_identity_platform=file`, `wlc_identity_token_file` → the token file | a Custom IDP registration for the dashboard's issuer | **None.** The `file` platform exists |
+| **Workload Credentials** | `wlc_identity_platform=spire` → `wlc.jwt` in the token directory | a Custom IDP registration for the dashboard's issuer: `sub` and `aud` conditions | **Built.** A `spire` platform, because `file` hides the audience the token needs. See [the operator steps](../oidc/dashboard-identity.md#beyondtrust-workload-credentials) |
 | **OCI** | — | — | No clean fit. OCI's token exchange is tied to identity domains and is not worth the code here. Stays on its signing key or Password Safe |
 
 Three things apply across the table:

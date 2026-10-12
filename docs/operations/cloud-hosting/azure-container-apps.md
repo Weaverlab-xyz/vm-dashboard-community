@@ -253,11 +253,12 @@ you start:
 | **GCP** — Cloud Run, GCE, GKE | the metadata server's instance identity endpoint | **Custom IDP**, issuer `https://accounts.google.com` |
 | **AWS** — **EKS only** | a projected token file (IRSA, or Pod Identity) | **Custom IDP**, issuer = the cluster's OIDC provider URL |
 | **Other** | any projected token on disk, e.g. a Kubernetes ServiceAccount token | **Custom IDP** |
+| **The dashboard's own SPIFFE identity** — any host, ECS and on-prem included | `wlc.jwt`, minted by the dashboard's SPIRE server | **Custom IDP**, issuer = the dashboard's `/spiffe` URL ([steps](../../oidc/dashboard-identity.md#beyondtrust-workload-credentials)) |
 
 > **ECS is the exception.** An ECS task — and a plain EC2 instance — gets SigV4
 > credentials and a signed instance identity document from the task metadata
 > endpoint. Neither is an OIDC token, and there is no endpoint that will issue
-> one. A dashboard on ECS stays on a stored Personal Access Token; the panel says
+> one. A dashboard on ECS uses its own SPIFFE identity or stays on a stored Personal Access Token; the panel says
 > so, and so does the error if you select AWS anyway.
 
 Which one you pick is **Settings → Integrations → Workload Credentials →
@@ -284,16 +285,12 @@ it against Entra because that is the host being documented; the same form with
 `https://<your-org>.okta.com/oauth2/default` or a GKE cluster's issuer URL works
 identically.
 
-**One honest limit, and it is on this side rather than Pathfinder's.** The trust
-is IdP-agnostic. The dashboard's *token source* is not. Today it can obtain a
-bearer token exactly two ways: a stored PAT, or Azure's managed-identity endpoint
-(`IDENTITY_ENDPOINT`, with IMDS as a fallback). There is no code path that reads
-a token from Okta, Ping, a GKE metadata server, or an EKS projected service
-account file — so **hosting on AWS or GCP, the dashboard itself still needs a
-PAT**, even though your *other* callers on the same Pathfinder site (CI jobs,
-your own services, scripts) can authenticate through Custom IDP with nothing
-stored. A PAT-free dashboard on a non-Azure host is a feature request, not a
-setting you have overlooked.
+**The token source is the dashboard's side of this.** The trust is
+IdP-agnostic; the dashboard reads its token from the platform you pick in the
+table above. It cannot sign in to Okta or Ping on its own behalf. Where no
+platform hands the container a token (ECS, plain EC2, an on-prem VM), the
+dashboard's own SPIFFE identity can: its SPIRE server mints the token, and a
+Custom IDP registration for the dashboard's issuer trusts it.
 
 ### 1. One user-assigned identity, on both container apps
 
