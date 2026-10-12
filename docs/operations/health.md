@@ -18,6 +18,8 @@ An area appears once the integration it covers is turned on.
 | Area | Checks | Every | Shown when |
 |---|---|---|---|
 | **Resources** | everything on [Inventory](../inventory.md) except directories: whether the cloud still has it and it is running, and its access wiring (see [below](#resources)) | 30 min | always |
+| **Cloud APIs and spend** | the dashboard's own cloud credentials: per provider, whether its reads keep failing (from the tile collector, so no extra call), the same for cost data, VMs at or near their spend cap, and the auto-delete timer's last pass | 15 min | always |
+| **Hypervisors** | each connection answers. Direct connections get the same read as **Test**, recorded on the connection. vSphere hosts disconnected or in maintenance, Proxmox nodes offline, Proxmox image storage under 15% free (failing under 5%). An agent-bound connection is never dialled; it shows its agent and whether the agent's sync is keeping up (more than three intervals late is degraded) | 15 min | any hypervisor is on |
 | **BeyondTrust tenants** | each PRA and Password Safe credential still gets a token, the same handshake as **Verify** on the tenant. The result is recorded on the tenant too | 30 min | PRA or Password Safe is on |
 | **PRA Gateways** | each Gateway PRA knows about has a connected node, and each Gateway host the dashboard deployed is running (the reconcile pass's *degraded* and *missing* included) | 15 min | PRA is on |
 | **Password Safe accounts** | every account the dashboard onboarded still exists and is rotating: database accounts, Kubernetes tokens, directory administrators, lab and workload accounts | 60 min | Password Safe is on |
@@ -76,6 +78,10 @@ Thresholds:
   longer exists.
 - **Entitle sweep:** degraded when it has missed three runs or is switched off.
 - **Remote agents:** an agent is failing when it is offline.
+- **Cloud APIs:** failing when every read for a provider is failing, degraded when some
+  are. The message is the provider's own, for example an expired client secret.
+- **Auto-delete:** failing when a deletion failed in the last pass, degraded when
+  resources are past their expiry but the timer is not armed to delete them.
 
 **When an area cannot be checked at all.** For example, if Password Safe does not
 answer, the area says the last check could not run and keeps showing the results from

@@ -22,7 +22,7 @@ and what it cleans up.
 | [Cloud Hosting](operations/cloud-hosting.md) | you want the dashboard reachable from outside your LAN, or fronting remote agents |
 | [Container User](operations/container-user.md) | you are upgrading from a release that ran as root, a job hits "permission denied", or you are setting a security context on the container |
 | [Job Worker](operations/job-worker.md) | a long job is sitting queued, or you are sizing the worker for more of them |
-| [Health](operations/health.md) | you want to know whether the BeyondTrust tenants, Gateways, Password Safe accounts, Entitle and agents the dashboard depends on are working |
+| [Health](operations/health.md) | you want to know whether what the dashboard built is still running, and whether its cloud credentials, hypervisors, BeyondTrust tenants, Gateways, Password Safe accounts, Entitle and agents are working |
 | [Notifications](operations/notifications.md) | you want to hear about expiring resources and failed jobs without opening the dashboard |
 | [Auto-delete Timer](operations/auto-delete-timer.md) | you want lab resources to clean themselves up. Read it before enabling it, because it deletes infrastructure |
 | [Config Migration](operations/config-migration.md) | you are standing up a second instance and do not want to re-type months of configuration |

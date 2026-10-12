@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .collectors import (agents, bt_tenants, directories, entitle, pra_gateways, ps_accounts,
-                         resources)
+from .collectors import (agents, bt_tenants, cloud_ops, directories, entitle, hypervisors,
+                         pra_gateways, ps_accounts, resources)
 from .core import Collector
 
 COLLECTORS = (
@@ -21,6 +21,19 @@ COLLECTORS = (
         description="Everything the dashboard built or registered: whether the cloud still "
                     "has it and it is running, and its Password Safe, PRA and Entitle "
                     "wiring."),
+    Collector(
+        area="cloud_ops", label="Cloud APIs and spend", collect=cloud_ops.collect,
+        interval_minutes=15, personas=("cloudops", "finops"),
+        description="Whether the dashboard's own cloud credentials are answering, cost data "
+                    "is refreshing, and spend caps and the auto-delete timer are working."),
+    Collector(
+        area="hypervisors", label="Hypervisors", collect=hypervisors.collect,
+        interval_minutes=15,
+        flags=("vsphere_enabled", "proxmox_enabled", "hyperv_enabled", "nutanix_enabled",
+               "xcpng_enabled"),
+        personas=("hypervisor", "itops"),
+        description="Whether each hypervisor connection answers, its hosts and nodes are up, "
+                    "Proxmox storage has room, and agent-run syncs are keeping up."),
     Collector(
         area="beyondtrust", label="BeyondTrust tenants", collect=bt_tenants.collect,
         interval_minutes=30, flags=("pra_enabled", "password_safe_enabled"),
