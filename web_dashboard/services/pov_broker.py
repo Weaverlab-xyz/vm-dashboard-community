@@ -733,6 +733,94 @@ fi
 """
 
 
+# What a platform accepts as the bootstrap, when its capability row does not say. Skytap
+# refuses user_data over 16384 characters with a 422, and EC2's user data is capped at
+# 16 KB before encoding, so the strictest known limit is the default.
+DEFAULT_BOOTSTRAP_MAX_CHARS = 16384
+_HEREDOC_START = re.compile(r"<<-?\s*'?\"?([A-Za-z_][A-Za-z0-9_]*)'?\"?\s*$")
+_GZ_EOF = "DASHBOARD_BOOTSTRAP_GZ_EOF"
+
+
+def _compact(script: str) -> str:
+    """The script without its comment lines and runs of blank lines.
+
+    Heredoc bodies are copied verbatim: they are files (the policy, SPIRE's configs, the
+    trust bundle), and a `#` line inside one is data. The shebang and both markers stay,
+    because the guest runner matches the markers.
+    """
+    out: list[str] = []
+    terminator = None
+    for line in script.splitlines():
+        if terminator is not None:
+            out.append(line)
+            if line == terminator:
+                terminator = None
+            continue
+        bare = line.strip()
+        if (bare.startswith("#") and not line.startswith("#!")
+                and line not in (BOOTSTRAP_BEGIN, BOOTSTRAP_END)):
+            continue
+        if not bare and out and not out[-1].strip():
+            continue
+        out.append(line)
+        m = _HEREDOC_START.search(line)
+        if m:
+            terminator = m.group(1)
+    return "\n".join(out) + "\n"
+
+
+def _compressed(script: str) -> str:
+    """The script gzipped and base64-encoded, between the same two markers, with the
+    decoder that runs it.
+
+    Decoded to a file and run from there rather than piped into ``sh``: a shell reading its
+    script from a pipe shares that pipe as stdin with every command it runs, and one that
+    reads stdin would eat the rest of the script. ``base64`` and ``gzip`` are in coreutils
+    and BusyBox alike, which covers every guest that can run the agent's Docker.
+    """
+    import base64
+    import gzip
+    body = base64.encodebytes(gzip.compress(script.encode("utf-8"), mtime=0)).decode("ascii")
+    return (
+        "#!/bin/sh\n"
+        f"{BOOTSTRAP_BEGIN}\n"
+        "# Compressed to fit the platform's user-data limit. The plain script is the\n"
+        "# decoded payload below; it runs exactly as if it had been sent as-is.\n"
+        "set -eu\n"
+        # mktemp makes the file 0600. No umask here: the script it runs inherits one, and
+        # it sets its own where a mode matters.
+        "T=$(mktemp)\n"
+        "trap 'rm -f \"$T\"' EXIT\n"
+        f"base64 -d <<'{_GZ_EOF}' | gzip -dc > \"$T\"\n"
+        f"{body}{_GZ_EOF}\n"
+        "sh \"$T\"\n"
+        f"{BOOTSTRAP_END}\n")
+
+
+def fit_bootstrap(script: str, limit: int) -> tuple[str, str]:
+    """``(payload, how)``: the script as it will fit the platform, least changed first.
+
+    ``how`` is ``"plain"`` (unchanged), ``"compact"`` (comments dropped) or
+    ``"compressed"``. Raises BrokerError when not even the compressed form fits, naming the
+    size, rather than letting the platform refuse it with a 422 that names neither.
+
+    Least changed first because the plain script is the one a human can read on the guest
+    when something goes wrong; it is only given up when the platform will not take it.
+    """
+    if len(script) <= limit:
+        return script, "plain"
+    compact = _compact(script)
+    if len(compact) <= limit:
+        return compact, "compact"
+    packed = _compressed(compact)
+    if len(packed) <= limit:
+        return packed, "compressed"
+    raise BrokerError(
+        f"the broker's bootstrap is {len(packed)} characters even compressed, and this "
+        f"platform accepts {limit}. The policy grows with the POV's VMs; a POV this size "
+        f"needs a platform with a larger user-data limit.")
+
+
 def render_bootstrap(*, env_name: str, dashboard_url: str, enroll_code: str,
                      policy_yaml: str, images: tuple = (),
                      now: datetime | None = None, spire: dict | None = None) -> str:
@@ -1157,6 +1245,15 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
         env_name=env.name, dashboard_url=dashboard_url, enroll_code=code,
         policy_yaml=render_policy(targets, win_targets, ssh_targets),
         images=tuple(images), spire=spire)
+    # Fitted before the platform sees it. Skytap answers an oversized user_data with a 422
+    # that names neither the payload nor its size, and the policy grows with every VM.
+    limit = int(lab_platforms.capabilities(env.platform).get("bootstrap_max_chars")
+                or DEFAULT_BOOTSTRAP_MAX_CHARS)
+    raw_len = len(payload)
+    payload, how = fit_bootstrap(payload, limit)
+    if how != "plain":
+        _progress(45, f"The bootstrap is {raw_len} characters and {env.platform} accepts "
+                      f"{limit}; sending it {how} ({len(payload)} characters).")
 
     mod = lab_platforms.adapter(env.platform)
     if mechanism == "metadata":

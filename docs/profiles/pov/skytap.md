@@ -285,6 +285,23 @@ Port 8081 is the default. On an instance that shares its environment with anothe
 dashboard, as the reference POV instance does on port 8091, set **SPIRE server address for
 agents** to `host:port` first: a blank one sends brokers to the other dashboard's server.
 
+### Fitting Skytap's 16,384-character limit
+
+Skytap refuses a longer `user_data` with a 422 ("Contents is too long"). About half of the
+script is comments written for whoever reads it on the guest, and the policy grows with
+every VM in the POV. So the dashboard fits it before injecting, changing as little as it
+can:
+
+1. **sent as written** when it fits;
+2. else **with its comment lines removed**. Heredocs (the policy, SPIRE's configs, the
+   trust bundle) are kept byte for byte;
+3. else **gzip-compressed and base64-encoded**, between the same two markers, with a
+   short decoder that writes the script to a temporary file and runs it. `base64` and
+   `gzip` are in coreutils and BusyBox alike.
+
+The Broker job says when it had to do 2 or 3. A POV large enough that even 3 does not fit
+is refused with both sizes named. Cloud POVs use the same 16 KB limit, which is EC2's.
+
 ### The ordering that matters
 
 The payload is injected **after** the power-on, never before. An enrolment code lives
