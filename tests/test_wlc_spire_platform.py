@@ -115,6 +115,15 @@ def test_the_panel_offers_it_and_asks_for_its_audience():
     assert "/docs/oidc/dashboard-identity#beyondtrust-workload-credentials" in html
 
 
+def test_the_test_button_names_what_is_missing_for_the_mode_in_use():
+    src = open(os.path.join(_ROOT, "web_dashboard", "api", "secrets.py"),
+               encoding="utf-8").read()
+    endpoint = src[src.index("async def test_workload_credentials("):]
+    endpoint = endpoint[:endpoint.index("@router.")]
+    assert "wlc.missing_settings()" in endpoint
+    assert "Personal Access Token, save" not in endpoint
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

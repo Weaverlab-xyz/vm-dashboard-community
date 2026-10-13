@@ -251,9 +251,11 @@ async def test_workload_credentials(request: Request):
     _require_admin(request)
     from ..services import workload_credentials_service as wlc
     if not wlc.configured():
+        # Named per auth mode: on a workload identity there is no token to set, and
+        # asking for one sends the operator after a credential they chose not to hold.
         raise HTTPException(
             status_code=400,
-            detail="Set the site ID and Personal Access Token, save, then test.")
+            detail="Set " + ", ".join(wlc.missing_settings()) + ", save, then test.")
     try:
         return await asyncio.to_thread(wlc.test_connection)
     except wlc.WorkloadCredentialsError as exc:

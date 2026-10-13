@@ -12,7 +12,7 @@ the everyday credential while jobs take a lease. Feature reference:
 Unit tests, `terraform validate` and `packer validate` against the real azure plugin pass.
 **No cloud has yet accepted one of these tokens**, so this procedure is the proof. Run it
 in sandbox accounts, in order: each section assumes the ones before it passed. Record the
-outcome in [§9](#9-record-the-result).
+outcome in [§10](#10-record-the-result).
 
 ## 0. Prerequisites
 
@@ -220,7 +220,63 @@ long it ran; that is the margin to leave above your longest build.
 **If it fails:** `invalid_grant` from STS is usually the provider's attribute condition. It
 must equal the subject from §0 exactly.
 
-## 8. A key-less install looks configured
+## 8. BeyondTrust Workload Credentials on the SPIFFE identity
+
+Prerequisites: §1 passed, including from outside your network. You have a Pathfinder site
+and an admin who can register Workload Identities. Workload Credentials currently works on
+a stored Personal Access Token (PAT), so you have a known-good baseline to compare with.
+Pathfinder is hosted, so it fetches the issuer's documents from the internet, as AWS and
+Azure do. Reference: [BeyondTrust Workload Credentials](../oidc/dashboard-identity.md#beyondtrust-workload-credentials).
+
+1. Pick an audience, for example `beyondtrust-wlc`. Enter it as **Token audience** under
+   **Settings → Integrations → Workload Credentials**, and save. Leave the authentication on
+   the PAT for now.
+2. Tick **Workload Credentials** in the SPIFFE panel.
+
+   **Pass:** within a minute the panel lists `wlc.jwt`. In `GET /api/spiffe-identity`,
+   `tokens.wlc` has the audience from step 1, `subject` `spiffe://<trust domain>/dashboard`
+   and `issuer` exactly the §0 value. The token itself never leaves the container.
+3. In Pathfinder, **Administration → Workload Identities → Register Workload Identity**,
+   type **Custom IDP**:
+   - issuer: the §0 issuer;
+   - claim condition: `sub` equals the subject;
+   - claim condition: `aud` equals the audience;
+   - site: the one in `wlc_site_id`.
+
+   Note the registration's **Service Name**.
+4. On the Workload Credentials panel, set:
+   - **Authentication**: *Workload identity (nothing stored)*;
+   - **Identity platform**: *The dashboard's own SPIFFE identity*;
+   - **Service name**: the value from step 3.
+
+   Save, then press **Test connection**.
+
+**Pass:**
+
+- **Test connection** reports *Connected to Workload Credentials*. It calls `GET /session`,
+  which issues nothing and is not billed.
+- A job that mints a lease completes: the §3 EC2 deploy if AWS is on Workload Credentials,
+  or any job reading a `wlc://` secret. That proves the **worker** reads the same `wlc.jwt`.
+  The panel's test only proves the app.
+- Then clear the stored PAT. Everything above still passes, and the dashboard now holds no
+  BeyondTrust credential at all.
+
+**Fail closed:** untick **Workload Credentials** in the SPIFFE panel. The file is deleted at
+once, and **Test connection** fails with *no SPIFFE token at /run/spiffe-tokens/wlc.jwt — the
+dashboard writes this token itself…*. It must not fall back to the PAT you cleared. Tick it
+again afterwards.
+
+**If it fails:** the wording below is what to expect, not yet seen from a live tenant.
+
+- **An HTTP 401 from BeyondTrust:** Pathfinder rejected the token. Check the `sub` and
+  `aud` conditions and the Service Name, character for character.
+- **An error about the issuer or its keys:** back to §1.
+
+**Record which one you saw.** Nobody has yet confirmed that a Custom IDP registration
+fetches keys through `<issuer>/.well-known/openid-configuration`, as the clouds do. This
+run settles it.
+
+## 9. A key-less install looks configured
 
 With no stored key for any cloud you tested:
 
@@ -230,7 +286,7 @@ With no stored key for any cloud you tested:
   Workload Credentials* in §3's setup).
 - **Health → Workload credentials** shows the provisioning lease as on demand, not failing.
 
-## 9. Record the result
+## 10. Record the result
 
 Copy this into the PR or issue that closes out the test, one row per section you ran:
 
@@ -243,7 +299,10 @@ Copy this into the PR or issue that closes out the test, one row per section you
 | Azure | Everyday federation, jobs on WLC | §5 | | | |
 | Azure | Packer build on an assertion | §6 | | | |
 | GCP | Federation, SA impersonation | §7 | | | |
-| — | Key-less install looks configured | §8 | | | |
+| BeyondTrust | Workload Credentials, no PAT | §8 | | | |
+| — | Key-less install looks configured | §9 | | | |
 
 Once a cloud has accepted a token, update the *Preview* note at the top of
 [The dashboard's own identity](../oidc/dashboard-identity.md) to say which clouds are proven.
+Once Pathfinder has, drop the *Not yet run against a live Pathfinder tenant* note under
+[BeyondTrust Workload Credentials](../oidc/dashboard-identity.md#beyondtrust-workload-credentials).
