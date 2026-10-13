@@ -50,9 +50,12 @@ from web_dashboard.services import (agent_service, config_service, dashboard_spi
 _URL = "https://pov-agents.example.test"
 _PEM = ("-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUQ0FfdGVzdF9vbmx5X25vdF9hX2NlcnQwCgYIKoZIzj0E\n"
         "-----END CERTIFICATE-----")
+# A join token's SHAPE (a UUID), deliberately not random-looking: a high-entropy literal
+# beside the word "join_token" is exactly what the secret scanner is there to catch.
+_FAKE_TOKEN = str(uuid.UUID(int=1))
 _OFFER = {"server_address": "pov-agents.example.test", "server_port": 8091,
           "trust_domain": "pov.example.test",
-          "join_token": "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0", "bootstrap_pem": _PEM}
+          "join_token": _FAKE_TOKEN, "bootstrap_pem": _PEM}
 
 
 def _script(spire=None):
