@@ -427,7 +427,8 @@
           </p>
           <p x-show="!options.labs.length && !options.dashboard_spire" x-cloak class="text-xs text-gray-500 mt-1">
             None yet. Start the dashboard's own SPIRE server
-            (<code>docker-compose.spire.yml</code>), or stand a lab up on
+            (<code>docker-compose.spire.yml</code>, or the <code>examples/cloud-spire</code>
+            sidecar on a managed runtime), or stand a lab up on
             <button type="button" @click="mintOpen = false; $dispatch('select-tab', 'spire')"
                     class="text-blue-600 hover:underline">the SPIRE tab</button>
             first &mdash; without a trust domain the worker logs <code>unattested</code> and

@@ -1187,7 +1187,8 @@ function spireLabPage() {
                    + ' and fetches the other\'s:\n'
                    + '  • the dashboard host must be able to reach ' + lab.federation_lab_url + '\n'
                    + '  • the lab host must be able to reach this dashboard\'s SPIRE host on tcp/'
-                   + lab.federation_port + ' (docker-compose.spire.yml publishes it)\n\n'
+                   + lab.federation_port + ' (docker-compose.spire.yml publishes it; on a managed '
+                   + 'runtime, the sidecar\'s TCP port mapping does)\n\n'
                    + 'The lab\'s install playbook is re-applied, which restarts its SPIRE server. '
                    + 'Bundles are public keys; nothing secret moves.')) return;
       this.busy = true;

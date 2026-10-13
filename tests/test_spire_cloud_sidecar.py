@@ -522,6 +522,15 @@ def test_the_sidecar_runs_as_the_apps_uid():
     assert "setuidgid spire" in entry
 
 
+def test_the_server_gets_a_home_it_can_read():
+    """With sslmode=require the Postgres driver stats $HOME/.postgresql/postgresql.crt.
+    Left at root's 0700 /root, that stat is "permission denied" and the server dies on
+    start — found on the first live ACA deploy. HOME must be set before the exec."""
+    entry = _text("examples", "cloud-spire", "entrypoint.sh")
+    assert 'export HOME="$DATA_DIR"' in entry
+    assert entry.index('export HOME="$DATA_DIR"') < entry.index("exec setuidgid")
+
+
 def _entrypoint(env):
     sh = shutil.which("sh")
     if not sh or os.name != "posix":

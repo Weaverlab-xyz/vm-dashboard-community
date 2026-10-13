@@ -318,6 +318,7 @@ says the server "is not running".
 |---|---|---|
 | "the SPIRE server container … is not running" | Compose: the overlay is not up, or **SPIRE server container** names another container | start the overlay, or correct the setting |
 | "the SPIRE server sidecar is not running" | the sidecar has not started, has crashed (its log names the missing variable), or does not mount the same volume at `/run/spire-server` as the app | check the sidecar's log and its `/ready` probe |
+| The sidecar crash-loops with `datastore-sql: stat /root/.postgresql/postgresql.crt: permission denied` | a sidecar image built before this was fixed. With `sslmode=require` the Postgres driver looks for a client certificate under `$HOME`, and `HOME` was still root's unreadable `/root` | rebuild the image from the current `examples/cloud-spire`, which points `HOME` at the server's own data directory |
 | "refused this container on its admin socket" | the sidecar runs as a different uid from the app | leave `SPIRE_RUN_UID` at 10001, or set it to the app's uid |
 | "the spire-server binary is not in this image" | the app runs an image older than the managed-runtime support | update the app image |
 | A worker job fails with "the SPIRE server relay is not running" | no app process with `SPIRE_SERVER_SOCKET` has checked in for 20 seconds: the app is restarting, or runs an older image | wait for the app, or update its image. The worker needs no setting of its own |
