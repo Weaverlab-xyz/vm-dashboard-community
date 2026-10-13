@@ -252,6 +252,39 @@ starts the agent container. Two lines in it are load-bearing:
   because the dashboard never chose it; a guest with no socket gets no flag rather than an
   empty argument.
 
+### SPIRE on the broker
+
+When **Let agents attest through SPIRE** is on (Settings → Integrations → Remote Agents)
+and this dashboard's [SPIRE server](../../spiffe.md) answers, the broker **attests through
+SPIRE**, so its signing key is held only in memory. Nothing to configure per POV: each
+**Broker** run does what **Migrate to SPIRE** does for a hand-installed agent:
+
+- it mints the enrolment code first, then a one-use **join token** for
+  `spiffe://<trust domain>/node/<agent id>`;
+- it binds the agent to `spiffe://<trust domain>/agent/<agent id>`;
+- it writes the token and the trust bundle into the bootstrap beside the code.
+
+On the guest, the script starts `spire-agent` and `spiffe-helper`, the same two sidecars
+as the [agent overlay](../../remote-agents/spire-attestation.md), with the same images and
+the same locked-down settings. It then **waits up to two minutes for an SVID**:
+
+| The guest | The agent starts with |
+|---|---|
+| gets an SVID | `AGENT_SPIFFE_JWT_FILE`; the enrolment code is not mounted, and is deleted |
+| gets none: the SPIRE port is blocked, a proxy inspects TLS, or an image cannot be pulled | its **enrolment code**, exactly as before. The script prints a warning and `spire-agent`'s last log lines, and removes the sidecars |
+
+**The fallback is the design.** A customer's network that stops SPIRE is the usual case
+on site, and a broker on an Ed25519 key is worth more than one that never comes up.
+
+The **Broker** job's last line, and an **SPIRE** or **Ed25519** label beside the Broker
+status on the POV list, say which way it went. If you expected SPIRE and got Ed25519, the
+broker VM could not reach **SPIRE server address for agents** over plain TCP. Teardown
+removes the broker's SPIRE entries along with the agent.
+
+Port 8081 is the default. On an instance that shares its environment with another
+dashboard, as the reference POV instance does on port 8091, set **SPIRE server address for
+agents** to `host:port` first: a blank one sends brokers to the other dashboard's server.
+
 ### The ordering that matters
 
 The payload is injected **after** the power-on, never before. An enrolment code lives

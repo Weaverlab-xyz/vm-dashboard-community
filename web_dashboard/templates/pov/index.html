@@ -369,6 +369,16 @@
                                'bg-gray-100 text-gray-500': e.broker_status === 'none'}"
                       :title="brokerTitle(e)"
                       x-text="e.broker_status || 'none'"></span>
+                <!-- How the broker signs in. SPIRE is offered whenever this dashboard lets
+                     agents attest through it; a guest that cannot reach the server falls
+                     back to the enrolment code, and this is where that becomes visible. -->
+                <span x-show="e.broker_auth" x-cloak
+                      class="ml-1 text-xs px-2 py-0.5 rounded-full"
+                      :class="e.broker_auth === 'spiffe' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-500'"
+                      :title="e.broker_auth === 'spiffe'
+                              ? 'Attested through SPIRE: its signing key is held in memory only'
+                              : 'Enrolled with an Ed25519 key kept on the broker VM'"
+                      x-text="e.broker_auth === 'spiffe' ? 'SPIRE' : 'Ed25519'"></span>
                 <!-- The reason lives here rather than in error_message: a POV whose broker
                      did not come up is running, billing and reapable. -->
                 <p x-show="e.broker_error" class="text-xs text-amber-700 mt-0.5" x-text="e.broker_error"></p>
