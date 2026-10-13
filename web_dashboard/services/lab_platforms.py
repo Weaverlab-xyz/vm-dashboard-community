@@ -120,6 +120,8 @@ CAPABILITIES = {
         "idle_suspend": True,          # suspend_on_idle, in seconds, per environment
         "scheduled_suspend": False,    # it has its own timer; see the aws row below
         "bootstrap_injection": "metadata",
+        # Skytap refuses a longer user_data with a 422 (pov_broker.fit_bootstrap).
+        "bootstrap_max_chars": 16384,
         "share_link": True,            # publish_sets: password + expiration_date(_tz)
         "stored_credentials": True,    # …/vms/{id}/credentials
         # A cheap authenticated read that proves the credential AND what it can see, so an
