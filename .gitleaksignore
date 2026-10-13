@@ -25,3 +25,4 @@ a6b5400d5534ab9c56da1b346cc8e96444fe0abf:docs/integrations/vmware.md:curl-auth-u
 2edec541d30699886102124a99ec235ad728d6bc:tests/test_ps_k8ssa.py:generic-api-key:295
 156c70cd6c2343611be3ae88cb4f3b001b167d47:web_dashboard/services/terraform_pra_service.py:generic-api-key:996
 1e6f8b4b55148ec5135b56d5f757ebf160e30779:.env.example:generic-api-key:17
+0d17e9a6e891c7d8da44c9f5576085dda20fd646:tests/test_pov_broker_spire.py:generic-api-key:55
