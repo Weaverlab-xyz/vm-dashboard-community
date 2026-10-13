@@ -69,6 +69,11 @@ unset SPIRE_UPSTREAM_CA_CERT SPIRE_UPSTREAM_CA_KEY SPIRE_UPSTREAM_CA_CERT_FILE \
       SPIRE_UPSTREAM_CA_KEY_FILE SPIRE_DATASTORE_URL_FILE SPIRE_TRUST_DOMAIN_FILE CA_KEY CA_CERT
 export SPIRE_TRUST_DOMAIN SPIRE_DATASTORE_URL SPIRE_JWT_ISSUER="${SPIRE_JWT_ISSUER:-}"
 
+# HOME follows the server, not the root shell that started it: with sslmode=require the
+# Postgres driver stats $HOME/.postgresql/postgresql.crt for a client certificate, and
+# under root's 0700 /root that stat is "permission denied" — fatal, not "no certificate".
+export HOME="$DATA_DIR"
+
 set -- /usr/local/bin/spire-server run -config /etc/spire/server.conf -expandEnv
 if [ "$(id -u)" = "0" ]; then
     chown "$RUN_UID:$RUN_UID" "$SOCK_DIR" "$CA_DIR" "$CA_DIR/upstream.crt" \
