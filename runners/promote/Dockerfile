@@ -15,7 +15,7 @@
 # with argparse exit 2. Keep the base current AND set GOTOOLCHAIN=auto so a
 # future version bump fetches the toolchain go.mod asks for instead of breaking
 # another release.
-FROM golang:1.26-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS gcp-guest-agent
+FROM golang:1.27-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS gcp-guest-agent
 ENV GOTOOLCHAIN=auto
 ARG GUEST_AGENT_VERSION=20260529.00
 RUN apt-get update \
