@@ -358,6 +358,7 @@ _TITLE_OVERRIDES = {
     "oidc/k8s-federation/pingone":       "Kubernetes federation: PingOne",
     "oidc/k8s-federation/oidc":          "Kubernetes federation: other OIDC",
     "oidc/dashboard-identity":           "The dashboard's own identity",
+    "spiffe":                            "SPIFFE and SPIRE",
     "oidc/dex":                          "Dex",
     # The section hubs and their pages. Folder names were dropped from the filenames
     # (cloud-vms -> cloud/vms), so the derived titles lose the word that said what they were.

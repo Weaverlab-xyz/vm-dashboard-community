@@ -1294,6 +1294,28 @@ def _install_signal_handlers(loop, shutdown: asyncio.Event) -> None:
                     sig, lambda *_: loop.call_soon_threadsafe(shutdown.set))
 
 
+async def _spiffe_token_loop(interval: float = 60.0) -> None:
+    """Keep THIS container's copy of the dashboard's JWT-SVID files fresh.
+
+    On Docker Compose a no-op forever: the worker mounts the app's token volume read-only
+    and reads the app's files (``dashboard_identity.writes_here`` is False). On a managed
+    container runtime nothing crosses the two deployments, so Terraform and Packer here
+    would find no files at all — this loop gives the worker its own, minted through the
+    database relay to the app's SPIRE sidecar (services/spire_relay). A peer of the job
+    runner for the same reason as the drain below: not a job type, never raises.
+    """
+    from .services import dashboard_identity
+    while True:
+        try:
+            if dashboard_identity.enabled() and dashboard_identity.writes_here():
+                await asyncio.to_thread(dashboard_identity.refresh)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- a background loop: log, carry on
+            logger.warning("dashboard SPIFFE tokens: refresh failed: %s", exc)
+        await asyncio.sleep(interval)
+
+
 async def _main() -> None:
     """Run the job runner and the notification drain concurrently.
 
@@ -1348,12 +1370,13 @@ async def _main() -> None:
     # Password Safe, Entitle, agents. Each area is a no-op while its feature is off.
     from .services.health import runner as health_runner
     health = asyncio.create_task(health_runner.run_loop(), name="health")
+    spiffe = asyncio.create_task(_spiffe_token_loop(), name="spiffe-tokens")
     try:
         await _run_loop(shutdown=shutdown)   # returns once shutdown is set and jobs drain
     finally:
-        for task in (drain, stats, dirhealth, health):
+        for task in (drain, stats, dirhealth, health, spiffe):
             task.cancel()
-        for task in (drain, stats, dirhealth, health):
+        for task in (drain, stats, dirhealth, health, spiffe):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         # Non-blocking: a poller's thread still parked in time.sleep() would otherwise

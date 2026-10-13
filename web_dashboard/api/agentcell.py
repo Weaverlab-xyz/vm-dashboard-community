@@ -293,7 +293,7 @@ def _install_facts(db: Session, row) -> dict:
                    agent_node_id=agentcell_service.dashboard_ids(
                        row.trust_domain or "", row.id)[1],
                    spire_server_address=dashboard_spire.server_address(),
-                   spire_server_port=dashboard_spire.SERVER_PORT)
+                   spire_server_port=dashboard_spire.server_port())
         return out
     lab = db.query(SpireLab).filter(SpireLab.id == row.spire_lab_id).first()
     if lab:

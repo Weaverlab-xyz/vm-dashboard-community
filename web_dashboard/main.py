@@ -206,8 +206,22 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_warm_wlc_leases(), name="warm_wlc_leases")
     )
 
+    # The dashboard's SPIRE server, for processes that cannot reach it themselves: the
+    # worker on a managed container runtime is a separate deployment, and the admin socket
+    # is a volume of the app's pod only. A thread, not a task — see services/spire_relay.
+    # None when this process has no local path to a server either; idle (one config read
+    # every 30s) while no SPIRE feature is on.
+    spire_relay_server = None
+    try:
+        from .services import spire_relay
+        spire_relay_server = spire_relay.start()
+    except Exception as exc:  # noqa: BLE001 -- an optional feature must not stop startup
+        logger.warning("SPIRE relay did not start (non-fatal): %s", exc)
+
     yield
 
+    if spire_relay_server is not None:
+        spire_relay_server.stop()
     for task in warmers:
         task.cancel()
         try:

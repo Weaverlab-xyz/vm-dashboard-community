@@ -1545,6 +1545,7 @@ def migrate_to_spire(agent_id: str, request: Request,
                                    "trust_domain": out["trust_domain"]})
     host = dashboard_spire.server_address() or "<dashboard host>"
     env = (f"SPIRE_SERVER_ADDRESS={host}\n"
+           f"SPIRE_SERVER_PORT={dashboard_spire.server_port()}\n"
            f"SPIRE_TRUST_DOMAIN={out['trust_domain']}\n"
            f"SPIRE_JOIN_TOKEN={out['join_token']}\n")
     return {**_agent_row(agent), **out, "env": env,

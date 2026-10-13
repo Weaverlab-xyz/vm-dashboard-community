@@ -8,10 +8,17 @@ boto3's ``AWS_WEB_IDENTITY_TOKEN_FILE``, a GCP ``external_account`` credential's
 platform. Nothing here changes which credential a cloud call uses: a stored key still
 wins, exactly as before, and an operator retires it on purpose.
 
-**One writer, any number of readers.** The token loop in ``main.py`` calls
+**One writer per directory, any number of readers.** The token loop in ``main.py`` calls
 :func:`refresh` every minute in each app worker; an ``flock`` on the directory makes the
 second worker find fresh files and mint nothing. Files are written to a temporary name
 and renamed, so a reader never sees half a token.
+
+Which directory depends on the platform. On Docker Compose the app and the worker share
+one volume, the worker mounts it read-only, and only the app writes (:func:`writes_here`
+is False in the worker). On a managed container runtime no volume crosses the two
+deployments, so each keeps its OWN directory and the worker runs the same loop
+(``jobs_worker._spiffe_token_loop``), minting through the database relay
+(services/spire_relay). Same identity either way: one SPIFFE ID, two sets of files.
 
 **A failed mint keeps the old file.** It may still be valid for minutes, and a consumer
 that reads an expired one fails with an expired-token error — which is what happened. It
@@ -74,6 +81,21 @@ def enabled() -> bool:
 
 def token_dir() -> str:
     return os.environ.get("SPIFFE_TOKEN_DIR", "").strip() or DEFAULT_TOKEN_DIR
+
+
+def writes_here() -> bool:
+    """Whether THIS process keeps the token files, rather than reading another's.
+
+    False exactly when the directory cannot be written — the compose worker's read-only
+    mount of the app's volume. Creating a missing directory is part of the check: on a
+    managed runtime nothing mounts it, and the process makes its own.
+    """
+    directory = token_dir()
+    try:
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+    except OSError:
+        return False
+    return os.access(directory, os.W_OK)
 
 
 def issuer() -> str:
@@ -172,7 +194,8 @@ def _check_minted(token: str, audience: str, want_sub: str, want_iss: str) -> No
         raise IdentityError(
             f"the SPIRE server signs with issuer {c.get('iss') or '(none)'!r}, but this "
             f"dashboard publishes discovery as {want_iss!r}. Set SPIRE_JWT_ISSUER to the "
-            f"same value (docker-compose.spire.yml) and restart the SPIRE server, or change "
+            f"same value (docker-compose.spire.yml, or the SPIRE sidecar's environment) and "
+            f"restart the SPIRE server, or change "
             f"the issuer under Settings → Remote agents.")
 
 

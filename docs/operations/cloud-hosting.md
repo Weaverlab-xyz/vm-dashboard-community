@@ -37,6 +37,7 @@ depend on those, and the rest do not.
 | Config Management against **cloud** targets | **Works**, but you must set the runner to `ecs` / `aci` / `gcp` in Settings → Ansible. The `local` runner shells out to `docker run`. |
 | Config Management against **on-prem** targets — VMware, Proxmox, Hyper-V, locally-registered clusters | **Broken**, and not only because of the socket: the dashboard has no route to your lab. The run is refused with a message saying so. Use [remote agents](../remote-agents.md). |
 | Local Filesystem / UNC storage backend | **Unavailable.** Pick a cloud bucket on `/storage`. |
+| The dashboard's SPIRE server: agent attestation, the dashboard's own SPIFFE identity | **Works, as a sidecar of the app**, not the compose overlay: PostgreSQL for its datastore, an upstream CA as a secret, and the worker reaching it through the database. Agents cannot attest on **Cloud Run**, which has no TCP ingress. See [On a managed container runtime](../spiffe.md#on-a-managed-container-runtime). |
 
 ---
 
