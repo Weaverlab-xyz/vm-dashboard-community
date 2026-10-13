@@ -44,6 +44,24 @@ from .config import settings
 # B1ms is 50, which is why the defaults are 5 + 5 and jobs_worker._limits clamps
 # concurrency to 3 there; B2s and every General Purpose tier are 429+.
 _is_sqlite = "sqlite" in settings.database_url
+
+
+def engine_url(raw: str):
+    """``raw`` with a bare ``postgresql://`` pinned to the psycopg2 driver.
+
+    psycopg2 is the driver this app ships (requirements.txt), but a URL with no driver
+    named leaves the choice to SQLAlchemy, and 2.1 changed its default to psycopg 3.
+    Every documented URL is the bare form (the compose files, the CI job, the docs), so
+    without this, upgrading SQLAlchemy fails every Postgres install at boot with
+    ``No module named 'psycopg'``. A URL that names its driver is left as it is.
+    """
+    from sqlalchemy.engine import make_url
+    url = make_url(raw)
+    if url.drivername == "postgresql":
+        url = url.set(drivername="postgresql+psycopg2")
+    return url
+
+
 _pool_kwargs = {} if _is_sqlite else {
     "pool_size":     settings.db_pool_size,
     "max_overflow":  settings.db_max_overflow,
@@ -52,7 +70,7 @@ _pool_kwargs = {} if _is_sqlite else {
     "pool_recycle":  settings.db_pool_recycle_s,
 }
 engine = create_engine(
-    settings.database_url,
+    engine_url(settings.database_url),
     connect_args={"check_same_thread": False} if _is_sqlite else {},
     poolclass=NullPool if _is_sqlite else QueuePool,
     echo=False,
@@ -5517,6 +5535,7 @@ def create_admin_user(username: str, password: str, workgroups: List[str] = None
     Returns:
         Created User object
     """
+    check_password_length(password)
     if workgroups is None:
         workgroups = list(settings.workgroups.keys())
 
@@ -5548,19 +5567,53 @@ def create_admin_user(username: str, password: str, workgroups: List[str] = None
         db.close()
 
 
+# bcrypt only ever reads the first 72 bytes of a password. bcrypt 4 dropped the rest
+# silently; bcrypt 5 raises ValueError instead. Every stored hash of a longer password was
+# made from its first 72 bytes, so cutting there keeps those users able to sign in, and
+# keeps a long password at the login form a wrong-password answer rather than a 500.
+BCRYPT_MAX_BYTES = 72
+
+
+def password_length_error(password: str) -> str:
+    """Why ``password`` is too long to set, or ``""`` when it is fine.
+
+    For a password being SET. Verifying keeps cutting at 72 instead (bcrypt_input), so a
+    long password hashed by bcrypt 4 still works; a new one is refused rather than having
+    its tail ignored without anyone knowing. Counts bytes: é is two, an emoji four.
+    """
+    size = len((password or "").encode("utf-8"))
+    if size > BCRYPT_MAX_BYTES:
+        return (f"Passwords can be at most {BCRYPT_MAX_BYTES} bytes (bcrypt reads no "
+                f"further); this one is {size} bytes.")
+    return ""
+
+
+def check_password_length(password: str) -> str:
+    """:func:`password_length_error` as a ValueError, for callers outside a request."""
+    error = password_length_error(password)
+    if error:
+        raise ValueError(error)
+    return password
+
+
+def bcrypt_input(password: str) -> bytes:
+    """The bytes bcrypt actually hashes: the UTF-8 password, cut at 72 bytes."""
+    return password.encode("utf-8")[:BCRYPT_MAX_BYTES]
+
+
 def verify_password(plain_password: str, hashed_password: Optional[str]) -> bool:
     """Verify password against bcrypt hash. Returns False for OAuth-only users (no hash)."""
     if not hashed_password:
         return False
     return _bcrypt.checkpw(
-        plain_password.encode("utf-8"),
+        bcrypt_input(plain_password),
         hashed_password.encode("utf-8") if isinstance(hashed_password, str) else hashed_password,
     )
 
 
 def get_password_hash(password: str) -> str:
     """Hash a password with bcrypt"""
-    return _bcrypt.hashpw(password.encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
+    return _bcrypt.hashpw(bcrypt_input(password), _bcrypt.gensalt()).decode("utf-8")
 
 
 # ========== CLI UTILITIES ==========

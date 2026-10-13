@@ -68,6 +68,12 @@ Before this, the create form had no grid at all and saved no map, which left the
 the NULL state above — every section, every level, for anyone the admin added. Tick
 "Full access (unrestricted)" if that is genuinely what you want.
 
+**Passwords can be at most 72 bytes.** bcrypt, which hashes them, reads no further, so a
+longer one is refused when it is set (here, on edit, in the setup wizard and on a headless
+import) rather than accepted with its end ignored. Bytes, not characters: an accented letter
+is 2, an emoji 4. A longer password set before this limit still signs in: it was always
+checked on its first 72 bytes, and still is.
+
 **Service accounts are the exception to the NULL rule.** A [service account](service-accounts.md)
 — a workload principal that authenticates with an OAuth client — reads an empty map as
 **nothing**, not everything, and the "Full access" option is not offered for one. It can

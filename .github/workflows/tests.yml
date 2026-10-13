@@ -257,7 +257,8 @@ jobs:
 
       - name: Run PostgreSQL schema tests
         env:
-          # psycopg2-binary is already in requirements.txt, so the default driver works.
+          # Bare on purpose, like every documented URL: database.engine_url pins it to
+          # psycopg2, the driver requirements.txt ships (SQLAlchemy 2.1 defaults to psycopg 3).
           DATABASE_URL: postgresql://test:test@localhost:5432/testdb
           JWT_SECRET_KEY: ci-postgres-schema-tests
         run: |
