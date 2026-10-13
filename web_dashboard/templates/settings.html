@@ -5613,8 +5613,11 @@
                   in a file per audience, and publishes the issuer's discovery document and
                   keys at <code class="font-mono">&lt;issuer&gt;/.well-known/openid-configuration</code>.
                   A cloud trusts that issuer instead of a stored key. Stored keys still win:
-                  clear one only once its cloud accepts the token. Needs the SPIRE server from
-                  <code class="font-mono">docker-compose.spire.yml</code>.
+                  clear one only once its cloud accepts the token. Needs the dashboard's own
+                  SPIRE server: <code class="font-mono">docker-compose.spire.yml</code> on Docker
+                  Compose, or the <code class="font-mono">examples/cloud-spire</code> sidecar on a
+                  managed container runtime, with <code class="font-mono">SPIRE_JWT_ISSUER</code>
+                  set to the issuer below.
                 </span>
               </span>
             </label>
