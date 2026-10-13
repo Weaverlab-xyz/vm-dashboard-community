@@ -28,7 +28,7 @@ pydantic-settings>=2.6.1
 # every decode here pins its algorithms, asymmetric-only where the key is public. See
 # .pip-audit-ignore for why it, and its ecdsa dependency, are accepted.
 python-jose[cryptography]==3.5.0
-bcrypt==4.2.1
+bcrypt==5.0.0
 fido2>=1.1.2
 msal>=1.28.0
 
