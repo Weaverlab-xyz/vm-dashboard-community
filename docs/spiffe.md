@@ -199,6 +199,10 @@ CREATE DATABASE spire;
 share one datastore and one upstream CA. That is SPIRE's own HA shape, and each replica's
 JWT key is published in the shared bundle.
 
+The sidecar holds at most **5** connections to it (`max_open_conns`), per replica. Count
+them against the server's limit next to the dashboard's own pools: a small tier such as
+Azure's B1ms allows 50 in all.
+
 #### The sidecar
 
 ```bash
