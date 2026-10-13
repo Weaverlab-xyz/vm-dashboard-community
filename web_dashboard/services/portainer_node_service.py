@@ -388,7 +388,8 @@ def _admin_password_hash(password: str) -> str:
         logger.warning("bcrypt is not installed — the Portainer node will fall back to "
                        "first-run API initialization, which races Portainer's init window.")
         return ""
-    raw = password.encode()
+    # The first 72 bytes, as bcrypt 4 did silently: bcrypt 5 raises on anything longer.
+    raw = password.encode()[:72]
     hashed = bcrypt.hashpw(raw, bcrypt.gensalt()).decode()
     if not bcrypt.checkpw(raw, hashed.encode()):
         raise RuntimeError("bcrypt produced a hash it cannot verify — refusing to launch a "

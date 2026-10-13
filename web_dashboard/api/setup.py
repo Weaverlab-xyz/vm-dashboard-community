@@ -459,7 +459,11 @@ def _require_admin(request: Request) -> str:
 
 
 def _upsert_admin(username: str, password: str) -> None:
-    from ..database import SessionLocal, User, get_password_hash
+    from ..database import SessionLocal, User, get_password_hash, password_length_error
+    # Every caller runs this before writing any config, so a refusal here leaves nothing
+    # half-saved.
+    if password_length_error(password):
+        raise HTTPException(status_code=400, detail=password_length_error(password))
     db = SessionLocal()
     try:
         existing = db.query(User).filter(User.username == username).first()

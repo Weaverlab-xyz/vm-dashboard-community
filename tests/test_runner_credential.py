@@ -244,8 +244,17 @@ def test_the_containers_sigv4_matches_botocore():
                      headers={k: v for k, v in proof["headers"].items()
                               if k in ("content-type", rf.BINDING_HEADER)})
     import unittest.mock as m
-    with m.patch("botocore.auth.datetime") as dt:
-        dt.datetime.utcnow.return_value = when.replace(tzinfo=None)
+    import botocore.auth as _auth
+    # Freeze botocore's clock wherever this version reads it: newer releases call
+    # botocore.auth.get_current_datetime(), older ones datetime.datetime.utcnow().
+    if hasattr(_auth, "get_current_datetime"):
+        clock = m.patch.object(_auth, "get_current_datetime",
+                               return_value=when.replace(tzinfo=None))
+    else:
+        clock = m.patch("botocore.auth.datetime")
+    with clock as frozen:
+        if not hasattr(_auth, "get_current_datetime"):
+            frozen.datetime.utcnow.return_value = when.replace(tzinfo=None)
         SigV4Auth(Credentials("AKIDEXAMPLE", "wJalrXUtnFEMI", "tok"), "sts",
                   "eu-west-2").add_auth(req)
     theirs = req.headers["Authorization"].split("Signature=")[1]

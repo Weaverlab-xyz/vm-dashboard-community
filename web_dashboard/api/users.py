@@ -9,7 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from ..database import User, Fido2Credential, PersonalAccessToken, get_db, get_password_hash
+from ..database import (User, Fido2Credential, PersonalAccessToken, get_db, get_password_hash,
+                        password_length_error)
 from ..models.user import UserResponse
 from ..services import role_service
 from .auth import (PERMISSION_SCOPES, get_current_user, require_admin,
@@ -205,6 +206,8 @@ def create_user(
 ):
     if db.query(User).filter(User.username == body.username).first():
         raise HTTPException(status_code=409, detail="Username already exists")
+    if password_length_error(body.password):
+        raise HTTPException(status_code=400, detail=password_length_error(body.password))
     user = User(
         username=body.username,
         hashed_password=get_password_hash(body.password),
@@ -272,6 +275,8 @@ def update_user(
     # Prevent admins from removing their own admin flag
     if user.id == admin.id and body.is_admin is False:
         raise HTTPException(status_code=400, detail="Cannot remove your own admin privilege")
+    if body.password and password_length_error(body.password):
+        raise HTTPException(status_code=400, detail=password_length_error(body.password))
     was_admin = _admin_here(user)
 
     if body.full_name is not None:
