@@ -31,6 +31,9 @@ if _ROOT not in sys.path:
 
 _TMPDB = os.path.join(tempfile.mkdtemp(prefix="dash-spire-test-"), "test.db")
 os.environ["DATABASE_URL"] = f"sqlite:///{_TMPDB}"
+# The fake SPIRE sits behind dashboard_spire._run, which only the local transports call;
+# pin docker so the test does not depend on whether this host has a Docker socket.
+os.environ["SPIRE_SERVER_TRANSPORT"] = "docker"
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-dashboard-spire-tests")
 
 try:

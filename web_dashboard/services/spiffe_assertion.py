@@ -65,6 +65,10 @@ _JWKS_TTL = 300
 _KID_REFETCH_INTERVAL = 60
 _cache: dict = {}
 _last_forced: dict = {}
+# The same once-a-minute cap for re-reading the dashboard's own bundle on an unknown kid.
+# Its own dict because that re-read ends in clear_state(), which empties _last_forced: an
+# assertion with a made-up kid must not be able to make every request ask the server.
+_last_resync: dict = {}
 
 _REPLAY_PREFIX = "vmcli:spiffe:assertion:"
 
@@ -190,6 +194,43 @@ def keys_for(row, kid: Optional[str] = None) -> list:
     raise AssertionError_(f"trust domain {row.trust_domain} has neither a JWKS URL nor a bundle")
 
 
+def _resync_own_bundle(db, row, kid: Optional[str], keys: list) -> bool:
+    """Re-read the bundle of the dashboard's OWN trust domain when an assertion names a
+    key it does not hold yet. Returns whether the row changed.
+
+    That row is a stored bundle re-synced daily (dashboard_spire.sync_if_due), which is
+    enough across SPIRE's scheduled rotation — the next key is published well ahead. It
+    is not enough on a managed runtime, where the SPIRE sidecar's signing keys live in
+    memory and a restart signs with a brand-new one at once: every agent would be refused
+    for up to a day. The dashboard administers this server, so it can simply ask. Only
+    for that row (another trust domain's bundle is someone else's statement, and its URL
+    rows already refetch above), and at most once a minute, like the URL refetch.
+    """
+    from . import dashboard_spire
+    if not kid or row.jwks_url or row.created_by != dashboard_spire.OWNER:
+        return False
+    if kid in {k.get("kid") for k in keys}:
+        return False
+    now = time.time()
+    if now - _last_resync.get(row.trust_domain, 0) < _KID_REFETCH_INTERVAL:
+        return False
+    _last_resync[row.trust_domain] = now
+    # Its own session: sync_trust_domain commits, and the caller's transaction (an
+    # attestation, a token exchange) is not this function's to commit.
+    from ..database import SessionLocal
+    own = SessionLocal()
+    try:
+        dashboard_spire.sync_trust_domain(own, row.trust_domain)
+    except dashboard_spire.DashboardSpireError as exc:
+        logger.warning("unknown kid for %s, and the bundle could not be re-read: %s",
+                       row.trust_domain, exc)
+        return False
+    finally:
+        own.close()
+    db.refresh(row)
+    return True
+
+
 def is_stale(row) -> bool:
     return bool(not row.jwks_url and row.bundle_captured_at
                 and datetime.utcnow() - row.bundle_captured_at > BUNDLE_STALE_AFTER)
@@ -218,6 +259,8 @@ def verify(db, assertion: str, audiences, now: Optional[float] = None) -> dict:
     if not row:
         raise AssertionError_(f"trust domain {td} is not registered")
     keys = keys_for(row, header.get("kid"))
+    if _resync_own_bundle(db, row, header.get("kid"), keys):
+        keys = keys_for(row, header.get("kid"))
     if not keys:
         raise AssertionError_(f"trust domain {td} has no JWT-SVID keys")
     try:

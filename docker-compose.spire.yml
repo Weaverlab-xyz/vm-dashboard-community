@@ -26,6 +26,10 @@
 #   The app then keeps one JWT-SVID per audience in the memory-only `spiffe_tokens`
 #   volume, at /run/spiffe-tokens/<aws|azure|gcp|wlc>.jwt, readable by the worker.
 #
+# On a managed container runtime (Azure Container Apps, Cloud Run, ECS, Kubernetes) there
+# is no compose and no shared volume: run examples/cloud-spire as a sidecar of the app
+# instead. docs/spiffe.md#on-a-managed-container-runtime
+#
 # Images are pinned by digest, from the same table as the SPIRE lab
 # (examples/playbooks/spire/spire-docker-server.yml); tests/test_spire_overlay.py keeps
 # the two in step. Design: docs/design/agent-and-human-identity.md

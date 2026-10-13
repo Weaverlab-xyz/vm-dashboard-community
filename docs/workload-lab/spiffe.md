@@ -2,6 +2,10 @@
 
 > **Audience:** operator · **Profile:** `demo` · **Read this when:** you need a SPIRE trust domain to govern non-human identities against, and want it gone again when the demo ends.
 
+This page is about the SPIRE trust domains the **Workload Lab** builds for demos, and the
+Password Safe plugin that governs them. The dashboard's **own** SPIRE server, and every
+feature that uses it, is on [SPIFFE and SPIRE](../spiffe.md).
+
 > **Preview.** The plugin's own suite covers everything above the SPIRE API, and its
 > 16-step harness runs green against a live SPIRE 1.15.3 server — but **nothing here has
 > been proven through a live BeyondInsight**. The single open question is whether the

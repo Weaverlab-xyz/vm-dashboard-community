@@ -117,6 +117,7 @@ operator-supplied code. The runner stays one-shot; only the thing that launches 
 | [Agent-executed Config Management](remote-agents/config-runs.md) | What the dashboard sends, the grants it needs, and what a run looks like, for VMs, on-prem databases and on-prem AD/LDAP directories. |
 | [Agent-brokered file shares](remote-agents/file-shares.md) | A name rather than a path, the grants, and why it needs no Docker socket. |
 | [Attesting an agent through SPIRE](remote-agents/spire-attestation.md) | Moving an agent from an Ed25519 key on disk to a SPIRE attestation at every start: the two overlays, **Migrate to SPIRE**, ports, rollback and the settings. |
+| [SPIFFE and SPIRE](spiffe.md) | The dashboard's own SPIRE server that agents attest to: running it on Docker Compose or as a sidecar on a managed container runtime, its trust domain, and troubleshooting it. |
 
 The same SPIRE server also gives the **dashboard** an identity of its own, which AWS, Azure,
 GCP and k3s can trust instead of a stored key. That is not about agents, so it lives with the

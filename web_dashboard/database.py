@@ -650,6 +650,56 @@ class SpiffeTrustDomain(Base):
     updated_at = Column(DateTime, nullable=True)
 
 
+class SpireAdminCall(Base):
+    """One ``spire-server`` CLI call, relayed through the database to a process that can
+    reach the dashboard's SPIRE server (services/spire_relay).
+
+    On a managed container runtime the SPIRE server is a sidecar of the APP, and its admin
+    socket is a volume only that pod can see — the worker is a separate deployment, and no
+    platform shares a volume between two of them. Everything the worker asks the server
+    for (its own JWT-SVIDs, a Packer build assertion, a Workload Lab federation) goes in a
+    row here; an app process claims it with the same ``UPDATE … WHERE status='pending'``
+    rowcount the job queue uses, runs it, and writes the result back. The requester reads
+    it and deletes the row.
+
+    ``stdin`` and both output columns are Fernet-encrypted (config_service.encrypt_value):
+    the output of ``token generate`` and ``jwt mint`` is a credential.
+    """
+    __tablename__ = "spire_admin_calls"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # The CLI arguments after `spire-server`, as a JSON list. Built by code, never by a
+    # request; the server side still refuses a subcommand outside its allow-list.
+    args_json = Column(Text, nullable=False)
+    stdin_enc = Column(Text, nullable=True)
+    timeout_s = Column(Integer, nullable=False, default=30)
+    # pending -> running -> done. Indexed because the server polls on it.
+    status = Column(String(16), nullable=False, default="pending", index=True)
+    returncode = Column(Integer, nullable=True)
+    stdout_enc = Column(Text, nullable=True)
+    stderr_enc = Column(Text, nullable=True)
+    requested_by = Column(String(255), nullable=True)
+    served_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    claimed_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+
+
+class SpireAdminRelay(Base):
+    """A process currently serving :class:`SpireAdminCall` rows, and when it last said so.
+
+    A requester checks for a fresh row BEFORE it queues a call, so an install with no
+    SPIRE server at all fails at once with a sentence, rather than after a full timeout in
+    every background loop that asks.
+    """
+    __tablename__ = "spire_admin_relays"
+
+    # host:pid — one row per serving process.
+    id = Column(String(255), primary_key=True)
+    transport = Column(String(16), nullable=False)
+    seen_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
 class LoginAttempt(Base):
     """One FAILED password login. Successes are not recorded here — a successful login
     deletes the username's rows, so the table only ever holds the evidence of failure.

@@ -1,11 +1,12 @@
 """The dashboard's OWN SPIRE server: one-click agent migration and its trust domain.
 
-docs/design/agent-and-human-identity.md. ``docker-compose.spire.yml`` runs a SPIRE server
-beside the dashboard; this module drives it the way the SPIRE lab drives its Docker-mode
-server (``spire_lab_service._CLI_PREFIX``): ``docker exec <container> spire-server …``,
-over the Docker socket the app already mounts and with the ``docker`` CLI the image
-already ships. No gRPC dependency, and the CLI's own ``-output json`` (protojson with
-proto field names, empty fields emitted) is the contract.
+docs/design/agent-and-human-identity.md. A SPIRE server runs beside the dashboard —
+``docker-compose.spire.yml`` on Docker Compose, the ``examples/cloud-spire`` sidecar on a
+managed container runtime — and this module drives it with its own CLI: ``docker exec``
+into the compose container, the sidecar's admin socket, or a relay through the database
+for a process that has neither (see "transport" below). No gRPC dependency, and the CLI's
+own ``-output json`` (protojson with proto field names, empty fields emitted) is the
+contract.
 
 Three jobs:
 
@@ -31,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 from datetime import datetime, timedelta
 from typing import Optional
@@ -77,26 +79,121 @@ def _run(argv: list, timeout: int, input: Optional[str] = None) -> subprocess.Co
                           check=False, input=input)
 
 
-def _cli(*args: str, timeout: int = 30, input: Optional[str] = None) -> str:
-    name = container()
-    # `-i` only when there is something to send: a federation's seed bundle goes in on
-    # stdin (`-trustDomainBundlePath /dev/stdin`) because the container's filesystem is
-    # read-only and nothing the app writes is mounted into it.
-    argv = ["docker", "exec", *(["-i"] if input is not None else []), name, SPIRE_BIN, *args]
+# ── transport ─────────────────────────────────────────────────────────────────
+# Three ways to reach the server, chosen per PROCESS, because app and worker can differ:
+#
+#   docker  `docker exec <container> spire-server …` — Docker Compose with
+#           docker-compose.spire.yml, where app and worker both mount the Docker socket;
+#   socket  the local `spire-server` binary (baked into the image) against the admin
+#           socket of a SIDECAR, shared with this container through a pod volume — Azure
+#           Container Apps, Cloud Run, ECS/Fargate, Kubernetes (examples/cloud-spire);
+#   relay   neither: the call goes through the database to an app process that has one
+#           (services/spire_relay). The worker on every managed runtime.
+#
+# Every transport runs the same argv and returns the same CompletedProcess, and _cli
+# applies the same checks to it, so nothing above this section knows which one answered.
+
+TRANSPORT_ENV = "SPIRE_SERVER_TRANSPORT"     # docker | socket | relay: an explicit choice
+SOCKET_ENV = "SPIRE_SERVER_SOCKET"           # the sidecar's admin socket, in this container
+DEFAULT_SOCKET = "/run/spire-server/api.sock"
+LOCAL_BIN = "/usr/local/bin/spire-server"    # Dockerfile copies it from the pinned image
+DOCKER_SOCKET = "/var/run/docker.sock"
+TRANSPORTS = ("docker", "socket", "relay")
+
+
+def transport() -> str:
+    """Which transport this process uses. An explicit SPIRE_SERVER_TRANSPORT wins; then a
+    configured sidecar socket; then a Docker socket; else the relay.
+
+    A sidecar socket outranks a Docker socket on purpose: a container that has both is a
+    pod with a sidecar that also happens to see a Docker host, and the sidecar is the
+    server this pod's configuration names.
+    """
+    explicit = os.environ.get(TRANSPORT_ENV, "").strip().lower()
+    if explicit in TRANSPORTS:
+        return explicit
+    if os.environ.get(SOCKET_ENV, "").strip():
+        return "socket"
+    if os.environ.get("DOCKER_HOST", "").strip() or os.path.exists(DOCKER_SOCKET):
+        return "docker"
+    return "relay"
+
+
+def socket_path() -> str:
+    return os.environ.get(SOCKET_ENV, "").strip() or DEFAULT_SOCKET
+
+
+def exec_local(args, timeout: int, input: Optional[str] = None) -> subprocess.CompletedProcess:
+    """Run ``spire-server *args`` over this process's own transport, unchecked. The relay
+    server calls this for a relayed call; everything else goes through _cli. Raises
+    DashboardSpireError only when the transport itself is missing."""
+    mode = transport()
+    if mode == "socket":
+        # -socketPath goes last: every subcommand takes it, and every argument before it
+        # is already a flag of that subcommand.
+        argv = [LOCAL_BIN, *args, "-socketPath", socket_path()]
+        missing = (f"the spire-server binary is not in this image ({LOCAL_BIN}); "
+                   f"SPIRE_SERVER_SOCKET needs an image from this release or later")
+    elif mode == "docker":
+        # `-i` only when there is something to send: a federation's seed bundle goes in on
+        # stdin (`-trustDomainBundlePath /dev/stdin`) because the container's filesystem
+        # is read-only and nothing the app writes is mounted into it.
+        argv = ["docker", "exec", *(["-i"] if input is not None else []), container(),
+                SPIRE_BIN, *args]
+        missing = "the docker CLI is not available to the dashboard"
+    else:
+        raise DashboardSpireError("this process has no local path to the SPIRE server")
     try:
-        proc = _run(argv, timeout) if input is None else _run(argv, timeout, input=input)
+        return _run(argv, timeout) if input is None else _run(argv, timeout, input=input)
     except FileNotFoundError as exc:
-        raise DashboardSpireError("the docker CLI is not available to the dashboard") from exc
+        raise DashboardSpireError(missing) from exc
     except subprocess.TimeoutExpired as exc:
         raise DashboardSpireError(f"spire-server {args[0]} timed out after {timeout}s") from exc
+
+
+def _exec(args, timeout: int, input: Optional[str]) -> tuple:
+    """``(CompletedProcess, transport)`` from whichever transport this process has."""
+    mode = transport()
+    if mode != "relay":
+        return exec_local(list(args), timeout, input), mode
+    from . import spire_relay
+    try:
+        return spire_relay.call(list(args), timeout, input), mode
+    except spire_relay.RelayError as exc:
+        raise DashboardSpireError(str(exc)) from exc
+
+
+# What a missing or stopped server looks like on each local transport. The relay passes
+# the serving process's stderr through, so its text is one of these too.
+_DOCKER_DOWN = ("No such container", "is not running")
+_SOCKET_DOWN = ("connect: no such file or directory", "connect: connection refused")
+_SOCKET_DENIED = "connect: permission denied"
+
+
+def _cli(*args: str, timeout: int = 30, input: Optional[str] = None) -> str:
+    proc, mode = _exec(args, timeout, input)
     if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "").strip().splitlines()
+        stderr = proc.stderr or ""
+        err = (stderr or proc.stdout or "").strip().splitlines()
         tail = err[-1][:300] if err else f"exit code {proc.returncode}"
-        if "No such container" in (proc.stderr or "") or "is not running" in (proc.stderr or ""):
+        # "is not running" is in every one of these on purpose: callers that tell "absent"
+        # from "server down" (_federation_exists, unfederate) look for it.
+        if any(s in stderr for s in _DOCKER_DOWN):
             raise DashboardSpireError(
-                f"the SPIRE server container {name!r} is not running. Start it with "
+                f"the SPIRE server container {container()!r} is not running. Start it with "
                 f"docker compose -f docker-compose.yml -f docker-compose.spire.yml up -d, "
                 f"or set its name under Settings → Remote agents.")
+        if any(s in stderr for s in _SOCKET_DOWN):
+            raise DashboardSpireError(
+                f"the SPIRE server sidecar is not running (nothing is listening on its "
+                f"admin socket{'' if mode == 'relay' else ' ' + socket_path()}). Check the "
+                f"spire-server container beside the app, and that both mount the same "
+                f"volume at /run/spire-server.")
+        if _SOCKET_DENIED in stderr:
+            raise DashboardSpireError(
+                "the SPIRE server sidecar refused this container on its admin socket: the "
+                "socket is 0770, so the sidecar must run as the app's uid (10001, "
+                "SPIRE_RUN_UID).")
         # Only the subcommand is named, never the full command line.
         raise DashboardSpireError(f"spire-server {' '.join(args[:2])} failed: {tail}")
     return proc.stdout
@@ -260,18 +357,39 @@ def remove_workload(spiffe_id: str, node: str) -> list:
     return problems
 
 
+def _address_setting() -> tuple:
+    """``(host, port or None)`` from ``spire_server_address``; ``("", None)`` when blank."""
+    raw = (config_service.get("spire_server_address") or "").strip()
+    raw = raw.removeprefix("tcp://").rstrip("/")
+    if not raw:
+        return "", None
+    host, sep, port = raw.rpartition(":")
+    if sep and port.isdigit() and host and not host.endswith(":"):
+        return host.strip("[]"), int(port)
+    return raw.strip("[]"), None
+
+
 def server_address() -> str:
-    """Where an agent host reaches this SPIRE server: the pinned agent audience's host,
-    because that is the name the install already publishes for agents."""
+    """Where an agent host reaches this SPIRE server: ``spire_server_address`` when set —
+    a managed runtime may publish tcp/8081 under a name of its own, such as an AWS NLB's —
+    else the pinned agent audience's host, the name the install already publishes."""
+    host, _ = _address_setting()
+    if host:
+        return host
     from urllib.parse import urlparse
     from . import agent_service
     return urlparse(config_service.get(agent_service.AUDIENCE_CONFIG) or "").hostname or ""
 
 
+def server_port() -> int:
+    _, port = _address_setting()
+    return port or SERVER_PORT
+
+
 def install_facts(td: str) -> dict:
     """What spire-agent-install.yml needs besides the join token. None of it is secret."""
     return {"trust_domain": td, "server_address": server_address(),
-            "server_port": SERVER_PORT, "bootstrap_pem": bootstrap_bundle_pem()}
+            "server_port": server_port(), "bootstrap_pem": bootstrap_bundle_pem()}
 
 
 def in_trust_domain(spiffe_id: str, td: str) -> bool:

@@ -10,6 +10,14 @@
 # same change (the URL is in the comment next to each pair). Terraform providers and
 # Packer plugins need no hash here: `terraform init` and `packer plugins install` verify
 # signed checksums themselves.
+
+# The SPIRE server CLI, for driving a SPIRE SIDECAR through its admin socket on a managed
+# container runtime (SPIRE_SERVER_SOCKET; services/dashboard_spire, examples/cloud-spire).
+# Only the client half is used here — this image never runs a server. Statically linked,
+# so it runs on the slim base unchanged. Same pinned digest as docker-compose.spire.yml
+# and the sidecar image; tests/test_spire_overlay.py keeps all three in step.
+FROM ghcr.io/spiffe/spire-server:1.15.3@sha256:4082f30d3e0ddc4000a171392c4ea174345ee44d161ee917c70b97b2ecfba141 AS spire
+
 FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS base
 
 ARG PACKER_VERSION=1.11.2
@@ -540,7 +548,12 @@ RUN ARCH=$(dpkg --print-architecture) \
 # /app/web_dashboard, which would undo the point of dropping root.
 RUN groupadd -g 10001 dashboard \
     && useradd -u 10001 -g dashboard -m -d /home/dashboard -s /usr/sbin/nologin dashboard \
-    && install -d -o dashboard -g dashboard /app/terraform/deployments /app/packer/builds /app/data
+    && install -d -o dashboard -g dashboard /app/terraform/deployments /app/packer/builds /app/data \
+    && install -d -m 0700 -o dashboard -g dashboard /run/spiffe-tokens
+# The SPIRE CLI (stage above). /run/spiffe-tokens is the dashboard's own JWT-SVID
+# directory (services/dashboard_identity): compose mounts a tmpfs volume over it; on a
+# managed runtime nothing does, and the app and the worker each keep their own copy here.
+COPY --from=spire /opt/spire/bin/spire-server /usr/local/bin/spire-server
 # The SQLite fallback lives in /app/data, which the app owns, not beside the code in /app
 # (SQLite needs to write its journal in the database's directory). Compose and every
 # cloud-hosting guide set DATABASE_URL to PostgreSQL, which overrides this; it only

@@ -219,6 +219,8 @@ optional (the SVID's SPIFFE ID resolves the client); if sent, it must match.
 
 ### 0. Or use the dashboard's own SPIRE server
 
+Running that server is covered on [SPIFFE and SPIRE](../spiffe.md).
+
 When the dashboard runs its own SPIRE server (`docker-compose.spire.yml`), its trust domain
 is already registered, and it can register your workload too:
 

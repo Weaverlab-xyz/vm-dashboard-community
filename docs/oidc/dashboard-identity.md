@@ -2,7 +2,7 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you want the dashboard to authenticate to a cloud with a short-lived token from its own SPIRE server instead of a stored key, or you are checking why a token file is missing or refused.
 
-Part of [OIDC and single sign-on](../oidc.md). The dashboard publishes an OIDC issuer of its own, and AWS, Azure, GCP, k3s and BeyondTrust Workload Credentials can trust the short-lived tokens it signs instead of a stored key. The tokens come from the same SPIRE server that [attests remote agents](../remote-agents/spire-attestation.md).
+Part of [OIDC and single sign-on](../oidc.md). The dashboard publishes an OIDC issuer of its own, and AWS, Azure, GCP, k3s and BeyondTrust Workload Credentials can trust the short-lived tokens it signs instead of a stored key. The tokens come from the same SPIRE server that [attests remote agents](../remote-agents/spire-attestation.md); the server itself is on [SPIFFE and SPIRE](../spiffe.md).
 
 **Preview.** The dashboard keeps a short-lived JWT-SVID per audience in a file, publishes
 the discovery document and keys a cloud fetches to verify it, and — once you retire a
@@ -36,7 +36,9 @@ is not this identity, why not.
 
 ## Setting it up
 
-1. **Run the SPIRE server overlay** with an issuer:
+1. **Run the dashboard's SPIRE server** with an issuer. On Docker Compose that is the
+   overlay below; on a managed container runtime, set `SPIRE_JWT_ISSUER` on
+   [the sidecar](../spiffe.md#the-sidecar) instead.
 
    ```bash
    SPIRE_TRUST_DOMAIN=dashboard.example.com \
@@ -262,31 +264,11 @@ presence, instead of one that works offline for ever. It is not "the app holds n
 
 ## Protect the SPIRE server's CA key
 
-The SPIRE server keeps its CA and JWT signing keys in `keys.json` on its data volume
-(`KeyManager "disk"`). Once this identity is on, that key signs every token a cloud accepts
-in place of the stored key you retired, as well as agent attestation and service-account
-SVIDs. Whoever copies `keys.json` can mint all of them until the key rotates.
-
-On a host with a cloud identity of its own, keep the key in that cloud's KMS instead.
-`examples/spire-server/server.conf` carries a commented block for each:
-
-| Host | KeyManager | The SPIRE container needs |
-|---|---|---|
-| AWS | `aws_kms` | an instance role allowed to create and use KMS keys |
-| Azure | `azure_key_vault` | a managed identity with key permissions on the vault |
-| GCP | `gcp_kms` | a service account with KMS rights on the key ring |
-
-Comment out the `disk` line, uncomment one block, fill it in, and restart the
-`spire-server` container. Check the field names against SPIRE 1.15's
-`server_keymanager_*` plugin docs first: the examples are starting points.
-
-**Switching creates a new CA.** The old keys stay in `keys.json`, and the server will not
-read them through a KMS plugin. Every agent attested to the old CA has to attest again, and
-the published JWT keys change. Each cloud re-fetches `/spiffe/keys` on its own schedule, so
-expect federated calls to fail for a while after the switch.
-Switch before you migrate agents to SPIRE, or plan the re-attestation. A self-hosted Docker
-host with no cloud identity has nothing to authenticate to a KMS with, so it stays on `disk`.
-Protect that volume as you would the key itself.
+Once this identity is on, the SPIRE server's keys sign every token a cloud accepts in
+place of the stored key you retired, as well as agent attestation and service-account
+SVIDs. Where those keys live depends on how the server runs. On Compose it is a volume,
+or a cloud KMS; on a managed runtime it is an upstream CA held as a secret. See
+[SPIFFE and SPIRE → Protecting the keys](../spiffe.md#protecting-the-keys).
 
 ## Settings
 

@@ -384,6 +384,10 @@ class Settings(BaseSettings):
     # docs/design/agent-and-human-identity.md). Ed25519 enrolment is unaffected.
     spire_attest_enabled: bool = False
     spire_server_container: str = "vmdash-spire-server"   # see services/dashboard_spire.py
+    # Where agents dial the SPIRE server, "host" or "host:port". Blank = the agent
+    # audience's host on 8081, which is right when 8081 is published beside the agent
+    # gateway (compose, an ACA TCP port mapping); an ECS NLB has its own name.
+    spire_server_address: str = ""
     # Release dashboard-held credentials (/jobs/{id}/secret, /gateway-key, /ansible-bundle)
     # only to agents that attested through SPIRE. Off by default: Ed25519 agents keep them.
     dashboard_secrets_require_spire: bool = False

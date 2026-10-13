@@ -36,3 +36,25 @@ gcloud run deploy dash-worker \
   --set-secrets=DATABASE_URL=dash-db-url:latest,JWT_SECRET_KEY=dash-jwt-key:latest \
   --set-env-vars=APP_ENV=production,PUBLIC_BASE_URL=https://dash.example.com
 ```
+
+## SPIRE sidecar
+
+**Remote agents cannot attest through SPIRE on Cloud Run.** Cloud Run's only ingress is
+HTTPS, which it terminates itself, and an agent's mTLS gRPC to tcp/8081 has to reach the
+server untouched ([why](../../spiffe.md#publishing-8081-to-agents)).
+Agents on a Cloud Run dashboard stay on Ed25519, which is fully supported.
+
+The sidecar is still worth running for [the dashboard's own SPIFFE
+identity](../../oidc/dashboard-identity.md), which needs nothing inbound beyond the
+issuer's HTTPS discovery documents. Those are served by the app, through the gateway. In
+the service YAML:
+
+- **a third container** from `examples/cloud-spire`, with the variables from
+  [The sidecar](../../spiffe.md#the-sidecar) (the secrets through
+  Secret Manager, as for `DATABASE_URL`) and a startup probe of `httpGet /ready` on 8088;
+- **an in-memory volume**, `emptyDir: {medium: Memory}`, mounted at `/run/spire-server` in
+  both the sidecar and `app`, and `SPIRE_SERVER_SOCKET=/run/spire-server/api.sock` on `app`;
+- **`--no-cpu-throttling` and `--min-instances=1` on the app service.** It is the same trap
+  as the worker: a throttled instance freezes the server's key rotation between requests.
+
+The worker relays through the database, so it does not change.
