@@ -206,7 +206,7 @@ first visit because no credentials are stored yet.
 
 | Step | What to fill in |
 |------|-----------------|
-| **Admin account** | Username and password you'll use to log in. Optionally expand **Single sign-on (OIDC)** to let people sign in through Okta, Entra ID, Keycloak or any OpenID Connect provider ([OIDC and single sign-on](oidc.md)) |
+| **Admin account** | Username and password you'll use to log in. The password can be at most 72 bytes (bcrypt reads no further; an accented letter is 2 bytes, an emoji 4). Optionally expand **Single sign-on (OIDC)** to let people sign in through Okta, Entra ID, Keycloak or any OpenID Connect provider ([OIDC and single sign-on](oidc.md)) |
 | **AWS** | Access Key ID, Secret Access Key, and default region from Part A |
 | **Azure** | Service principal credentials from Part B. Optionally expand **Sign in with Microsoft (legacy)** to add the older Entra-only sign-in ([oidc/entra-oauth.md](oidc/entra-oauth.md)); for new setups, prefer the OIDC panel on the Admin step |
 | **GCP** | Project ID, region/zone, and service account JSON key from Part C. Expand **Advanced** to set the SSH key secret name |
