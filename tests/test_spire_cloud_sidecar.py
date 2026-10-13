@@ -506,6 +506,8 @@ def test_the_sidecar_config_matches_the_compose_one_where_it_must():
     assert _hcl(cloud, "socket_path") == dashboard_spire.DEFAULT_SOCKET
     assert _hcl(cloud, "database_type") == "postgres"
     assert _hcl(cloud, "connection_string") == "${SPIRE_DATASTORE_URL}"
+    # It shares the dashboard's PostgreSQL; an unbounded pool could starve the app.
+    assert 0 < int(_hcl(cloud, "max_open_conns")) <= 10
     plugins = set(re.findall(r'^\s*(\w+)\s+"(\w+)"\s*\{', cloud, re.M))
     assert ("UpstreamAuthority", "disk") in plugins
     assert ("KeyManager", "memory") in plugins
