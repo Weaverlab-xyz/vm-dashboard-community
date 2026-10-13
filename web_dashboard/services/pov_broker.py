@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -102,6 +103,25 @@ GUEST_STATE_VOLUME = "dashboard_agent_state"
 # (``AGENT_DOCKER_SOCKET``) is that path. A mount whose container side differs from what the
 # agent looks for is a "cannot reach the Docker socket" that no amount of mounting fixes.
 GUEST_DOCKER_SOCKET = "/var/run/docker.sock"
+
+# SPIRE attestation for the broker (opt-in through "Let agents attest through SPIRE"). The
+# same two sidecars as examples/remote-agent/docker-compose.spire.yml, pinned to the same
+# digests — tests/test_pov_broker_spire.py keeps them in step — run with `docker run`
+# because the bootstrap is a shell script, not a compose project.
+SPIRE_AGENT_IMAGE = ("ghcr.io/spiffe/spire-agent:1.15.3"
+                     "@sha256:41b0dcd8b258a69db9e2768292a060766fb76fd866e4bc925849981ea1b825ff")
+SPIFFE_HELPER_IMAGE = ("ghcr.io/spiffe/spiffe-helper:0.12.1"
+                       "@sha256:49a7b1aca5b497bb4c1ca1ed1f15397bdf9c9cafb8036df4b963b566bd234f7f")
+GUEST_SPIRE_DIR = GUEST_STATE_DIR + "/spire"
+# The JWT-SVID lives here: a tmpfs-backed named volume owned by the agent's uid, so the
+# token is never on the guest's disk, and the volume definition survives a reboot where a
+# tmpfs mounted by hand would not.
+GUEST_JWT_VOLUME = "dashboard_agent_spiffe_jwt"
+SPIRE_CONTAINERS = ("dashboard-agent-spiffe-helper", "dashboard-agent-spire")
+# How long the guest waits for an SVID before it falls back to the enrolment code. A
+# reachable server issues one in seconds; this only bounds a port that is blocked or a
+# proxy that inspects TLS, which is where a customer's network most often stops SPIRE.
+SPIRE_WAIT_SECONDS = 120
 
 # What the broker may reach. Ports rather than "any": the difference between "may look for
 # databases in the POV" and "may reach anything in the customer's environment". These are
@@ -562,9 +582,160 @@ def render_policy(targets: list[str], ansible_targets: list[str] | None = None,
     return "\n".join(lines)
 
 
+_SPIRE_HOST = re.compile(r"^[A-Za-z0-9.-]{1,253}$|^[0-9A-Fa-f:]{2,45}$")
+_SPIRE_TD = re.compile(r"^[a-z0-9.-]{1,255}$")
+_SPIRE_TOKEN = re.compile(r"^[A-Za-z0-9-]{8,128}$")
+_PEM_LINE = re.compile(r"^(-----(BEGIN|END) CERTIFICATE-----|[A-Za-z0-9+/=]{1,76})$")
+
+
+def check_spire_offer(spire: dict) -> dict:
+    """The SPIRE values the bootstrap writes, or ValueError naming the one that is unsafe.
+
+    Every one of them lands in a root shell script and in a SPIRE config on a guest, so
+    each is held to the shape it can legitimately have rather than escaped: an address, a
+    trust domain, a join token and a PEM bundle never need a quote, a brace or a newline
+    out of place, and a value that has one is a misconfiguration to report, not to quote.
+    """
+    out = {
+        "server_address": str(spire.get("server_address") or "").strip(),
+        "trust_domain": str(spire.get("trust_domain") or "").strip(),
+        "join_token": str(spire.get("join_token") or "").strip(),
+        "bootstrap_pem": str(spire.get("bootstrap_pem") or "").strip(),
+    }
+    try:
+        out["server_port"] = int(spire.get("server_port") or 0)
+    except (TypeError, ValueError):
+        out["server_port"] = 0
+    if not _SPIRE_HOST.match(out["server_address"]):
+        raise ValueError("the SPIRE server address for agents is empty or not a host name "
+                         "(Settings → Remote Agents, or the agent gateway's Public base URL)")
+    if not 0 < out["server_port"] < 65536:
+        raise ValueError("the SPIRE server port is not a port number")
+    if not _SPIRE_TD.match(out["trust_domain"]):
+        raise ValueError("the SPIRE trust domain is not a bare lower-case name")
+    if not _SPIRE_TOKEN.match(out["join_token"]):
+        raise ValueError("the SPIRE server returned a join token of an unexpected shape")
+    lines = out["bootstrap_pem"].splitlines()
+    if (not lines or "BEGIN CERTIFICATE" not in lines[0]
+            or not all(_PEM_LINE.match(ln.strip()) for ln in lines)):
+        raise ValueError("the SPIRE trust bundle is not a PEM certificate")
+    return out
+
+
+def _render_spire_block(spire: dict | None, dashboard_url: str) -> str:
+    """The shell that brings up SPIRE on the guest and decides how the agent signs in.
+
+    Always emitted, because its first half is cleanup: a broker re-brokered after SPIRE
+    was switched off must lose the sidecars it no longer uses. Its result is
+    ``AGENT_AUTH``, ``spiffe`` or ``ed25519``, which the agent's ``docker run`` reads.
+
+    **It falls back, and that is the design rather than a concession.** SPIRE needs mTLS
+    to the server's port, untouched; a customer network that blocks the port or inspects
+    TLS stops it, and a POV whose broker never comes up is worth less than one on an
+    Ed25519 key. So the guest waits ``SPIRE_WAIT_SECONDS`` for an SVID and, without one,
+    removes the sidecars and redeems the enrolment code that was written beside them. The
+    dashboard sees which happened on the agent row (``auth_mode``) and says so.
+
+    The containers mirror examples/remote-agent/docker-compose.spire.yml exactly — same
+    users, the same read-only, capability-free settings, spiffe-helper in spire-agent's PID
+    namespace so the unix workload attestor can read its uid (10001, the entry's selector).
+    Host directories replace the overlay's init container: this script already runs as
+    root, so it can set the ownership itself.
+    """
+    cleanup = (
+        "# SPIRE: remove whatever a previous run left, so a re-broker attests from nothing --\n"
+        "# the same reason the agent's state volume goes below.\n"
+        'AGENT_AUTH="ed25519"\n'
+        f"docker rm -f {' '.join(SPIRE_CONTAINERS)} >/dev/null 2>&1 || true\n"
+        f"docker volume rm {GUEST_JWT_VOLUME} >/dev/null 2>&1 || true\n"
+        f'rm -rf "{GUEST_SPIRE_DIR}"\n')
+    if not spire:
+        return cleanup + "\n"
+    s = check_spire_offer(spire)
+    audience = dashboard_url.rstrip("/") + "/api/agent/attest"
+    agent_conf = (
+        "agent {\n"
+        '    data_dir          = "/opt/spire/data"\n'
+        '    log_level         = "INFO"\n'
+        f'    server_address    = "{s["server_address"]}"\n'
+        f'    server_port       = "{s["server_port"]}"\n'
+        f'    trust_domain      = "{s["trust_domain"]}"\n'
+        '    trust_bundle_path = "/opt/spire/conf/bootstrap.crt"\n'
+        f'    join_token        = "{s["join_token"]}"\n'
+        '    socket_path       = "/run/spire/sockets/agent.sock"\n'
+        "}\n"
+        "plugins {\n"
+        '    NodeAttestor "join_token" { plugin_data {} }\n'
+        '    KeyManager "disk" { plugin_data { directory = "/opt/spire/data" } }\n'
+        '    WorkloadAttestor "unix" { plugin_data {} }\n'
+        "}\n")
+    helper_conf = (
+        'agent_address = "/run/spire/sockets/agent.sock"\n'
+        'cert_dir = "/run/spiffe/jwt"\n'
+        "daemon_mode = true\n"
+        f'jwt_svids = [{{jwt_audience="{audience}", jwt_svid_file_name="attest.jwt"}}]\n'
+        "jwt_svid_file_mode = 0400\n")
+    d = GUEST_SPIRE_DIR
+    hardening = ("--read-only --cap-drop ALL --security-opt no-new-privileges:true")
+    return cleanup + f"""
+# SPIRE: attest this agent with a short-lived JWT-SVID, its key held only in memory.
+# Server {s["server_address"]}:{s["server_port"]}, trust domain {s["trust_domain"]}.
+mkdir -p "{d}/data" "{d}/sock"
+cat > "{d}/agent.conf" <<'DASHBOARD_SPIRE_AGENT_EOF'
+{agent_conf}DASHBOARD_SPIRE_AGENT_EOF
+cat > "{d}/bootstrap.crt" <<'DASHBOARD_SPIRE_BUNDLE_EOF'
+{s["bootstrap_pem"]}
+DASHBOARD_SPIRE_BUNDLE_EOF
+cat > "{d}/helper.conf" <<'DASHBOARD_SPIRE_HELPER_EOF'
+{helper_conf}DASHBOARD_SPIRE_HELPER_EOF
+chmod 0644 "{d}/agent.conf" "{d}/bootstrap.crt"
+# spire-agent runs as 1000, spiffe-helper as the agent's 10001.
+chown 1000:1000 "{d}/data" "{d}/sock" && chmod 0700 "{d}/data" && chmod 0755 "{d}/sock"
+chown 10001:10001 "{d}/helper.conf" && chmod 0400 "{d}/helper.conf"
+
+if docker volume create --driver local --opt type=tmpfs --opt device=tmpfs \\
+     --opt o=size=1m,uid=10001,gid=10001,mode=0700 {GUEST_JWT_VOLUME} >/dev/null \\
+   && docker run -d --name dashboard-agent-spire --restart unless-stopped \\
+        --user 1000:1000 {hardening} --pids-limit 128 \\
+        --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \\
+        -v "{d}/agent.conf:/opt/spire/conf/agent.conf:ro,Z" \\
+        -v "{d}/bootstrap.crt:/opt/spire/conf/bootstrap.crt:ro,Z" \\
+        -v "{d}/data:/opt/spire/data:Z" \\
+        -v "{d}/sock:/run/spire/sockets:z" \\
+        {SPIRE_AGENT_IMAGE} -config /opt/spire/conf/agent.conf >/dev/null \\
+   && docker run -d --name dashboard-agent-spiffe-helper --restart unless-stopped \\
+        --user 10001:10001 {hardening} --pids-limit 64 \\
+        --pid container:dashboard-agent-spire \\
+        -v "{d}/helper.conf:/etc/spiffe-helper/helper.conf:ro,Z" \\
+        -v "{d}/sock:/run/spire/sockets:ro,z" \\
+        -v {GUEST_JWT_VOLUME}:/run/spiffe/jwt \\
+        {SPIFFE_HELPER_IMAGE} -config /etc/spiffe-helper/helper.conf >/dev/null; then
+  # The token is in a volume only a container can see; the agent's own image has a shell.
+  WAITED=0
+  while [ "$WAITED" -lt {SPIRE_WAIT_SECONDS} ]; do
+    if docker run --rm --entrypoint sh --user 10001:10001 \\
+         -v {GUEST_JWT_VOLUME}:/run/spiffe/jwt:ro {AGENT_IMAGE} \\
+         -c 'test -s /run/spiffe/jwt/attest.jwt' >/dev/null 2>&1; then
+      AGENT_AUTH="spiffe"
+      break
+    fi
+    sleep 5
+    WAITED=$((WAITED + 5))
+  done
+fi
+if [ "$AGENT_AUTH" != "spiffe" ]; then
+  echo "WARNING: SPIRE issued no SVID within {SPIRE_WAIT_SECONDS}s. Check that this VM reaches {s["server_address"]}:{s["server_port"]} with no TLS inspection in between. Falling back to the enrolment code." >&2
+  docker logs --tail 20 dashboard-agent-spire >&2 2>&1 || true
+  docker rm -f {' '.join(SPIRE_CONTAINERS)} >/dev/null 2>&1 || true
+  docker volume rm {GUEST_JWT_VOLUME} >/dev/null 2>&1 || true
+fi
+
+"""
+
+
 def render_bootstrap(*, env_name: str, dashboard_url: str, enroll_code: str,
                      policy_yaml: str, images: tuple = (),
-                     now: datetime | None = None) -> str:
+                     now: datetime | None = None, spire: dict | None = None) -> str:
     """The script the guest runs, between its two markers.
 
     A ``/bin/sh`` script rather than cloud-init: Skytap's mechanism hands bytes to the
@@ -662,7 +833,9 @@ def render_bootstrap(*, env_name: str, dashboard_url: str, enroll_code: str,
         "# image is in the list because `docker run` pulls only what is ABSENT, so\n"
         "# without this a re-broker re-runs the copy cached at first boot, forever.\n"
         "# A failure here warns and carries on: one refused job beats no agent at all.\n"
-        "for IMAGE in " + " ".join((AGENT_IMAGE,) + tuple(images)) + "; do\n"
+        "for IMAGE in " + " ".join((AGENT_IMAGE,) + tuple(images)
+                                   + ((SPIRE_AGENT_IMAGE, SPIFFE_HELPER_IMAGE) if spire else ())
+                                   ) + "; do\n"
         "  docker pull \"$IMAGE\" || echo \"WARNING: could not pull $IMAGE\"\n"
         "done\n\n")
 
@@ -684,6 +857,9 @@ def render_bootstrap(*, env_name: str, dashboard_url: str, enroll_code: str,
     # newline here would end the comment and put whatever followed on its own line, so it
     # is flattened at the point of use rather than trusted from two callers away.
     env_name = " ".join(str(env_name or "unnamed").split())
+    # After the pulls (it needs the images) and after the agent's own `docker rm`, so the
+    # old agent is gone before a new identity is set up for its replacement.
+    spire_block = _render_spire_block(spire, dashboard_url)
     return f"""#!/bin/sh
 {BOOTSTRAP_BEGIN}
 # POV environment: {env_name}
@@ -707,6 +883,15 @@ chmod 0644 "$STATE/policy.yaml"
 docker rm -f dashboard-agent >/dev/null 2>&1 || true
 docker volume rm {GUEST_STATE_VOLUME} >/dev/null 2>&1 || true
 
+{spire_block}# How the agent signs in, decided by the SPIRE block above. With an SVID the code is
+# neither mounted nor kept: attesting burns it on the dashboard anyway.
+if [ "$AGENT_AUTH" = "spiffe" ]; then
+  rm -f "$STATE/enroll-code"
+  AGENT_AUTH_ARGS="-e AGENT_SPIFFE_JWT_FILE=/run/spiffe/jwt/attest.jwt -v {GUEST_JWT_VOLUME}:/run/spiffe/jwt:ro"
+else
+  AGENT_AUTH_ARGS="-v $STATE/enroll-code:/etc/dashboard-agent/enroll-code:ro,Z -e AGENT_ENROLLMENT_CODE_FILE=/etc/dashboard-agent/enroll-code"
+fi
+
 # The container runs as uid 10001 and the socket below is typically 0660 root:docker, so
 # uid 10001 cannot open it without the socket's GROUP. Mounting it is not enough: the agent
 # gets EACCES, and the refusal it prints says "the sibling runner needs it mounted", which
@@ -721,17 +906,17 @@ if [ -n "$DOCKER_SOCK_GID" ]; then
   DOCKER_GROUP="--group-add $DOCKER_SOCK_GID"
 fi
 
-# $DOCKER_GROUP is deliberately unquoted: it is two words or none.
+# $DOCKER_GROUP and $AGENT_AUTH_ARGS are deliberately unquoted: each is words or none,
+# and no word in either has a space ($STATE is a constant path).
 docker run -d --name dashboard-agent --restart unless-stopped \\
   --read-only --cap-drop ALL --security-opt no-new-privileges:true \\
   --user 10001:10001 --tmpfs /tmp \\
   $DOCKER_GROUP \\
+  $AGENT_AUTH_ARGS \\
   -v {GUEST_DOCKER_SOCKET}:{GUEST_DOCKER_SOCKET} \\
   -v {GUEST_STATE_VOLUME}:/var/lib/dashboard-agent \\
   -v "$STATE/policy.yaml:/etc/dashboard-agent/policy.yaml:ro,Z" \\
-  -v "$STATE/enroll-code:/etc/dashboard-agent/enroll-code:ro,Z" \\
   -e DASHBOARD_URL="{dashboard_url}" \\
-  -e AGENT_ENROLLMENT_CODE_FILE=/etc/dashboard-agent/enroll-code \\
   {AGENT_IMAGE}
 {BOOTSTRAP_END}
 """
@@ -830,6 +1015,43 @@ def record_broker_error(db: Session, env: PovEnvironment, message: str) -> None:
     db.commit()
 
 
+def spire_offer(db: Session, agent: RemoteAgent) -> tuple[dict | None, str]:
+    """``(spire facts for the bootstrap, or None; a line for the job log)``. Never raises.
+
+    Offered whenever this install lets agents attest through SPIRE and its server answers:
+    the same four steps as **Migrate to SPIRE** (``dashboard_spire.migrate_agent``), so a
+    broker and a hand-migrated agent are bound identically. Anything that stops it leaves
+    the broker on its enrolment code, which is how every broker enrolled before this —
+    a broker that comes up on Ed25519 is worth more than one that does not come up.
+
+    In the worker on a managed runtime this reaches the SPIRE sidecar through the database
+    relay (services/spire_relay), like every other dashboard_spire call made there.
+    """
+    if not config_service.get_bool("spire_attest_enabled"):
+        return None, "SPIRE attestation is off on this dashboard; the broker enrols with an Ed25519 key."
+    from . import dashboard_spire
+    try:
+        out = dashboard_spire.migrate_agent(db, agent)
+        facts = check_spire_offer({
+            "server_address": dashboard_spire.server_address(),
+            "server_port": dashboard_spire.server_port(),
+            "trust_domain": out["trust_domain"],
+            "join_token": out["join_token"],
+            "bootstrap_pem": out["bootstrap_pem"],
+        })
+    except (dashboard_spire.DashboardSpireError, agent_service.AgentError, ValueError) as exc:
+        logger.warning("POV broker %s: SPIRE not offered: %s", agent.name, exc)
+        # A half-done offer must not leave a binding that nothing on the guest will use.
+        try:
+            agent_service.bind_spiffe_id(db, agent, "")
+        except Exception:  # noqa: BLE001 -- best effort; the code path works either way
+            db.rollback()
+        return None, f"SPIRE not offered ({exc}); the broker enrols with an Ed25519 key."
+    return facts, (f"SPIRE join token minted for {out['spiffe_id']} "
+                   f"({facts['server_address']}:{facts['server_port']}); the broker falls "
+                   f"back to its enrolment code if the guest cannot reach the server.")
+
+
 async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
                         sleep=None) -> str:
     """Install and enrol this POV's broker agent. Returns a one-line summary.
@@ -892,6 +1114,10 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
 
     _progress(35, f"Minting an enrolment code for {agent_name(env)}…")
     agent, code = _mint_code(db, env)
+    # After the code, never before: re-issuing a code clears the row's SPIFFE binding, so
+    # binding first would be undone a line later.
+    spire, spire_note = spire_offer(db, agent)
+    _progress(40, spire_note)
 
     # The Config-Management grant is scoped to this POV's Windows guests — or to the one
     # named Resource Broker host, once somebody has named it — plus its Linux guests, or
@@ -930,7 +1156,7 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
     payload = render_bootstrap(
         env_name=env.name, dashboard_url=dashboard_url, enroll_code=code,
         policy_yaml=render_policy(targets, win_targets, ssh_targets),
-        images=tuple(images))
+        images=tuple(images), spire=spire)
 
     mod = lab_platforms.adapter(env.platform)
     if mechanism == "metadata":
@@ -1042,7 +1268,19 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
             logger.warning("POV %s: post-enrolment VM read failed", env.id, exc_info=True)
 
     record_broker_error(db, env, "")
-    return f"Broker agent {agent.name} enrolled on {vm.name or vm.platform_vm_id}."
+    where = vm.name or vm.platform_vm_id
+    db.rollback()
+    row = db.query(RemoteAgent).filter(RemoteAgent.id == agent.id).first()
+    if row is not None and row.auth_mode == "spiffe":
+        return (f"Broker agent {agent.name} attested through SPIRE on {where}; its signing "
+                f"key is held in memory only.")
+    if spire:
+        # Offered and not taken: the guest fell back on its own, which only it can explain.
+        return (f"Broker agent {agent.name} enrolled on {where} with an Ed25519 key. SPIRE "
+                f"was offered but the guest fell back: check that {where} reaches "
+                f"{spire['server_address']}:{spire['server_port']} with no TLS inspection "
+                f"in between. The guest's bootstrap output names what it saw.")
+    return f"Broker agent {agent.name} enrolled on {where}."
 
 
 async def run_env_broker(job_id: str, meta: dict) -> None:
@@ -1103,14 +1341,29 @@ def teardown(db: Session, env: PovEnvironment) -> str:
         return "No broker agent to revoke."
 
     name = agent.name
+    # Its SPIRE entries go with it. Best-effort, like remove_workload itself: the agent
+    # being revoked is what must happen, and it already has by the time a down server
+    # would matter.
+    spire_note = ""
+    if agent.spiffe_id:
+        try:
+            from . import dashboard_spire
+            td = agent.spiffe_id.split("/")[2]
+            problems = dashboard_spire.remove_workload(
+                agent.spiffe_id, dashboard_spire.ids_for(td, agent.id)[1])
+            if problems:
+                spire_note = f" SPIRE cleanup left: {'; '.join(problems)}."
+        except Exception as exc:  # noqa: BLE001
+            spire_note = f" SPIRE cleanup failed: {exc}."
     held = agent_service.revoke_agent(db, agent)
     agent_service.delete_agent(db, agent)
     env.broker_agent_id = None
     env.broker_vm_id = None
     db.commit()
     if held:
-        return f"Revoked and removed broker agent {name}; {held} held job(s) released."
-    return f"Revoked and removed broker agent {name}."
+        return (f"Revoked and removed broker agent {name}; {held} held job(s) "
+                f"released.{spire_note}")
+    return f"Revoked and removed broker agent {name}.{spire_note}"
 
 
 # ── what the UI shows ────────────────────────────────────────────────────────
@@ -1133,6 +1386,10 @@ def _described(env: PovEnvironment, agent: RemoteAgent | None) -> dict:
         "broker_agent_id": env.broker_agent_id or "",
         "broker_agent_name": agent.name if agent is not None else "",
         "broker_status": agent_service.status_of(agent) if agent is not None else "none",
+        # How it signs in: "spiffe" (attested, key in memory), "ed25519" (enrolment code,
+        # key on the guest's disk), or "" before it has done either.
+        "broker_auth": ("" if agent is None or not agent.public_key
+                        else "spiffe" if agent.auth_mode == "spiffe" else "ed25519"),
         "broker_error": env.metadata_dict.get("broker_error", ""),
     }
 
