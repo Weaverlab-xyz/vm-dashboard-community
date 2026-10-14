@@ -102,6 +102,20 @@
              x-text="(env.setup ? env.setup.settled : 0) + ' of ' + (env.setup ? env.setup.total : 0) + ' settled'
                      + (env.setup && env.setup.busy ? ' · working…' : '')"></p>
         </div>
+        <!-- At a glance: the POV list's columns that belong to no single step — power,
+             tenants, use cases, expiry, sleep, spend — so an SE working down this ladder
+             does not have to scroll the list page sideways for them. Read-only: the
+             controls stay on the list page, where their editors are. -->
+        <dl class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-x-4 gap-y-3 mb-5 pb-4 border-b border-gray-100">
+          <template x-for="f in glanceFacts" :key="f.label">
+            <div class="min-w-0">
+              <dt class="text-[11px] uppercase tracking-wide text-gray-400" x-text="f.label"></dt>
+              <template x-for="(line, j) in f.lines" :key="f.label + j">
+                <dd class="text-xs break-words" :class="toneClass(line.tone)" x-text="line.text"></dd>
+              </template>
+            </div>
+          </template>
+        </dl>
         <ol class="space-y-3">
           <template x-for="(s, i) in (env.setup ? env.setup.steps : [])" :key="s.key">
             <li class="flex items-start gap-3 rounded-lg border p-3"
@@ -125,6 +139,13 @@
                    x-text="s.locked ? 'Finish “' + s.locked_by + '” first.'
                          : (s.detail || (s.state === 'done' ? 'Done.' : s.state === 'configured'
                               ? 'Configured.' : s.state === 'skipped' ? 'Not part of this POV.' : ''))"></p>
+                <!-- What the list page's column for this step says, so the ladder carries
+                     the same facts as the row it summarises. -->
+                <p x-show="stepFacts(s).length" class="text-[11px] mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
+                  <template x-for="(f, j) in stepFacts(s)" :key="s.key + j">
+                    <span :class="toneClass(f.tone)" x-text="f.text"></span>
+                  </template>
+                </p>
               </div>
               <button x-show="stepActionLabel(s)" @click="runStep(s)"
                       :disabled="s.locked || stepBusy || (env.setup && env.setup.busy)"
@@ -1142,6 +1163,8 @@
       busy: '',
       notice: '',
       env: null,
+      // The tenant registry, only so the Setup tab can name a tenant rather than say "set".
+      tenants: [],
       groups: [],
       products: {},
       summary: { done: 0, skipped: 0, total: 0, cards: 0 },
@@ -1184,7 +1207,7 @@
         const hash = window.location.hash.slice(1);
         if (this.tabs.some(t => t.id === hash)) this.tab = hash;
         await Promise.all([this.loadEnv(), this.loadUseCases(), this.loadAccessors(),
-                           this.loadSummary(), this.loadStepAssets()]);
+                           this.loadSummary(), this.loadStepAssets(), this.loadTenants()]);
         // After loadEnv, not beside it: the template list is only fetched for a platform
         // that can merge one, and that answer arrives with the environment.
         await this.loadTemplates();
@@ -1202,6 +1225,135 @@
       // page: a method called across components is a dead button (see the Alpine mixin
       // note in static/js/app.js). Steps that need a form the list page already owns —
       // the Resource Broker's installer, zone and key — link to it with the editor open.
+
+      // ── The list row's columns, on the ladder ------------------------------
+      //
+      // Each returns [{text, tone}] built from fields the row already carries, mirroring
+      // what the POV list's columns render. Read-only: the editors stay on the list page.
+
+      async loadTenants() {
+        try {
+          const res = await this.apiFetch('/api/pov/tenants');
+          this.tenants = res.ok ? ((await res.json()).tenants || []) : [];
+        } catch (e) { this.tenants = []; }
+      },
+
+      tenantName(kind) {
+        const id = this.env[(kind === 'password_safe' ? 'ps' : kind) + '_tenant_id'];
+        if (!id) return '';
+        const found = this.tenants.find(t => t.id === id);
+        return found ? found.name : '(unknown)';
+      },
+
+      toneClass(tone) {
+        return { ok: 'text-green-700', warn: 'text-amber-700', bad: 'text-red-600',
+                 muted: 'text-gray-400' }[tone] || 'text-gray-600';
+      },
+
+      seenAgo() {
+        const at = this.env.platform_seen_at;
+        const seen = at ? Date.parse(at + 'Z') : NaN;
+        if (Number.isNaN(seen)) return 'not confirmed';
+        const mins = Math.max(0, Math.round((Date.now() - seen) / 60000));
+        if (mins < 1) return 'confirmed just now';
+        if (mins < 60) return `confirmed ${mins}m ago`;
+        const hrs = Math.round(mins / 60);
+        return hrs < 24 ? `confirmed ${hrs}h ago` : `confirmed ${Math.round(hrs / 24)}d ago`;
+      },
+
+      get glanceFacts() {
+        const e = this.env || {};
+        const vms = e.vm_count || 0;
+        const uc = e.use_cases || {};
+        const power = [{ text: e.runstate || '—' }, { text: this.seenAgo(), tone: 'muted' }];
+        if (e.rate_limited) power.push({ text: 'rate-limited', tone: 'warn' });
+        if (e.platform_missing) power.push({ text: 'gone from the platform', tone: 'bad' });
+        const tenants = [['pra', 'PRA'], ['password_safe', 'PS'], ['entitle', 'Entitle']]
+          .map(([k, short]) => {
+            const name = this.tenantName(k);
+            return { text: short + ': ' + (name || '—'), tone: name ? '' : 'muted' };
+          });
+        let sleeps;
+        if (e.suspend_on_idle_seconds) {
+          sleeps = [{ text: Math.round(e.suspend_on_idle_seconds / 60) + ' min idle' }];
+        } else if (e.schedule && e.schedule.scheduled) {
+          sleeps = [{ text: e.schedule.suspend_at_local
+                            + (e.schedule.resume_at_local ? '–' + e.schedule.resume_at_local : '') }];
+        } else {
+          sleeps = [{ text: 'always on', tone: 'muted' }];
+        }
+        let spend = [{ text: '—', tone: 'muted' }];
+        if (e.spend_priced) {
+          const s = e.spend || {};
+          spend = [{ text: s.capped
+            ? '$' + (s.spent_usd || 0).toFixed(0) + ' / $' + (s.cap_usd || 0).toFixed(0)
+            : '$' + (s.spent_usd || 0).toFixed(0) }];
+        }
+        return [
+          { label: 'Power', lines: power },
+          { label: 'VMs', lines: [{ text: vms + ' in the environment' }] },
+          { label: 'Tenants', lines: tenants },
+          { label: 'Use cases', lines: [{ text: (uc.done || 0) + ' / ' + (uc.total || 0) + ' done' }]
+              .concat(uc.skipped ? [{ text: uc.skipped + ' skipped', tone: 'muted' }] : []) },
+          { label: 'Expires', lines: [!e.expiry_enabled
+              ? { text: 'off', tone: 'muted' }
+              : { text: e.expires_at ? e.expires_at.slice(0, 10) : 'never' }] },
+          { label: 'Sleeps', lines: sleeps },
+          { label: 'Spend', lines: spend },
+          { label: 'Template', lines: [{ text: e.template_name || e.template_id || '—' }] },
+          { label: 'Created by', lines: [{ text: e.created_by || '—' }] },
+        ];
+      },
+
+      stepFacts(s) {
+        const e = this.env || {};
+        const vms = e.vm_count || 0;
+        const out = [];
+        if (s.key === 'environment') {
+          out.push({ text: 'status ' + (e.status || '—') });
+          if (e.provision_job_id) out.push({ text: 'provision job ' + e.provision_job_id, tone: 'muted' });
+        } else if (s.key === 'guest_os') {
+          out.push({ text: vms + ' VMs' });
+          if (e.os_unknown_count) out.push({ text: e.os_unknown_count + ' with no OS', tone: 'warn' });
+        } else if (s.key === 'broker') {
+          const st = e.broker_status || 'none';
+          out.push({ text: 'agent ' + st,
+                     tone: st === 'online' ? 'ok' : st === 'revoked' ? 'bad' : st === 'none' ? 'muted' : 'warn' });
+          if (e.broker_auth) out.push({ text: e.broker_auth === 'spiffe' ? 'SPIRE' : 'Ed25519' });
+          out.push({ text: 'VM ' + (e.broker_vm_name || 'auto-detect'), tone: e.broker_vm_name ? '' : 'muted' });
+        } else if (s.key === 'gateway') {
+          out.push({ text: e.gateway_name ? 'Gateway ' + e.gateway_name : 'no Gateway named',
+                     tone: e.gateway_name ? '' : 'muted' });
+          if (e.gateway_name && !e.gateway_has_key) out.push({ text: 'no deploy key', tone: 'warn' });
+          if (e.gateway_created) out.push({ text: 'created here', tone: 'muted' });
+        } else if (s.key === 'resource_broker') {
+          out.push({ text: e.rb_asset ? 'installer ' + e.rb_asset : 'no installer chosen',
+                     tone: e.rb_asset ? '' : 'muted' });
+          out.push(e.rb_zone ? { text: 'zone ' + e.rb_zone } : { text: 'no zone', tone: 'warn' });
+          out.push(e.rb_has_key ? { text: 'installer key stored' } : { text: 'no installer key', tone: 'warn' });
+          if (e.ps_application_host_id) out.push({ text: 'app host ' + e.ps_application_host_id });
+        } else if (s.key === 'entitle_agent' && e.entitle_tenant_id) {
+          out.push(e.entitle_agent_token_name
+            ? { text: 'agent ' + e.entitle_agent_token_name, tone: 'ok' }
+            : { text: 'no agent', tone: 'warn' });
+        } else if (s.key === 'wireup') {
+          out.push({ text: 'PRA ' + (e.wired_count || 0) + ' / ' + vms });
+          if (e.ps_onboard_ready) out.push({ text: 'PS ' + (e.onboarded_count || 0) + ' / ' + vms });
+          if (e.entitle_ready) out.push({ text: 'Entitle ' + (e.entitle_count || 0) + ' / ' + vms });
+          if (e.wiring_error_count) out.push({ text: e.wiring_error_count + ' with errors', tone: 'warn' });
+          if (e.entitle_tenant_id) out.push(e.entitle_has_key
+            ? { text: 'Entitle ssh key stored' } : { text: 'no Entitle ssh key', tone: 'warn' });
+        } else if (s.key === 'pra_ps' && e.pra_tenant_id && e.ps_tenant_id) {
+          out.push({ text: (e.pra_ps_linked_count || 0) + ' linked' });
+          out.push({ text: (e.pra_ps_matched_count || 0) + ' seen by PRA' });
+        } else if (s.key === 'share' && e.shareable) {
+          if (e.share_url && !e.share_expired) out.push({ text: 'shared', tone: 'ok' });
+          else if (e.share_expired) out.push({ text: 'expired', tone: 'warn' });
+          else out.push({ text: 'not shared', tone: 'muted' });
+          if (e.share_expires_at) out.push({ text: 'until ' + e.share_expires_at.slice(0, 10), tone: 'muted' });
+        }
+        return out;
+      },
 
       stepActionLabel(s) {
         // The OT adapter is the one step with something left to press once it is done: it
