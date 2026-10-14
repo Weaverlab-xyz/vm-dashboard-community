@@ -56,7 +56,7 @@
        keeps attesting; its next poll is refused. Hiding that behind a teardown would
        remove the only thing worth watching. #}
 
-<div x-data="workloadAgentTab()" x-init="init()">
+<div x-data="workloadAgentTab()">
 
   <div class="flex justify-end mb-3 sm:mb-1">
     <button @click="openMint()" :disabled="!canMint()"

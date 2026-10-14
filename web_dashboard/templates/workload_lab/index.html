@@ -109,7 +109,6 @@
         tests/test_template_scripts.py was written for. tests/test_templates_parse.py
         now sweeps every template for it. #}
      x-data='workloadLabPage({{ tab_slugs | tojson }})'
-     x-init="init()"
      {# Cross-tab links. A tab partial has its OWN Alpine component, so it cannot call
         select() directly -- `this` inside it is that component, not the container. It
         dispatches instead and the container listens here, which also means a link to a

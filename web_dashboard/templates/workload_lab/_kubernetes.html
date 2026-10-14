@@ -25,7 +25,7 @@
    the token. A value proxied through this dashboard would record only that the dashboard
    did, and would be a second unaudited way to read it. #}
 
-<div x-data="workloadK8sTab()" x-init="init()">
+<div x-data="workloadK8sTab()">
 
   <div class="flex justify-end mb-3 sm:mb-1">
     <button @click="openOnboard()" :disabled="!usableClusters().length"

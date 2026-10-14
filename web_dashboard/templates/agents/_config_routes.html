@@ -25,7 +25,7 @@
 <!-- The agent picker below is loaded once by init(). Reload it whenever this tab is shown
      again, or an agent enrolled while another tab was up is missing from it — see the
      dispatch in agents/index.html for why that reads as the wrong problem entirely. -->
-<div x-data="configRoutesPage()" x-init="init()"
+<div x-data="configRoutesPage()"
      @agents-tab-shown.window="if ($event.detail === 'config-routes') refresh()">
 
   <div class="flex justify-end mb-3 sm:mb-1">
