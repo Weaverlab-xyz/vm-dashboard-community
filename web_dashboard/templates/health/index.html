@@ -44,9 +44,38 @@
     Nothing to check yet. Areas appear here as the integrations they cover are turned on in Settings.
   </div>
 
-  <div class="space-y-6">
+  {# One tab per area, so an admin opens the area they care about instead of scrolling
+     past every other one. The tab list comes from the API, not Jinja, because which areas
+     exist depends on what is turned on in Settings. The fragment (#resources, …) keeps the
+     tab across Reload and makes it bookmarkable. Panels toggle with x-show over the one
+     loaded payload; nothing is fetched per tab. #}
+  <div x-show="(data.areas || []).length" x-cloak
+       class="border-b border-gray-200 mb-4 flex flex-wrap gap-1" role="tablist" aria-label="Health areas">
     <template x-for="a in (data.areas || [])" :key="a.area">
-      <section class="bg-white rounded-xl shadow-sm border border-gray-200">
+      <button type="button" role="tab" @click="select(a.area)"
+              :aria-selected="activeTab === a.area ? 'true' : 'false'"
+              :class="activeTab === a.area
+                        ? 'border-blue-600 text-blue-700'
+                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+              class="px-3 py-2 -mb-px border-b-2 text-sm font-medium inline-flex items-center gap-1.5">
+        <span x-text="a.label"></span>
+        <span x-show="a.counts.fail" class="text-xs font-semibold px-1.5 rounded-full bg-red-100 text-red-800"
+              x-text="a.counts.fail"></span>
+        <span x-show="!a.counts.fail && a.counts.warn" class="text-xs font-semibold px-1.5 rounded-full bg-amber-100 text-amber-800"
+              x-text="a.counts.warn"></span>
+      </button>
+    </template>
+  </div>
+
+  <label x-show="(data.areas || []).length" x-cloak class="inline-flex items-center gap-2 text-sm text-gray-600 mb-4">
+    <input type="checkbox" x-model="problemsOnly" class="rounded border-gray-300">
+    Only failing and degraded
+  </label>
+
+  <div>
+    <template x-for="a in (data.areas || [])" :key="a.area">
+      <section x-show="activeTab === a.area" role="tabpanel"
+               class="bg-white rounded-xl shadow-sm border border-gray-200">
         <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between px-4 py-3 border-b border-gray-100">
           <div class="min-w-0">
             <h2 class="font-semibold text-gray-800" x-text="a.label"></h2>
@@ -64,8 +93,11 @@
         <div x-show="a.last_error" class="px-4 py-2 text-sm bg-amber-50 text-amber-800 border-b border-amber-100"
              x-text="a.last_error + ' The results below are from the run before.'"></div>
         <div x-show="!a.items.length" class="px-4 py-3 text-sm text-gray-500">Nothing to check in this area.</div>
+        <div x-show="a.items.length && !visibleItems(a).length" class="px-4 py-3 text-sm text-gray-500">
+          Nothing failing or degraded in this area.
+        </div>
         <ul class="divide-y divide-gray-100">
-          <template x-for="it in a.items" :key="it.object_id">
+          <template x-for="it in visibleItems(a)" :key="it.object_id">
             <li class="px-4 py-2.5">
               <div class="flex items-center gap-3">
                 <span class="inline-block text-xs font-semibold px-2 py-0.5 rounded-full shrink-0"
@@ -96,6 +128,7 @@
 function estateHealthPage() {
   return {
     data: {}, loading: true, busy: {},
+    activeTab: '', problemsOnly: false,
     toast: '', toastType: 'success',
     summary: [
       {status: 'fail', label: 'Failing', text: 'text-red-600'},
@@ -114,6 +147,21 @@ function estateHealthPage() {
       try { this.data = (await API.get('/api/estate-health')) || {}; }
       catch (e) { this.note(e.message, 'error'); }
       finally { this.loading = false; }
+      // Keep the open tab across a reload; otherwise take the fragment, then the first
+      // area. An area that has since been turned off falls through to the first one.
+      const keys = (this.data.areas || []).map(a => a.area);
+      const want = this.activeTab || (window.location.hash || '').replace(/^#/, '');
+      this.activeTab = keys.includes(want) ? want : (keys[0] || '');
+    },
+
+    select(area) {
+      this.activeTab = area;
+      // replaceState, not pushState: Back leaves the page rather than walking the tabs.
+      window.history.replaceState(null, '', '#' + area);
+    },
+
+    visibleItems(a) {
+      return this.problemsOnly ? a.items.filter(it => it.status === 'fail' || it.status === 'warn') : a.items;
     },
 
     async runNow(a) {
