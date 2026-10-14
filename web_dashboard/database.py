@@ -3683,6 +3683,15 @@ class PovEnvironment(Base):
                                ForeignKey("beyondtrust_tenants.id", ondelete="SET NULL"),
                                index=True, nullable=True)
 
+    # Which use cases this POV tests -- the "Use cases chosen" step of its Setup tab. A
+    # comma-separated subset of pra,password_safe,entitle (a Password-Safe-only POV, a
+    # Total PASM POV of PRA + Password Safe, ...) plus a JSON list of card ids the SE
+    # unticked. NULL products means nobody has chosen yet, which reads as "the whole
+    # catalog", so every POV from before this landed keeps the checklist it had. See
+    # services/pov_use_case_scope.
+    use_case_products = Column(String(64), nullable=True)
+    use_case_excluded = Column(Text, nullable=True)
+
     # The Entitle REST integration that mints this POV's accessors, registered against
     # THIS POV's own Entitle tenant. One per POV rather than one per instance, because the
     # asset is the POV: an instance-wide integration would have to name every customer's
@@ -4249,6 +4258,11 @@ class PovBlueprint(Base):
     entitle_tenant_id = Column(String(36),
                                ForeignKey("beyondtrust_tenants.id", ondelete="SET NULL"),
                                index=True, nullable=True)
+
+    # The use cases a POV from this blueprint tests. Same two columns, same NULL meaning,
+    # as PovEnvironment.use_case_products.
+    use_case_products = Column(String(64), nullable=True)
+    use_case_excluded = Column(Text, nullable=True)
 
     # The non-secret configuration for the two in-environment installs, pre-filled onto a
     # POV at provision time so the Gateway and Resource Broker panels open ready to press.
@@ -5139,6 +5153,13 @@ def init_db():
             # POV's Gateway becomes deletable when this lands. See
             # PovEnvironment.pra_gateway_id.
             "ALTER TABLE pov_environments ADD COLUMN pra_gateway_id VARCHAR(64)",
+            # The POV's chosen use cases. NULL backfills to "nobody has chosen", which
+            # reads as the whole catalog, so no existing POV's checklist changes when this
+            # lands. See PovEnvironment.use_case_products.
+            "ALTER TABLE pov_environments ADD COLUMN use_case_products VARCHAR(64)",
+            "ALTER TABLE pov_environments ADD COLUMN use_case_excluded TEXT",
+            "ALTER TABLE pov_blueprints ADD COLUMN use_case_products VARCHAR(64)",
+            "ALTER TABLE pov_blueprints ADD COLUMN use_case_excluded TEXT",
             # NULL backfills to "choose by guest OS", so no existing POV changes
             # behaviour when this lands. See PovEnvironmentVM.login_username.
             "ALTER TABLE pov_environment_vms ADD COLUMN login_username VARCHAR(104)",

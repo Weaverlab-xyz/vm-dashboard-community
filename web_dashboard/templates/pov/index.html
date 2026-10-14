@@ -184,6 +184,38 @@
       </p>
     </div>
 
+    <!-- What this POV tests. A preset picks the products; the use cases inside them can
+         be unticked one by one on the POV’s Setup tab afterwards. Only the tenant pickers
+         for the chosen products are shown below. Choosing nothing is allowed: the Setup
+         tab's first step then asks. See services/pov_use_case_scope. -->
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">POV type — which use cases it tests</label>
+      <div class="flex flex-wrap gap-2">
+        <template x-for="p in useCasePresets" :key="'preset-' + p.key">
+          <button type="button" @click="pickUseCasePreset(p)"
+                  :class="useCasePresetActive(p)
+                          ? 'bg-blue-600 text-white border-blue-600'
+                          : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'"
+                  class="px-3 py-1.5 text-sm rounded-full border"
+                  x-text="p.label"></button>
+        </template>
+      </div>
+      <div class="flex flex-wrap items-center gap-4 mt-2 text-sm text-gray-700">
+        <span class="text-xs text-gray-500">or choose:</span>
+        <template x-for="k in tenantKinds" :key="'scope-' + k.kind">
+          <label class="inline-flex items-center gap-1.5">
+            <input type="checkbox" :checked="useCaseProductChosen(k.kind, true)"
+                   @change="toggleUseCaseProduct(k.kind)">
+            <span x-text="k.label"></span>
+          </label>
+        </template>
+      </div>
+      <p class="text-xs text-gray-500 mt-1"
+         x-text="form.use_case_products.length
+                 ? 'Only these products’ use cases appear on the POV’s checklist and the customer’s page. Untick single use cases on its Setup tab.'
+                 : 'Not chosen yet — every use case shows until you pick one here or on the POV’s Setup tab.'"></p>
+    </div>
+
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1">Template</label>
@@ -246,7 +278,7 @@
         </p>
       </div>
       <template x-for="k in tenantKinds" :key="'pick-' + k.kind">
-        <div>
+        <div x-show="useCaseProductChosen(k.kind)">
           <label class="block text-sm font-medium text-gray-700 mb-1" x-text="k.label + ' tenant'"></label>
           <select x-model="form[k.kind + '_field']"
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
@@ -1101,7 +1133,10 @@ function povPage() {
     // generic — a fourth product is then a registry entry, not more markup.
     form: { template_id: '', name: '', workgroup: '', project_id: '',
             broker_vm_name: '', pra_field: '', password_safe_field: '',
-            entitle_field: '', suspend_on_idle_seconds: 3600 },
+            entitle_field: '', suspend_on_idle_seconds: 3600,
+            use_case_products: [] },
+    // The POV types, from services/pov_use_case_scope.PRESETS via a template global.
+    useCasePresets: {{ pov_use_case_presets | tojson }},
     tenants: [],
     tenantKinds: [],
     blueprints: [],
@@ -1216,6 +1251,37 @@ function povPage() {
         const key = kind.kind + '_field';
         if (!this.form[key]) this.form[key] = b[this.tenantField(kind.kind)] || '';
       }
+      const scope = b.use_case_scope || {};
+      if (!this.form.use_case_products.length && scope.products) {
+        this.form.use_case_products = [...scope.products];
+      }
+    },
+
+    // ── which use cases the new POV tests ──
+    // `use_case_products` is the stored choice; a preset is only a name for one set.
+    pickUseCasePreset(p) {
+      this.form.use_case_products = this.useCasePresetActive(p) ? [] : [...p.products];
+    },
+
+    useCasePresetActive(p) {
+      const chosen = this.form.use_case_products;
+      return chosen.length === p.products.length
+          && p.products.every(x => chosen.includes(x));
+    },
+
+    toggleUseCaseProduct(kind) {
+      const chosen = this.form.use_case_products;
+      this.form.use_case_products = chosen.includes(kind)
+          ? chosen.filter(x => x !== kind)
+          : this.tenantKinds.map(k => k.kind).filter(x => x === kind || chosen.includes(x));
+    },
+
+    // `strict` for the checkbox: nothing chosen ticks nothing. Without it, nothing chosen
+    // means every tenant picker shows, as it did before POV types existed.
+    useCaseProductChosen(kind, strict = false) {
+      const chosen = this.form.use_case_products;
+      if (!chosen.length) return !strict;
+      return chosen.includes(kind);
     },
 
     tenantsOfKind(kind) {
@@ -1507,16 +1573,23 @@ function povPage() {
           workgroup: this.form.workgroup,
           project_id: this.form.project_id,
           broker_vm_name: this.form.broker_vm_name,
-          pra_tenant_id: this.form.pra_field,
-          ps_tenant_id: this.form.password_safe_field,
-          entitle_tenant_id: this.form.entitle_field,
+          // A tenant whose picker is hidden is not sent: the SE said this POV does not
+          // test that product, and a tenant left over from an earlier choice would wire
+          // it in anyway.
+          pra_tenant_id: this.useCaseProductChosen('pra') ? this.form.pra_field : '',
+          ps_tenant_id: this.useCaseProductChosen('password_safe')
+                        ? this.form.password_safe_field : '',
+          entitle_tenant_id: this.useCaseProductChosen('entitle') ? this.form.entitle_field : '',
           suspend_on_idle_seconds: this.form.suspend_on_idle_seconds,
           blueprint_id: this.selectedBlueprint,
+          use_case_products: this.form.use_case_products.length
+                             ? this.form.use_case_products : null,
         });
         this.notice = `Creating ${this.form.name}. Watch its job for progress.`;
         this.showCreate = false;
         this.form.template_id = '';
         this.form.name = '';
+        this.form.use_case_products = [];
         await this.load();
       } catch (e) {
         this.error = e.message;
@@ -1535,6 +1608,7 @@ function povPage() {
     // references it carries rather than from anything it installs -- a recipe holds no
     // secret and installs nothing (see pov_blueprint_service).
     blueprintProducts(b) {
+      if (b.use_case_scope && b.use_case_scope.label) return b.use_case_scope.label;
       const names = [];
       if (b.pra_tenant_id) names.push('PRA');
       if (b.ps_tenant_id) names.push('Password Safe');
@@ -1599,6 +1673,8 @@ function povPage() {
           resume_at_local: sched.resume_at_local || '',
           schedule_timezone: sched.schedule_timezone || '',
           schedule_days: sched.schedule_days || '',
+          use_case_products: (env.use_case_scope || {}).products || null,
+          use_case_excluded: (env.use_case_scope || {}).excluded || [],
         });
         this.notice = `Saved ${name}. It is in the Build a POV strip above.`;
         await this.loadBlueprints();

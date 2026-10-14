@@ -82,6 +82,7 @@ same POV.
 | … and a blank broker VM name stays blank, which means auto-detect | |
 | The idle timeout and an expiry override | The **workgroup**, which decides RBAC and the expiry exempt list. Not something a saved recipe should set silently |
 | The three tenant references | Any **secret** — see below |
+| The POV type — which [use cases](design/use-cases.md#choosing-the-povs-use-cases) it tests | |
 | The Gateway name, and the Resource Broker's VM, zone and installer asset | |
 
 ### It is defaults, not a second provision path
@@ -149,7 +150,9 @@ Entitle credential per customer, and duplicated credentials rotate apart.
 
 Choose them on the New POV form, or press **edit** in the Tenants column of an existing
 POV — a POV is often stood up while the customer's appliance is still being provisioned,
-so "choose later" is a real answer and not a placeholder.
+so "choose later" is a real answer and not a placeholder. Pick the **POV type** first
+(Password Safe, PRA, Total PASM, …): the form then shows only the tenant pickers for the
+products that POV tests. See [choosing the POV's use cases](design/use-cases.md#choosing-the-povs-use-cases).
 
 What the resolver does, in order:
 

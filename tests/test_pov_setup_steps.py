@@ -38,6 +38,10 @@ def _row(**over):
     states the single thing it is about and a key added later defaults to "fine".
     """
     base = {
+        # the use cases this POV tests -- every product, so nothing is skipped for scope
+        "use_case_products": "pra,password_safe,entitle",
+        "use_case_scope": {"label": "Total PASM + Entitle"},
+        "use_cases": {"total": 30},
         "status": "active",
         "provision_job_id": "job-1",
         "error_message": "",
@@ -96,7 +100,7 @@ def test_the_ladder_is_the_dependency_order_and_every_step_appears_once():
     """The order IS the feature — it is the thing the page could not say before."""
     result = steps.describe(_row())
     keys = [s["key"] for s in result["steps"]]
-    assert keys == ["environment", "guest_os", "broker", "gateway",
+    assert keys == ["use_cases", "environment", "guest_os", "broker", "gateway",
                     "resource_broker", "entitle_agent", "wireup", "pra_ps", "ot_adapter",
                     "share"], keys
     assert len(set(keys)) == len(keys), "a step key is duplicated"
@@ -210,6 +214,54 @@ def test_every_action_the_ladder_emits_has_a_button_on_the_setup_tab():
     runner = src.split("async runStep(s) {", 1)[1].split("watchSetup()", 1)[0]
     for action in emitted:
         assert f"\x27{action}\x27" in runner, f"runStep does not handle {action!r}"
+
+
+# ── the use cases this POV tests ─────────────────────────────────────────────
+
+def test_choosing_the_use_cases_is_the_first_step_and_never_locks_anything():
+    """A POV from before the choice existed has none recorded. The step asks, and the
+    ladder's cursor starts there, but nothing downstream waits on it."""
+    result = steps.describe(_row(use_case_products="", use_case_scope={}))
+    by_key = _by_key(result)
+    assert result["steps"][0]["key"] == "use_cases"
+    assert by_key["use_cases"]["state"] == steps.READY
+    assert by_key["use_cases"]["action"] == "use_cases"
+    assert result["next"] == "use_cases"
+    assert steps.NEEDS["use_cases"] == ()
+    assert not any("use_cases" in deps for deps in steps.NEEDS.values())
+    for step in result["steps"]:
+        assert not step["locked"], step
+    # And nobody choosing changes no other step: the whole catalog is in.
+    assert by_key["gateway"]["state"] == steps.CONFIGURED
+    assert by_key["entitle_agent"]["state"] == steps.DONE
+
+
+def test_a_chosen_scope_is_done_and_names_the_pov_type():
+    step = _by_key(steps.describe(_row(
+        use_case_products="pra,password_safe",
+        use_case_scope={"label": "Total PASM (PRA + Password Safe)"},
+        use_cases={"total": 21})))["use_cases"]
+    assert step["state"] == steps.DONE
+    assert "Total PASM" in step["detail"] and "21 use cases" in step["detail"], step
+
+
+def test_a_password_safe_only_pov_skips_the_pra_and_entitle_steps_even_with_tenants():
+    """The tenants say what the POV CAN reach; the choice says what it is testing."""
+    result = steps.describe(_row(use_case_products="password_safe",
+                                 cell_role_counts={"ot-sim": 1}))
+    by_key = _by_key(result)
+    for key in ("gateway", "wireup", "pra_ps", "entitle_agent", "ot_adapter"):
+        assert by_key[key]["state"] == steps.SKIPPED, (key, by_key[key])
+        assert "not in this POV's use cases" in by_key[key]["detail"], by_key[key]
+    assert by_key["resource_broker"]["state"] == steps.CONFIGURED
+    assert result["complete"] is True
+
+
+def test_total_pasm_keeps_the_pra_password_safe_link_and_skips_entitle():
+    by_key = _by_key(steps.describe(_row(use_case_products="pra,password_safe")))
+    assert by_key["pra_ps"]["state"] == steps.DONE
+    assert by_key["gateway"]["state"] == steps.CONFIGURED
+    assert by_key["entitle_agent"]["state"] == steps.SKIPPED
 
 
 # ── Password Safe credentials in PRA ─────────────────────────────────────────

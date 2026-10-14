@@ -34,7 +34,7 @@ import re
 from sqlalchemy.orm import Session
 
 from ..database import PovBlueprint
-from . import bt_tenant_service, lab_platforms
+from . import bt_tenant_service, lab_platforms, pov_use_case_scope
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +136,10 @@ def create(db: Session, *, platform: str, name: str, template_id: str,
            source_build_id: str = "", suspend_at_local: str = "",
            resume_at_local: str = "", schedule_timezone: str = "",
            schedule_days: str = "",
-           spend_cap_usd: float | None = None) -> PovBlueprint:
+           spend_cap_usd: float | None = None,
+           use_case_products: list | None = None,
+           use_case_excluded: list | None = None) -> PovBlueprint:
+    scope = _scope(use_case_products, use_case_excluded)
     platform, slug, tenants = _validate(
         db, platform=platform, template_id=template_id, name=name,
         pra_tenant_id=pra_tenant_id, ps_tenant_id=ps_tenant_id,
@@ -161,9 +164,18 @@ def create(db: Session, *, platform: str, name: str, template_id: str,
         created_by=created_by or None,
         **tenants,
     )
+    pov_use_case_scope.write(row, *scope)
     db.add(row)
     db.commit()
     return row
+
+
+def _scope(products, excluded) -> tuple:
+    """The blueprint's use cases, validated, or :class:`BlueprintError`."""
+    try:
+        return pov_use_case_scope.validate(products, excluded)
+    except pov_use_case_scope.ScopeError as exc:
+        raise BlueprintError(str(exc)) from None
 
 
 # Fields `update` will take from a payload. Listed rather than derived from the model so a
@@ -197,6 +209,13 @@ def update(db: Session, row: PovBlueprint, payload: dict) -> PovBlueprint:
             payload.get("resume_at_local", row.resume_at_local) or "",
             payload.get("schedule_timezone", row.schedule_timezone) or "",
             payload.get("schedule_days", row.schedule_days) or ""))
+    scope = None
+    if "use_case_products" in payload or "use_case_excluded" in payload:
+        current_products, current_excluded = pov_use_case_scope.parse(row)
+        scope = _scope(
+            payload.get("use_case_products",
+                        list(current_products) if current_products is not None else None),
+            payload.get("use_case_excluded", list(current_excluded)))
     name = payload.get("name")
     platform, slug, tenants = _validate(
         db,
@@ -223,6 +242,8 @@ def update(db: Session, row: PovBlueprint, payload: dict) -> PovBlueprint:
             setattr(row, field, value)
     for column, value in tenants.items():
         setattr(row, column, value or None)
+    if scope is not None:
+        pov_use_case_scope.write(row, *scope)
     db.commit()
     return row
 
@@ -268,6 +289,13 @@ def apply_to(row: PovBlueprint, payload) -> dict:
     _fill("pra_tenant_id", row.pra_tenant_id)
     _fill("ps_tenant_id", row.ps_tenant_id)
     _fill("entitle_tenant_id", row.entitle_tenant_id)
+    # The use cases travel as a pair: a request that chose its own products also chose
+    # which of their cards to untick, and mixing its products with the blueprint's
+    # unticked list would hide cards nobody unticked.
+    products, excluded = pov_use_case_scope.parse(row)
+    if products is not None and getattr(payload, "use_case_products", None) is None:
+        out["use_case_products"] = list(products)
+        out["use_case_excluded"] = sorted(excluded)
     return out
 
 
@@ -356,6 +384,7 @@ def serialize(row: PovBlueprint) -> dict:
         "schedule_timezone": row.schedule_timezone or "",
         "schedule_days": row.schedule_days or "",
         "spend_cap_usd": row.spend_cap_usd or 0.0,
+        "use_case_scope": pov_use_case_scope.describe(row),
         "workgroup": row.workgroup or "",
         "created_by": row.created_by or "",
         "created_at": row.created_at.isoformat() if row.created_at else "",
