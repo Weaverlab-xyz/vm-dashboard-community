@@ -177,6 +177,83 @@ whole question. Docker Desktop's `host.docker.internal` resolves to the host and
 legitimate `fqdn:` target, but it only helps if the service is listening on an address other
 than `127.0.0.1`.
 
+### The sibling runner on Docker Desktop
+
+Hyper-V, bare ESXi and Config Management run in a one-shot container the agent launches
+through the Docker socket — see [The sibling runner](hypervisors.md#the-sibling-runner).
+[`docker-compose.sibling.yml`](../../examples/remote-agent/docker-compose.sibling.yml) is
+written for a Linux host, and **two of its defaults are wrong on Docker Desktop**:
+
+- **The socket path.** The overlay mounts the *rootless* socket,
+  `${XDG_RUNTIME_DIR:-/run/user/1000}/docker.sock`. Docker Desktop has no rootless engine,
+  so that path does not exist, and — as with any unreachable bind source here — Docker
+  Desktop mounts an empty directory in its place rather than failing. Edit the volume line to
+  Docker Desktop's engine socket, which is the same path on both sides:
+
+  ```yaml
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
+  ```
+
+  This is the root-equivalent socket the overlay warns about; on Docker Desktop there is no
+  alternative to choose instead. If you run Compose from Git Bash, MSYS rewrites a leading
+  `/var/run/...` into a Windows path — use PowerShell, or set `MSYS_NO_PATHCONV=1`.
+- **The socket's group.** The agent runs as uid 10001, so the mounted socket is unopenable
+  without its group, and the overlay refuses to start until `DOCKER_SOCKET_GID` is set. Do
+  not guess it — read it off the socket as a container sees it:
+
+  ```powershell
+  docker run --rm -v /var/run/docker.sock:/var/run/docker.sock alpine stat -c "%g %a" /var/run/docker.sock
+  ```
+
+  On Docker Desktop this prints `0 660` — group 0, read-write for the group — so the gid is
+  `0`. That adds the root *group* to the agent, not the root user, and it is what the socket
+  needs. Put the first number in a `.env` file beside the compose files
+  (`DOCKER_SOCKET_GID=<gid>`), or `$env:DOCKER_SOCKET_GID = "<gid>"` in the shell you run
+  Compose from. With `docker run` instead of Compose, the equivalent is
+  `-v /var/run/docker.sock:/var/run/docker.sock --group-add <gid>`.
+
+Then start the agent with **both** files — the overlay alone declares no image, and the base
+file alone mounts no socket:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.sibling.yml up -d
+```
+
+**Every overlay, on every `up`.** Compose recreates the agent from exactly the files named
+on that command line, so running with the sibling overlay and later with
+[`docker-compose.spire.yml`](../../examples/remote-agent/docker-compose.spire.yml) alone
+silently drops the socket — the next Hyper-V job fails with `No such file or directory`
+again. The two overlays touch different mounts and variables and merge cleanly; name them
+together. To stop having to remember, list them once in the same `.env` (the separator is
+`;` on Windows, `:` on Linux and macOS):
+
+```
+COMPOSE_FILE=docker-compose.yml;docker-compose.sibling.yml;docker-compose.spire.yml
+```
+
+A bare `docker compose up -d` — and `logs`, `restart`, `down` — then uses all three.
+`docker compose config --quiet` validates the merge and names any required variable that
+is unset, before anything is recreated. To confirm the result, the agent's mounts should
+include `/var/run/docker.sock` (and `/run/spiffe/jwt` with SPIRE):
+
+```powershell
+docker inspect dashboard-agent --format "{{range .Mounts}}{{.Destination}} {{end}}"
+```
+
+The job error tells you which step was missed. All three are prefixed `Agent policy
+refused:` even though none is a policy decision — your `policy.yaml` is not the problem:
+
+| Error after `cannot reach the Docker socket` / `the Docker socket` | Meaning |
+|---|---|
+| `[Errno 2] No such file or directory` | nothing is mounted — the overlay was not applied |
+| `[Errno 111] Connection refused` | the mount source does not exist, so an empty directory was mounted — the rootless path is still in the overlay |
+| `is mounted but this process cannot open it` | the socket is there; `DOCKER_SOCKET_GID` is wrong or unset |
+
+The agent does not pull runner images, so pull the ones your `policy.yaml` names, once:
+`chrweav/hypervisor-runner:latest` for Hyper-V and ESXi, `chrweav/ansible-winrm:latest`
+and `chrweav/ansible-cloud:latest` for Config Management.
+
 
 ## Behind a TLS-inspecting proxy
 
