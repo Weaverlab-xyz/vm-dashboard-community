@@ -206,7 +206,9 @@ written for a Linux host, and **two of its defaults are wrong on Docker Desktop*
   docker run --rm -v /var/run/docker.sock:/var/run/docker.sock alpine stat -c "%g %a" /var/run/docker.sock
   ```
 
-  Put the first number in a `.env` file beside the compose files
+  On Docker Desktop this prints `0 660` — group 0, read-write for the group — so the gid is
+  `0`. That adds the root *group* to the agent, not the root user, and it is what the socket
+  needs. Put the first number in a `.env` file beside the compose files
   (`DOCKER_SOCKET_GID=<gid>`), or `$env:DOCKER_SOCKET_GID = "<gid>"` in the shell you run
   Compose from. With `docker run` instead of Compose, the equivalent is
   `-v /var/run/docker.sock:/var/run/docker.sock --group-add <gid>`.
@@ -216,6 +218,27 @@ file alone mounts no socket:
 
 ```powershell
 docker compose -f docker-compose.yml -f docker-compose.sibling.yml up -d
+```
+
+**Every overlay, on every `up`.** Compose recreates the agent from exactly the files named
+on that command line, so running with the sibling overlay and later with
+[`docker-compose.spire.yml`](../../examples/remote-agent/docker-compose.spire.yml) alone
+silently drops the socket — the next Hyper-V job fails with `No such file or directory`
+again. The two overlays touch different mounts and variables and merge cleanly; name them
+together. To stop having to remember, list them once in the same `.env` (the separator is
+`;` on Windows, `:` on Linux and macOS):
+
+```
+COMPOSE_FILE=docker-compose.yml;docker-compose.sibling.yml;docker-compose.spire.yml
+```
+
+A bare `docker compose up -d` — and `logs`, `restart`, `down` — then uses all three.
+`docker compose config --quiet` validates the merge and names any required variable that
+is unset, before anything is recreated. To confirm the result, the agent's mounts should
+include `/var/run/docker.sock` (and `/run/spiffe/jwt` with SPIRE):
+
+```powershell
+docker inspect dashboard-agent --format "{{range .Mounts}}{{.Destination}} {{end}}"
 ```
 
 The job error tells you which step was missed. All three are prefixed `Agent policy
