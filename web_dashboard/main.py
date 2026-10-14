@@ -1022,6 +1022,11 @@ templates.env.globals["app_env"] = settings.app_env
 # in it, and because login.html renders outside the normal chrome and would be exactly
 # the page a per-route context forgot (see the note on _profile_context above).
 templates.env.globals["static_url"] = static_assets.url
+# The POV types an SE picks a POV's use cases from (Password Safe, PRA, Total PASM, ...).
+# One list, read by the create form and the Setup tab, so the two cannot drift.
+from .services import pov_use_case_scope as _pov_use_case_scope  # noqa: E402
+templates.env.globals["pov_use_case_presets"] = [
+    {**p, "products": list(p["products"])} for p in _pov_use_case_scope.PRESETS]
 
 
 # ── Register API routers ──────────────────────────────────────────────────────

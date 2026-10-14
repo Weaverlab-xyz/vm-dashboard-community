@@ -1,6 +1,6 @@
 """What is still to be done to a POV, in order, derived from what the row already says.
 
-Standing a POV up is **provision, broker agent, Gateway, Resource Broker, Entitle agent,
+Standing a POV up is **choose the use cases, provision, broker agent, Gateway, Resource Broker, Entitle agent,
 wire-up, share** — and until this module the page stated that order nowhere. Every step was
 a button, none of them said whether it was the *next* one, and a step pressed out of turn
 fails with a refusal that reads like a bug rather than like a queue. So an SE learned the
@@ -101,10 +101,54 @@ def _no_tenant(product: str) -> str:
             f"bring these steps into its ladder")
 
 
+def _not_chosen(product: str) -> str:
+    """Why a product's steps are grey when the POV has chosen not to test it."""
+    return (f"{product} is not in this POV's use cases — change that on the Use cases "
+            f"chosen step to bring these steps back")
+
+
+def _out(p: dict, *products: str) -> str:
+    """The first of ``products`` (keys) this POV's chosen use cases leave out, as a label.
+
+    Read off the serialised ``use_case_products`` string rather than through
+    ``pov_use_case_scope``, because this module imports nothing. Blank means nobody has
+    chosen, which leaves out nothing -- so a POV from before the choice existed keeps the
+    ladder it had.
+    """
+    raw = str(p.get("use_case_products") or "").strip()
+    if not raw:
+        return ""
+    chosen = raw.split(",")
+    labels = {"pra": "PRA", "password_safe": "Password Safe", "entitle": "Entitle"}
+    for product in products:
+        if product not in chosen:
+            return labels[product]
+    return ""
+
+
 # ── one resolver per step: (state, detail, action) ───────────────────────────
 #
 # `action` names what the page should offer, never a URL — the row already owns the
 # handlers, and a target built here would be a second place the route lives.
+
+
+def _use_cases(p: dict):
+    """Which use cases this POV tests -- the first decision, and a choice, not a job.
+
+    Never ``blocked`` and nothing depends on it: a POV from before this step existed has
+    no choice recorded and must keep working, so the step only ever asks.
+    """
+    raw = str(p.get("use_case_products") or "").strip()
+    if not raw:
+        return (READY, "pick what this POV tests: Password Safe, PRA, Total PASM (both), "
+                       "Entitle, or a mix — and untick any use case you will not run",
+                "use_cases")
+    detail = str((p.get("use_case_scope") or {}).get("label") or raw)
+    total = (p.get("use_cases") or {}).get("total") if isinstance(p.get("use_cases"),
+                                                                   dict) else None
+    if total is not None:
+        detail += f" — {total} use case{'' if total == 1 else 's'}"
+    return DONE, detail, "use_cases"
 
 
 def _environment(p: dict):
@@ -173,6 +217,8 @@ def _broker(p: dict):
 
 
 def _gateway(p: dict):
+    if _out(p, "pra"):
+        return SKIPPED, _not_chosen("PRA"), ""
     if not p.get("pra_tenant_id"):
         return SKIPPED, _no_tenant("PRA"), ""
     if p.get("gateway_ready"):
@@ -192,6 +238,8 @@ def _gateway(p: dict):
 
 
 def _resource_broker(p: dict):
+    if _out(p, "password_safe"):
+        return SKIPPED, _not_chosen("Password Safe"), ""
     if not p.get("ps_tenant_id"):
         return SKIPPED, _no_tenant("Password Safe"), ""
     if p.get("rb_ready"):
@@ -211,6 +259,8 @@ def _resource_broker(p: dict):
 
 
 def _entitle_agent(p: dict):
+    if _out(p, "entitle"):
+        return SKIPPED, _not_chosen("Entitle"), ""
     if not p.get("entitle_tenant_id"):
         return SKIPPED, _no_tenant("Entitle"), ""
     if p.get("entitle_agent_installed"):
@@ -222,6 +272,8 @@ def _entitle_agent(p: dict):
 
 def _wireup(p: dict):
     """The VMs in PRA, Password Safe and Entitle — judged on artifacts, never on the job."""
+    if _out(p, "pra"):
+        return SKIPPED, _not_chosen("PRA"), ""
     if not p.get("pra_tenant_id"):
         return SKIPPED, _no_tenant("PRA"), ""
     total = _int(p.get("vm_count"))
@@ -265,6 +317,8 @@ def _ot_adapter(p: dict):
     roles = p.get("cell_role_counts") or {}
     if not roles.get("ot-sim"):
         return SKIPPED, "this POV has no OT simulator guest", ""
+    if _out(p, "entitle"):
+        return SKIPPED, _not_chosen("Entitle"), ""
     if not p.get("entitle_tenant_id"):
         return SKIPPED, _no_tenant("Entitle"), ""
     if p.get("ot_adapter_registered"):
@@ -289,6 +343,9 @@ def _pra_ps(p: dict):
     The integration itself is a PRA /login setting with no API, so the honest blocked
     state is "PRA sees none of them", with the checklist behind the action.
     """
+    left_out = _out(p, "pra", "password_safe")
+    if left_out:
+        return SKIPPED, _not_chosen(left_out), ""
     if not p.get("pra_tenant_id") or not p.get("ps_tenant_id"):
         return SKIPPED, "needs both a PRA and a Password Safe tenant", ""
     if not _int(p.get("onboarded_count")):
@@ -325,6 +382,7 @@ def _share(p: dict):
 # OS, so a POV that reaches the broker step with unknown guests is one whose inline install
 # has usually already failed for exactly that reason.
 STEPS = (
+    ("use_cases",       "Use cases chosen",                  _use_cases),
     ("environment",     "Environment running",               _environment),
     ("guest_os",        "Every guest's OS known",            _guest_os),
     ("broker",          "Broker agent enrolled",             _broker),
@@ -345,6 +403,7 @@ STEP_KEYS = tuple(key for key, _label, _fn in STEPS)
 # customer has not configured yet would park a working POV forever. A dependency the
 # server would refuse anyway is the only thing that locks a button.
 NEEDS = {
+    "use_cases":       (),
     "environment":     (),
     "guest_os":        ("environment",),
     "broker":          ("environment", "guest_os"),
