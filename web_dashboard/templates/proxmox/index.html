@@ -5,7 +5,7 @@
 {% block title %}Proxmox VE{% endblock %}
 
 {% block content %}
-<div x-data="proxmoxDashboard()" x-init="init()" class="pb-12">
+<div x-data="proxmoxDashboard()" class="pb-12">
 
   {% if via_agent %}
   {#- An agent-bound connection is on a network the dashboard has no route to, so this

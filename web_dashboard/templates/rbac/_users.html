@@ -7,7 +7,7 @@
    test_templates_parse.py only parses, so nothing in the suite would catch it. #}
 {% from "partials/permission_matrix.html" import permission_matrix %}
 
-<div x-data="usersPage()" x-init="init()">
+<div x-data="usersPage()">
 
   <div class="flex justify-end gap-2 mb-3">
     <!-- A workload principal: no password, never admin, authenticates with an OAuth

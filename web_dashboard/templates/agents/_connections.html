@@ -20,7 +20,7 @@
 
 <!-- Same staleness as the Config Routes tab, and the same fix: this form's agent picker is
      fetched once in init(), so reload it when the tab is shown again. -->
-<div x-data="connectionsPage()" x-init="init()"
+<div x-data="connectionsPage()"
      @agents-tab-shown.window="if ($event.detail === 'connections') refresh()">
 
   <div class="flex justify-end mb-3 sm:mb-1">

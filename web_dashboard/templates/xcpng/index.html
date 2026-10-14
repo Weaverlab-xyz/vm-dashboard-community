@@ -3,7 +3,7 @@
 {% block title %}XCP-ng{% endblock %}
 
 {% block content %}
-<div x-data="xcpngDashboard()" x-init="init()" class="pb-12">
+<div x-data="xcpngDashboard()" class="pb-12">
 
   {% if via_agent %}
   {#- An agent-bound connection is on a network the dashboard has no route to, so this

@@ -24,7 +24,7 @@
    count is shown — a number climbing on an identity nobody is using is the signature of a
    consumer stuck in a retry loop. #}
 
-<div x-data="workloadCloudTab()" x-init="init()">
+<div x-data="workloadCloudTab()">
 
   <div class="flex justify-end mb-3 sm:mb-1">
     <button @click="openRegister()" :disabled="!enabledClouds().length"

@@ -82,8 +82,7 @@
         `or ''` on the second argument because |tojson on an Undefined raises: a route that
         forgot the key would take the whole page down rather than simply opening on the
         first tab. #}
-     x-data='rbacPage({{ tab_slugs | tojson }}, {{ (initial_tab or "") | tojson }}, {{ admin_slugs | tojson }})'
-     x-init="init()">
+     x-data='rbacPage({{ tab_slugs | tojson }}, {{ (initial_tab or "") | tojson }}, {{ admin_slugs | tojson }})'>
 
   <h1 class="text-2xl font-bold text-gray-900 mb-1">RBAC</h1>
   <p class="text-sm text-gray-500 mb-6">
