@@ -13,7 +13,10 @@ workgroups.
 
 ## Areas
 
-An area appears once the integration it covers is turned on.
+An area appears once the integration it covers is turned on. Each area is its own tab,
+labelled with its count of failing objects (or degraded, when nothing is failing); the
+open tab is kept in the address (`/health#cloud_ops`), so it survives **Reload** and can
+be bookmarked. **Only failing and degraded** hides the healthy rows in every tab.
 
 | Area | Checks | Every | Shown when |
 |---|---|---|---|
