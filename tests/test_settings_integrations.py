@@ -178,6 +178,55 @@ def test_the_wizard_and_the_settings_page_agree_on_labels():
             f"Settings; the same integration must not have two names")
 
 
+# ── tabs ──────────────────────────────────────────────────────────────────────
+
+def _integration_groups() -> dict:
+    """key -> `group:` of every integrations[] entry (None when an entry has none)."""
+    html = _read(_SETTINGS)
+    start = html.index("integrations: [")
+    end = html.index("\n    ],", start)
+    out = {}
+    for m in re.finditer(r"\{\s*key:\s*'([a-z_0-9]+)'([^}]*)\}", html[start:end], re.S):
+        g = re.search(r"group:\s*'([a-z_0-9]+)'", m.group(2))
+        out[m.group(1)] = g.group(1) if g else None
+    return out
+
+
+def _tab_ids() -> set:
+    html = _read(_SETTINGS)
+    start = html.index("integrationGroups: [")
+    end = html.index("\n    ],", start)
+    return set(re.findall(r"\{\s*id:\s*'([a-z_0-9]+)'", html[start:end]))
+
+
+def test_every_integration_renders_on_a_tab():
+    """The card shows one tab's rows at a time, filtered on `group`. A row with no group,
+    or a group no tab carries, is in integrations[] but renders nowhere — the original
+    invisible-feature failure, just quieter."""
+    groups, tabs = _integration_groups(), _tab_ids()
+    assert groups.keys() == _integration_keys(), "could not parse every integrations[] entry"
+    orphans = sorted(k for k, g in groups.items() if g not in tabs)
+    assert not orphans, f"integrations[] entries on no Settings tab: {orphans}"
+
+
+def test_every_page_tab_shows_a_card():
+    """The page-level tab strip is built from settingsTabs; each card is gated on
+    `settingsTab === '<id>'`. A tab with no gated card is a click that empties the page."""
+    html = _read(_SETTINGS)
+    start = html.index("settingsTabs: [")
+    end = html.index("\n    ],", start)
+    ids = re.findall(r"\{\s*id:\s*'([a-z_0-9]+)'", html[start:end])
+    assert ids, "could not parse settingsTabs"
+    for tab in ids:
+        assert f"settingsTab === '{tab}'\"" in html, f"no card is shown on the '{tab}' tab"
+
+
+def test_the_beyondtrust_tab_holds_the_beyondtrust_products():
+    groups = _integration_groups()
+    for key in ("password_safe", "pra", "epml", "entitle"):
+        assert groups.get(key) == "beyondtrust", f"{key} is not on the BeyondTrust tab"
+
+
 # ── remote agents specifically ────────────────────────────────────────────────
 
 def test_remote_agents_is_reachable_from_settings():
