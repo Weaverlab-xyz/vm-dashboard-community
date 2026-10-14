@@ -241,6 +241,15 @@ every key rotation (weekly by default).
 These documents carry public keys and nothing else. Do not put them behind SSO: every cloud
 that trusts the issuer would stop accepting the dashboard's tokens at once.
 
+Both gateways publish them on the agent hostname: `examples/remote-agent/Caddyfile` on
+Docker Compose, and `examples/cloud-gateway/Caddyfile` — the sidecar on Azure Container Apps,
+Cloud Run and ECS. A cloud gateway image built before `/spiffe/*` was added answers 404 on
+the agent hostname, and AWS then refuses every token with `InvalidIdentityToken`. Rebuild the
+gateway image and roll the sidecar.
+
+On a POV instance the POV cloud provider panel can use this identity in place of an AWS key:
+see [Keyless AWS](../profiles/pov/public-cloud.md#keyless-aws-the-dashboards-spiffe-identity).
+
 **Check before retiring a key.** On the panel, **Check the issuer is reachable** fetches both
 documents over the issuer's public URL with TLS verified, the way a cloud does. It reports
 whether the name resolves, the certificate is publicly trusted, the document names exactly
