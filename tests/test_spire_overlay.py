@@ -249,6 +249,31 @@ def test_the_helper_writes_the_token_the_agent_reads_for_the_route_the_server_ch
     assert any(m.endswith(f":{cert_dir}") for m in mounts), "the helper cannot write cert_dir"
 
 
+def test_the_helper_can_renew_the_token_it_wrote():
+    """spiffe-helper renews the token with os.WriteFile, which applies the mode only when
+    it creates the file. A mode without the owner-write bit is therefore written once and
+    refused on every renewal ("permission denied" each minute in the helper's log), while
+    the agent runs happily on its first token — until a restart, when it presents an
+    expired one and is refused for good. Live on a Docker Desktop agent host, 2026-10-14.
+
+    Both places that render the helper's config are held to it, and the overlay's init must
+    repair a token file an older config already created: the new mode would never reach it.
+    """
+    init = " ".join(_yaml(*_AGENT_OVERLAY)["services"]["spire-volumes-init"]["command"])
+    broker = _text("web_dashboard", "services", "pov_broker.py")
+    for name, src in (("agent overlay", init), ("pov_broker", broker)):
+        modes = re.findall(r"jwt_svid_file_mode = (0[0-7]{3})", src)
+        assert modes, f"{name}: no jwt_svid_file_mode — spiffe-helper's default is 0600, say so"
+        for mode in modes:
+            assert int(mode, 8) & 0o200, (
+                f"{name}: jwt_svid_file_mode = {mode} has no owner-write bit, so the "
+                f"helper can never renew the token")
+    assert "chmod 0600 /jwt/attest.jwt" in init, (
+        "the init does not repair a token file left read-only by an older config")
+    mounts = [str(v) for v in _yaml(*_AGENT_OVERLAY)["services"]["spire-volumes-init"]["volumes"]]
+    assert "spiffe_jwt:/jwt" in mounts, "the init repairs /jwt but does not mount the token volume"
+
+
 def test_the_server_enables_every_attestor_an_agent_config_can_use():
     """An agent attesting with a plugin the server does not run is refused at the first
     connection, with an error that reads like a network fault."""
