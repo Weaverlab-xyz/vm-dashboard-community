@@ -470,8 +470,26 @@
       </a>
     </div>
 
-    <div class="space-y-2">
-      <template x-for="intg in integrations" :key="intg.key">
+    <!-- Tabs: one per integrationGroups entry. The badge is "toggles on / toggles in
+         this tab"; config-only rows have no toggle, so they are left out of both. -->
+    <div class="flex flex-wrap gap-x-1 border-b border-gray-200 mb-4" role="tablist">
+      <template x-for="g in integrationGroups" :key="g.id">
+        <button type="button" role="tab" @click="integrationTab = g.id"
+                :aria-selected="integrationTab === g.id"
+                class="-mb-px flex items-center gap-1.5 px-3 py-2 text-sm font-medium border-b-2 transition-colors"
+                :class="integrationTab === g.id
+                  ? 'border-blue-600 text-blue-700'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'">
+          <span x-text="g.label"></span>
+          <span class="text-[11px] font-normal rounded-full px-1.5 py-0.5"
+                :class="integrationTab === g.id ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-500'"
+                x-text="integrations.filter(i => i.group === g.id && !i.configOnly && i.enabled).length + '/' + integrations.filter(i => i.group === g.id && !i.configOnly).length"></span>
+        </button>
+      </template>
+    </div>
+
+    <div class="space-y-2" role="tabpanel">
+      <template x-for="intg in integrations.filter(i => i.group === integrationTab)" :key="intg.key">
         <div class="flex items-center gap-4 px-4 py-3 rounded-xl border transition-colors"
              :class="intg.enabled ? 'border-blue-200 bg-blue-50' : 'border-gray-200 bg-white'">
 
@@ -548,12 +566,23 @@
   <!-- ── Preview features (admin only) ────────────────────────────────── -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6"
        x-show="isAdmin" x-cloak>
-    <div class="mb-4">
-      <h2 class="text-base font-semibold text-gray-700">Preview features</h2>
-      <p class="text-xs text-gray-400 mt-0.5">Early-access features with no extra configuration. Toggle on to reveal them in the nav — changes take effect immediately.</p>
-    </div>
+    <button type="button" @click="previewOpen = !previewOpen" :aria-expanded="previewOpen"
+            class="w-full flex items-start justify-between gap-4 text-left">
+      <div>
+        <h2 class="text-base font-semibold text-gray-700">Preview features</h2>
+        <p class="text-xs text-gray-400 mt-0.5">Early-access features with no extra configuration. Toggle on to reveal them in the nav — changes take effect immediately.</p>
+      </div>
+      <span class="flex-shrink-0 flex items-center gap-2 text-xs text-gray-500 mt-0.5">
+        <span x-show="!previewOpen"
+              x-text="previewFlags.filter(f => f.enabled).length + ' of ' + previewFlags.length + ' enabled'"></span>
+        <svg class="w-4 h-4 transition-transform" :class="previewOpen ? 'rotate-180' : ''"
+             fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
+        </svg>
+      </span>
+    </button>
 
-    <div class="space-y-2">
+    <div class="space-y-2 mt-4" x-show="previewOpen" x-cloak>
       <template x-for="f in previewFlags" :key="f.key">
         <div class="flex items-center gap-4 px-4 py-3 rounded-xl border transition-colors"
              :class="f.enabled ? 'border-blue-200 bg-blue-50' : 'border-gray-200 bg-white'">
@@ -8215,69 +8244,83 @@ function settingsPage() {
     brandingLogoError: '',
     brandingLogoSvgOk: true,
     integrations: [
-      { key: 'vmware',       label: 'VMware Workstation',      hasConfig: false, enabled: false,
+      { key: 'vmware',       label: 'VMware Workstation',      group: 'hypervisors', hasConfig: false, enabled: false,
         desc: 'VM management on a Windows host. Toggle to enable.' },
       // The three BeyondTrust products gate independently — customers routinely license
       // one or two, not all three. Each key derives its own config flag via
       // _feature_to_cfg_key (password_safe -> password_safe_enabled), so renaming one
       // silently repoints its toggle at a key nothing reads.
-      { key: 'password_safe', label: 'Password Safe',          hasConfig: true,  enabled: false,
+      { key: 'password_safe', label: 'Password Safe',          group: 'beyondtrust', hasConfig: true,  enabled: false,
         desc: 'Secret and managed-account checkout, VM / database / Kubernetes onboarding, and scheduled credential rotation.' },
-      { key: 'pra',          label: 'Privileged Remote Access', hasConfig: true,  enabled: false,
+      { key: 'pra',          label: 'Privileged Remote Access', group: 'beyondtrust', hasConfig: true,  enabled: false,
         desc: 'Shell Jump, protocol-tunnel and Web Jump provisioning through PRA, plus the Gateway hosts that carry them.' },
-      { key: 'epml',         label: 'EPM for Linux',           hasConfig: true,  enabled: false,
+      { key: 'epml',         label: 'EPM for Linux',           group: 'beyondtrust', hasConfig: true,  enabled: false,
         desc: 'Build and download EPM for Linux client packages and mint activation tokens via the BeyondTrust Pathfinder API.' },
-      { key: 'portainer',    label: 'Containers',              hasConfig: true,  enabled: false,
+      { key: 'portainer',    label: 'Containers',              group: 'cloud', hasConfig: true,  enabled: false,
         desc: 'Manage and view containers across all configured cloud providers (AWS ECS, Azure ACI, GCP Cloud Run), plus optional on-prem Portainer management.' },
-      { key: 'ansible',      label: 'Remote Worker',           hasConfig: true,  enabled: false,
+      { key: 'ansible',      label: 'Remote Worker',           group: 'platform', hasConfig: true,  enabled: false,
         desc: 'Where config-management (Ansible) and Kubernetes (kubectl/helm) ops run — in-process or as one-shot cloud tasks (ECS / ACI / Cloud Run).' },
-      { key: 'entitle',      label: 'Entitle',                 hasConfig: true,  enabled: false,
+      { key: 'entitle',      label: 'Entitle',                 group: 'beyondtrust', hasConfig: true,  enabled: false,
         desc: 'Register built VMs & databases as Entitle integrations.' },
-      { key: 'skytap',       label: 'Skytap',                  hasConfig: true,  enabled: false,
+      { key: 'skytap',       label: 'Skytap',                  group: 'pov', hasConfig: true,  enabled: false,
         desc: 'Lab platform for customer POV environments — create one from a Skytap template. Available on a POV instance only.' },
-      { key: 'pov_cloud',    label: 'POV cloud provider',      hasConfig: true,  enabled: false,
+      { key: 'pov_cloud',    label: 'POV cloud provider',      group: 'pov', hasConfig: true,  enabled: false,
         desc: 'Run POVs on one public cloud alongside Skytap — templates, scheduled suspend and the same auto-delete timer. Available on a POV instance only.' },
-      { key: 'proxmox',      label: 'Proxmox VE',              hasConfig: true,  enabled: false,
+      { key: 'proxmox',      label: 'Proxmox VE',              group: 'hypervisors', hasConfig: true,  enabled: false,
         desc: 'On-premises VM and LXC container management via the Proxmox REST API.' },
-      { key: 'vsphere',      label: 'VMware vSphere / ESXi',   hasConfig: true,  enabled: false,
+      { key: 'vsphere',      label: 'VMware vSphere / ESXi',   group: 'hypervisors', hasConfig: true,  enabled: false,
         desc: 'Enterprise VMware VM management via the vSphere Web Services API (pyVmomi).' },
-      { key: 'hyperv',       label: 'Microsoft Hyper-V',        hasConfig: true,  enabled: false,
+      { key: 'hyperv',       label: 'Microsoft Hyper-V',        group: 'hypervisors', hasConfig: true,  enabled: false,
         desc: 'Hyper-V VM management via WinRM/PowerShell on a Windows host.' },
-      { key: 'nutanix',      label: 'Nutanix AHV',              hasConfig: true,  enabled: false,
+      { key: 'nutanix',      label: 'Nutanix AHV',              group: 'hypervisors', hasConfig: true,  enabled: false,
         desc: 'Nutanix AHV VM management via Prism Central REST API v3.' },
-      { key: 'xcpng',        label: 'XCP-ng / XenServer',       hasConfig: true,  enabled: false,
+      { key: 'xcpng',        label: 'XCP-ng / XenServer',       group: 'hypervisors', hasConfig: true,  enabled: false,
         desc: 'XCP-ng and XenServer VM management via the XAPI XML-RPC API.' },
-      { key: 'cost_explorer', label: 'Cloud Costs',             hasConfig: true,  enabled: false,
+      { key: 'cost_explorer', label: 'Cloud Costs',             group: 'governance', hasConfig: true,  enabled: false,
         desc: 'Month-to-date cloud spend, with an optional monthly budget alert.' },
-      { key: 'admission_control', label: 'Action Guardrails',   hasConfig: true,  enabled: false,
+      { key: 'admission_control', label: 'Action Guardrails',   group: 'governance', hasConfig: true,  enabled: false,
         desc: 'Pre-action policy gate (OPA): allowed regions, blocked sizes, change-freeze.' },
-      { key: 'resource_expiry', label: 'Auto-delete Timer',     hasConfig: true,  enabled: false,
+      { key: 'resource_expiry', label: 'Auto-delete Timer',     group: 'governance', hasConfig: true,  enabled: false,
         desc: 'Give new cloud VMs, databases and clusters an expiry, then destroy them when it passes. Starts in report-only mode.' },
-      { key: 'notifications', label: 'Notifications',           hasConfig: true,  enabled: false,
+      { key: 'notifications', label: 'Notifications',           group: 'governance', hasConfig: true,  enabled: false,
         desc: 'Send auto-delete warnings, job failures and budget/secret/drift alerts to Slack, Microsoft Teams, or a signed webhook. Starts in dry-run mode.' },
-      { key: 'cloud_database', label: 'Databases',              hasConfig: true,  enabled: false,
+      { key: 'cloud_database', label: 'Databases',              group: 'cloud', hasConfig: true,  enabled: false,
         desc: 'Provision private managed databases (PostgreSQL, MySQL, SQL Server) on AWS, Azure and GCP, or register ones you already run — on-premises or in a cloud. PRA tunnel for the private ones.' },
-      { key: 'k8s_management', label: 'Kubernetes',             hasConfig: true,  enabled: false,
+      { key: 'k8s_management', label: 'Kubernetes',             group: 'cloud', hasConfig: true,  enabled: false,
         desc: 'Provision (EKS/AKS/GKE), register, and broker Kubernetes clusters — PRA tunnels + Entitle real-identity JIT.' },
-      { key: 'cloud_functions', label: 'Cloud Functions',        hasConfig: true,  enabled: false,
+      { key: 'cloud_functions', label: 'Cloud Functions',        group: 'cloud', hasConfig: true,  enabled: false,
         desc: 'Deploy a dashboard-authored handler as an AWS Lambda, an Azure Function App, or a GCP Cloud Run function — optionally attached to a VPC/VNet so it can reach private resources. Each gets a stable HTTPS endpoint protected by a shared bearer secret.' },
-      { key: 'remote_agents', label: 'Remote Agents',           hasConfig: true,  enabled: false,
+      { key: 'remote_agents', label: 'Remote Agents',           group: 'platform', hasConfig: true,  enabled: false,
         desc: 'Containerised agents inside private networks that poll out to this dashboard to discover on-premises Kubernetes clusters and databases. No inbound firewall rules. Adds an Agents page for registering and revoking them. Terminate TLS in front of the dashboard before enabling — this is the only API that serves callers outside your own network.' },
-      { key: 'mcp_server',   label: 'MCP Server',                hasConfig: false, enabled: false,
+      { key: 'mcp_server',   label: 'MCP Server',                group: 'platform', hasConfig: false, enabled: false,
         desc: 'Expose read-only dashboard tools to an MCP-compatible AI client (Claude Desktop, Claude Code, Cursor) at /mcp, authenticated with a Personal Access Token. Each tool returns only what the token owner could see in the UI. Off by default; turning it on serves an endpoint that reads your estate.' },
-      { key: 'vm_spend_cap', label: 'VM spend caps', hasConfig: false, enabled: false,
+      { key: 'vm_spend_cap', label: 'VM spend caps', group: 'governance', hasConfig: false, enabled: false,
         desc: 'Give a cloud VM a dollar cap. Spend is accrued every sweep at the provider list price and, when the cap is reached, the VM is warned about or suspended — never destroyed. The estimate excludes reservations, credits, free tier, transfer and snapshots, so it errs high, which is the safe direction for a cap. Off by default; a cap is per-VM, so turning this on accrues nothing until you set one. A cap is refused on a VM whose region has no price source, rather than stored and silently never firing.' },
-      { key: 'cloud_unmanaged_discovery', label: 'Discover unmanaged cloud VMs', hasConfig: false, enabled: false,
+      { key: 'cloud_unmanaged_discovery', label: 'Discover unmanaged cloud VMs', group: 'cloud', hasConfig: false, enabled: false,
         desc: 'Show cloud VMs this dashboard did not deploy, in a separate list on each cloud console. Discovered VMs can be started and stopped; they can never be destroyed from here. Off by default because it lists every instance in the account, subscription or project rather than the ones the dashboard deployed. A discovered VM is admin-only unless it carries a workgroup tag.' },
-      { key: 'multi_region', label: 'Multi-region',            hasConfig: true,  enabled: true, configOnly: true,
+      { key: 'multi_region', label: 'Multi-region',            group: 'cloud', hasConfig: true,  enabled: true, configOnly: true,
         desc: 'Per-region resource config sets for AWS, GCP and Azure — subnets, security groups, SSH secrets, networks. Blank fields fall back to the flat defaults.' },
-      { key: 'oidc',         label: 'Single sign-on (OIDC)',   hasConfig: true,  enabled: true, configOnly: true,
+      { key: 'oidc',         label: 'Single sign-on (OIDC)',   group: 'platform', hasConfig: true,  enabled: true, configOnly: true,
         desc: 'Sign in with any OpenID Connect provider — Okta, Auth0, Keycloak, Authentik, Authelia, Google Workspace, JumpCloud, Ping, GitLab. Configured from the issuer URL; endpoints are discovered automatically.' },
-      { key: 'worker',       label: 'Job Worker',              hasConfig: true,  enabled: true, configOnly: true,
+      { key: 'worker',       label: 'Job Worker',              group: 'platform', hasConfig: true,  enabled: true, configOnly: true,
         desc: 'How many background jobs run at once, per kind. Raise the poll-only limit if image exports and copies queue up; raise the heavy limit to provision more clusters or databases in parallel. Takes effect within seconds, no restart.' },
-      { key: 'change_windows', label: 'Change Windows',        hasConfig: true,  enabled: true, configOnly: true,
+      { key: 'change_windows', label: 'Change Windows',        group: 'governance', hasConfig: true,  enabled: true, configOnly: true,
         desc: 'Named periods during which changes may start — "Prod Weekend, Sat 02:00–06:00 New York". Any run form can then book a job into one by name instead of starting it now. A job that misses its window is marked missed and never runs late. Optionally require a second person to approve a booked change before it fires.' },
     ],
+    // The tabs of the Integrations card, in display order. Every integrations[] entry's
+    // `group` must be one of these ids, or the row renders on no tab at all — pinned by
+    // tests/test_settings_integrations.py.
+    integrationGroups: [
+      { id: 'beyondtrust', label: 'BeyondTrust' },
+      { id: 'hypervisors', label: 'Hypervisors' },
+      { id: 'cloud',       label: 'Cloud services' },
+      { id: 'governance',  label: 'Governance & cost' },
+      { id: 'platform',    label: 'Platform' },
+      { id: 'pov',         label: 'POV' },
+    ],
+    // UI-only, remembered per browser so a reload lands back on the same tab/state.
+    integrationTab: 'beyondtrust',
+    previewOpen: false,
 
     // OIDC discovery probe result (Test connection in the SSO panel).
     oidcTest: { running: false, ok: null, error: '', doc: null },
@@ -8497,6 +8540,19 @@ function settingsPage() {
 
     async init() {
       requireAuth();
+      // Storage can be missing or throw (private window, blocked site data): the
+      // defaults above then stand, and nothing else depends on these two values.
+      try {
+        const tab = localStorage.getItem('settings.integrationTab');
+        if (this.integrationGroups.some(g => g.id === tab)) this.integrationTab = tab;
+        this.previewOpen = localStorage.getItem('settings.previewOpen') === '1';
+      } catch (e) { /* defaults */ }
+      this.$watch('integrationTab', v => {
+        try { localStorage.setItem('settings.integrationTab', v); } catch (e) { /* ignore */ }
+      });
+      this.$watch('previewOpen', v => {
+        try { localStorage.setItem('settings.previewOpen', v ? '1' : '0'); } catch (e) { /* ignore */ }
+      });
       await this.loadProfile();
       await this.loadCredentials();
       await this.loadFeatureFlags();
