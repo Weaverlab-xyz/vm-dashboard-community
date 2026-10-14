@@ -10,13 +10,17 @@ dashboard puts on top of anything it provisions — a route in, a vaulted creden
 just-in-time grant, and the endpoint agent. The **platform** pages are places
 infrastructure lives, or things that run work on it.
 
-**Settings → Integrations is tabbed** along the same lines: **BeyondTrust** (Password
-Safe, PRA, EPM for Linux, Entitle), **Hypervisors**, **Cloud services**, **Governance &
-cost**, **Platform** (Remote Worker, Job Worker, Remote Agents, SSO, MCP Server) and
-**POV** (Skytap, POV cloud provider). A path such as *Settings → Integrations → Entitle*
-in these pages means: open the tab that holds it, then its **Configure →**. Each tab's
-badge counts the toggles switched on in it. **Settings → Preview features** is a separate,
-collapsible card further down the page; expand it to reach a preview feature's toggle.
+**The Settings page is tabbed**: **Account** (account details, security keys, the MCP
+endpoint), **Appearance**, **Integrations**, **Reference** and **Preview features**.
+Appearance, Integrations and Preview features are admin-only. Each tab has its own URL,
+such as `/settings#integrations` or `/settings#preview`.
+
+**Settings → Integrations is tabbed again inside**, along the same lines as these pages:
+**BeyondTrust** (Password Safe, PRA, EPM for Linux, Entitle), **Hypervisors**, **Cloud
+services**, **Governance & cost**, **Platform** (Remote Worker, Job Worker, Remote Agents,
+SSO, MCP Server) and **POV** (Skytap, POV cloud provider). A path such as *Settings →
+Integrations → Entitle* in these pages means: open the tab that holds it, then its
+**Configure →**. Each tab's badge counts the toggles switched on in it.
 
 **Giving a credential to something that is not a person is a folder of its own**, not a
 page here: [`workload-lab/`](../workload-lab.md) holds the four mechanisms — certificates,

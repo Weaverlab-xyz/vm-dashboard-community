@@ -209,6 +209,18 @@ def test_every_integration_renders_on_a_tab():
     assert not orphans, f"integrations[] entries on no Settings tab: {orphans}"
 
 
+def test_every_page_tab_shows_a_card():
+    """The page-level tab strip is built from settingsTabs; each card is gated on
+    `settingsTab === '<id>'`. A tab with no gated card is a click that empties the page."""
+    html = _read(_SETTINGS)
+    start = html.index("settingsTabs: [")
+    end = html.index("\n    ],", start)
+    ids = re.findall(r"\{\s*id:\s*'([a-z_0-9]+)'", html[start:end])
+    assert ids, "could not parse settingsTabs"
+    for tab in ids:
+        assert f"settingsTab === '{tab}'\"" in html, f"no card is shown on the '{tab}' tab"
+
+
 def test_the_beyondtrust_tab_holds_the_beyondtrust_products():
     groups = _integration_groups()
     for key in ("password_safe", "pra", "epml", "entitle"):

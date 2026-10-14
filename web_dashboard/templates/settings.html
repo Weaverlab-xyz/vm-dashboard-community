@@ -6,13 +6,31 @@
 <div class="max-w-2xl mx-auto py-8 px-4" x-data="settingsPage()">
 
   <h1 class="text-2xl font-bold text-gray-800 mb-1">Settings</h1>
-  <p class="text-sm text-gray-500 mb-8">Manage security keys, authentication, and integrations.</p>
+  <p class="text-sm text-gray-500 mb-6">Manage security keys, authentication, and integrations.</p>
+
+  <!-- Page tabs. Admin-only tabs are hidden, not just their cards: a non-admin would
+       otherwise land on an empty tab. The toast stays outside so a save on any tab
+       reports wherever the user is. -->
+  <div class="flex flex-wrap gap-x-1 border-b border-gray-200 mb-6" role="tablist">
+    <template x-for="t in settingsTabs.filter(t => isAdmin || !t.adminOnly)" :key="t.id">
+      <button type="button" role="tab" @click="settingsTab = t.id"
+              :aria-selected="settingsTab === t.id"
+              class="-mb-px px-3 py-2 text-sm font-medium border-b-2 transition-colors"
+              :class="settingsTab === t.id
+                ? 'border-blue-600 text-blue-700'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+              x-text="t.label"></button>
+    </template>
+  </div>
 
   <!-- Toast / status -->
   <div x-show="toast" x-cloak x-transition
        :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
        class="mb-6 border rounded-lg px-4 py-3 text-sm"
        x-text="toast"></div>
+
+  <!-- ═══ Account tab: Account, Security Keys, MCP Server ═══════════════════ -->
+  <div x-show="settingsTab === 'account'">
 
   <!-- ── Account Info ──────────────────────────────────────────────────── -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
@@ -157,6 +175,8 @@
     </p>
   </div>
 
+  </div><!-- /Account tab -->
+
   <!-- ── Appearance (admin only) ──────────────────────────────────────── -->
   {#
     Instance-wide, not per-user: this is what the login page and the public /docs shell
@@ -164,7 +184,7 @@
     Integrations panel — see the note above the endpoints in api/setup.py for why.
   #}
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6"
-       x-show="isAdmin" x-cloak>
+       x-show="isAdmin && settingsTab === 'appearance'" x-cloak>
     <div class="mb-4">
       <h2 class="text-base font-semibold text-gray-700">Appearance</h2>
       <p class="text-xs text-gray-400 mt-0.5">
@@ -454,7 +474,7 @@
 
   <!-- ── Integrations (admin only) ────────────────────────────────────── -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6"
-       x-show="isAdmin" x-cloak>
+       x-show="isAdmin && settingsTab === 'integrations'" x-cloak>
     <div class="flex items-center justify-between mb-4">
       <div>
         <h2 class="text-base font-semibold text-gray-700">Integrations</h2>
@@ -532,7 +552,8 @@
   <!-- ── Reference: docs + API explorer ───────────────────────────────── -->
   <!-- Both ship with the app but were previously only reachable if you already
        knew the URL, which made them effectively invisible. -->
-  <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6"
+       x-show="settingsTab === 'reference'" x-cloak>
     <div class="mb-4">
       <h2 class="text-base font-semibold text-gray-700">Reference</h2>
       <p class="text-xs text-gray-400 mt-0.5">Documentation and API tooling shipped with this build — no internet access required for the docs.</p>
@@ -565,24 +586,13 @@
 
   <!-- ── Preview features (admin only) ────────────────────────────────── -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6"
-       x-show="isAdmin" x-cloak>
-    <button type="button" @click="previewOpen = !previewOpen" :aria-expanded="previewOpen"
-            class="w-full flex items-start justify-between gap-4 text-left">
-      <div>
-        <h2 class="text-base font-semibold text-gray-700">Preview features</h2>
-        <p class="text-xs text-gray-400 mt-0.5">Early-access features with no extra configuration. Toggle on to reveal them in the nav — changes take effect immediately.</p>
-      </div>
-      <span class="flex-shrink-0 flex items-center gap-2 text-xs text-gray-500 mt-0.5">
-        <span x-show="!previewOpen"
-              x-text="previewFlags.filter(f => f.enabled).length + ' of ' + previewFlags.length + ' enabled'"></span>
-        <svg class="w-4 h-4 transition-transform" :class="previewOpen ? 'rotate-180' : ''"
-             fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
-        </svg>
-      </span>
-    </button>
+       x-show="isAdmin && settingsTab === 'preview'" x-cloak>
+    <div class="mb-4">
+      <h2 class="text-base font-semibold text-gray-700">Preview features</h2>
+      <p class="text-xs text-gray-400 mt-0.5">Early-access features with no extra configuration. Toggle on to reveal them in the nav — changes take effect immediately.</p>
+    </div>
 
-    <div class="space-y-2 mt-4" x-show="previewOpen" x-cloak>
+    <div class="space-y-2">
       <template x-for="f in previewFlags" :key="f.key">
         <div class="flex items-center gap-4 px-4 py-3 rounded-xl border transition-colors"
              :class="f.enabled ? 'border-blue-200 bg-blue-50' : 'border-gray-200 bg-white'">
@@ -8318,9 +8328,18 @@ function settingsPage() {
       { id: 'platform',    label: 'Platform' },
       { id: 'pov',         label: 'POV' },
     ],
-    // UI-only, remembered per browser so a reload lands back on the same tab/state.
+    // UI-only, remembered per browser so a reload lands back on the same tab.
     integrationTab: 'beyondtrust',
-    previewOpen: false,
+    // The page-level tabs. The id doubles as the URL hash, so /settings#integrations
+    // opens straight onto that tab. adminOnly tabs are hidden from non-admins.
+    settingsTabs: [
+      { id: 'account',      label: 'Account' },
+      { id: 'appearance',   label: 'Appearance',       adminOnly: true },
+      { id: 'integrations', label: 'Integrations',     adminOnly: true },
+      { id: 'reference',    label: 'Reference' },
+      { id: 'preview',      label: 'Preview features', adminOnly: true },
+    ],
+    settingsTab: 'account',
 
     // OIDC discovery probe result (Test connection in the SSO panel).
     oidcTest: { running: false, ok: null, error: '', doc: null },
@@ -8541,21 +8560,35 @@ function settingsPage() {
     async init() {
       requireAuth();
       // Storage can be missing or throw (private window, blocked site data): the
-      // defaults above then stand, and nothing else depends on these two values.
+      // defaults above then stand, and nothing else depends on these values.
+      // A #hash in the URL beats the remembered tab, so a link lands where it points.
+      const isTab = id => this.settingsTabs.some(t => t.id === id);
+      let pageTab = location.hash.slice(1);
       try {
         const tab = localStorage.getItem('settings.integrationTab');
         if (this.integrationGroups.some(g => g.id === tab)) this.integrationTab = tab;
-        this.previewOpen = localStorage.getItem('settings.previewOpen') === '1';
+        if (!isTab(pageTab)) pageTab = localStorage.getItem('settings.tab');
       } catch (e) { /* defaults */ }
+      if (isTab(pageTab)) this.settingsTab = pageTab;
       this.$watch('integrationTab', v => {
         try { localStorage.setItem('settings.integrationTab', v); } catch (e) { /* ignore */ }
       });
-      this.$watch('previewOpen', v => {
-        try { localStorage.setItem('settings.previewOpen', v ? '1' : '0'); } catch (e) { /* ignore */ }
+      this.$watch('settingsTab', v => {
+        try { localStorage.setItem('settings.tab', v); } catch (e) { /* ignore */ }
+        history.replaceState(null, '', '#' + v);
+      });
+      window.addEventListener('hashchange', () => {
+        const id = location.hash.slice(1);
+        if (isTab(id)) this.settingsTab = id;
       });
       await this.loadProfile();
       await this.loadCredentials();
       await this.loadFeatureFlags();
+      // isAdmin is known only now. A non-admin restored onto an admin tab would see an
+      // empty page, since both the tab and its card are hidden from them.
+      if (!this.isAdmin && this.settingsTabs.find(t => t.id === this.settingsTab)?.adminOnly) {
+        this.settingsTab = 'account';
+      }
       await this.loadPreviewFlags();
       await this.loadBranding();
       await this.loadStorageStatus();   // gates the Ansible enable toggle
