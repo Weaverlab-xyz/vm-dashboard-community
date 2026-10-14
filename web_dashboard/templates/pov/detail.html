@@ -378,7 +378,7 @@
             <input x-show="/\.(exe|msi)$/i.test(stepAsset)" type="text" x-model="stepArgs"
                    placeholder="installer arguments"
                    class="border border-gray-300 rounded px-2 py-1 text-xs font-mono w-64">
-            <button @click="runStep()" :disabled="!stepVm || !stepAsset"
+            <button @click="runGuestStep()" :disabled="!stepVm || !stepAsset"
                     class="text-xs px-2 py-1 rounded bg-blue-600 text-white disabled:opacity-40 disabled:cursor-not-allowed">Run</button>
           </div>
 
@@ -1620,7 +1620,7 @@
         } catch (e) { this.stepAssets = []; }
       },
 
-      async runStep() {
+      async runGuestStep() {
         this.error = ''; this.notice = '';
         try {
           const res = await this.apiFetch(
