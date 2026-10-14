@@ -2,7 +2,9 @@
 {% block title %}Job {{ job_id[:8] }}{% endblock %}
 
 {% block content %}
-<div x-data="jobDetail('{{ job_id }}')" x-init="init()">
+{# No x-init: Alpine 3 calls a component's init() by itself, and a second call opened a
+   second WebSocket whose replay printed every line already shown a second time. #}
+<div x-data="jobDetail('{{ job_id }}')">
 
   <!-- Back link -->
   <a href="/jobs" class="inline-flex items-center gap-1 text-sm text-blue-600 hover:underline mb-4">
@@ -515,7 +517,7 @@
       jobId,
       job: {},
       logs: [],
-      _lastLogLine: null,
+      _lastLogSeq: 0,
       wsConnected: false,
       logsLoading: false,
       tracker: null,
@@ -659,6 +661,9 @@
       },
 
       connectWs() {
+        // One stream per page. Each socket replays the whole persisted log on connect,
+        // so a second one would print every line again.
+        if (this.tracker) return;
         // Connect even when the job is already finished. /api/ws/jobs/{id} replays every
         // persisted JobLog line and *then* closes precisely so this case works — opening
         // a job after it completed used to short-circuit here and show "No output yet…"
@@ -669,8 +674,10 @@
             this.job.status = data.status || this.job.status;
             this.job.progress_pct = data.progress_pct ?? this.job.progress_pct;
             this.job.progress_message = data.progress_message ?? this.job.progress_message;
-            if (data.log_line && data.log_line !== this._lastLogLine) {
-              this._lastLogLine = data.log_line;
+            // Deduped by the JobLog seq, never by text: a stream that replays what was
+            // already shown is skipped, and a line that legitimately repeats is kept.
+            if (data.log_line && !(data.seq && data.seq <= this._lastLogSeq)) {
+              if (data.seq) this._lastLogSeq = data.seq;
               this.logs.push(data.log_line);
               this.scrollLog();
             }

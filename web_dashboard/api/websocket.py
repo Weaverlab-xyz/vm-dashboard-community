@@ -174,10 +174,13 @@ async def job_progress_websocket(websocket: WebSocket, job_id: str):
 
     await manager.connect(job_id, websocket, subprotocol=subprotocol)
 
-    def _log_msg(line: str, job) -> dict:
+    def _log_msg(seq: int, line: str, job) -> dict:
+        # `seq` lets the client drop a line it has already shown, which is what makes a
+        # replay (a reconnect, or a second socket from the same page) safe to receive.
         return {
             "job_id": job_id,
             "type": "progress",
+            "seq": seq,
             "progress_pct": job.progress_pct,
             "progress_message": job.progress_message,
             "log_line": line,
@@ -204,7 +207,7 @@ async def job_progress_websocket(websocket: WebSocket, job_id: str):
         # Replay persisted Live Output BEFORE any terminal close, so a client that
         # opens a finished job (or reconnects mid-job) still sees the full output.
         for seq, line in job_service.get_job_logs(db, job_id, after_seq=last_seq):
-            await websocket.send_json(_log_msg(line, job))
+            await websocket.send_json(_log_msg(seq, line, job))
             last_seq = seq
 
         # If already terminal, close immediately
@@ -237,7 +240,7 @@ async def job_progress_websocket(websocket: WebSocket, job_id: str):
 
             # Tail any new Live Output lines persisted since the last poll.
             for seq, line in job_service.get_job_logs(db, job_id, after_seq=last_seq):
-                await websocket.send_json(_log_msg(line, job))
+                await websocket.send_json(_log_msg(seq, line, job))
                 last_seq = seq
 
             if job.status in ("completed", "failed", "cancelled"):
