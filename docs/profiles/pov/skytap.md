@@ -285,6 +285,13 @@ Port 8081 is the default. On an instance that shares its environment with anothe
 dashboard, as the reference POV instance does on port 8091, set **SPIRE server address for
 agents** to `host:port` first: a blank one sends brokers to the other dashboard's server.
 
+Before it mints anything, the Broker run checks that address: it opens TLS to it and
+requires the certificate to chain to this dashboard's own trust bundle and to name
+`spiffe://<trust domain>/spire/server`. If something else answers, such as another
+dashboard's server, SPIRE is not offered and the job says which address to fix, instead of
+the guest waiting two minutes and falling back. If nothing answers from the dashboard, it is
+offered anyway, because that proves nothing about the guest's own network.
+
 ### Fitting Skytap's 16,384-character limit
 
 Skytap refuses a longer `user_data` with a 422 ("Contents is too long"). About half of the

@@ -236,13 +236,12 @@ def test_the_offer_binds_the_agent_like_migrate():
         return {"trust_domain": "pov.example.test", "join_token": _OFFER["join_token"],
                 "bootstrap_pem": _PEM, "spiffe_id": agent_.spiffe_id}
     try:
-        with _flags(True), _Patch(dashboard_spire, migrate_agent=migrate,
-                                  server_address=lambda: "pov-agents.example.test",
-                                  server_port=lambda: 8091):
+        with _flags(True), _server(verdict=True), _Patch(dashboard_spire, migrate_agent=migrate):
             facts, note = pov_broker.spire_offer(db, agent)
         assert calls == [agent.id]
         assert facts["join_token"] == _OFFER["join_token"] and facts["server_port"] == 8091
         assert agent.spiffe_id.endswith(agent.id) and "falls back" in note
+        assert "verified" in note
     finally:
         db.close()
 
@@ -254,7 +253,7 @@ def test_a_down_server_leaves_the_broker_unbound_on_its_code():
         agent_service.bind_spiffe_id(db_, agent_, f"spiffe://pov.example.test/agent/{agent_.id}")
         raise dashboard_spire.DashboardSpireError("the SPIRE server sidecar is not running")
     try:
-        with _flags(True), _Patch(dashboard_spire, migrate_agent=migrate):
+        with _flags(True), _server(verdict=True), _Patch(dashboard_spire, migrate_agent=migrate):
             facts, note = pov_broker.spire_offer(db, agent)
         assert facts is None and "not running" in note
         db.refresh(agent)
@@ -268,8 +267,81 @@ def test_the_offer_comes_after_the_code_in_ensure_broker():
     src = open(os.path.join(_ROOT, "web_dashboard", "services", "pov_broker.py"),
                encoding="utf-8").read()
     body = src.split("async def ensure_broker(", 1)[1]
-    assert body.index("_mint_code(db, env)") < body.index("spire_offer(db, agent)")
+    assert body.index("_mint_code(db, env)") < body.index("spire_offer, db, agent")
+    assert "asyncio.to_thread(spire_offer" in body, "relayed calls must not block the loop"
     assert "spire=spire" in body
+
+
+def _server(verdict=True, why="checked", td_raises=None):
+    """dashboard_spire's read side, faked: trust domain, bundle, address, and the verdict
+    of the address check."""
+    seq = list(td_raises or [])
+
+    def td():
+        if seq:
+            raise seq.pop(0)
+        return "pov.example.test"
+    return _Patch(dashboard_spire, trust_domain=td, bootstrap_bundle_pem=lambda: _PEM,
+                  server_address=lambda: "pov-agents.example.test", server_port=lambda: 8091,
+                  check_agent_address=lambda *a, **k: (verdict, why))
+
+
+def test_an_address_that_is_another_server_is_never_offered():
+    """The live failure: a blank address handed the broker port 8081, which in that
+    environment is another dashboard's SPIRE server."""
+    db, agent = _agent()
+    minted = []
+    try:
+        with _flags(True), _server(verdict=False, why="presents another trust domain"),                 _Patch(dashboard_spire, migrate_agent=lambda *a: minted.append(1)):
+            facts, note = pov_broker.spire_offer(db, agent)
+        assert facts is None and minted == [], "no token is minted for the wrong server"
+        assert "another trust domain" in note
+    finally:
+        db.close()
+
+
+def test_an_address_the_dashboard_cannot_reach_is_still_offered():
+    """Unreachable from the dashboard proves nothing about the guest's network."""
+    db, agent = _agent()
+
+    def migrate(db_, agent_):
+        agent_service.bind_spiffe_id(db_, agent_, f"spiffe://pov.example.test/agent/{agent_.id}")
+        return {"trust_domain": "pov.example.test", "join_token": _OFFER["join_token"],
+                "bootstrap_pem": _PEM, "spiffe_id": agent_.spiffe_id}
+    try:
+        with _flags(True), _server(verdict=None, why="timed out"),                 _Patch(dashboard_spire, migrate_agent=migrate):
+            facts, note = pov_broker.spire_offer(db, agent)
+        assert facts is not None and "not verifiable" in note and "timed out" in note
+    finally:
+        db.close()
+
+
+def test_a_relay_that_is_just_starting_gets_one_more_chance():
+    slept = []
+    err = dashboard_spire.DashboardSpireError("the SPIRE server relay is not running: …")
+    with _server(td_raises=[err]):
+        assert pov_broker._trust_domain_with_grace(dashboard_spire, sleep=slept.append)             == "pov.example.test"
+    assert slept == [pov_broker.RELAY_GRACE_S]
+    with _server(td_raises=[err, err]):
+        try:
+            pov_broker._trust_domain_with_grace(dashboard_spire, sleep=slept.append)
+            raise AssertionError("a relay that never comes must still fail")
+        except dashboard_spire.DashboardSpireError:
+            pass
+    other = dashboard_spire.DashboardSpireError("spire-server bundle show failed: x")
+    with _server(td_raises=[other]):
+        try:
+            pov_broker._trust_domain_with_grace(dashboard_spire, sleep=slept.append)
+            raise AssertionError("only a missing relay is waited for")
+        except dashboard_spire.DashboardSpireError:
+            pass
+    assert len(slept) == 2
+
+
+def test_the_relay_rechecks_the_switches_within_seconds():
+    from web_dashboard.services import spire_relay
+    assert spire_relay.IN_USE_RECHECK_S <= 5
+    assert pov_broker.RELAY_GRACE_S > spire_relay.IN_USE_RECHECK_S + spire_relay.POLL_S
 
 
 # ── what the operator sees ───────────────────────────────────────────────────

@@ -44,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -1119,6 +1120,17 @@ def spire_offer(db: Session, agent: RemoteAgent) -> tuple[dict | None, str]:
         return None, "SPIRE attestation is off on this dashboard; the broker enrols with an Ed25519 key."
     from . import dashboard_spire
     try:
+        # Where the guest will dial, checked BEFORE a token is minted for it. A blank
+        # "SPIRE server address for agents" means the agent gateway's host on 8081, and on
+        # a Container Apps environment shared with another dashboard that is the OTHER
+        # dashboard's server: the guest's TLS fails, it waits two minutes and falls back,
+        # and nothing anywhere says why. Found live.
+        td = _trust_domain_with_grace(dashboard_spire)
+        host, port = dashboard_spire.server_address(), dashboard_spire.server_port()
+        verdict, why = dashboard_spire.check_agent_address(
+            host, port, dashboard_spire.bootstrap_bundle_pem(), td)
+        if verdict is False:
+            raise ValueError(why)
         out = dashboard_spire.migrate_agent(db, agent)
         facts = check_spire_offer({
             "server_address": dashboard_spire.server_address(),
@@ -1135,9 +1147,29 @@ def spire_offer(db: Session, agent: RemoteAgent) -> tuple[dict | None, str]:
         except Exception:  # noqa: BLE001 -- best effort; the code path works either way
             db.rollback()
         return None, f"SPIRE not offered ({exc}); the broker enrols with an Ed25519 key."
+    checked = ("verified: it presents this dashboard's SPIRE server" if verdict
+               else f"not verifiable from the dashboard: {why}")
     return facts, (f"SPIRE join token minted for {out['spiffe_id']} "
-                   f"({facts['server_address']}:{facts['server_port']}); the broker falls "
-                   f"back to its enrolment code if the guest cannot reach the server.")
+                   f"({facts['server_address']}:{facts['server_port']}, {checked}); the "
+                   f"broker falls back to its enrolment code if the guest cannot reach the "
+                   f"server.")
+
+
+# How long a Broker run waits for an app process to start serving the SPIRE relay. The
+# relay only serves while a SPIRE feature is on, so the first run after ticking one can
+# arrive before any app process has noticed (it re-checks every few seconds).
+RELAY_GRACE_S = 10.0
+
+
+def _trust_domain_with_grace(dashboard_spire, sleep=time.sleep) -> str:
+    """The server's trust domain, giving a relay that is just starting one more chance."""
+    try:
+        return dashboard_spire.trust_domain()
+    except dashboard_spire.DashboardSpireError as exc:
+        if "relay is not running" not in str(exc):
+            raise
+        sleep(RELAY_GRACE_S)
+        return dashboard_spire.trust_domain()
 
 
 async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
@@ -1204,7 +1236,10 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
     agent, code = _mint_code(db, env)
     # After the code, never before: re-issuing a code clears the row's SPIFFE binding, so
     # binding first would be undone a line later.
-    spire, spire_note = spire_offer(db, agent)
+    # Off the event loop: on a managed runtime every call in it is a relayed one, and a
+    # down relay costs a grace period plus timeouts that the worker's other jobs (and
+    # their heartbeats) must not wait behind. The session is not shared meanwhile.
+    spire, spire_note = await asyncio.to_thread(spire_offer, db, agent)
     _progress(40, spire_note)
 
     # The Config-Management grant is scoped to this POV's Windows guests — or to the one

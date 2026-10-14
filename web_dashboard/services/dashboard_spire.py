@@ -386,6 +386,62 @@ def server_port() -> int:
     return port or SERVER_PORT
 
 
+def check_agent_address(host: str, port: int, bundle_pem: str, td: str,
+                        timeout: float = 5.0) -> tuple:
+    """``(verdict, sentence)``: does ``host:port`` present THIS dashboard's SPIRE server?
+
+    ``True``: the TLS chain verifies against this server's own bundle and the certificate
+    names ``spiffe://<td>/spire/server``. ``False``: something answered and it is NOT this
+    server, which is a misconfiguration to stop at, not to hand to an agent. ``None``:
+    nothing answered from here, which proves nothing about the agent's network.
+
+    Found live: with **SPIRE server address for agents** blank, a POV instance sharing a
+    Container Apps environment with another dashboard handed its brokers port 8081, which
+    there is the OTHER dashboard's server. Every broker fell back to Ed25519 after its
+    two-minute wait, and nothing said why. This is the check that says why, before any of it.
+
+    Only the handshake: a SPIRE server's agent endpoint completes TLS without a client
+    certificate (node attestation happens inside the stream), and gRPC needs ALPN "h2".
+    """
+    import socket
+    import ssl
+    want = server_id(td)
+    try:
+        ctx = ssl.create_default_context(cadata=bundle_pem)
+    except (ssl.SSLError, ValueError) as exc:
+        return None, f"this server's own trust bundle could not be loaded ({exc})"
+    ctx.check_hostname = False          # SPIFFE: the identity is the URI SAN, not a name
+    # Python 3.13 made X.509 strict mode the default, which holds a chain to web-PKI rules
+    # (key identifiers and the like) a SPIFFE chain is not obliged to meet. The question is
+    # only "does this chain to our bundle", and its answer must not change with the image's
+    # Python version.
+    ctx.verify_flags &= ~getattr(ssl, "VERIFY_X509_STRICT", 0)
+    ctx.set_alpn_protocols(["h2"])
+    try:
+        raw = socket.create_connection((host, int(port)), timeout=timeout)
+    except OSError as exc:
+        return None, f"{host}:{port} could not be reached from the dashboard ({exc})"
+    try:
+        with raw, ctx.wrap_socket(raw) as tls:
+            cert = tls.getpeercert() or {}
+    except ssl.SSLCertVerificationError:
+        return False, (f"{host}:{port} answers with a SPIRE server this dashboard does not "
+                       f"trust: another dashboard's, or another trust domain's. Set SPIRE "
+                       f"server address for agents (Settings → Remote Agents) to the "
+                       f"host:port that reaches THIS dashboard's server")
+    except (ssl.SSLError, OSError) as exc:
+        # It connected, so something is there; it just is not a SPIRE server's TLS.
+        reason = getattr(exc, "reason", None) or exc
+        return False, (f"{host}:{port} answers, but not as a SPIRE server (TLS failed: "
+                       f"{reason}). Check SPIRE server address for agents")
+    uris = [v for k, v in cert.get("subjectAltName", ()) if k == "URI"]
+    if want not in uris:
+        return False, (f"{host}:{port} presents {', '.join(uris) or 'no SPIFFE ID'}, not "
+                       f"{want}. Set SPIRE server address for agents to this dashboard's "
+                       f"own server")
+    return True, f"{host}:{port} presents {want}"
+
+
 def install_facts(td: str) -> dict:
     """What spire-agent-install.yml needs besides the join token. None of it is secret."""
     return {"trust_domain": td, "server_address": server_address(),
