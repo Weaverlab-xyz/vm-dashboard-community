@@ -160,6 +160,14 @@ def test_something_that_is_not_tls_is_refused():
     assert verdict is False, why
 
 
+def test_tls_below_1_2_is_never_negotiated():
+    """CodeQL: create_default_context alone can still allow TLS 1.0/1.1 on some builds."""
+    src = open(os.path.join(_ROOT, "web_dashboard", "services", "dashboard_spire.py"),
+               encoding="utf-8").read()
+    body = src.split("def check_agent_address(", 1)[1].split("\ndef ", 1)[0]
+    assert "ctx.minimum_version = ssl.TLSVersion.TLSv1_2" in body
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     fns.sort(key=lambda f: f.__code__.co_firstlineno)

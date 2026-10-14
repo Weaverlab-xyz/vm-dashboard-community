@@ -410,6 +410,8 @@ def check_agent_address(host: str, port: int, bundle_pem: str, td: str,
         ctx = ssl.create_default_context(cadata=bundle_pem)
     except (ssl.SSLError, ValueError) as exc:
         return None, f"this server's own trust bundle could not be loaded ({exc})"
+    # SPIRE speaks TLS 1.2 and 1.3 only; refuse anything older outright.
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.check_hostname = False          # SPIFFE: the identity is the URI SAN, not a name
     # Python 3.13 made X.509 strict mode the default, which holds a chain to web-PKI rules
     # (key identifiers and the like) a SPIFFE chain is not obliged to meet. The question is
