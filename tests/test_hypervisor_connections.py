@@ -287,6 +287,67 @@ def test_an_agent_bound_connection_may_now_hold_a_secret():
     db.close()
 
 
+def test_the_projection_says_where_the_credential_lives():
+    """The Connections tab's Credential column. It names the SOURCE, never the value — a
+    Secrets Safe reference reads as "BeyondTrust Secrets Safe", not as its path."""
+    db = _fresh()
+    on_agent = hcs.create(db, kind="workstation", name="ws", created_by="t",
+                          agent_id="agt-1", agent_connection_name="pc-workstation")
+    in_safe = hcs.create(db, kind="hyperv", name="hv", created_by="t",
+                         agent_id="agt-1", agent_connection_name="pc-hyperv",
+                         secret_ref="bt_safe://Dashboard/hv-hyperv")
+    in_ps = hcs.create(db, kind="vsphere", name="vc", created_by="t",
+                       agent_id="agt-1", agent_connection_name="dc1-vcenter",
+                       secret_ref="ps_account://42")
+    stored = hcs.create(db, kind="proxmox", name="px", created_by="t",
+                        host="10.0.0.5", username="root@pam", secret="s3cret")
+    assert on_agent["credential_held_by"] == "agent"
+    assert on_agent["credential_source"] == ""
+    assert in_safe["credential_held_by"] == "dashboard"
+    assert in_safe["credential_source"] == "BeyondTrust Secrets Safe"
+    assert in_ps["credential_source"] == "Password Safe managed account"
+    assert stored["credential_held_by"] == "dashboard"
+    assert stored["credential_source"] == "Encrypted in the dashboard database"
+    assert "s3cret" not in repr(stored)
+    db.close()
+
+
+def test_the_list_shows_when_the_agent_last_fetched_its_credential():
+    """`agent.connection_secret` is written only once a credential was sealed for a running
+    job, so it is the dashboard's one piece of evidence that the agent's connections.yaml
+    opted in. A row the agent never fetched for must read as not fetched, not as fine."""
+    from datetime import datetime, timedelta
+    from web_dashboard.database import AuditLog
+    from web_dashboard.services import job_service
+    db = _fresh()
+    db.query(AuditLog).filter(AuditLog.action == "agent.connection_secret").delete()
+    db.commit()
+    used = hcs.create(db, kind="hyperv", name="hv", created_by="t",
+                      agent_id="agt-1", agent_connection_name="pc-hyperv",
+                      secret_ref="bt_safe://Dashboard/hv-hyperv")
+    unused = hcs.create(db, kind="workstation", name="ws", created_by="t",
+                        agent_id="agt-1", agent_connection_name="pc-workstation",
+                        secret_ref="bt_safe://Dashboard/hv-workstation")
+    stale = hcs.create(db, kind="vsphere", name="vc", created_by="t",
+                       agent_id="agt-1", agent_connection_name="dc1-vcenter",
+                       secret="s3cret")
+    job_service.log_audit(db, "agent:pc", "agent.connection_secret",
+                          details={"job_id": "j1", "connection_id": used["id"],
+                                   "connection_ref": "pc-hyperv", "source": "secret_ref:bt_safe"})
+    old = AuditLog(action="agent.connection_secret", username="agent:pc",
+                   timestamp=datetime.utcnow() - timedelta(days=hcs._FETCH_LOOKBACK_DAYS + 5),
+                   details='{"connection_id": "%s"}' % stale["id"])
+    db.add(old)
+    db.commit()
+
+    by_id = {c["id"]: c for c in hcs.list_connections(db)}
+    assert by_id[used["id"]]["secret_last_fetched_at"], "a fetch in the window is shown"
+    assert by_id[unused["id"]]["secret_last_fetched_at"] is None
+    assert by_id[stale["id"]]["secret_last_fetched_at"] is None, \
+        "a fetch older than the lookback is not evidence the agent still opts in"
+    db.close()
+
+
 def test_an_agent_bound_row_cannot_be_aimed_by_a_later_edit():
     """`create` stripped the aiming fields; `update` used to let them straight back in.
 
