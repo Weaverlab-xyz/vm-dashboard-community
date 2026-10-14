@@ -58,6 +58,19 @@ PRA) never hold up the share link. The tab refreshes itself while a step is runn
 Steps that need a form, such as the Resource Broker's installer, zone and key, open that
 form on the POV list page.
 
+The tab also shows everything in the POV list's row, so you don't have to scroll that wide
+table sideways:
+
+- **The strip at the top** shows the columns that belong to no single step: power and when
+  it was last confirmed, VM count, the PRA, Password Safe and Entitle tenants, use cases
+  done, expiry, the sleep timer or schedule, spend, template and who created the POV.
+- **The small line under each step** shows what that step's column says on the list. For
+  example, the broker's status and VM, the Gateway's name and whether it has a deploy key,
+  the Resource Broker's installer, zone and key, the wired counts for PRA, Password Safe
+  and Entitle, and whether the share link is live.
+
+These are read-only. To edit them, use the controls on the POV list page.
+
 ## The pages
 
 | Page | What's in it |
