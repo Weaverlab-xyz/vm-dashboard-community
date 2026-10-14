@@ -80,7 +80,7 @@ def _trust_domain(td, uri=None):
                  uri=uri or f"spiffe://{td}/spire/server")
     d = tempfile.mkdtemp(prefix="spire-tls-")
     chain, key = os.path.join(d, "chain.pem"), os.path.join(d, "key.pem")
-    open(chain, "w").write(_pem(leaf) + _pem(inter))
+    open(chain, "w", encoding="ascii").write(_pem(leaf) + _pem(inter))
     open(key, "wb").write(lk.private_bytes(serialization.Encoding.PEM,
                                            serialization.PrivateFormat.PKCS8,
                                            serialization.NoEncryption()))
