@@ -333,6 +333,16 @@ def _get_ec2(region: str):
     return aws_client("ec2", region)
 
 
+def _get_ec2_pinned(region: str):
+    """``_get_ec2``, but the caller's region wins over the configured ``aws_region``.
+
+    For callers that carry a region of their own — a POV cloud template names one per
+    template — where the default-region override would silently build somewhere else.
+    """
+    _require_boto3()
+    return aws_client("ec2", region, pinned=True)
+
+
 def _get_sm(region: str):
     _require_boto3()
     return aws_client("secretsmanager", region)

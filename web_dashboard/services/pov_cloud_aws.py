@@ -76,12 +76,12 @@ def _env_filter(env_id: str) -> list:
 # ── verify ───────────────────────────────────────────────────────────────────
 
 def _verify_sync(region: str) -> tuple[int, str]:
-    ec2 = aws_service._get_ec2(region)
+    ec2 = aws_service._get_ec2_pinned(region)
     resp = ec2.describe_regions(RegionNames=[region])
     # Who the calls ran as. GetCallerIdentity needs no permission, so it cannot fail
     # where DescribeRegions succeeded; it is what tells an operator that the role was
     # actually assumed rather than some other credential being picked up.
-    arn = aws_service.aws_client("sts", region).get_caller_identity().get("Arn", "")
+    arn = aws_service.aws_client("sts", region, pinned=True).get_caller_identity().get("Arn", "")
     return len(resp.get("Regions") or []), arn
 
 
@@ -257,7 +257,7 @@ def _create_zones_sync(ec2, env_id: str, vpc_id: str, zones: list) -> dict:
 
 def _create_network_sync(env_id: str, region: str, cidr: str, sub_cidr: str,
                          zones: list | None = None) -> dict:
-    ec2 = aws_service._get_ec2(region)
+    ec2 = aws_service._get_ec2_pinned(region)
 
     vpc = ec2.create_vpc(CidrBlock=cidr,
                          TagSpecifications=[_tag_spec("vpc", env_id, env_id)])
@@ -370,7 +370,7 @@ def _root_device(ec2, image_id: str) -> tuple:
 
 
 def _create_vms_sync(env_id: str, region: str, specs: list, network: dict) -> list:
-    ec2 = aws_service._get_ec2(region)
+    ec2 = aws_service._get_ec2_pinned(region)
     created = []
     for spec in specs:
         where = {**network, **env.placement(network, spec)}
@@ -474,7 +474,7 @@ def _environment(env_id: str, instances: list, region: str,
 
 
 def _describe_sync(region: str, filters: list) -> list:
-    ec2 = aws_service._get_ec2(region)
+    ec2 = aws_service._get_ec2_pinned(region)
     out = []
     token = None
     while True:
@@ -500,7 +500,7 @@ def _volume_sizes_sync(region: str, filters: list) -> dict:
     that a suspended POV keeps paying — so the footprint has to include it or the page
     would imply a stopped environment is free.
     """
-    ec2 = aws_service._get_ec2(region)
+    ec2 = aws_service._get_ec2_pinned(region)
     out: dict = {}
     token = None
     while True:
@@ -568,7 +568,7 @@ async def list_environments(region: str) -> list:
 
 def _network_env_ids_sync(region: str, filters: list) -> list:
     """Environment ids that still have a VPC, whatever happened to their instances."""
-    ec2 = aws_service._get_ec2(region)
+    ec2 = aws_service._get_ec2_pinned(region)
     out = set()
     for vpc in ec2.describe_vpcs(Filters=filters).get("Vpcs") or []:
         tags = {t["Key"]: t["Value"] for t in vpc.get("Tags") or []}
@@ -586,7 +586,7 @@ def _read_network_sync(env_id: str, region: str) -> dict:
     anybody changes the environment by hand — while the tag is the same thing the teardown
     selects on, so if this finds it the teardown will too.
     """
-    ec2 = aws_service._get_ec2(region)
+    ec2 = aws_service._get_ec2_pinned(region)
     filters = _env_filter(env_id)
     subnets = ec2.describe_subnets(Filters=filters).get("Subnets") or []
     groups = ec2.describe_security_groups(Filters=filters).get("SecurityGroups") or []
@@ -626,7 +626,7 @@ def _remove_vms_sync(env_id: str, region: str, names: list) -> list:
     selecting one environment's instance while claiming to select another's would delete a
     live customer's agent host.
     """
-    ec2 = aws_service._get_ec2(region)
+    ec2 = aws_service._get_ec2_pinned(region)
     wanted = {(n or "").strip().lower() for n in names if (n or "").strip()}
     if not wanted:
         return []
@@ -655,7 +655,7 @@ async def remove_vms(env_id: str, region: str, names: list) -> list:
 # ── power ────────────────────────────────────────────────────────────────────
 
 def _power_sync(env_id: str, region: str, action: str) -> int:
-    ec2 = aws_service._get_ec2(region)
+    ec2 = aws_service._get_ec2_pinned(region)
     ids = [i["InstanceId"] for i in _describe_sync(region, _env_filter(env_id))]
     if not ids:
         return 0
@@ -686,7 +686,7 @@ def _delete_sync(env_id: str, region: str) -> list:
     called to prevent. The caller runs this again on the next attempt, so anything
     survived is retried, not lost.
     """
-    ec2 = aws_service._get_ec2(region)
+    ec2 = aws_service._get_ec2_pinned(region)
     removed = []
     filters = _env_filter(env_id)
 
