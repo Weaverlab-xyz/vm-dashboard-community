@@ -1589,6 +1589,18 @@ class PovCloudFeatureConfig(BaseModel):
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""     # encrypted at rest
     aws_region: str = "us-east-2"
+    # Keyless AWS: the dashboard's own SPIFFE identity, assuming this role through
+    # AssumeRoleWithWebIdentity (services/cloud_federation.py). The SAME keys the Remote
+    # Agents panel binds — one setting shown in two places, not a POV copy — declared
+    # here because the panel's "SPIFFE identity" choice writes them, and an undeclared
+    # bound field is discarded on save.
+    dashboard_spiffe_identity_enabled: bool = False
+    dashboard_spiffe_aud_aws: bool = False
+    aws_federation_role_arn: str = ""
+    # "federation" = the SPIFFE identity is the EVERYDAY credential and Workload
+    # Credentials serves only jobs (services/workload_credential_lease). The same key the
+    # Workload Credentials panel binds; that panel keeps the rest of WLC's settings.
+    wlc_aws_everyday_source: str = "lease"
     azure_client_id: str = ""
     azure_client_secret: str = ""       # encrypted at rest
     azure_tenant_id: str = ""

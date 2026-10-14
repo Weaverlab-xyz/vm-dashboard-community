@@ -43,6 +43,12 @@ if _ROOT not in sys.path:
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-agent-vhost-surface")
 
 _CADDYFILE = os.path.join(_ROOT, "examples", "remote-agent", "Caddyfile")
+# The managed-runtime gateway sidecar (ACA / Cloud Run / ECS). Same rule, a second copy:
+# it carried the no-slash matcher long after the Compose file was fixed, and it is the
+# one the live ACA installs run. Only its `handle @agent { ... }` block is the agent
+# vhost — the rest of the file is the UI vhost.
+_CLOUD_CADDYFILE = os.path.join(_ROOT, "examples", "cloud-gateway", "Caddyfile")
+_GATEWAYS = (_CADDYFILE, _CLOUD_CADDYFILE)
 _COMPOSE = os.path.join(_ROOT, "docker-compose.agent.yml")
 
 # Probe the optional third-party packages by name, then import the app UNGUARDED. A
@@ -65,18 +71,33 @@ from web_dashboard.main import app  # noqa: E402
 
 # ── reading the gateway config ────────────────────────────────────────────────
 
-def _proxied_matchers():
-    """Every path matcher on a `handle` block in the Caddyfile that proxies to the app.
+def _agent_vhost_lines(caddyfile):
+    """The lines of the agent vhost, comments stripped.
 
-    Deliberately ignores comment lines. The Caddyfile's comments have to be able to
-    name the wrong matcher in order to explain why it is wrong, and a parser that read
-    them would fail this test on its own documentation.
+    The Compose gateway's file IS the agent vhost. The cloud gateway serves both vhosts
+    from one site block, so only the body of its ``handle @agent {`` block counts.
+    Deliberately ignores comment lines: the Caddyfiles' comments have to be able to name
+    the wrong matcher in order to explain why it is wrong, and a parser that read them
+    would fail this test on its own documentation.
     """
+    lines = [raw.split("#", 1)[0].strip() for raw in open(caddyfile, encoding="utf-8")]
+    lines = [ln for ln in lines if ln]
+    if caddyfile != _CLOUD_CADDYFILE:
+        return lines
+    start = lines.index("handle @agent {")
+    depth, body = 0, []
+    for line in lines[start:]:
+        depth += line.count("{") - line.count("}")
+        body.append(line)
+        if depth <= 0:
+            break
+    return body[1:-1]
+
+
+def _proxied_matchers(caddyfile=_CADDYFILE):
+    """Every path matcher on a `handle` block of the agent vhost that proxies to the app."""
     matchers, pending, depth = [], None, 0
-    for raw in open(_CADDYFILE, encoding="utf-8"):
-        line = raw.split("#", 1)[0].strip()
-        if not line:
-            continue
+    for line in _agent_vhost_lines(caddyfile):
         # `handle /path/* {` — capture the matchers, then look for a reverse_proxy
         # inside the block before deciding it is proxied to the app at all.
         m = re.match(r"handle\s+(.*?)\s*\{$", line)
@@ -126,8 +147,8 @@ def _permission_gates(route):
     return gates
 
 
-def _proxied_routes():
-    matchers = _proxied_matchers()
+def _proxied_routes(caddyfile=_CADDYFILE):
+    matchers = _proxied_matchers(caddyfile)
     return [r for r in _api_routes()
             if any(_matches(m, r.path) for m in matchers)], matchers
 
@@ -138,12 +159,13 @@ def test_the_caddyfile_still_proxies_something():
     """A guard on the parser itself: every assertion below is vacuously true if this
     file stops finding the matcher, which is exactly what a Caddyfile reformat would
     do."""
-    matchers = _proxied_matchers()
-    assert matchers, f"no proxied `handle` matcher found in {_CADDYFILE}"
-    assert matchers == ["/api/agent/*", "/spiffe/*"], (
-        f"the agent vhost proxies {matchers}. If that is deliberate, the comments in "
-        f"the Caddyfile and docker-compose.agent.yml describe the old set and need "
-        f"updating too — they are the reason this test exists.")
+    for caddyfile in _GATEWAYS:
+        matchers = _proxied_matchers(caddyfile)
+        assert matchers, f"no proxied `handle` matcher found in {caddyfile}"
+        assert matchers == ["/api/agent/*", "/spiffe/*"], (
+            f"the agent vhost in {caddyfile} proxies {matchers}. If that is deliberate, "
+            f"the comments in the Caddyfiles and docker-compose.agent.yml describe the "
+            f"old set and need updating too — they are the reason this test exists.")
 
 
 def test_no_route_needing_a_human_permission_is_published_on_the_agent_vhost():
@@ -154,22 +176,28 @@ def test_no_route_needing_a_human_permission_is_published_on_the_agent_vhost():
     — which is the side of the wall it belongs on. Minting an enrolment code and
     revoking an agent are the two that were on the wrong side.
     """
-    routes, matchers = _proxied_routes()
-    offenders = [f"{sorted(r.methods)} {r.path} ({', '.join(_permission_gates(r))})"
-                 for r in routes if _permission_gates(r)]
-    assert not offenders, (
-        f"{matchers} publishes {len(offenders)} route(s) that require a human "
-        f"permission, on the vhost reachable from wherever the agents live:\n  "
-        + "\n  ".join(offenders)
-        + "\nMove them to a prefix the matcher does not reach (the operator half of "
-          "api/agent.py lives on /api/agents), or narrow the matcher.")
+    for caddyfile in _GATEWAYS:
+        routes, matchers = _proxied_routes(caddyfile)
+        offenders = [f"{sorted(r.methods)} {r.path} ({', '.join(_permission_gates(r))})"
+                     for r in routes if _permission_gates(r)]
+        assert not offenders, (
+            f"{caddyfile}: {matchers} publishes {len(offenders)} route(s) that require "
+            f"a human permission, on the vhost reachable from wherever the agents "
+            f"live:\n  " + "\n  ".join(offenders)
+            + "\nMove them to a prefix the matcher does not reach (the operator half of "
+              "api/agent.py lives on /api/agents), or narrow the matcher.")
 
 
 def test_the_agent_protocol_is_still_reachable():
     """The other direction. A matcher narrow enough to publish nothing would pass the
     test above and break every agent in the field, with the failure showing up as
     enrolment hanging rather than as anything that names a proxy."""
-    routes, matchers = _proxied_routes()
+    for caddyfile in _GATEWAYS:
+        _assert_agent_protocol_reachable(caddyfile)
+
+
+def _assert_agent_protocol_reachable(caddyfile):
+    routes, matchers = _proxied_routes(caddyfile)
     published = {r.path for r in routes}
     required = {"/api/agent/enroll", "/api/agent/lease",
                 "/api/agent/jobs/{job_id}/heartbeat",
@@ -180,7 +208,7 @@ def test_the_agent_protocol_is_still_reachable():
                 "/api/agent/jobs/{job_id}/ansible-bundle"}
     missing = sorted(required - published)
     assert not missing, (
-        f"{matchers} does not reach {missing}. The agent calls these — see "
+        f"{caddyfile}: {matchers} does not reach {missing}. The agent calls these — see "
         f"runners/agent/agent.py — so an agent behind this gateway would get the "
         f"vhost's catch-all 404 instead.")
 
@@ -192,20 +220,22 @@ def test_only_the_agent_protocol_router_is_published():
     console API with no signature scheme anywhere in it — and `/api/agent*` published
     every route on it, because prefix matching does not care about word boundaries.
     """
-    routes, matchers = _proxied_routes()
-    strays = sorted({r.path for r in routes
-                     if not r.path.startswith(("/api/agent/", "/spiffe/"))})
-    assert not strays, f"{matchers} also publishes {strays}"
+    for caddyfile in _GATEWAYS:
+        routes, matchers = _proxied_routes(caddyfile)
+        strays = sorted({r.path for r in routes
+                         if not r.path.startswith(("/api/agent/", "/spiffe/"))})
+        assert not strays, f"{caddyfile}: {matchers} also publishes {strays}"
 
 
 def test_the_spiffe_issuer_publishes_discovery_and_keys_and_nothing_else():
     """/spiffe/* is on the vhost for one reason: a cloud's STS fetching the dashboard's
     own issuer documents. Exactly those two, both GET, neither behind a session."""
-    routes, _ = _proxied_routes()
-    spiffe = {(r.path, tuple(sorted(r.methods))) for r in routes
-              if r.path.startswith("/spiffe/")}
-    assert spiffe == {("/spiffe/.well-known/openid-configuration", ("GET",)),
-                      ("/spiffe/keys", ("GET",))}, spiffe
+    for caddyfile in _GATEWAYS:
+        routes, _ = _proxied_routes(caddyfile)
+        spiffe = {(r.path, tuple(sorted(r.methods))) for r in routes
+                  if r.path.startswith("/spiffe/")}
+        assert spiffe == {("/spiffe/.well-known/openid-configuration", ("GET",)),
+                          ("/spiffe/keys", ("GET",))}, (caddyfile, spiffe)
 
 
 def test_the_operator_half_is_off_the_vhost_and_still_gated():
@@ -215,7 +245,7 @@ def test_the_operator_half_is_off_the_vhost_and_still_gated():
     permission check — an internal hostname is a smaller blast radius, not a closed
     door — so this asserts they kept their gates as well as their new prefix.
     """
-    matchers = _proxied_matchers()
+    matchers = [m for c in _GATEWAYS for m in _proxied_matchers(c)]
     moved = {"/api/agents", "/api/agents/audience", "/api/agents/{agent_id}",
              "/api/agents/{agent_id}/enrollment-code",
              "/api/agents/{agent_id}/discover",
@@ -240,7 +270,7 @@ def test_the_config_files_do_not_claim_the_old_matcher():
     code was defensible and the prose was not. Both files must name the matcher that is
     actually in force.
     """
-    for path in (_CADDYFILE, _COMPOSE):
+    for path in (*_GATEWAYS, _COMPOSE):
         text = open(path, encoding="utf-8").read()
         assert "/api/agent/*" in text, (
             f"{os.path.basename(path)} never names the matcher it documents")

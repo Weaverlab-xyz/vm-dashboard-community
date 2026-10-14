@@ -878,16 +878,38 @@ def _fail_backstop(job_id: str, exc: BaseException) -> None:
         db.close()
 
 
+# Job types that run with the EVERYDAY credential rather than the provisioning one.
+#
+# Every other job takes write privilege for its dispatch (``_wlc_provisioning``). These
+# are timer-driven and read-only, and on Workload Credentials the provisioning lease is a
+# METERED issuance: ``pov_env_reconcile`` runs every ten minutes (``job_service.
+# ROUTINE_JOB_TYPES``), so in the provision scope it would keep a privileged credential
+# alive around the clock, re-minted each TTL — dozens of billed issuances a day with
+# nobody building anything, and a write credential live between jobs, which is exactly
+# what the everyday/provision split exists to stop.
+#
+# A type may join ONLY if nothing it can reach writes to a cloud. ``pov_env_reconcile``
+# lists and reads environments (``pov_reconcile.reconcile``) and, for the suspend
+# schedule, only ENQUEUES ``pov_env_power`` — which runs as its own job, in the provision
+# scope. A write attempted from a type in this set fails on the everyday role's
+# permissions rather than silently borrowing privilege; that is the intended failure.
+EVERYDAY_JOB_TYPES = frozenset({"pov_env_reconcile"})
+
+
 @contextlib.contextmanager
-def _wlc_provisioning():
+def _wlc_provisioning(job_type: str = ""):
     """``workload_credential_lease.provisioning``, resolved lazily and fail-open.
 
     Lazy because the runner must not import the credential feature at module scope, and
     fail-open because a job failing to *start* over a credential feature that may not
     even be configured would be a far worse bug than the one the split prevents. When
     the lease module is unavailable this is a plain no-op and the job runs exactly as it
-    did before.
+    did before. A no-op too for :data:`EVERYDAY_JOB_TYPES`, which keep the everyday
+    credential.
     """
+    if job_type in EVERYDAY_JOB_TYPES:
+        yield
+        return
     try:
         from .services.workload_credential_lease import provisioning
     except Exception:  # noqa: BLE001
@@ -924,7 +946,7 @@ async def _run_job(job_id: str, job_type: str, meta: dict) -> None:
             #
             # A no-op until a second dynamic secret is configured, so this changes
             # nothing until an operator opts into the split.
-            with _wlc_provisioning():
+            with _wlc_provisioning(job_type):
                 await _dispatch(job_id, job_type, meta)
         except asyncio.CancelledError:
             # Shutdown drain. Deliberately NOT marked failed here: _drain backdates the

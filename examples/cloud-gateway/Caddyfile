@@ -7,9 +7,11 @@
 # 1. IT SPLITS THE VHOSTS. Remote agents dial in from private networks anywhere,
 #    so their endpoint must be public. Nothing else should be. Serving
 #    /api/agent/* on one hostname and the UI on another means the
-#    internet-facing surface is one prefix with no HTML, no login form, no
-#    session cookies, no OAuth callbacks and no /setup wizard — every route on it
-#    authenticates with an Ed25519 signature or returns 401.
+#    internet-facing surface is the agent protocol (/api/agent/*) plus the
+#    dashboard's public SPIFFE issuer documents (/spiffe/*) — no HTML, no login
+#    form, no session cookies, no OAuth callbacks and no /setup wizard. Every
+#    agent route authenticates with a signature or returns 401; the two issuer
+#    routes serve public keys and nothing else.
 #
 # 2. IT KEEPS `TRUSTED_PROXY_HOSTS` HONEST. This is the subtle one. The app only
 #    believes X-Forwarded-* from peers listed in `trusted_proxy_hosts`, which
@@ -57,7 +59,11 @@
 	# to". `.invalid` is reserved by RFC 2606 and can never resolve.
 	@agent host {$AGENT_HOSTNAME:agents.invalid}
 	handle @agent {
-		handle /api/agent* {
+		# WITH the slash. The no-slash form is a raw prefix match, so it also
+		# published the operator console's /api/agents routes and all of
+		# /api/agentcell on this hostname. tests/test_agent_vhost_surface.py
+		# parses this block and checks it against the app's real route table.
+		handle /api/agent/* {
 			reverse_proxy localhost:8000 {
 				# An agent holds its lease poll open for up to ~50s. The default
 				# would cut it, and the agent would look like it was flapping.
@@ -65,6 +71,16 @@
 					read_timeout 120s
 				}
 			}
+		}
+		# The dashboard's own SPIFFE issuer: its OIDC discovery document and JWT
+		# signing keys, fetched anonymously by AWS STS, Entra, GCP STS and
+		# Pathfinder when they validate a token the dashboard minted for itself
+		# (docs/oidc/dashboard-identity.md). Public keys only, and both routes 404
+		# unless that identity is switched on. Here because this is the hostname
+		# built to be reachable from outside, and the default issuer is this
+		# hostname plus /spiffe. Nothing under it needs a session.
+		handle /spiffe/* {
+			reverse_proxy localhost:8000
 		}
 		# One answer for every other path, so this hostname is not an oracle
 		# for which dashboard routes exist.
