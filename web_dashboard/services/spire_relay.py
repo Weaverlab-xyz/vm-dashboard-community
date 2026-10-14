@@ -43,7 +43,11 @@ ALIVE_WITHIN_S = 20             # requester: a relay seen this recently is alive
 CLAIM_WAIT_S = 10               # requester: how long a call may sit unclaimed
 RESULT_POLL_S = 0.25            # requester: how often it looks for its answer
 RETAIN = timedelta(minutes=10)  # server: rows older than this are swept
-IN_USE_RECHECK_S = 30           # server: how often an idle install re-checks the switches
+# Server: how often an idle install re-checks the switches. Short on purpose: it was 30s,
+# and the first Broker run after an operator ticked "Let agents attest through SPIRE" landed
+# inside that window and found no relay. The check is a cached config read and one indexed
+# query, so five seconds costs nothing.
+IN_USE_RECHECK_S = 5
 
 
 class RelayError(Exception):
