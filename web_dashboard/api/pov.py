@@ -79,7 +79,8 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         pov_pra_ps_link, pov_ps_config, pov_resource_broker,
                         pov_setup_steps,
                         suspend_schedule, pov_share, spend_policy, pov_summary,
-                        pov_use_cases, pov_vendor_access, pov_wireup)
+                        pov_use_case_scope, pov_use_cases, pov_vendor_access,
+                        pov_wireup)
 from . import pov_gates
 from .auth import (get_current_user, has_explicit_permission, has_permission,
                    pov_env_scope, require_permission, require_pov_env_access,
@@ -164,6 +165,11 @@ class ProvisionRequest(BaseModel):
     pra_tenant_id: str = ""
     ps_tenant_id: str = ""
     entitle_tenant_id: str = ""
+    # Which use cases this POV tests: a subset of pra / password_safe / entitle, plus any
+    # card ids unticked within it. None = not chosen yet, which the Setup tab's first step
+    # then asks for -- see services/pov_use_case_scope.
+    use_case_products: list[str] | None = None
+    use_case_excluded: list[str] = []
 
     @field_validator("name")
     @classmethod
@@ -259,6 +265,10 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
     # one product has most of the catalog out of scope, and a denominator of everything
     # would make a correctly scoped evaluation look like one going badly.
     out["use_cases"] = pov_use_cases.summary_for(_db_of(env), env, wireup)
+    # Which use cases this POV tests, for the Setup tab's first step and its picker. The
+    # raw column travels too, because the ladder reads the serialised row, not the model.
+    out["use_case_scope"] = pov_use_case_scope.describe(env)
+    out["use_case_products"] = env.use_case_products or ""
     # No Request here, so the endpoint falls back to the configured public URL. That is
     # the right answer for a list rendered for an operator: the URL Entitle would be given
     # is the configured one, not whichever host this particular request arrived on.
@@ -740,6 +750,13 @@ async def provision(payload: ProvisionRequest,
     except bt_tenant_service.BTTenantError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    # The use cases, checked now for the same reason: a bad card id is a form error.
+    try:
+        scope = pov_use_case_scope.validate(payload.use_case_products,
+                                            payload.use_case_excluded)
+    except pov_use_case_scope.ScopeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     # Record the project the environment will REALLY be created in, not just what the form
     # sent. The adapter falls back to the configured default when the request names none,
     # so storing the raw payload would leave this column blank for an environment that is
@@ -774,6 +791,7 @@ async def provision(payload: ProvisionRequest,
     # (the only Linux VM), so a coerced default here would switch inference off for every
     # POV this dashboard creates.
     pov_broker.set_broker_vm_name(env, payload.broker_vm_name)
+    pov_use_case_scope.write(env, *scope)
     # The auto-delete timer, stamped at creation like every other kind. NULL when the
     # feature is off, which is what makes enabling it later act on nothing that already
     # exists. A POV gets its own much longer default than a cloud VM — see
@@ -1997,17 +2015,51 @@ def set_spend_cap(env_id: str, payload: SpendCapRequest,
 
 
 @router.get("/managed/{env_id}/use-cases")
-def list_use_cases(env_id: str, db: Session = Depends(get_db),
+def list_use_cases(env_id: str, include_all: bool = Query(False, alias="all"),
+                   db: Session = Depends(get_db),
                          current_user: User = Depends(get_current_user)):
-    """This POV's catalog, every group and every card, with each card's own state.
+    """This POV's catalog, with each card's own state.
 
-    Complete for every product mix. A POV wired into one product still gets every group and
-    all their cards — the mix decides each card's state, never its presence. So a
-    Password-Safe-only POV renders the PRA and Entitle groups entirely out of scope, which
-    is a statement about the evaluation rather than a gap in the page.
+    Complete for every product MIX: a POV with no tenant for a product still gets that
+    product's cards, rendered out of scope -- the mix decides a card's state, never its
+    presence. What does remove a card is the POV's chosen use cases (the Setup tab's
+    first step): a Password-Safe-only POV that chose Password Safe sees only those.
+
+    ``all=1`` keeps the cards outside that choice, flagged ``in_pov: false``, for the
+    Setup tab's picker. The customer's page never asks for it.
     """
     env = _env_or_404(db, env_id)
-    return pov_use_cases.describe(db, env)
+    return pov_use_cases.describe(db, env, include_excluded=include_all)
+
+
+class UseCaseScopeRequest(BaseModel):
+    """Which use cases this POV tests. ``products`` None clears the choice."""
+    products: list[str] | None = None
+    excluded: list[str] = []
+
+
+@router.put("/managed/{env_id}/use-case-scope", dependencies=_POV_WRITE_OWN)
+def set_use_case_scope(env_id: str, payload: UseCaseScopeRequest,
+                       db: Session = Depends(get_db),
+                       current_user: User = Depends(get_current_user)):
+    """Choose the POV's use cases: Password Safe only, PRA only, Total PASM, and so on.
+
+    Progress is never deleted here. A card taken out of the POV keeps its tick and notes
+    and gets them back if it is put back in.
+    """
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    try:
+        products, excluded = pov_use_case_scope.validate(payload.products, payload.excluded)
+    except pov_use_case_scope.ScopeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    pov_use_case_scope.write(env, products, excluded)
+    db.commit()
+    logger.info("POV %s: use cases set to %s (%d unticked) by %s", env.id,
+                ",".join(products) if products else "the whole catalog", len(excluded),
+                getattr(current_user, "username", "?"))
+    return pov_use_cases.describe(db, env, include_excluded=True)
 
 
 @router.post("/managed/{env_id}/use-cases/{card_id}", dependencies=_POV_USE)

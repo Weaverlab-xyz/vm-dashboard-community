@@ -22,6 +22,9 @@ So this module resolves cards against a **POV row**, and it keeps two properties
     A card whose product this POV does not include is rendered and explained as
     ``out_of_scope``. A mix decides a card's STATE and nothing else, so a
     Password-Safe-only POV still sees what the other two products would have shown it.
+    The one exception is a choice rather than a mix: the use cases an SE picked on the
+    Setup tab (``pov_use_case_scope``). A card outside that choice is hidden, because
+    somebody decided this POV is not testing it.
   * **``pov_cards`` knows nothing about the database.** It takes a dict of booleans and this
     module is the one that owns ``PovEnvironment``. The import direction is one-way:
     ``pov_use_cases`` imports ``pov_cards``, never the reverse.
@@ -39,7 +42,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovUseCaseProgress
-from . import pov_cards, pov_cell_roles, pov_runbooks, pov_wireup
+from . import pov_cards, pov_cell_roles, pov_runbooks, pov_use_case_scope, pov_wireup
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +141,8 @@ def describe_row(row: PovUseCaseProgress | None) -> dict:
     }
 
 
-def _groups(db: Session, env: PovEnvironment, products: dict) -> list:
+def _groups(db: Session, env: PovEnvironment, products: dict,
+            include_excluded: bool = False) -> list:
     """The catalog for this POV with each card's progress merged in.
 
     Two registries, appended rather than merged: `pov_cards` groups cards by the PRODUCT
@@ -147,14 +151,28 @@ def _groups(db: Session, env: PovEnvironment, products: dict) -> list:
     consumer below -- `_summarize`, the detail page's group loop, `pov_summary.by_group` --
     takes them without knowing which is which. Runbooks come last because a product is what
     the evaluation was scoped to and a runbook is what somebody is working through today.
+
+    The chosen use cases (``pov_use_case_scope``) are applied last. A card outside them is
+    dropped, and so is a group left with none -- unless ``include_excluded``, which keeps
+    them with ``in_pov: false`` for the picker on the Setup tab and nothing else.
     """
     rows = _rows(db, env)
+    chosen, excluded = pov_use_case_scope.parse(env)
     groups = (pov_cards.catalog(env.id, products)
               + pov_runbooks.catalog(env.id, products))
+    kept = []
     for group in groups:
+        cards = []
         for card in group["use_cases"]:
+            card["in_pov"] = pov_use_case_scope.includes(card, chosen, excluded)
+            if not (card["in_pov"] or include_excluded):
+                continue
             card["progress"] = describe_row(rows.get(card["id"]))
-    return groups
+            cards.append(card)
+        if cards:
+            group["use_cases"] = cards
+            kept.append(group)
+    return kept
 
 
 def _summarize(groups: list) -> dict:
@@ -164,7 +182,7 @@ def _summarize(groups: list) -> dict:
     "3 of 32" against it would read as a POV that is going badly rather than one that is
     scoped. ``cards`` keeps the honest denominator for anyone who wants it.
     """
-    every = [c for g in groups for c in g["use_cases"]]
+    every = [c for g in groups for c in g["use_cases"] if c.get("in_pov", True)]
     in_scope = [c for c in every if c["state"] != "out_of_scope"]
     return {
         "done": sum(1 for c in in_scope if c["progress"]["state"] == "done"),
@@ -174,13 +192,20 @@ def _summarize(groups: list) -> dict:
     }
 
 
-def describe(db: Session, env: PovEnvironment, wireup: dict | None = None) -> dict:
-    """The payload the POV page's Use cases tab reads."""
+def describe(db: Session, env: PovEnvironment, wireup: dict | None = None,
+             include_excluded: bool = False) -> dict:
+    """The payload the POV page's Use cases tab reads.
+
+    ``include_excluded`` is for the Setup tab's use-case picker only: it keeps the cards
+    outside the chosen use cases, flagged ``in_pov: false``, and the summary still counts
+    only the ones in the POV.
+    """
     products = products_for(db, env, wireup)
-    groups = _groups(db, env, products)
+    groups = _groups(db, env, products, include_excluded=include_excluded)
     return {
         "environment_id": env.id,
         "products": products,
+        "scope": pov_use_case_scope.describe(env),
         "groups": groups,
         "summary": _summarize(groups),
     }
@@ -226,6 +251,14 @@ def set_state(db: Session, env: PovEnvironment, card_id: str, *,
         group_key, card = pov_runbooks.find_card(card_id)
     if card is None:
         raise UseCaseError(f"no POV use case with id {card_id!r}")
+    # A card outside this POV's chosen use cases is hidden from every page, so a write to
+    # one can only come from a tab opened before the choice changed. Refused rather than
+    # stored: a tick nobody can see is not evidence of anything.
+    chosen, excluded = pov_use_case_scope.parse(env)
+    if not pov_use_case_scope.includes(
+            {"id": card.id, "products": card.requires_products}, chosen, excluded):
+        raise UseCaseError(f"{card.title!r} is not one of this POV's use cases. Add it on "
+                           f"the Setup tab's Use cases chosen step first.")
     if state not in VALID_STATES:
         raise UseCaseError(
             f"state must be one of {', '.join(VALID_STATES)}; got {state!r}")

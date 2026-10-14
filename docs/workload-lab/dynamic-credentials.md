@@ -141,6 +141,12 @@ the everyday secret. On Azure:
   `azure_client_secret` is still set), Azure calls fail with that reason. They never fall
   back to the lease, which would hand the request path the privileged credential.
 
+**Routine read-only jobs keep the everyday credential.** Every job runs in the provisioning
+scope except `jobs_worker.EVERYDAY_JOB_TYPES`, today just `pov_env_reconcile`: the POV
+instance's ten-minute read-back. In the provisioning scope it would keep the billed,
+write-capable lease alive around the clock, re-minted every TTL, with nobody building
+anything. A job type may join that set only if nothing it reaches writes to a cloud.
+
 Grant the two identities differently. `scripts/wlc/setup-azure-apps.sh --everyday-sp
 <azure_client_id>` copies the reference service principal's roles onto the federated app
 **except** any role that can write role assignments: Owner, User Access Administrator, Role

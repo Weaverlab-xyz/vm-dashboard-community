@@ -75,10 +75,39 @@ def _env_filter(env_id: str) -> list:
 
 # ── verify ───────────────────────────────────────────────────────────────────
 
-def _verify_sync(region: str):
+def _verify_sync(region: str) -> tuple[int, str]:
     ec2 = aws_service._get_ec2_pinned(region)
     resp = ec2.describe_regions(RegionNames=[region])
-    return len(resp.get("Regions") or [])
+    # Who the calls ran as. GetCallerIdentity needs no permission, so it cannot fail
+    # where DescribeRegions succeeded; it is what tells an operator that the role was
+    # actually assumed rather than some other credential being picked up.
+    arn = aws_service.aws_client("sts", region, pinned=True).get_caller_identity().get("Arn", "")
+    return len(resp.get("Regions") or []), arn
+
+
+def _credential_label() -> str:
+    """Which rung of ``aws_service._aws_kwargs`` the request-path calls are using, in
+    words. Same order as ``_aws_kwargs``: a Workload Credentials lease first, unless the
+    everyday credential is the SPIFFE identity, then a stored key, then federation."""
+    from . import cloud_federation
+    from . import config_service
+    from . import workload_credential_lease as leases
+    if leases.dynamic_enabled("aws") and not leases.everyday_from_federation("aws"):
+        return "a Workload Credentials lease"
+    if cloud_federation.source("aws") == "stored key":
+        key_id = (config_service.get("aws_access_key_id") or "").strip()
+        return f"access key {key_id[:4]}…{key_id[-4:]}" if len(key_id) > 8 else "a stored access key"
+    if cloud_federation.active("aws"):
+        return "the dashboard's SPIFFE identity"
+    return "the AWS SDK's default credential chain"
+
+
+def _not_configured_message() -> str:
+    from . import cloud_federation
+    why = cloud_federation.reason("aws")
+    return ("No AWS credential is configured. Choose Access key and paste one, or choose "
+            "SPIFFE identity and set the role to assume"
+            + (f" (federation is not in use: {why})." if why else "."))
 
 
 async def verify() -> tuple[bool, str]:
@@ -90,19 +119,60 @@ async def verify() -> tuple[bool, str]:
     """
     region = default_region()
     if not configured():
-        return False, ("No AWS credentials are configured. Add an access key in "
-                       "Settings → Integrations → AWS.")
+        return False, _not_configured_message()
+    label = _credential_label()
     try:
-        count = await aws_service._to_thread(_verify_sync, region)
+        count, arn = await aws_service._to_thread(_verify_sync, region)
     except AWSError as exc:
-        return False, f"AWS refused the call: {exc}"
+        return False, f"AWS refused the call made with {label}: {exc}"
     except Exception:  # noqa: BLE001
         logger.warning("AWS POV verify failed", exc_info=True)
-        return False, ("AWS did not answer. Check the access key, its permissions and "
-                       f"that {region} is enabled for this account.")
+        return False, (f"AWS did not answer the call made with {label}. Check the "
+                       f"credential, its permissions and that {region} is enabled for "
+                       f"this account.")
     if not count:
         return False, f"The credential works but cannot see region {region}."
-    return True, f"Connected to AWS in {region}."
+    who = f" as {arn}" if arn else ""
+    msg = f"Connected to AWS in {region}{who}, using {label}."
+    if not _provisioning_split():
+        return True, msg
+    ok, wlc_msg = await _verify_provisioning_leg()
+    return ok, f"{msg} {wlc_msg}"
+
+
+def _provisioning_split() -> bool:
+    """SPIFFE identity for everyday calls, Workload Credentials for jobs
+    (``wlc_aws_everyday_source = federation`` with AWS dynamic credentials on)."""
+    from . import workload_credential_lease as leases
+    return leases.dynamic_enabled("aws") and leases.everyday_from_federation("aws")
+
+
+async def _verify_provisioning_leg() -> tuple[bool, str]:
+    """The jobs' credential, proven WITHOUT minting it.
+
+    ``test_connection`` is ``GET /session``: it authenticates to Workload Credentials the
+    way a mint would — on the SPIFFE path, with the dashboard's ``wlc.jwt`` — and is
+    unmetered. A real issuance is billed, so a button an operator is told to press until
+    it goes green must never call ``generate``; the lease itself is minted when the first
+    job needs it, and its outcome shows under Workload Credentials → Active credential
+    source.
+    """
+    from . import workload_credentials_service as wlc
+    if not wlc.configured():
+        return False, ("Jobs take a Workload Credentials lease, but Workload Credentials is "
+                       "not configured: set " + ", ".join(wlc.missing_settings()) + ".")
+    try:
+        await aws_service._to_thread(wlc.test_connection)
+    except wlc.WorkloadCredentialsError as exc:
+        return False, f"Jobs take a Workload Credentials lease, and Workload Credentials refused: {exc}"
+    except Exception:  # noqa: BLE001
+        logger.warning("Workload Credentials session check failed", exc_info=True)
+        return False, ("Jobs take a Workload Credentials lease, and Workload Credentials did "
+                       "not answer. Check its API URL and site.")
+    from . import workload_credential_lease as leases
+    name = leases.secret_name_for("aws", leases.PURPOSE_PROVISION) or "(no secret named)"
+    return True, (f"Jobs take a Workload Credentials lease from {name}: authenticated, "
+                  f"not minted (a lease is billed; the first job mints it).")
 
 
 # ── create ───────────────────────────────────────────────────────────────────

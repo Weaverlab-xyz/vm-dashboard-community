@@ -147,6 +147,54 @@ reaches no tenant — and it does not live in the registry at all. `services/pov
 a pure read; the write lands in `api/pov.py`, behind the auth every other POV action
 already carries.
 
+## Choosing the POV's use cases
+
+A POV's tenants say which products it *can* reach. They do not say what the evaluation is
+*for*. So the first step of a POV's **Setup** tab is **Use cases chosen**, and the New POV
+form asks the same question as **POV type**:
+
+| POV type | Use cases it tests |
+|---|---|
+| Password Safe | Password Safe only |
+| PRA | PRA only |
+| Total PASM (PRA + Password Safe) | both, **including** the cards that need the two together, such as Password Safe credentials injected into a PRA session |
+| Entitle | Entitle only |
+| Total PASM + Entitle | all three |
+| *or tick the products* | any other mix |
+
+A card is in the POV when **every** product it names was chosen, so the combined PRA +
+Password Safe cards appear on a Total PASM POV and never on a Password-Safe-only one. The
+cards that name no product, the ones about the environment itself, are in every POV.
+Inside the choice you can untick single use cases on the Setup tab, which is where you
+leave out a demo the customer does not care about.
+
+**This is the one place the checklist subtracts.** A product with no tenant still renders
+its cards `out_of_scope`, because "no tenant picked yet" is somebody's next click. A card
+outside the chosen use cases is **hidden** instead. It is gone from the Use cases tab, from
+the customer's page and from the summary, and it is not counted in their totals: the SE
+has said this POV is not testing it. A write to a hidden card is refused, which only
+happens from a tab opened before the choice changed.
+
+The rest of the Setup tab follows the choice. On a Password-Safe-only POV the PRA Gateway,
+the wire-up, the PRA/Password Safe link and the Entitle steps all show as skipped ("not in
+this POV's use cases"), even if those tenants are set.
+
+* **Stored as two columns** on `PovEnvironment` and `PovBlueprint`: `use_case_products`
+  (comma-separated products) and `use_case_excluded` (a JSON list of card ids). A preset
+  is only a name for a set of products and is never stored.
+* **NULL means nobody has chosen**, which reads as the whole catalog. Every POV from
+  before this step existed keeps the checklist it had; its Setup tab offers **Choose**,
+  and nothing waits on it.
+* **Changing the choice deletes nothing.** Progress rows stay, so a card taken out and
+  put back gets its tick and its notes back.
+* **A blueprint carries it**, so a "Password Safe POV" recipe builds Password Safe POVs.
+  A request that names its own products wins, and it brings its own unticked list with
+  it rather than mixing in the blueprint's.
+
+`PUT /api/pov/managed/{id}/use-case-scope` with `{products, excluded}` sets it, behind the
+same owner gate as the Tenants edit. `GET …/use-cases?all=1` is the picker's read: it keeps
+the hidden cards, flagged `in_pov: false`. The customer's page never asks for it.
+
 ## Slice 2 — the ephemeral accessor
 
 Built. The prospect gets a login of their own; slice 3 gives them something to do with it.

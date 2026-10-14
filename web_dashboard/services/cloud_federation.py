@@ -183,6 +183,17 @@ def _aws_assume(now: Optional[float] = None) -> tuple:
             RoleArn=role, RoleSessionName=AWS_SESSION_NAME, WebIdentityToken=token)
     except Exception as exc:  # noqa: BLE001 -- botocore's error zoo; one message out
         code = (getattr(exc, "response", None) or {}).get("Error", {}).get("Code")
+        if code in ("InvalidIdentityToken", "IDPCommunicationError"):
+            # STS could not validate the token itself: it fetches the issuer's keys
+            # anonymously, so a private or unproxied issuer fails HERE, not on the trust
+            # policy — and the trust-policy advice below would send the operator to the
+            # wrong console.
+            raise FederationError(
+                f"AWS refused the dashboard's SPIFFE identity for {role}: {code}. AWS "
+                f"could not fetch or validate the signing keys at "
+                f"{dashboard_identity.issuer()}/keys — check the issuer is reachable "
+                f"from the internet and that the IAM OIDC provider names exactly that "
+                f"issuer.") from exc
         if code:
             raise FederationError(
                 f"AWS refused the dashboard's SPIFFE identity for {role}: {code}. Check the "

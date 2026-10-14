@@ -146,6 +146,60 @@
                     <span :class="toneClass(f.tone)" x-text="f.text"></span>
                   </template>
                 </p>
+                <!-- The use-case picker. A preset picks the products; every use case of
+                     those products is then ticked and can be unticked one by one. Cards
+                     left out are hidden from the Use cases tab, the customer's page and
+                     the summary. Progress is kept, so putting a card back restores it. -->
+                <div x-show="s.key === 'use_cases' && scopeOpen" class="mt-3 space-y-3">
+                  <div class="flex flex-wrap gap-2">
+                    <template x-for="p in useCasePresets" :key="'scope-preset-' + p.key">
+                      <button type="button" @click="scopePickPreset(p)"
+                              :class="scopePresetActive(p)
+                                      ? 'bg-blue-600 text-white border-blue-600'
+                                      : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'"
+                              class="px-3 py-1 text-xs rounded-full border" x-text="p.label"></button>
+                    </template>
+                  </div>
+                  <div class="flex flex-wrap items-center gap-4 text-xs text-gray-700">
+                    <span class="text-gray-500">or choose:</span>
+                    <template x-for="k in scopeProducts" :key="'scope-product-' + k.key">
+                      <label class="inline-flex items-center gap-1.5">
+                        <input type="checkbox" :checked="scopeDraft.products.includes(k.key)"
+                               @change="scopeToggleProduct(k.key)">
+                        <span x-text="k.label"></span>
+                        <span x-show="scopeDraft.products.includes(k.key) && !env[k.tenant]"
+                              class="text-amber-700">(no tenant yet — pick one on the POV list)</span>
+                      </label>
+                    </template>
+                  </div>
+                  <template x-for="g in scopeGroups" :key="'scope-group-' + g.group">
+                    <div x-show="g.use_cases.some(c => scopeCardSelectable(c))">
+                      <p class="text-xs font-semibold text-gray-600" x-text="g.label"></p>
+                      <ul class="mt-1 grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-1">
+                        <template x-for="c in g.use_cases" :key="'scope-card-' + c.id">
+                          <li x-show="scopeCardSelectable(c)">
+                            <label class="inline-flex items-start gap-1.5 text-xs text-gray-700">
+                              <input type="checkbox" class="mt-0.5"
+                                     :checked="!scopeDraft.excluded.includes(c.id)"
+                                     @change="scopeToggleCard(c)">
+                              <span x-text="c.title"></span>
+                            </label>
+                          </li>
+                        </template>
+                      </ul>
+                    </div>
+                  </template>
+                  <div class="flex items-center gap-2">
+                    <button type="button" @click="saveScope()"
+                            :disabled="scopeSaving || !scopeDraft.products.length"
+                            class="text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40"
+                            x-text="scopeSaving ? 'Saving…' : 'Save use cases'"></button>
+                    <button type="button" @click="scopeOpen = false"
+                            class="text-xs px-3 py-1.5 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50">Cancel</button>
+                    <span class="text-xs text-gray-500"
+                          x-text="scopeSelectedCount() + ' use cases in this POV'"></span>
+                  </div>
+                </div>
               </div>
               <button x-show="stepActionLabel(s)" @click="runStep(s)"
                       :disabled="s.locked || stepBusy || (env.setup && env.setup.busy)"
@@ -1187,6 +1241,18 @@
       tab: 'overview',
       // The step whose button was just pressed, so only that row says "Working…".
       stepBusy: '',
+      // The "Use cases chosen" step's picker. `scopeGroups` is the whole catalog
+      // (use-cases?all=1); `scopeDraft` is unsaved until Save.
+      useCasePresets: {{ pov_use_case_presets | tojson }},
+      scopeProducts: [
+        { key: 'pra', label: 'PRA', tenant: 'pra_tenant_id' },
+        { key: 'password_safe', label: 'Password Safe', tenant: 'ps_tenant_id' },
+        { key: 'entitle', label: 'Entitle', tenant: 'entitle_tenant_id' },
+      ],
+      scopeOpen: false,
+      scopeSaving: false,
+      scopeGroups: [],
+      scopeDraft: { products: [], excluded: [] },
       _stepPoll: null,
       tabs: [
         { id: 'setup',     label: 'Setup' },
@@ -1309,7 +1375,10 @@
         const e = this.env || {};
         const vms = e.vm_count || 0;
         const out = [];
-        if (s.key === 'environment') {
+        if (s.key === 'use_cases') {
+          const unticked = ((e.use_case_scope || {}).excluded || []).length;
+          if (unticked) out.push({ text: unticked + ' use case' + (unticked === 1 ? '' : 's') + ' unticked', tone: 'muted' });
+        } else if (s.key === 'environment') {
           out.push({ text: 'status ' + (e.status || '—') });
           if (e.provision_job_id) out.push({ text: 'provision job ' + e.provision_job_id, tone: 'muted' });
         } else if (s.key === 'guest_os') {
@@ -1356,6 +1425,9 @@
       },
 
       stepActionLabel(s) {
+        // The use-case choice stays changeable once made: a POV that starts as Password
+        // Safe only can grow into Total PASM.
+        if (s.key === 'use_cases' && s.state === 'done') return 'Change';
         // The OT adapter is the one step with something left to press once it is done: it
         // deploys in dry run, and going live is a second press.
         if (s.key === 'ot_adapter' && s.state === 'done') {
@@ -1364,7 +1436,7 @@
         if (s.state === 'done' || s.state === 'skipped') return '';
         if (s.key === 'pra_ps') return this.env.pra_ps_matched_count ? 'Link' : 'Check';
         const labels = {
-          vms: 'Set guest OS', broker: 'Install broker', gateway: 'Create & install',
+          use_cases: 'Choose', vms: 'Set guest OS', broker: 'Install broker', gateway: 'Create & install',
           resource_broker: 'Configure', entitle_agent: 'Install agent', wireup: 'Wire up',
           share: 'Share', ot_adapter: 'Deploy adapter',
         };
@@ -1391,6 +1463,7 @@
           window.location.href = `/pov?edit=rb&env=${encodeURIComponent(this.envId)}`;
           return;
         }
+        if (s.key === 'use_cases') { await this.openScope(); return; }
         if (s.key === 'pra_ps') { await this.praPs(this.env.pra_ps_matched_count ? 'link' : 'check'); return; }
         this.stepBusy = s.key;
         try {
@@ -1791,6 +1864,89 @@
           this.env = data.environment || this.env;
           this.notice = `Running ${this.stepAsset} on ${this.stepVm} — watch job ${data.job_id}.`;
         } catch (e) { this.error = 'Could not queue the step.'; }
+      },
+
+      // ── the "Use cases chosen" picker ──
+      async openScope() {
+        if (this.scopeOpen) { this.scopeOpen = false; return; }
+        try {
+          const res = await this.apiFetch(`/api/pov/managed/${this.envId}/use-cases?all=1`);
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.detail || `Could not load the use cases (${res.status}).`);
+          this.scopeGroups = data.groups || [];
+          const scope = data.scope || {};
+          this.scopeDraft = { products: [...(scope.products || [])],
+                              excluded: [...(scope.excluded || [])] };
+          this.scopeOpen = true;
+        } catch (e) {
+          this.error = e.message;
+        }
+      },
+
+      scopePickPreset(p) {
+        // A preset re-ticks every use case of its products: picking "Total PASM" means
+        // the whole of it, whatever was unticked under the previous choice.
+        this.scopeDraft = { products: [...p.products], excluded: [] };
+      },
+
+      scopePresetActive(p) {
+        const chosen = this.scopeDraft.products;
+        return chosen.length === p.products.length && p.products.every(x => chosen.includes(x));
+      },
+
+      scopeToggleProduct(key) {
+        const chosen = this.scopeDraft.products;
+        this.scopeDraft.products = chosen.includes(key)
+          ? chosen.filter(x => x !== key)
+          : this.scopeProducts.map(k => k.key).filter(x => x === key || chosen.includes(x));
+      },
+
+      // Every product the card names is chosen. A card naming none is about the
+      // environment itself and is always offered.
+      scopeCardSelectable(c) {
+        return (c.products || []).every(p => this.scopeDraft.products.includes(p));
+      },
+
+      scopeToggleCard(c) {
+        const ex = this.scopeDraft.excluded;
+        this.scopeDraft.excluded = ex.includes(c.id) ? ex.filter(x => x !== c.id) : [...ex, c.id];
+      },
+
+      scopeSelectedCount() {
+        let n = 0;
+        for (const g of this.scopeGroups) {
+          for (const c of g.use_cases) {
+            if (this.scopeCardSelectable(c) && !this.scopeDraft.excluded.includes(c.id)) n += 1;
+          }
+        }
+        return n;
+      },
+
+      async saveScope() {
+        this.scopeSaving = true;
+        this.error = ''; this.notice = '';
+        try {
+          // Only unticks that are still visible are kept: a card hidden because its
+          // product was dropped is out anyway, and storing it would silently hide it
+          // again the day that product comes back.
+          const visible = new Set(this.scopeGroups.flatMap(g => g.use_cases)
+                                    .filter(c => this.scopeCardSelectable(c)).map(c => c.id));
+          const res = await this.apiFetch(`/api/pov/managed/${this.envId}/use-case-scope`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ products: this.scopeDraft.products,
+                                   excluded: this.scopeDraft.excluded.filter(id => visible.has(id)) }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.detail || `Could not save the use cases (${res.status}).`);
+          this.notice = `This POV now tests ${(data.scope || {}).label || 'the chosen use cases'}.`;
+          this.scopeOpen = false;
+          await Promise.all([this.loadEnv(), this.loadUseCases(), this.loadSummary()]);
+        } catch (e) {
+          this.error = e.message;
+        } finally {
+          this.scopeSaving = false;
+        }
       },
 
       async loadUseCases() {

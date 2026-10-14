@@ -293,6 +293,7 @@ can be copied and used offline for ever. It is not "the app holds nothing".
 The switches that **use** the server are on the feature pages:
 - [Let agents attest through SPIRE](remote-agents/spire-attestation.md#settings) (`spire_attest_enabled`);
 - [Give the dashboard its own SPIFFE identity](oidc/dashboard-identity.md#settings) (`dashboard_spiffe_identity_enabled`).
+- On a POV instance, [AWS for the POV cloud provider with no stored key](profiles/pov/public-cloud.md#keyless-aws-the-dashboards-spiffe-identity), which uses that identity.
 
 These two are about the server itself, both on **Settings → Integrations → Remote
 Agents**:
@@ -330,4 +331,5 @@ says the server "is not running".
 | "the trust domain … is already registered" | a SPIRE lab, or someone by hand, registered a trust domain with the same name | remove that registration, or give this server another `SPIRE_TRUST_DOMAIN` |
 | A POV broker comes up **Ed25519** and its job says the address "answers with a SPIRE server this dashboard does not trust" | **SPIRE server address for agents** is blank or wrong, and that address reaches another dashboard's server (a shared Container Apps environment publishes each one on its own port) | set it to `host:port` for this dashboard's server, then press **Broker** again |
 | Every attested agent fails after the server restarts | the trust anchor changed: the compose volume was lost, or the sidecar's upstream CA secret is not the same on every revision | restore the volume or the CA. An agent bootstrapped with another root must be migrated again |
+| AWS refuses the dashboard's token with `InvalidIdentityToken` | AWS could not fetch `<issuer>/keys`: on a managed runtime, the cloud gateway image predates `/spiffe/*` on the agent hostname, so it answers 404 | rebuild the gateway from `examples/cloud-gateway` and roll the sidecar, then **Check the issuer is reachable** |
 | A cloud refuses the dashboard's token with an issuer error | `SPIRE_JWT_ISSUER` differs from the issuer the dashboard publishes | see [The dashboard's own identity → Troubleshooting](oidc/dashboard-identity.md#troubleshooting) |
