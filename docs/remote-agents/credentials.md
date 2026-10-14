@@ -17,6 +17,11 @@ fetch the credential per job. In practice:
    the local `password`, `password_file` or `password_sealed`.
 3. **Set the credential on the Connections tab.** A Password Safe managed account
    (`ps_account://`) is best, so that the dashboard keeps no standing password either.
+   The tab's **Credential** column then reads **Held by dashboard**, names the source
+   (Secrets Safe, a Password Safe account, a cloud vault, or the dashboard's own
+   database), and shows when the agent last fetched it. **Not fetched by the agent yet**
+   means the agent's entry does not say `dashboard_secret: true` yet, or no job has run
+   since you changed it. Only fetches from the last 30 days count.
 4. **Tick "Release dashboard-held credentials only to SPIRE-attested agents"** under
    Settings → Remote agents (`dashboard_secrets_require_spire`). Once every agent that
    needs a credential has migrated, this stops an Ed25519 key from receiving credentials,

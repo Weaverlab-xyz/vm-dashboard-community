@@ -64,6 +64,7 @@
           <th class="px-4 py-3">Kind</th>
           <th class="px-4 py-3">Endpoint</th>
           <th class="px-4 py-3">Reached via</th>
+          <th class="px-4 py-3">Credential</th>
           <th class="px-4 py-3">Status</th>
           <th class="px-4 py-3 text-right">Actions</th>
         </tr>
@@ -88,6 +89,32 @@
               <span x-show="c.via_agent" x-cloak
                     class="text-xs bg-purple-50 text-purple-700 px-2 py-0.5 rounded"
                     x-text="'Agent: ' + agentName(c.agent_id)"></span>
+            </td>
+            <!-- Where the credential lives. For an agent-bound row the dashboard can only
+                 say what IT holds; whether the agent uses it is decided by the agent's
+                 connections.yaml (dashboard_secret: true), and the last per-job fetch is the
+                 only evidence of that the dashboard has. -->
+            <td class="px-4 py-3">
+              <template x-if="c.credential_held_by === 'dashboard'">
+                <div :title="credentialTitle(c)">
+                  <span class="text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded">Held by dashboard</span>
+                  <div class="text-xs text-gray-500 mt-0.5" x-text="c.credential_source"></div>
+                  <div x-show="c.via_agent && c.secret_last_fetched_at" x-cloak
+                       class="text-xs text-green-600"
+                       x-text="'Agent fetched it ' + timeAgo(c.secret_last_fetched_at)"></div>
+                  <div x-show="c.via_agent && !c.secret_last_fetched_at" x-cloak
+                       class="text-xs text-amber-600">Not fetched by the agent yet</div>
+                </div>
+              </template>
+              <template x-if="c.credential_held_by === 'agent'">
+                <div :title="credentialTitle(c)">
+                  <span class="text-xs bg-gray-100 text-gray-700 px-2 py-0.5 rounded">On the agent host</span>
+                  <div class="text-xs text-gray-500 mt-0.5">connections.yaml</div>
+                </div>
+              </template>
+              <template x-if="c.credential_held_by === 'none'">
+                <span class="text-xs text-gray-400">None set</span>
+              </template>
             </td>
             <td class="px-4 py-3">
               <span x-show="c.last_error" x-cloak class="text-red-600 text-xs"
@@ -373,6 +400,21 @@ function connectionsPage() {
 
     kindLabel(k) { return CONN_KIND_LABELS[k] || k; },
     defaultPort(k) { return CONN_DEFAULT_PORTS[k] || ''; },
+    timeAgo(iso) { return timeAgo(iso); },
+    credentialTitle(c) {
+      if (c.credential_held_by === 'agent') {
+        return 'The agent reads this credential from its own connections.yaml. To hold it '
+             + 'here instead, set one on Edit and add dashboard_secret: true to the agent\'s entry.';
+      }
+      if (!c.via_agent) return 'The dashboard holds this credential and connects directly.';
+      if (c.secret_last_fetched_at) {
+        return 'The dashboard holds this credential and the agent fetches it per job, '
+             + 'sealed to that job. Nothing is stored on the agent host.';
+      }
+      return 'The dashboard holds a credential, but the agent has not fetched it in the last '
+           + '30 days. It keeps using its own until its connections.yaml entry says '
+           + 'dashboard_secret: true.';
+    },
     agentName(id) {
       const a = this.agents.find(x => x.id === id);
       return a ? a.name : (id || '').slice(0, 8);

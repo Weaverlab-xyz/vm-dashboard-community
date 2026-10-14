@@ -476,7 +476,89 @@ def list_connections(db: Session, kind: str = "") -> list:
     if kind:
         query = query.filter(HypervisorConnection.kind == kind.strip().lower())
     rows = query.order_by(HypervisorConnection.kind, HypervisorConnection.name).all()
-    return [serialize(r) for r in rows]
+    fetched = _last_dashboard_secret_fetch(db) if any(r.agent_id for r in rows) else {}
+    out = []
+    for r in rows:
+        item = serialize(r)
+        at = fetched.get(r.id)
+        item["secret_last_fetched_at"] = at.isoformat() if at else None
+        out.append(item)
+    return out
+
+
+# A friendly name for where a stored reference points. Keyed by prefix rather than by
+# config_service._EXT_PREFIXES because ps_account:// is deliberately absent from that map.
+_SOURCE_LABELS = (
+    (PS_ACCOUNT_PREFIX, "Password Safe managed account"),
+    ("bt_safe://", "BeyondTrust Secrets Safe"),
+    ("wlc://", "BeyondTrust Workload Credentials"),
+    ("aws_sm://", "AWS Secrets Manager"),
+    ("azure_kv://", "Azure Key Vault"),
+    ("gcp_sm://", "GCP Secret Manager"),
+)
+
+# How far back the Connections tab looks for an agent's last fetch. The audit log is
+# append-only and grows forever, so this bounds the scan; a connection whose agent has
+# not fetched in this window reads as "not fetched yet", which is the honest answer.
+_FETCH_LOOKBACK_DAYS = 30
+_FETCH_SCAN_LIMIT = 5000
+
+
+def credential_source(row: HypervisorConnection) -> str:
+    """Where this row's credential comes from, for display. Never the value itself."""
+    ref = str(row.secret_ref or "").strip()
+    if ref:
+        for prefix, label in _SOURCE_LABELS:
+            if ref.startswith(prefix):
+                return label
+        return "External vault reference"
+    if row.secret_enc:
+        return "Encrypted in the dashboard database"
+    return ""
+
+
+def credential_held_by(row: HypervisorConnection) -> str:
+    """``dashboard``, ``agent`` or ``none``.
+
+    An agent-bound row with no credential is ``agent``: the agent host's own
+    connections.yaml supplies it. One WITH a credential is ``dashboard`` — but only on
+    the dashboard's side; the agent uses it only once its entry says
+    ``dashboard_secret: true``, which ``secret_last_fetched_at`` is the evidence for.
+    """
+    if row.secret_enc or row.secret_ref:
+        return "dashboard"
+    return "agent" if row.agent_id else "none"
+
+
+def _last_dashboard_secret_fetch(db: Session) -> dict:
+    """``{connection_id: datetime}`` of each connection's most recent credential release
+    to an agent, read from the ``agent.connection_secret`` audit rows.
+
+    The audit row is written only after the sealed credential has been built for a
+    running job, so it is proof the agent's file opted in — the one fact the dashboard
+    cannot otherwise see.
+    """
+    from datetime import timedelta
+    from ..database import AuditLog
+    since = datetime.utcnow() - timedelta(days=_FETCH_LOOKBACK_DAYS)
+    try:
+        rows = (db.query(AuditLog.timestamp, AuditLog.details)
+                .filter(AuditLog.action == "agent.connection_secret",
+                        AuditLog.timestamp >= since)
+                .order_by(AuditLog.timestamp.desc())
+                .limit(_FETCH_SCAN_LIMIT).all())
+    except Exception:  # noqa: BLE001 — a display hint must never break the list
+        logger.warning("could not read credential-fetch audit rows", exc_info=True)
+        return {}
+    out: dict = {}
+    for ts, details in rows:
+        try:
+            conn_id = (json.loads(details) if details else {}).get("connection_id")
+        except (ValueError, AttributeError):
+            continue
+        if conn_id and conn_id not in out:
+            out[conn_id] = ts
+    return out
 
 
 def serialize(row: HypervisorConnection) -> dict:
@@ -488,6 +570,8 @@ def serialize(row: HypervisorConnection) -> dict:
         "username": row.username or "", "verify_ssl": bool(row.verify_ssl),
         "options": row.options_dict,
         "has_secret": bool(row.secret_enc or row.secret_ref),
+        "credential_held_by": credential_held_by(row),
+        "credential_source": credential_source(row),
         "secret_ref": row.secret_ref or "",
         "agent_id": row.agent_id, "agent_connection_name": row.agent_connection_name or "",
         "via_agent": bool(row.agent_id),
