@@ -66,6 +66,8 @@ services:
     volumes:
       # Rootless Docker (recommended). Swap the SOURCE for /var/run/docker.sock only if
       # you accept that the agent then holds root on this host.
+      # Docker Desktop (Windows/macOS) has no rootless socket — use /var/run/docker.sock
+      # here. See docs/remote-agents/agent-host.md#the-sibling-runner-on-docker-desktop.
       - ${XDG_RUNTIME_DIR:-/run/user/1000}/docker.sock:/var/run/docker.sock
 
     # MOUNTING THE SOCKET IS NOT THE SAME AS BEING ABLE TO OPEN IT.

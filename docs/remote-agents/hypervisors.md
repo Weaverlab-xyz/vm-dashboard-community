@@ -306,7 +306,8 @@ separate, deliberate act:
 
 Withhold any one and nothing runs. Prefer the rootless Docker or Podman user socket; the
 example overlay uses the rootless path deliberately, so reaching for the root socket has to
-be a conscious edit.
+be a conscious edit. On **Docker Desktop** that path does not exist and the socket needs its
+group set — see [The sibling runner on Docker Desktop](agent-host.md#the-sibling-runner-on-docker-desktop).
 
 What the agent does with it is deliberately narrow. Every field of the container spec is a
 constant or comes from your policy — the image, the network, and a `HostConfig` with no
