@@ -61,14 +61,25 @@ services:
           'cert_dir = "/run/spiffe/jwt"' \
           'daemon_mode = true' \
           "jwt_svids = [{jwt_audience=\"$${DASHBOARD_URL%/}/api/agent/attest\", jwt_svid_file_name=\"attest.jwt\"}]" \
-          'jwt_svid_file_mode = 0400' \
+          'jwt_svid_file_mode = 0600' \
           > /helper/helper.conf
         chown 10001:10001 /helper /helper/helper.conf
         chmod 0400 /helper/helper.conf && chmod 0700 /helper
+        # The token file must stay owner-WRITABLE. spiffe-helper renews it with
+        # os.WriteFile, which applies the mode only when it creates the file, so a 0400
+        # token is written once and every renewal after it is "permission denied" — the
+        # agent runs on its first token and, on its next restart, presents an expired
+        # one and is refused for good. An install that ran the old 0400 config still
+        # holds such a file: re-mode it (FOWNER allows chmod on a file root does not
+        # own; 0711 lets root reach it without DAC_OVERRIDE).
+        chmod 0711 /jwt
+        if [ -e /jwt/attest.jwt ]; then chmod 0600 /jwt/attest.jwt; fi
+        chmod 0700 /jwt
     volumes:
       - spire_agent_data:/data
       - spire_agent_socket:/sock
       - spiffe_helper_conf:/helper
+      - spiffe_jwt:/jwt
     restart: "no"
 
   spire-agent:

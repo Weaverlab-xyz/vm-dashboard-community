@@ -675,7 +675,9 @@ def _render_spire_block(spire: dict | None, dashboard_url: str) -> str:
         'cert_dir = "/run/spiffe/jwt"\n'
         "daemon_mode = true\n"
         f'jwt_svids = [{{jwt_audience="{audience}", jwt_svid_file_name="attest.jwt"}}]\n'
-        "jwt_svid_file_mode = 0400\n")
+        # Owner-writable: spiffe-helper renews with os.WriteFile, which applies the mode
+        # only on create, so 0400 is written once and every renewal is refused.
+        "jwt_svid_file_mode = 0600\n")
     d = GUEST_SPIRE_DIR
     hardening = ("--read-only --cap-drop ALL --security-opt no-new-privileges:true")
     return cleanup + f"""
