@@ -119,14 +119,14 @@ def _fixture():
     db.commit()
 
     env = db.query(PovEnvironment).filter(PovEnvironment.id == done_id).first()
-    pov_use_cases.set_state(db, env, "pov-security-who-has-access", state="done",
+    pov_use_cases.set_state(db, env, "pov-devops-no-inbound", state="done",
                             by="se@example")
     pov_use_cases.set_state(db, env, "pov-hypervisor-rotate-root", state="done",
                             by="povguest_acme", by_kind=pov_use_cases.KIND_ACCESSOR,
                             note="this is the one that sold it")
-    pov_use_cases.set_state(db, env, "pov-security-teardown-proof", state="skipped",
+    pov_use_cases.set_state(db, env, "pov-security-session-record", state="skipped",
                             by="se@example", note="ran out of time")
-    pov_use_cases.set_state(db, env, "pov-cloudops-reap", state="",
+    pov_use_cases.set_state(db, env, "pov-devops-secretless-run", state="",
                             by="povguest_acme", by_kind=pov_use_cases.KIND_ACCESSOR,
                             note="could not get to this")
     db.add(PovAccessor(environment_id=done_id, username="povguest_acme_aaa",
@@ -207,13 +207,13 @@ def test_the_summary_holds_only_what_somebody_touched():
     built = pov_summary.build(db, env)
     db.close()
     assert {e["id"] for e in built["covered"]} == {
-        "pov-security-who-has-access", "pov-hypervisor-rotate-root"}
-    assert [e["id"] for e in built["skipped"]] == ["pov-security-teardown-proof"]
+        "pov-devops-no-inbound", "pov-hypervisor-rotate-root"}
+    assert [e["id"] for e in built["skipped"]] == ["pov-security-session-record"]
     # The note-only card is in `notes` and in neither verdict list — a comment is not a
     # verdict, which is the rule the accessor page writes by.
     note_ids = {e["id"] for e in built["notes"]}
-    assert "pov-cloudops-reap" in note_ids
-    assert not any(e["id"] == "pov-cloudops-reap"
+    assert "pov-devops-secretless-run" in note_ids
+    assert not any(e["id"] == "pov-devops-secretless-run"
                    for e in built["covered"] + built["skipped"])
 
 
@@ -333,15 +333,48 @@ def _runbook_card():
     return pov_runbooks.get("ps-poc-skytap").use_cases[0].id
 
 
-def test_the_runbook_group_reaches_the_catalog():
+def test_the_runbook_is_listed_under_its_product_group_not_beside_it():
+    """One Password Safe list, not two: the runbook's cards are folded into the group its
+    `Runbook.group` names, after the product's own, and say where they came from."""
     from web_dashboard.services import pov_cards, pov_runbooks
     st = _fixture()
     db = SessionLocal()
     env = db.query(PovEnvironment).filter(PovEnvironment.id == st["live"]).first()
     groups = pov_use_cases.describe(db, env)["groups"]
     keys = [g["group"] for g in groups]
-    expected = list(pov_cards.GROUPS) + list(pov_runbooks.VALID_RUNBOOKS)
-    assert keys == expected, f"the catalog drops, reorders or duplicates a group: {keys}"
+    assert keys == list(pov_cards.GROUPS), \
+        f"the catalog drops, reorders or duplicates a group: {keys}"
+    for book in pov_runbooks.all_runbooks():
+        host = next(g for g in groups if g["group"] == book.group)
+        listed = [c["id"] for c in host["use_cases"]]
+        own = [c.id for c in pov_cards.cards(book.group)]
+        assert listed[:len(own)] == own, "the product's own cards no longer lead the group"
+        assert listed[len(own):] == [c.id for c in book.use_cases], \
+            f"{book.key} is not listed, in order, under {book.group}"
+        assert all(c.get("source") == book.label
+                   for c in host["use_cases"][len(own):]), "a runbook card lost its source"
+    db.close()
+
+
+def test_the_summary_leaves_out_the_presenters_to_do_list():
+    """The environment group is the SE's checklist: counted apart, and absent from the
+    after-POV summary that goes into a renewal note."""
+    st = _fixture()
+    db = SessionLocal()
+    env = db.query(PovEnvironment).filter(PovEnvironment.id == st["live"]).first()
+    pov_use_cases.set_state(db, env, "pov-cloudops-reap", state="done", by="se@example")
+    payload = pov_use_cases.describe(db, env)
+    assert payload["summary"]["todo_done"] == 1
+    assert payload["summary"]["todo_total"] == len(
+        [c for g in payload["groups"] if g["presenter"] for c in g["use_cases"]])
+    customer = [c["id"] for g in payload["groups"] if not g["presenter"]
+                for c in g["use_cases"] if c["state"] != "out_of_scope"]
+    assert payload["summary"]["total"] == len(customer), \
+        "the presenter's to-do list is in the customer's denominator"
+    built = pov_summary.build(db, env)
+    assert "environment" not in {g["group"] for g in built["by_group"]}
+    assert not any(e["id"] == "pov-cloudops-reap" for e in built["covered"])
+    pov_use_cases.clear(db, env, "pov-cloudops-reap")
     db.close()
 
 
@@ -359,9 +392,9 @@ def test_the_runbook_cards_are_counted_in_the_summary_total():
     db.close()
 
 
-def test_a_runbook_card_can_be_ticked_and_records_its_runbook():
-    """`set_state` consults both registries. The `group_key` column stores whichever group
-    the card came from, which is what makes a runbook tick renderable later."""
+def test_a_runbook_card_can_be_ticked_and_is_filed_where_it_is_listed():
+    """`set_state` consults both registries. The `group_key` column stores the group the
+    card is LISTED under -- for a runbook card, its product group."""
     st = _fixture()
     db = SessionLocal()
     env = db.query(PovEnvironment).filter(PovEnvironment.id == st["live"]).first()
@@ -378,8 +411,8 @@ def test_a_runbook_card_can_be_ticked_and_records_its_runbook():
     stored = (db.query(PovUseCaseProgress)
                 .filter(PovUseCaseProgress.environment_id == env.id,
                         PovUseCaseProgress.card_id == card).first())
-    misfiled = f"the tick was filed under {stored.group_key!r}, not its runbook"
-    assert stored.group_key == "ps-poc-skytap", misfiled
+    misfiled = f"the tick was filed under {stored.group_key!r}, not where it is listed"
+    assert stored.group_key == "password_safe", misfiled
 
     assert pov_use_cases.clear(db, env, card) is True
     db.close()

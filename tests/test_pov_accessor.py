@@ -692,7 +692,7 @@ def test_the_write_routes_needed_no_widening_of_the_allowlist():
 def test_an_accessor_can_tick_a_card_and_it_is_recorded_as_theirs():
     s = _setup()
     headers, _ = _mint()
-    card = "pov-security-who-has-access"
+    card = "pov-hypervisor-rotate-root"
     r = s["client"].post(f"/api/pov/accessor/self/use-cases/{card}",
                          json={"state": "done"}, headers=headers)
     assert r.status_code == 200, r.text
@@ -723,12 +723,25 @@ def test_an_accessor_cannot_write_an_unknown_card():
     assert r.status_code == 400
 
 
+def test_the_presenters_to_do_list_is_not_the_customers():
+    """The environment group is the SE's checklist. The customer's page never lists it, and
+    a hand-built write to one of its items is refused rather than stored as theirs."""
+    s = _setup()
+    headers, _ = _mint()
+    page = s["client"].get("/api/pov/accessor/self", headers=headers).json()
+    groups = [g["group"] for g in page["use_cases"]["groups"]]
+    assert "environment" not in groups, f"the customer is shown the presenter's list: {groups}"
+    r = s["client"].post("/api/pov/accessor/self/use-cases/pov-security-who-has-access",
+                         json={"state": "done"}, headers=headers)
+    assert r.status_code == 400, r.text
+
+
 def test_a_note_does_not_silently_mark_a_card_covered():
     """A comment is not a verdict. Defaulting one would put a claim in the customer's mouth
     because they typed in the box under it."""
     s = _setup()
     headers, _ = _mint()
-    card = "pov-security-teardown-proof"
+    card = "pov-devops-secretless-run"
     r = s["client"].post(f"/api/pov/accessor/self/use-cases/{card}",
                          json={"state": "", "note": "could not get to this"},
                          headers=headers)
@@ -750,7 +763,7 @@ def test_an_operator_tick_does_not_erase_the_customers_note():
     evidence in this feature that cannot be reconstructed."""
     s = _setup()
     headers, _ = _mint()
-    card = "pov-cloudops-reap"
+    card = "pov-dba-rotate-no-outage"
     s["client"].post(f"/api/pov/accessor/self/use-cases/{card}",
                      json={"state": "", "note": "this is what sold it for us"},
                      headers=headers)

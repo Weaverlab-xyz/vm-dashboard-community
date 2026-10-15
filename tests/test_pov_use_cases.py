@@ -120,6 +120,7 @@ def test_a_cards_group_is_derived_from_the_product_it_declares():
             f"{c.id} sits in '{g}' but derives '{C.group_of(c)}'"
     assert not any(c.requires_products for c in C.cards(C.ENVIRONMENT)), \
         "a card in the environment group declares a product, so it belongs elsewhere"
+    assert C.cards(C.OT) and all(C.group_of(c) == C.OT for c in C.cards(C.OT))
 
 
 def test_a_two_product_cards_group_is_its_first_product_and_that_is_deliberate():
@@ -128,8 +129,9 @@ def test_a_two_product_cards_group_is_its_first_product_and_that_is_deliberate()
     Reordering one of those tuples MOVES the card between headings, so this test exists to
     make that a decision rather than a side effect."""
     from web_dashboard.services import pov_cards as C
-    two = [(g, c) for g, c in _all_pov_cards() if len(c.requires_products) > 1]
-    assert len(two) == 4, f"the two-product set changed: {[c.id for _g, c in two]}"
+    two = [(g, c) for g, c in _all_pov_cards()
+           if len(c.requires_products) > 1 and g != C.OT]
+    assert len(two) == 2, f"the two-product set changed: {[c.id for _g, c in two]}"
     for g, c in two:
         assert g == c.requires_products[0], f"{c.id} is filed under {g}"
         assert g == "pra", (
@@ -160,12 +162,16 @@ def test_every_required_product_is_a_real_product():
                 f"{g}/{c.id} requires '{product}', not a real product"
 
 
-def test_the_groups_are_the_products_plus_one():
-    """The order is POV_PRODUCTS order, then the product-free group. A product group is
-    what the evaluation was bought for; the environment group runs on every POV."""
+def test_the_groups_are_the_products_then_ot_then_the_presenters_list():
+    """The order is POV_PRODUCTS order, then OT, then the product-free group. A product
+    group is what the evaluation was bought for; the environment group is the presenter's
+    to-do list, which is why it is last and the only presenter group."""
     from web_dashboard.services import pov_cards as C
-    assert C.GROUPS == C.POV_PRODUCTS + (C.ENVIRONMENT,), \
-        f"the group order is no longer products-then-environment: {C.GROUPS}"
+    assert C.GROUPS == C.POV_PRODUCTS + (C.OT, C.ENVIRONMENT), \
+        f"the group order is no longer products-OT-environment: {C.GROUPS}"
+    assert C.PRESENTER_GROUPS == (C.ENVIRONMENT,)
+    flags = {g["group"]: g["presenter"] for g in C.catalog("e", {})}
+    assert flags == {g: g == C.ENVIRONMENT for g in C.GROUPS}, flags
 
 
 def test_every_product_has_a_label_an_artifact_and_a_remedy():
@@ -411,7 +417,7 @@ def test_find_card_is_the_allowlist_and_refuses_a_demo_id():
     key, card = C.find_card("pov-security-who-has-access")
     assert card is not None and key == C.ENVIRONMENT
     key, card = C.find_card("pov-ot-vendor-jit")
-    assert card is not None and key == "pra"
+    assert card is not None and key == C.OT
     for bogus in ("", "   ", "nope", "cloudops-three-layers"):
         assert C.find_card(bogus) == ("", None), f"{bogus!r} resolved to a card"
 

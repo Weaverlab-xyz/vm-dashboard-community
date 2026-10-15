@@ -37,12 +37,17 @@ What survives from that arrangement, deliberately:
     booleans; ``services/pov_use_cases`` is the module that knows about ``PovEnvironment``.
     Keeping the row out of here is what lets this module be imported from anywhere.
 
-A card's group is **derived, never authored**: it is the first product the card declares,
-or the environment group when it declares none. So there is no second field to keep in sync
-with ``requires_products``, and an author moves a card between groups by reordering that
-tuple -- which is also the field that decides whether the card is in scope at all, so the
-two can never disagree. The four cards naming two products all lead with ``pra``, and all
-four are PRA-first stories; a guard test holds that the ordering stays deliberate.
+A card's group is **derived, never authored**, with one exception: it is the first product
+the card declares, or the environment group when it declares none. So there is no second
+field to keep in sync with ``requires_products``, and an author moves a card between product
+groups by reordering that tuple -- which is also the field that decides whether the card is
+in scope at all, so the two can never disagree. The exception is OT: a plant-floor card is
+filed under the OT group by being written in ``_OT_CARDS``, because "this is an OT story"
+cannot be read off the products it needs. The two-product cards outside OT both lead with
+``pra``; a guard test holds that the ordering stays deliberate.
+
+The environment group is the **presenter's to-do list**, not customer use cases -- see
+:data:`PRESENTER_GROUPS`.
 """
 from .personas import UseCase
 
@@ -114,18 +119,33 @@ _POV_ACTION_TAB = "#wired"
 
 # ── the groups ───────────────────────────────────────────────────────────────
 
-# The fourth group: cards that name no product at all. They are about the POV itself --
+# The OT group: the plant-floor cards, whichever product each one leads with. The product
+# groups are the IT estate; an OT evaluation is a different conversation with a different
+# audience, and an SE scoping one wants to keep or drop these as a set. After the products
+# because most of it is PRA, before the environment group because it is still a use case.
+OT = "ot"
+
+# The last group: cards that name no product at all. They are about the POV itself --
 # who can reach it, what the two components inside the customer's network talk to, what
-# teardown removes -- so they are always in scope, on every mix, and they are the ones a
-# platform team and an auditor ask for rather than a product owner. Last in the order
-# because a product group is what the evaluation was bought for.
+# teardown removes -- so they are always in scope, on every mix.
+#
+# **They are the presenter's to-do list, not the customer's use cases.** Nothing in them is
+# something a prospect evaluates; they are what the SE sets up, checks and narrates about
+# the POV itself. So the group is served with ``presenter: true`` and every consumer treats
+# it that way: it is kept out of the use-case counts, off the customer's page, out of the
+# Setup tab's picker and out of the after-POV summary. The SE's Use cases tab still lists
+# it, last and labelled, so the ticks have somewhere to live.
 ENVIRONMENT = "environment"
 
-GROUPS = POV_PRODUCTS + (ENVIRONMENT,)
+GROUPS = POV_PRODUCTS + (OT, ENVIRONMENT)
+
+PRESENTER_GROUPS = (ENVIRONMENT,)
 
 # A product group's label IS the product's label -- one spelling of "Password Safe", so a
 # rename in the copy cannot leave the heading and the "Needs: ..." line disagreeing.
-_GROUP_LABELS = {**_PRODUCT_LABELS, ENVIRONMENT: "The environment itself"}
+_GROUP_LABELS = {**_PRODUCT_LABELS,
+                 OT: "Operational Technology (OT)",
+                 ENVIRONMENT: "Presenter to-do"}
 
 _GROUP_BLURBS = {
     "pra": "Reaching a machine in the lab without a VPN, an inbound port or a password on "
@@ -134,8 +154,12 @@ _GROUP_BLURBS = {
                      "without breaking what uses them.",
     "entitle": "Access that arrives when it is asked for and leaves on its own, so nothing "
                "in the environment is standing.",
-    ENVIRONMENT: "The POV itself: who can reach it, what runs inside the customer's "
-                 "network, and what is left when it is destroyed. These run on every POV.",
+    OT: "The plant floor: devices on the process network, the HMI and the PLC behind it, "
+        "and the integrator who needs two hours on one of them.",
+    ENVIRONMENT: "Not a customer use case. What the presenter sets up, checks and shows "
+                 "about the POV itself — who can reach it, what runs inside the customer's "
+                 "network, what is left when it is destroyed. Not counted, and not on the "
+                 "customer's page.",
 }
 
 # One doc per group, and each one exists on disk (a guard test walks them). The product
@@ -145,20 +169,28 @@ _GROUP_DOCS = {
     "pra": ("integrations/beyondtrust/privileged-remote-access",),
     "password_safe": ("integrations/beyondtrust/password-safe",),
     "entitle": ("integrations/beyondtrust/entitle",),
+    OT: ("profiles/pov/demo-cells",),
     ENVIRONMENT: ("profiles/pov/lifecycle",),
 }
 
 
 def group_of(card: UseCase) -> str:
-    """Which group ``card`` belongs to -- the first product it declares, else the
-    environment group.
+    """Which group ``card`` belongs to -- the OT group for a card authored in
+    ``_OT_CARDS``, else the first product it declares, else the environment group.
 
-    Derived rather than stored, so ``requires_products`` is the single field that decides
-    both a card's group and whether it is in scope. A separate ``group=`` would be a second
-    place to edit, and the failure when they disagreed would be a card filed under a
-    product it never mentions.
+    Derived rather than stored for the product groups, so ``requires_products`` is the
+    single field that decides both a card's group and whether it is in scope. OT is the one
+    editorial axis: whether a card is a plant-floor story cannot be read off its products,
+    so it is decided by which tuple the card is written in -- still one place, not two.
     """
+    if card.id in _OT_IDS:
+        return OT
     return card.requires_products[0] if card.requires_products else ENVIRONMENT
+
+
+def is_presenter_group(group: str) -> bool:
+    """Whether ``group`` is the presenter's to-do list rather than customer use cases."""
+    return group in PRESENTER_GROUPS
 
 
 # ── the cards ─────────────────────────────────────────────────────────────────
@@ -227,39 +259,6 @@ _PRA_CARDS = (
         requires_products=("pra",),
     ),
     UseCase(
-        id="pov-ot-tunnel-to-device",
-        title="Tunnel to a device with no VPN and no inbound rule",
-        summary="Reach a machine on the lab’s process network over its own protocol "
-                "through a brokered tunnel — the access path that does not require "
-                "opening the plant network.",
-        target="#wired",
-        minutes=12,
-        docs="integrations/beyondtrust/privileged-remote-access",
-        requires_products=("pra",),
-    ),
-    UseCase(
-        id="pov-ot-vendor-jit",
-        title="Two hours for the integrator, then the tunnel closes",
-        summary="Give a third party access to one machine for a bounded window and "
-                "watch the grant expire and the session end by itself — the flagship "
-                "story, because vendor access is how plants get compromised.",
-        target="#wired",
-        minutes=15,
-        docs="design/entitle-user-jit",
-        requires_products=("pra", "entitle"),
-    ),
-    UseCase(
-        id="pov-ot-credential-injection",
-        title="The vendor uses a credential they never see",
-        summary="The machine’s account is vaulted and injected at session launch, so "
-                "a third party does real work without the password ever being on "
-                "their screen or in their notes.",
-        target="#wired",
-        minutes=12,
-        docs="integrations/beyondtrust/password-safe",
-        requires_products=("pra", "password_safe"),
-    ),
-    UseCase(
         id="pov-ot-egress-only",
         title="Nothing dials in — the architecture slide, live",
         summary="Trace the outbound-only path from the lab’s private segment to the "
@@ -299,44 +298,6 @@ _PRA_CARDS = (
         minutes=10,
         docs="integrations/beyondtrust/privileged-remote-access",
         requires_products=("pra",),
-    ),
-    # The demo cells, as a POV carries them: a guest playing a cell role (see
-    # services/pov_cell_roles). Out of scope on every POV with no such guest, so they
-    # cost a POV that is not about OT or network devices nothing.
-    UseCase(
-        id="pov-ot-hmi-web-jump",
-        title="Operate the plant HMI through a recorded Web Jump",
-        summary="Open the OT simulator's FUXA HMI from the PRA console — no route into "
-                "the plant network, the session recorded, the operator never on it.",
-        target="#wired",
-        minutes=10,
-        docs="profiles/pov/demo-cells",
-        requires_products=("pra",),
-        requires_cell_roles=("ot-sim",),
-    ),
-    UseCase(
-        id="pov-ot-plc-protocol-tunnel",
-        title="Reach a PLC over Modbus or OPC UA, brokered",
-        summary="Point an engineering tool at 127.0.0.1 and land on the simulated PLC "
-                "through a PRA protocol tunnel — one jump item per protocol, so each can "
-                "be granted to different people.",
-        target="#wired",
-        minutes=12,
-        docs="profiles/pov/demo-cells",
-        requires_products=("pra",),
-        requires_cell_roles=("ot-sim",),
-    ),
-    UseCase(
-        id="pov-net-emergency-firewall-change",
-        title="Make an emergency firewall change on a network device",
-        summary="Shell Jump to the VyOS device, enter configure mode and change a rule, "
-                "recorded end to end — the change a network team most needs to be able "
-                "to prove afterwards.",
-        target="#wired",
-        minutes=10,
-        docs="profiles/pov/demo-cells",
-        requires_products=("pra",),
-        requires_cell_roles=("vyos",),
     ),
 )
 
@@ -499,6 +460,69 @@ _ENTITLE_CARDS = (
         docs="design/entitle-user-jit",
         requires_products=("entitle",),
     ),
+)
+
+
+# The OT group's cards (see `OT`). Membership of this tuple is what files a card there,
+# whatever product it leads with. The demo-cell ones need a guest playing a cell role
+# (services/pov_cell_roles) and are out of scope on every POV with no such guest.
+_OT_CARDS = (
+    UseCase(
+        id="pov-ot-tunnel-to-device",
+        title="Tunnel to a device with no VPN and no inbound rule",
+        summary="Reach a machine on the lab’s process network over its own protocol "
+                "through a brokered tunnel — the access path that does not require "
+                "opening the plant network.",
+        target="#wired",
+        minutes=12,
+        docs="integrations/beyondtrust/privileged-remote-access",
+        requires_products=("pra",),
+    ),
+    UseCase(
+        id="pov-ot-hmi-web-jump",
+        title="Operate the plant HMI through a recorded Web Jump",
+        summary="Open the OT simulator's FUXA HMI from the PRA console — no route into "
+                "the plant network, the session recorded, the operator never on it.",
+        target="#wired",
+        minutes=10,
+        docs="profiles/pov/demo-cells",
+        requires_products=("pra",),
+        requires_cell_roles=("ot-sim",),
+    ),
+    UseCase(
+        id="pov-ot-plc-protocol-tunnel",
+        title="Reach a PLC over Modbus or OPC UA, brokered",
+        summary="Point an engineering tool at 127.0.0.1 and land on the simulated PLC "
+                "through a PRA protocol tunnel — one jump item per protocol, so each can "
+                "be granted to different people.",
+        target="#wired",
+        minutes=12,
+        docs="profiles/pov/demo-cells",
+        requires_products=("pra",),
+        requires_cell_roles=("ot-sim",),
+    ),
+    UseCase(
+        id="pov-ot-credential-injection",
+        title="The vendor uses a credential they never see",
+        summary="The machine’s account is vaulted and injected at session launch, so "
+                "a third party does real work without the password ever being on "
+                "their screen or in their notes.",
+        target="#wired",
+        minutes=12,
+        docs="integrations/beyondtrust/password-safe",
+        requires_products=("pra", "password_safe"),
+    ),
+    UseCase(
+        id="pov-ot-vendor-jit",
+        title="Two hours for the integrator, then the tunnel closes",
+        summary="Give a third party access to one machine for a bounded window and "
+                "watch the grant expire and the session end by itself — the flagship "
+                "story, because vendor access is how plants get compromised.",
+        target="#wired",
+        minutes=15,
+        docs="design/entitle-user-jit",
+        requires_products=("pra", "entitle"),
+    ),
     # The OT demo cell's DMZ broker story, on a POV: services/pov_ot_adapter. Ready means
     # the guests are there and wired; whether the adapter itself is registered is the
     # "OT HMI access through Entitle" setup step's to say.
@@ -513,6 +537,18 @@ _ENTITLE_CARDS = (
         docs="profiles/pov/demo-cells",
         requires_products=("entitle",),
         requires_cell_roles=("ot-sim", "ot-broker"),
+    ),
+    UseCase(
+        id="pov-net-emergency-firewall-change",
+        title="Make an emergency firewall change on a network device",
+        summary="Shell Jump to the VyOS device, enter configure mode and change a rule, "
+                "recorded end to end — the change a network team most needs to be able "
+                "to prove afterwards.",
+        target="#wired",
+        minutes=10,
+        docs="profiles/pov/demo-cells",
+        requires_products=("pra",),
+        requires_cell_roles=("vyos",),
     ),
 )
 
@@ -575,8 +611,11 @@ _CARDS = {
     "pra": _PRA_CARDS,
     "password_safe": _PASSWORD_SAFE_CARDS,
     "entitle": _ENTITLE_CARDS,
+    OT: _OT_CARDS,
     ENVIRONMENT: _ENVIRONMENT_CARDS,
 }
+
+_OT_IDS = frozenset(c.id for c in _OT_CARDS)
 
 
 def cards(group: str = "") -> tuple:
@@ -671,12 +710,14 @@ def describe_card(card: UseCase, env_id: str, products: dict) -> dict:
 def describe(group: str, env_id: str, products: dict) -> dict:
     """One group's cards for one POV. Unknown group yields an empty group, never None."""
     if group not in _CARDS:
-        return {"group": "", "label": "", "blurb": "", "docs": [], "use_cases": []}
+        return {"group": "", "label": "", "blurb": "", "docs": [], "presenter": False,
+                "use_cases": []}
     return {
         "group": group,
         "label": _GROUP_LABELS[group],
         "blurb": _GROUP_BLURBS[group],
         "docs": [f"/docs/{d}" for d in _GROUP_DOCS[group]],
+        "presenter": is_presenter_group(group),
         "use_cases": [describe_card(c, env_id, products) for c in _CARDS[group]],
     }
 

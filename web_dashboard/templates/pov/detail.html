@@ -48,8 +48,8 @@
   <div x-show="error" class="bg-red-50 border border-red-200 rounded-lg px-4 py-3">
     <p class="text-sm text-red-700" x-text="error"></p>
   </div>
-  <!-- The Setup tab's buttons report here; the other panels keep their own inline line. -->
-  <div x-show="notice && tab === 'setup'" class="bg-green-50 border border-green-200 rounded-lg px-4 py-3">
+  <!-- The Setup tab's buttons, and Start / Suspend, report here; the other panels keep their own inline line. -->
+  <div x-show="notice && (tab === 'setup' || tab === 'overview')" class="bg-green-50 border border-green-200 rounded-lg px-4 py-3">
     <p class="text-sm text-green-800 break-all" x-text="notice"></p>
   </div>
 
@@ -68,6 +68,24 @@
             <span class="text-gray-300 mx-1">·</span>
             <span x-text="env.status"></span>
           </p>
+        </div>
+        <!-- Start / Suspend, on the two tabs an SE runs a POV from. -->
+        <div x-show="tab === 'setup' || tab === 'overview'"
+             class="flex items-center gap-2 shrink-0 sm:ml-auto sm:mr-6 sm:self-center">
+          <span class="text-xs text-gray-500">
+            <span x-text="env.runstate || 'unknown'"></span>
+            <span class="text-gray-400" x-text="'· ' + seenAgo()"></span>
+          </span>
+          <button type="button" x-show="showStart()" @click="power('running')"
+                  :disabled="!powerActionable() || powerBusy"
+                  :title="powerActionable() ? 'Start this POV' : 'Only an active POV can be started'"
+                  class="text-xs px-3 py-1.5 rounded-lg bg-green-600 text-white hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                  x-text="powerBusy === 'running' ? 'Starting…' : 'Start'"></button>
+          <button type="button" x-show="showSuspend()" @click="power('suspended')"
+                  :disabled="!powerActionable() || powerBusy"
+                  :title="powerActionable() ? 'Suspend this POV' : 'Only an active POV can be suspended'"
+                  class="text-xs px-3 py-1.5 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                  x-text="powerBusy === 'suspended' ? 'Suspending…' : 'Suspend'"></button>
         </div>
         <div class="text-right shrink-0">
           <p class="text-xs text-gray-400">Use cases</p>
@@ -104,8 +122,8 @@
         </div>
         <!-- At a glance: the POV list's columns that belong to no single step — power,
              tenants, use cases, expiry, sleep, spend — so an SE working down this ladder
-             does not have to scroll the list page sideways for them. Read-only: the
-             controls stay on the list page, where their editors are. -->
+             does not have to scroll the list page sideways for them. Read-only apart from
+             Start / Suspend in the header: the other editors stay on the list page. -->
         <dl class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-x-4 gap-y-3 mb-5 pb-4 border-b border-gray-100">
           <template x-for="f in glanceFacts" :key="f.label">
             <div class="min-w-0">
@@ -172,9 +190,19 @@
                       </label>
                     </template>
                   </div>
+                  <!-- The presenter's to-do group is not offered: it is not a use case, and
+                       the choice never hides it. Each heading's box ticks or unticks every
+                       use case under it, and shows a dash when only some are ticked. -->
                   <template x-for="g in scopeGroups" :key="'scope-group-' + g.group">
-                    <div x-show="g.use_cases.some(c => scopeCardSelectable(c))">
-                      <p class="text-xs font-semibold text-gray-600" x-text="g.label"></p>
+                    <div x-show="!g.presenter && g.use_cases.some(c => scopeCardSelectable(c))">
+                      <label class="inline-flex items-center gap-1.5 text-xs font-semibold text-gray-600">
+                        <input type="checkbox"
+                               :checked="scopeGroupState(g) === 'all'"
+                               x-effect="$el.indeterminate = scopeGroupState(g) === 'some'"
+                               @change="scopeToggleGroup(g)"
+                               :aria-label="'Tick or untick every use case under ' + g.label">
+                        <span x-text="g.label"></span>
+                      </label>
                       <ul class="mt-1 grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-1">
                         <template x-for="c in g.use_cases" :key="'scope-card-' + c.id">
                           <li x-show="scopeCardSelectable(c)">
@@ -274,7 +302,8 @@
           <p class="text-xs text-gray-400 mt-4">
             Set the POV up step by step on the
             <button type="button" @click="select('setup')" class="underline hover:no-underline">Setup</button>
-            tab. Power, expiry and the Resource Broker's form live on
+            tab. Start and Suspend are at the top of this tab; expiry and the Resource
+            Broker's form live on
             <a href="/pov" class="underline hover:no-underline">the POV page</a>.
           </p>
         </div>
@@ -669,13 +698,17 @@
 
         <div class="chk-page-header">
           <p>
-            Grouped by the product each one proves, and narrowed to the products this POV
-            includes. What is wired decides what each card says.
+            Grouped by the product each one proves, with the OT use cases on their own, and
+            narrowed to the products this POV includes. What is wired decides what each card
+            says. The presenter's to-do list comes last and is not counted.
           </p>
           <p class="chk-progress">
             <b x-text="summary.done"></b> run ·
             <b x-text="summary.skipped"></b> skipped ·
             <b x-text="summary.total"></b> in scope
+            <span x-show="summary.todo_total">
+              · presenter to-do <b x-text="summary.todo_done || 0"></b>/<b x-text="summary.todo_total"></b>
+            </span>
           </p>
         </div>
 
@@ -684,9 +717,12 @@
              which is the same thing the customer's page and the /use-cases lead do. -->
         <template x-for="g in groups" :key="g.group">
           <div class="chk-section" x-show="inScope(g).length">
+            <!-- The presenter's to-do group is the SE's checklist, not the customer's: it
+                 is not counted above and never reaches the customer's page. -->
             <h2>
               <span x-text="g.label"></span>
-              <span class="chk-count" x-text="inScope(g).length + ' in scope'"></span>
+              <span class="chk-count"
+                    x-text="g.presenter ? 'for you, not the customer' : inScope(g).length + ' in scope'"></span>
             </h2>
             <p class="chk-blurb" x-show="g.blurb" x-text="g.blurb"></p>
 
@@ -1316,6 +1352,71 @@
                  muted: 'text-gray-400' }[tone] || 'text-gray-600';
       },
 
+      // ── Power, on Setup and Overview -------------------------------------
+      //
+      // The list page's Start / Suspend, here so an SE working down the ladder does not
+      // leave the POV to wake it. Same rules as the list: actionable only on an active (or
+      // failed) POV, and BOTH buttons while the runstate is stale or unconfirmed -- gating
+      // on a remembered value is what once hid Start from every POV the platform had
+      // suspended on its idle timer.
+      powerBusy: '',
+      _powerPoll: null,
+      STALE_AFTER_MS: 30 * 60 * 1000,
+
+      powerActionable() {
+        const s = (this.env || {}).status;
+        return s === 'active' || s === 'failed';
+      },
+
+      staleRunstate() {
+        const at = (this.env || {}).platform_seen_at;
+        const seen = at ? Date.parse(at + 'Z') : NaN;
+        return Number.isNaN(seen) || (Date.now() - seen) > this.STALE_AFTER_MS;
+      },
+
+      showStart() {
+        return (this.env || {}).runstate !== 'running' || this.staleRunstate();
+      },
+
+      showSuspend() {
+        return (this.env || {}).runstate === 'running' || this.staleRunstate();
+      },
+
+      async power(runstate) {
+        this.error = ''; this.notice = '';
+        this.powerBusy = runstate;
+        try {
+          const res = await this.apiFetch(`/api/pov/managed/${this.envId}/power`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ runstate }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.detail || `Could not change the power state (${res.status}).`);
+          this.notice = `${this.env.name}: requested ${runstate} — job ${data.job_id}.`;
+          this.watchPower(runstate);
+        } catch (e) {
+          this.error = e.message;
+        } finally {
+          this.powerBusy = '';
+        }
+      },
+
+      // Re-read the row until the reconcile reports the state asked for, or two minutes
+      // pass. The row, not the platform: it is what every other reader of this POV sees.
+      watchPower(runstate) {
+        if (this._powerPoll) clearInterval(this._powerPoll);
+        let left = 24;
+        this._powerPoll = setInterval(async () => {
+          await this.loadEnv();
+          left -= 1;
+          if (left <= 0 || (this.env && this.env.runstate === runstate)) {
+            clearInterval(this._powerPoll);
+            this._powerPoll = null;
+          }
+        }, 5000);
+      },
+
       seenAgo() {
         const at = this.env.platform_seen_at;
         const seen = at ? Date.parse(at + 'Z') : NaN;
@@ -1912,9 +2013,25 @@
         this.scopeDraft.excluded = ex.includes(c.id) ? ex.filter(x => x !== c.id) : [...ex, c.id];
       },
 
+      // 'all', 'some' or 'none' of the group's offered use cases ticked.
+      scopeGroupState(g) {
+        const offered = g.use_cases.filter(c => this.scopeCardSelectable(c));
+        const ticked = offered.filter(c => !this.scopeDraft.excluded.includes(c.id)).length;
+        if (!offered.length || ticked === 0) return 'none';
+        return ticked === offered.length ? 'all' : 'some';
+      },
+
+      // All ticked unticks the whole heading; anything less ticks the whole heading.
+      scopeToggleGroup(g) {
+        const ids = g.use_cases.filter(c => this.scopeCardSelectable(c)).map(c => c.id);
+        const rest = this.scopeDraft.excluded.filter(x => !ids.includes(x));
+        this.scopeDraft.excluded = this.scopeGroupState(g) === 'all' ? [...rest, ...ids] : rest;
+      },
+
       scopeSelectedCount() {
         let n = 0;
         for (const g of this.scopeGroups) {
+          if (g.presenter) continue;
           for (const c of g.use_cases) {
             if (this.scopeCardSelectable(c) && !this.scopeDraft.excluded.includes(c.id)) n += 1;
           }

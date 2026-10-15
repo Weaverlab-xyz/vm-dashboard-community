@@ -55,21 +55,35 @@ The middle row is the one that moved. The 32 POV cards used to live in eight
 remaining work by an axis belonging to the other install profile — and a POV instance has no
 role axis at all (`personas.applies()` is false there; see
 [Personas](../../demo/personas/README.md)). They now live in `services/pov_cards`, grouped
-by the **product** each one proves, because that is what a POV is bought and scoped by. Four
-groups, in this order:
+by the **product** each one proves, because that is what a POV is bought and scoped by, with
+the OT cards pulled out on their own. Five groups, in this order:
 
 | Group | Cards | What it is |
 |---|---|---|
-| `pra` — Privileged Remote Access | 13 | Reaching a machine without a VPN, an inbound port or a password on screen |
-| `password_safe` — Password Safe | 8 | The lab's own accounts under management, and rotated |
+| `pra` — Privileged Remote Access | 10 | Reaching a machine without a VPN, an inbound port or a password on screen |
+| `password_safe` — Password Safe | 8 + the runbook's 14 | The lab's own accounts under management, and rotated |
 | `entitle` — Entitle | 6 | Access that arrives when asked for and leaves on its own |
-| `environment` — The environment itself | 5 | The POV: who can reach it, what runs inside the customer's network, what teardown removes |
+| `ot` — Operational Technology (OT) | 7 | The plant floor: process-network devices, the HMI, the PLC, the integrator |
+| `environment` — Presenter to-do | 5 | **Not a customer use case.** The POV itself: who can reach it, what runs inside the customer's network, what teardown removes |
 
-A card's group is **derived, never authored**: `pov_cards.group_of` returns the first
-product the card declares, or the environment group when it declares none. So
-`requires_products` is the single field deciding both a card's group and its scope, and they
-cannot disagree. The four cards naming two products all lead with `pra` and all four are
-PRA-first stories; a test pins that the tuple order stays a decision.
+A card's group is **derived, never authored**, with one exception: `pov_cards.group_of`
+returns the first product the card declares, or the environment group when it declares
+none. So `requires_products` is the single field deciding both a card's product group and
+its scope, and they cannot disagree. The exception is OT — "this is a plant-floor story"
+cannot be read off a card's products, so a card is filed there by being written in
+`_OT_CARDS`. The two-product cards outside OT both lead with `pra`; a test pins that the
+tuple order stays a decision.
+
+The **Skytap Password Safe Cloud POC runbook** (`services/pov_runbooks`) is still its own
+registry, but its cards are listed under the Password Safe group (`Runbook.group`), after
+the product's own, rather than as a second Password Safe list. A tick on one is filed under
+`password_safe`.
+
+The **environment group is the presenter's to-do list**, served with `presenter: true`.
+It is never hidden by the Setup tab's choice and never offered in its picker, it is counted
+apart (`summary.todo_done` / `todo_total`) rather than in the customer's numbers, and it is
+left off the customer's page and the after-POV summary. The SE's Use cases tab lists it
+last.
 
 ### Three states, and three words that are not the estate page's
 
@@ -164,9 +178,10 @@ form asks the same question as **POV type**:
 
 A card is in the POV when **every** product it names was chosen, so the combined PRA +
 Password Safe cards appear on a Total PASM POV and never on a Password-Safe-only one. The
-cards that name no product, the ones about the environment itself, are in every POV.
-Inside the choice you can untick single use cases on the Setup tab, which is where you
-leave out a demo the customer does not care about.
+cards that name no product are the presenter's to-do list rather than use cases: they are
+not offered here and are on every POV. Inside the choice you can untick single use cases
+on the Setup tab, or a whole heading with the box beside it, which is where you leave out
+a demo — or all of OT — the customer does not care about.
 
 **This is the one place the checklist subtracts.** A product with no tenant still renders
 its cards `out_of_scope`, because "no tenant picked yet" is somebody's next click. A card

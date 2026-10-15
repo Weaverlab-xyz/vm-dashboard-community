@@ -150,7 +150,9 @@ def test_a_password_safe_pov_tests_only_password_safe():
             assert set(c["products"]) <= {"password_safe"}, (g["group"], c["id"])
     for card in _combined():
         assert card.id not in _ids(payload), f"{card.id} needs PRA too"
-    assert payload["summary"]["total"] == len(_ids(payload))
+    # The presenter's to-do list is listed but not counted.
+    counted = [c for g in payload["groups"] if not g["presenter"] for c in g["use_cases"]]
+    assert payload["summary"]["total"] == len(counted)
 
 
 def test_total_pasm_brings_in_the_cards_that_need_both():
@@ -293,6 +295,34 @@ def test_both_pages_read_the_one_preset_list():
         assert "{{ pov_use_case_presets | tojson }}" in _read(path), path
     detail = _read(_DETAIL)
     assert "use-cases?all=1" in detail and "use-case-scope" in detail
+
+
+def test_the_picker_ticks_a_whole_heading_and_never_offers_the_presenters_list():
+    detail = _read(_DETAIL)
+    # Each heading carries one box bound to the group toggle, with a partial state.
+    assert '@change="scopeToggleGroup(g)"' in detail
+    assert "$el.indeterminate = scopeGroupState(g) === 'some'" in detail
+    for helper in ("scopeGroupState(g) {", "scopeToggleGroup(g) {"):
+        assert helper in detail, f"the picker calls {helper} but the page defines none"
+    # The presenter's to-do group is neither offered nor counted.
+    assert 'x-show="!g.presenter && g.use_cases.some(' in detail
+    count = detail.split("scopeSelectedCount() {", 1)[1].split("\n      },", 1)[0]
+    assert "g.presenter" in count, "the picker's count includes the presenter's list"
+
+
+def test_setup_and_overview_carry_start_and_suspend():
+    """The list page's power controls, on the two tabs a POV is run from. Both buttons
+    show while the runstate is stale -- the gating rule the list page learnt the hard way."""
+    detail = _read(_DETAIL)
+    assert "x-show=\"tab === 'setup' || tab === 'overview'\"" in detail
+    assert "@click=\"power('running')\"" in detail
+    assert "@click=\"power('suspended')\"" in detail
+    assert "/power`" in detail
+    for helper in ("showStart() {", "showSuspend() {", "staleRunstate() {",
+                   "powerActionable() {", "async power(runstate) {"):
+        assert helper in detail, f"the page calls {helper} but defines none"
+    start = detail.split("showStart() {", 1)[1].split("},", 1)[0]
+    assert "staleRunstate()" in start, "Start is hidden on a remembered runstate"
 
 
 if __name__ == "__main__":
