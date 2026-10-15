@@ -82,6 +82,18 @@ def test_the_dashboard_server_config_matches_the_lab():
         "the trust domain must come from the environment (the server runs with -expandEnv)")
 
 
+def test_a_join_token_agent_survives_a_night_offline():
+    """A join-token agent cannot re-attest (the token is single-use), so its node SVID
+    must outlive the host being off. Left unset, agent_ttl falls back to
+    default_x509_svid_ttl (1h), and weaver-pc was locked out by one overnight shutdown."""
+    conf = _text(*_SERVER_CONF)
+    raw = _hcl_value(conf, "agent_ttl")
+    assert raw and raw.endswith("h"), "agent_ttl must be set, in hours"
+    assert int(raw[:-1]) >= 72, raw
+    assert int(raw[:-1]) <= int(_hcl_value(conf, "ca_ttl")[:-1]), (
+        "SPIRE caps it at the CA's life anyway; a longer value only misleads")
+
+
 def test_the_server_image_is_the_labs_pinned_digest():
     lab = _lab()["vars"]
     version = lab["spire_version"]

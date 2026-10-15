@@ -208,6 +208,43 @@ def test_the_agent_reads_a_base64_token_file_too():
     assert agent_mod._parse_jwt_file("not a token") == ""
 
 
+def test_a_locked_out_host_is_told_the_fix_early_and_at_the_end():
+    """A join-token agent whose node SVID expired offline never gets a token, and nothing
+    on the dashboard can see that. The agent's own log is the only place to say what to
+    press, and it should say so after a minute, not stay silent for six."""
+    clock = [1000.0]
+    warnings = []
+    real_time, real_sleep, real_warn = agent_mod.time.time, agent_mod.time.sleep, agent_mod.log.warning
+
+    def fake_sleep(s):
+        clock[0] += s
+
+    agent_mod.time.time = lambda: clock[0]
+    agent_mod.time.sleep = fake_sleep
+    agent_mod.log.warning = lambda msg, *a: warnings.append(msg % a)
+    try:
+        missing = os.path.join(tempfile.mkdtemp(prefix="no-svid-"), "attest.jwt")
+        try:
+            agent_mod.read_jwt_svid(missing, wait_s=360)
+        except agent_mod.AgentFatal as exc:
+            fatal = str(exc)
+        else:
+            raise AssertionError("an absent token must be fatal at the deadline")
+    finally:
+        agent_mod.time.time, agent_mod.time.sleep, agent_mod.log.warning = \
+            real_time, real_sleep, real_warn
+    assert len(warnings) == 1, warnings
+    assert "New SPIRE token" in warnings[0] and "already been used" in warnings[0]
+    assert "New SPIRE token" in fatal and "down -v" in fatal
+
+
+def test_a_quick_token_is_returned_without_a_warning():
+    path = os.path.join(tempfile.mkdtemp(prefix="svid-"), "attest.jwt")
+    with open(path, "w", encoding="ascii") as fh:
+        fh.write("a.b.c\n")
+    assert agent_mod.read_jwt_svid(path, wait_s=1) == "a.b.c"
+
+
 def test_the_proof_context_matches_on_both_sides():
     assert agent_mod.ATTEST_PROOF_CONTEXT == agent_service.ATTEST_PROOF_CONTEXT
 

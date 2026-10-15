@@ -126,6 +126,7 @@ containers, are on [SPIFFE and SPIRE](../spiffe.md#settings-and-environment).
 |---|---|---|
 | The SPIRE agent container cannot connect | a TLS-inspecting proxy, or tcp/8081 not published to the agent host | a proxy bypass for the server's host:port, or stay on Ed25519 |
 | The join token is refused | spent, or older than 15 minutes | press **Migrate to SPIRE** again for a new one |
+| After the host was off, the SPIRE agent logs `SVID is expired` then `join token does not exist or has already been used`, and restarts in a loop. The dashboard agent warns `still no JWT-SVID` after a minute, then exits after six | the agent's own SPIRE identity (7 days at most, about 3.5 at least) ran out while the host was offline, and a join-token agent cannot attest again with its spent token | press **New SPIRE token** on the agent's row, put the new `SPIRE_JOIN_TOKEN` in its `.env` and `up -d` again. Never `down -v` |
 | The agent waits at start instead of authenticating | its last token was already presented, and a replay is refused | nothing: it waits for spiffe-helper's next rotation, half the token's lifetime |
 | **Migrate to SPIRE** says the server is not running | the server, not the agent | [SPIFFE and SPIRE → Troubleshooting](../spiffe.md#troubleshooting) |
 | `403 … only to agents attested through SPIRE` | the release setting is on and this agent is still Ed25519 | migrate it, or keep its credential on its host for now |

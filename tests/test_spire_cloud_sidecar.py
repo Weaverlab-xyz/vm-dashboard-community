@@ -501,7 +501,7 @@ def test_the_sidecar_config_matches_the_compose_one_where_it_must():
     compose = _text("examples", "spire-server", "server.conf")
     cloud = _text("examples", "cloud-spire", "server.conf")
     for key in ("bind_port", "trust_domain", "ca_ttl", "default_x509_svid_ttl",
-                "default_jwt_svid_ttl", "jwt_issuer"):
+                "agent_ttl", "default_jwt_svid_ttl", "jwt_issuer"):
         assert _hcl(cloud, key) == _hcl(compose, key), key
     assert _hcl(cloud, "socket_path") == dashboard_spire.DEFAULT_SOCKET
     assert _hcl(cloud, "database_type") == "postgres"

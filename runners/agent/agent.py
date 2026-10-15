@@ -1523,10 +1523,27 @@ def _parse_jwt_file(raw: str) -> str:
     return decoded if decoded.count(".") == 2 and " " not in decoded else ""
 
 
+# The SPIRE agent attests in seconds when it can, so a minute with no token is worth saying
+# out loud: otherwise the log is silent until _ATTEST_PATIENCE_S runs out.
+_SVID_WAIT_HINT_S = 60
+
+# The one cause the dashboard cannot see (ACA hides the client IP, and a refused join token
+# names no agent row) and the operator cannot guess from a bare "no token": a join-token
+# agent whose node SVID expired while the host was off, so it presents its spent token.
+SPIRE_LOCKOUT_HINT = (
+    "If the SPIRE agent container's log says 'join token does not exist or has already "
+    "been used', this host was offline longer than its SPIRE identity lives: press New "
+    "SPIRE token on this agent's row on the dashboard's Agents page, put the new "
+    "SPIRE_JOIN_TOKEN in .env and run docker compose ... up -d --force-recreate (never "
+    "down -v).")
+
+
 def read_jwt_svid(path: str, *, wait_s: float = 60.0) -> str:
     """The JWT-SVID in ``path``, waiting up to ``wait_s`` for the sidecar to write it —
     on a cold start the agent can come up before SPIRE has issued anything."""
-    deadline = time.time() + wait_s
+    started = time.time()
+    deadline = started + wait_s
+    hinted = False
     while True:
         try:
             with open(path, encoding="ascii", errors="replace") as fh:
@@ -1538,7 +1555,11 @@ def read_jwt_svid(path: str, *, wait_s: float = 60.0) -> str:
         if time.time() >= deadline:
             raise AgentFatal(
                 f"no JWT-SVID in {path} after {wait_s:.0f}s. Is the SPIRE sidecar running, "
-                f"and does this agent's registration entry exist?")
+                f"and does this agent's registration entry exist? {SPIRE_LOCKOUT_HINT}")
+        if not hinted and time.time() - started >= _SVID_WAIT_HINT_S:
+            log.warning("still no JWT-SVID in %s after %ds. %s",
+                        path, _SVID_WAIT_HINT_S, SPIRE_LOCKOUT_HINT)
+            hinted = True
         time.sleep(2)
 
 
