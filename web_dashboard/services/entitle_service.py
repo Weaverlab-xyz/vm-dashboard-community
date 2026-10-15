@@ -42,6 +42,25 @@ def _cfg(key: str, fallback: str = "") -> str:
 _MACHINE_ENDPOINT = "/public/v1/accessRequests"
 
 
+def _auth() -> tuple:
+    """``(api_url, auth headers)``: the stored token, or the platform identity.
+
+    Native mode keeps the historical base, the full ``entitle_api_url``. Workload
+    mode takes ``entitle_workload_api_url`` through ``entitle_public_api.auth``.
+    """
+    from . import entitle_public_api
+    if entitle_public_api.uses_workload():
+        try:
+            return entitle_public_api.auth()
+        except entitle_public_api.EntitleApiError as exc:
+            raise EntitleError(str(exc)) from exc
+    api_url = _cfg("entitle_api_url").rstrip("/")
+    token = _cfg("entitle_api_token")
+    if not api_url or not token:
+        raise EntitleError("Entitle is not configured (api url or token missing).")
+    return api_url, {"Authorization": f"Bearer {token}"}
+
+
 async def submit_machine_request(
     *,
     operation: str,
@@ -59,10 +78,7 @@ async def submit_machine_request(
             "entitle_machine_identity_email is not configured. "
             "Phase 1 needs the synthetic-user email to satisfy Entitle's behalfOf policy."
         )
-    api_url = _cfg("entitle_api_url").rstrip("/")
-    token = _cfg("entitle_api_token")
-    if not api_url or not token:
-        raise EntitleError("Entitle is not configured (api url or token missing).")
+    api_url, auth = _auth()
 
     body = {
         "duration": duration_minutes,
@@ -75,7 +91,7 @@ async def submit_machine_request(
             resp = await client.post(
                 f"{api_url}{_MACHINE_ENDPOINT}",
                 json=body,
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                headers={**auth, "Content-Type": "application/json"},
             )
     except httpx.HTTPError as exc:
         raise EntitleError(f"Entitle machine-request submit failed: {exc}") from exc
@@ -97,15 +113,12 @@ async def get_machine_request(request_id: str) -> dict:
     """Fetch the current state of a machine access request."""
     import httpx
 
-    api_url = _cfg("entitle_api_url").rstrip("/")
-    token = _cfg("entitle_api_token")
-    if not api_url or not token:
-        raise EntitleError("Entitle is not configured (api url or token missing).")
+    api_url, auth = _auth()
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
                 f"{api_url}{_MACHINE_ENDPOINT}/{request_id}",
-                headers={"Authorization": f"Bearer {token}"},
+                headers=auth,
             )
     except httpx.HTTPError as exc:
         raise EntitleError(f"Entitle machine-request poll failed: {exc}") from exc

@@ -52,7 +52,22 @@ def _cfg(key: str) -> str:
     return getattr(settings, key, "") or ""
 
 
+def _uses_workload(tenant=None) -> bool:
+    """Workload identity auth — only ever for this install's own Password Safe.
+
+    A tenant override is a customer's site with its own trust, so it always keeps
+    its client credentials. See services/bt_platform_identity.py.
+    """
+    if tenant:
+        return False
+    from . import bt_platform_identity
+    return bt_platform_identity.uses_workload("ps")
+
+
 def configured() -> bool:
+    if _uses_workload():
+        from . import bt_platform_identity
+        return not bt_platform_identity.missing("ps")
     return all(_cfg(k) for k in ("pscli_api_url", "pscli_client_id", "pscli_client_secret"))
 
 
@@ -112,6 +127,12 @@ def api_base(url: str) -> str:
 
 
 def _base_url(tenant=None) -> str:
+    if _uses_workload(tenant):
+        from . import bt_platform_identity
+        try:
+            return api_base(bt_platform_identity.api_url("ps"))
+        except bt_platform_identity.IdentityError as exc:
+            raise PSApiError(str(exc)) from exc
     host = api_base(_tcfg("pscli_api_url", tenant))
     if not host:
         raise PSApiError("pscli_api_url is not configured")
@@ -129,7 +150,34 @@ def _client(tenant=None) -> httpx.AsyncClient:
 
 async def _sign_in(client: httpx.AsyncClient, tenant=None) -> None:
     """OAuth2 client credentials → Bearer token, then SignAppIn to establish
-    the API session (cookie retained by the client)."""
+    the API session (cookie retained by the client).
+
+    On workload identity auth the token step is replaced by the platform
+    identity's bearer + ``X-BT-Service-Name``, and SignAppIn is still attempted,
+    because a Password Safe API session normally needs it. **Unverified live:**
+    if the gateway answers SignAppIn with 404/405, the bearer is taken as the
+    whole session and that is logged once.
+    """
+    if _uses_workload(tenant):
+        from . import bt_platform_identity
+        try:
+            client.headers.update(bt_platform_identity.headers("ps"))
+        except bt_platform_identity.IdentityError as exc:
+            raise PSApiError(str(exc)) from exc
+        sign = await client.post("Auth/SignAppIn")
+        if sign.status_code in (200, 201):
+            return
+        if sign.status_code in (404, 405):
+            global _signappin_skip_logged
+            if not _signappin_skip_logged:
+                logger.info("Password Safe: SignAppIn answered %s on workload identity "
+                            "auth; using the bearer token alone.", sign.status_code)
+                _signappin_skip_logged = True
+            return
+        hint = (bt_platform_identity.rejection_hint("ps")
+                if sign.status_code in (401, 403) else "")
+        raise PSApiError(f"SignAppIn failed ({sign.status_code}){hint} "
+                         f"{sign.text[:300]}")
     token_resp = await client.post(
         "Auth/Connect/Token",
         data={
@@ -149,6 +197,9 @@ async def _sign_in(client: httpx.AsyncClient, tenant=None) -> None:
     sign = await client.post("Auth/SignAppIn")
     if sign.status_code not in (200, 201):
         raise PSApiError(f"SignAppIn failed ({sign.status_code}): {sign.text[:400]}")
+
+
+_signappin_skip_logged = False
 
 
 async def _sign_out(client: httpx.AsyncClient) -> None:

@@ -204,6 +204,14 @@ Password Safe is only the storage mechanism there; starting a Gateway is a PRA c
 
 ---
 
+## Workload identity
+
+Instead of the OAuth client credentials, the dashboard's REST calls to Password Safe can present the dashboard's
+own workload identity: set **Authentication → Workload identity** on this panel, after
+setting up the shared identity and adding Password Safe to its Pathfinder registration's
+**Product Scopes**. `ps-cli`, the Secrets Safe backend, the Ansible runner and the `passwordsafe` Terraform provider still use the client credentials, so keep them set. Not yet verified live — see
+[BeyondTrust platform identity](platform-identity.md).
+
 ## Troubleshooting
 
 **"ps-cli not found"** — `ps-cli` comes from the `beyondtrust-bips-cli` pip package in

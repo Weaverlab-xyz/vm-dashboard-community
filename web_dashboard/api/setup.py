@@ -1008,6 +1008,12 @@ class PasswordSafeFeatureConfig(BaseModel):
     pscli_client_id: str = ""
     pscli_client_secret: str = ""   # encrypted at rest
     pscli_api_account_name: str = ""  # run-as user, required by the passwordsafe TF provider (VM registration)
+    # REST auth: "oauth" (the client credentials above) or "workload" (the shared
+    # BeyondTrust platform identity). ps-cli, the runner and Terraform keep the
+    # client credentials either way.
+    ps_auth_mode: str = "oauth"
+    ps_workload_api_url: str = "https://api.beyondtrust.io/site/{site}/passwordsafe"
+    ps_workload_service_name: str = ""
     # Optional Password Safe VM resource registration (per-deploy opt-in).
     passwordsafe_registration_enabled: bool = False
     passwordsafe_workgroup: str = ""                      # workgroup name or id the managed system lands in
@@ -1203,6 +1209,12 @@ class PRAFeatureConfig(BaseModel):
     bt_api_host: str = ""
     bt_client_id: str = ""
     bt_client_secret: str = ""      # encrypted at rest
+    # REST auth: "oauth" (the client credentials above) or "workload" (the shared
+    # BeyondTrust platform identity). The sra Terraform provider keeps the client
+    # credentials either way.
+    pra_auth_mode: str = "oauth"
+    pra_workload_api_url: str = "https://api.beyondtrust.io/site/{site}/pra"
+    pra_workload_service_name: str = ""
     # Shell Jump provisioning — Jump Group and Jumpoint must pre-exist in PRA
     bt_jump_group_name: str = ""
     bt_jumpoint_name: str = ""
@@ -1294,6 +1306,9 @@ class EPMLFeatureConfig(BaseModel):
     # EPM for Linux (EPM-L) — Pathfinder public API gateway at api.beyondtrust.io
     epml_site_id: str = ""          # Pathfinder site UUID; PATs are bound to the site active at creation
     epml_pat: str = ""              # encrypted at rest; Bearer token for EPML API
+    # "pat" (above) or "workload" (the shared BeyondTrust platform identity).
+    epml_auth_mode: str = "pat"
+    epml_workload_service_name: str = ""
 
 class PortainerFeatureConfig(BaseModel):
     """Portainer CE — both the connection to a server and the knobs for deploying a
@@ -1484,6 +1499,11 @@ class EntitleFeatureConfig(BaseModel):
     # the app runs in another.
     entitle_api_url: str = "https://api.us.entitle.io/v1"
     entitle_api_token: str = ""         # encrypted at rest
+    # REST auth: "token" (above) or "workload" (the shared BeyondTrust platform
+    # identity). The Terraform provider keeps entitle_api_key / the token.
+    entitle_auth_mode: str = "token"
+    entitle_workload_api_url: str = "https://api.beyondtrust.io/site/{site}/entitle"
+    entitle_workload_service_name: str = ""
     # Resource registration — register built VMs/DBs as Entitle integrations.
     entitle_registration_enabled: bool = False
     entitle_api_key: str = ""           # entitleio/entitle TF provider key; encrypted at rest
@@ -2219,8 +2239,13 @@ class WorkloadCredentialsFeatureConfig(BaseModel):
     """Config-only panel (no `enabled`) for the Workload Credentials PREVIEW feature.
 
     The preview toggle owns `workload_credentials_enabled`; this panel holds the
-    site, the auth mode (a stored PAT, or this container's Azure managed identity)
-    and the per-cloud dynamic-secret wiring. See _CONFIG_ONLY_FEATURES.
+    site, the auth mode (a stored PAT, or the BeyondTrust platform identity) and the
+    per-cloud dynamic-secret wiring. See _CONFIG_ONLY_FEATURES.
+
+    The identity itself — platform, service name, audience, token file, client id —
+    is NOT here any more: it authenticates PRA, Password Safe, EPM-L and Entitle as
+    well, so it lives on BtPlatformIdentityFeatureConfig, a panel that is not behind
+    this feature's preview flag. Same keys, so nothing migrates.
 
     Workload Credentials is not yet generally available and its API may still change,
     which is why it sits behind a preview flag rather than the normal integration
@@ -2233,18 +2258,9 @@ class WorkloadCredentialsFeatureConfig(BaseModel):
     wlc_api_base_url: str = "https://api.beyondtrust.io"
     wlc_site_id: str = ""
     wlc_pat: str = ""
-    # "pat" | "workload". The second authenticates with the container's own cloud
-    # managed identity against a Workload Identity registered in Pathfinder, and
-    # stores no credential at all. The fields below are its wiring: the platform
-    # that vouches for the container, the registration's service name, the
-    # audience, and a projected-token path for the file platforms. All are
-    # identifiers, none is a secret, which is the whole point of the mode.
+    # "pat" | "workload". The second authenticates with the BeyondTrust platform
+    # identity (BtPlatformIdentityFeatureConfig) and stores no credential at all.
     wlc_auth_mode: str = "pat"
-    wlc_identity_platform: str = "azure"
-    wlc_service_name: str = ""
-    wlc_identity_audience: str = ""
-    wlc_identity_token_file: str = ""
-    wlc_entra_client_id: str = ""
     # Mandatory `bt-secrets-api-version` header value. A wrong version fails in a
     # way that reads like an auth error, so it is explicit, not inferred.
     wlc_api_version: str = "2026-04-28"
@@ -2267,6 +2283,27 @@ class WorkloadCredentialsFeatureConfig(BaseModel):
     wlc_subprocess_credential_process: bool = True
     # Folder for the `wlc://` static-secret backend on the Secrets page.
     secrets_wlc_folder: str = "dashboard"
+
+
+class BtPlatformIdentityFeatureConfig(BaseModel):
+    """Config-only panel for the BeyondTrust platform identity.
+
+    One workload identity — this container's own cloud identity, or the dashboard's
+    SPIFFE SVID — that Pathfinder trusts through a Workload Identity registration,
+    and that every BeyondTrust product set to ``workload`` auth presents: Workload
+    Credentials, PRA, Password Safe, EPM-L and Entitle. The registration's Product
+    Scopes decide which of them it may call.
+
+    The keys keep their ``wlc_`` names because Workload Credentials was the first
+    user and installs have them stored. All identifiers, none a secret — which is
+    the whole point. See services/bt_platform_identity.py.
+    """
+    bt_platform_site_id: str = ""
+    wlc_identity_platform: str = "azure"
+    wlc_service_name: str = ""
+    wlc_identity_audience: str = ""
+    wlc_identity_token_file: str = ""
+    wlc_entra_client_id: str = ""
 
 
 _FEATURE_MODELS = {
@@ -2315,6 +2352,7 @@ _FEATURE_MODELS = {
     "cert_lab": CertLabFeatureConfig,
     "spire_lab": SpireLabFeatureConfig,
     "workload_credentials": WorkloadCredentialsFeatureConfig,
+    "bt_platform_identity": BtPlatformIdentityFeatureConfig,
     "worker":         WorkerFeatureConfig,
     "change_windows": ChangeWindowsFeatureConfig,
 }
@@ -2330,7 +2368,8 @@ _FEATURE_MODELS = {
 # would be a switch with one position.
 _CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region", "oidc", "worker",
                          "cert_lab", "spire_lab", "directories",
-                         "workload_credentials", "change_windows"}
+                         "workload_credentials", "bt_platform_identity",
+                         "change_windows"}
 
 # Never returned by a feature panel's GET. The app-wide list -- see
 # secret_hygiene.SECRET_KEYS.
@@ -2470,6 +2509,15 @@ def _write_feature(feature: str, payload_dict: dict, touched: set | None = None)
         except Exception:
             pass
 
+    if feature == "bt_platform_identity":
+        # The memo is keyed on platform|audience|client id, but a changed service
+        # name or token file is not in the key — clear it so a save always takes.
+        try:
+            from ..services import workload_credentials_service as _wlc
+            _wlc.clear_token_cache()
+        except Exception:
+            pass
+
     if feature == "oidc":
         # Discovery + JWKS are cached for an hour; without this an operator who
         # fixes a typo'd issuer would keep hitting the old one until it expired.
@@ -2547,6 +2595,14 @@ def _carry_legacy_wlc_identity(data: dict) -> None:
         data["wlc_identity_platform"] = wlc.PLATFORM_AZURE
 
 
+_DEFAULT_WHEN_BLANK = (
+    "pra_auth_mode", "pra_workload_api_url",
+    "ps_auth_mode", "ps_workload_api_url",
+    "epml_auth_mode",
+    "entitle_auth_mode", "entitle_workload_api_url",
+)
+
+
 @router.get("/feature/{feature_name}")
 def get_feature_config(feature_name: str, request: Request):
     """Return current config for a single feature (secrets redacted). Admin JWT required."""
@@ -2555,8 +2611,15 @@ def get_feature_config(feature_name: str, request: Request):
     if model_cls is None:
         raise HTTPException(status_code=404, detail=f"Unknown feature: {feature_name}")
     data = _read_feature(feature_name, model_cls)
-    if feature_name == "workload_credentials":
+    if feature_name == "bt_platform_identity":
         _carry_legacy_wlc_identity(data)
+    # An unset key reads back as "", and a <select> bound to "" renders blank on an
+    # install that never chose — so the auth-mode selects and the workload URL
+    # templates show their model default instead. Display only: nothing is written
+    # until the operator saves, and a blank stored value behaves as the default anyway.
+    for field in _DEFAULT_WHEN_BLANK:
+        if field in data and not data[field]:
+            data[field] = model_cls.model_fields[field].default
     return data
 
 
@@ -2601,6 +2664,24 @@ def patch_feature_config(feature_name: str, payload: dict, request: Request):
     _write_feature(feature_name, filtered, touched=touched)
     logger.info("Feature '%s' configuration updated.", feature_name)
     return {"ok": True}
+
+
+# ── BeyondTrust platform identity probe ───────────────────────────────────────
+
+@router.post("/bt-platform-identity/test")
+def test_bt_platform_identity(request: Request):
+    """Fetch this container's identity token and report its (unverified) claims.
+
+    Free and local: it calls the platform's token source and no BeyondTrust
+    endpoint, so it separates "no usable identity here" from "Pathfinder declined
+    it". Tests the SAVED values — save first.
+    """
+    _require_admin(request)
+    from ..services import bt_platform_identity
+    try:
+        return bt_platform_identity.test_identity()
+    except bt_platform_identity.IdentityError as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 # ── OIDC discovery probe ──────────────────────────────────────────────────────

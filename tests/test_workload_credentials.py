@@ -1103,8 +1103,15 @@ def test_the_pat_box_hides_in_entra_mode_and_the_identity_fields_hide_in_pat_mod
     panel = html[html.index("panelCfg.wlc_auth_mode"):]
     panel = panel[:panel.index("panelCfg.wlc_api_version")]
     assert "x-show" in panel and "panelCfg.wlc_pat" in panel
-    assert "panelCfg.wlc_identity_platform" in panel, \
-        "the panel cannot choose which platform vouches for the container"
+    # The identity itself now lives on the shared BeyondTrust platform identity
+    # panel (it serves PRA, Password Safe, EPM-L and Entitle too); in workload
+    # mode this panel points there instead of carrying a second copy.
+    assert "'bt_platform_identity'" in panel, \
+        "workload mode does not point at the shared platform identity panel"
+    shared = html[html.index("panel?.key === 'bt_platform_identity'"):]
+    shared = shared[:shared.index("</template>")]
+    assert "panelCfg.wlc_identity_platform" in shared, \
+        "the shared panel cannot choose which platform vouches for the container"
     # x-show rather than x-if on purpose: a removed subtree drops its binding,
     # and the panel sends what it has bound.
     assert "x-if" not in panel

@@ -318,6 +318,14 @@ bootstrap is a separate script: `python -m web_dashboard.scripts.bootstrap_entra
 
 ---
 
+## Workload identity
+
+Instead of the API token, the dashboard's REST calls to Entitle can present the dashboard's
+own workload identity: set **Authentication → Workload identity** on this panel, after
+setting up the shared identity and adding Entitle to its Pathfinder registration's
+**Product Scopes**. Resource registration (the `entitleio/entitle` Terraform provider) still uses the API key or token, so keep one set. Not yet verified live — see
+[BeyondTrust platform identity](platform-identity.md).
+
 ## Troubleshooting
 
 **Nothing registers in Entitle** — confirm both the global **Registration enabled**

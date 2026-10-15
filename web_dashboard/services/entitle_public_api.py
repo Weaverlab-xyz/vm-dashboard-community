@@ -46,7 +46,22 @@ def base_url(cfg: Optional[Callable[[str], str]] = None) -> str:
     return f"{parts.scheme}://{parts.netloc}" if parts.scheme == "https" and parts.netloc else ""
 
 
+def uses_workload(cfg: Optional[Callable[[str], str]] = None) -> bool:
+    """Workload identity auth — only for this install's own Entitle.
+
+    A supplied ``cfg`` is a customer tenant's, which keeps its own token.
+    See services/bt_platform_identity.py.
+    """
+    if cfg is not None:
+        return False
+    from . import bt_platform_identity
+    return bt_platform_identity.uses_workload("entitle")
+
+
 def configured(cfg: Optional[Callable[[str], str]] = None) -> bool:
+    if uses_workload(cfg):
+        from . import bt_platform_identity
+        return not bt_platform_identity.missing("entitle")
     cfg = cfg or _default_cfg
     return bool(base_url(cfg) and cfg("entitle_api_token"))
 
@@ -69,8 +84,12 @@ def _client_kwargs(tp) -> dict:
     return kwargs
 
 
-def _check(resp, what: str) -> None:
+def _check(resp, what: str, workload: bool = False) -> None:
     if resp.status_code in (401, 403):
+        if workload:
+            from . import bt_platform_identity
+            raise EntitleApiError("Entitle declined the workload identity"
+                                  + bt_platform_identity.rejection_hint("entitle"))
         raise EntitleApiError("Entitle refused the API token (check it, and that the API "
                               "URL is your tenant's region).")
     if resp.status_code == 404:
@@ -80,13 +99,25 @@ def _check(resp, what: str) -> None:
         raise EntitleApiError(f"Entitle answered HTTP {resp.status_code}.")
 
 
-def _creds(cfg) -> tuple:
+def auth(cfg=None) -> tuple:
+    """``(base_url, auth headers)``: the stored token, or the platform identity.
+
+    On workload auth the base is ``entitle_workload_api_url`` (resolved), which
+    replaces the scheme+host of ``entitle_api_url``; paths are appended unchanged.
+    """
+    if uses_workload(cfg):
+        from . import bt_platform_identity
+        try:
+            return (bt_platform_identity.api_url("entitle"),
+                    bt_platform_identity.headers("entitle"))
+        except bt_platform_identity.IdentityError as exc:
+            raise EntitleApiError(str(exc)) from exc
     cfg = cfg or _default_cfg
     base, token = base_url(cfg), cfg("entitle_api_token")
     if not base or not token:
         raise EntitleApiError("Entitle is not configured — set its API URL and token in "
                               "Settings → Integrations → Entitle.")
-    return base, token
+    return base, {"Authorization": f"Bearer {token}"}
 
 
 async def get_paged(path: str, params: Optional[dict] = None, *, what: str = "list",
@@ -94,7 +125,8 @@ async def get_paged(path: str, params: Optional[dict] = None, *, what: str = "li
                     max_pages: int = MAX_PAGES) -> list:
     """Every row of a paged ``GET``, up to ``max_pages`` pages of :data:`PER_PAGE`."""
     import httpx
-    base, token = _creds(cfg)
+    base, headers = auth(cfg)
+    workload = uses_workload(cfg)
     out: list = []
     async with httpx.AsyncClient(**_client_kwargs(tp)) as client:
         for page in range(1, max_pages + 1):
@@ -102,11 +134,11 @@ async def get_paged(path: str, params: Optional[dict] = None, *, what: str = "li
                 resp = await client.get(
                     f"{base}{path}",
                     params={**(params or {}), "page": page, "perPage": PER_PAGE},
-                    headers={"Authorization": f"Bearer {token}"})
+                    headers=headers)
             except httpx.HTTPError as exc:
                 logger.warning("Entitle %s read failed: %s", what, type(exc).__name__)
                 raise EntitleApiError("Entitle could not be reached.") from exc
-            _check(resp, what)
+            _check(resp, what, workload)
             try:
                 batch = rows(resp.json())
             except ValueError as exc:
@@ -121,15 +153,15 @@ async def get_one(path: str, *, what: str = "item",
                   cfg: Optional[Callable[[str], str]] = None, tp=None) -> dict:
     """One object. Entitle wraps it as ``{"result": {...}}``; a bare object is accepted."""
     import httpx
-    base, token = _creds(cfg)
+    base, headers = auth(cfg)
+    workload = uses_workload(cfg)
     async with httpx.AsyncClient(**_client_kwargs(tp)) as client:
         try:
-            resp = await client.get(f"{base}{path}",
-                                    headers={"Authorization": f"Bearer {token}"})
+            resp = await client.get(f"{base}{path}", headers=headers)
         except httpx.HTTPError as exc:
             logger.warning("Entitle %s read failed: %s", what, type(exc).__name__)
             raise EntitleApiError("Entitle could not be reached.") from exc
-        _check(resp, what)
+        _check(resp, what, workload)
         try:
             body = resp.json()
         except ValueError as exc:
