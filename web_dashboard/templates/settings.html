@@ -5545,6 +5545,151 @@
           <template x-if="panelCfg.pov_cloud_platform === 'azure'">
             <div class="space-y-4">
               <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Azure credentials</p>
+              <!-- Which credential: a stored client secret, or the dashboard's own SPIFFE
+                   identity presented as a client assertion to the app's federated
+                   credential. Derived on open; see choosePovAzureSource. -->
+              <div class="flex flex-wrap gap-4 text-sm text-gray-700">
+                <label class="flex items-center gap-2">
+                  <input type="radio" name="pov-azure-source" value="secret"
+                         :checked="povAzureSource === 'secret'" @change="choosePovAzureSource('secret')"
+                         class="border-gray-300 text-blue-600 focus:ring-blue-500">
+                  Client secret
+                </label>
+                <label class="flex items-center gap-2">
+                  <input type="radio" name="pov-azure-source" value="spiffe"
+                         :checked="povAzureSource === 'spiffe'" @change="choosePovAzureSource('spiffe')"
+                         class="border-gray-300 text-blue-600 focus:ring-blue-500">
+                  SPIFFE identity <span class="text-[11px] text-gray-500">no stored secret</span>
+                </label>
+                <label class="flex items-center gap-2">
+                  <input type="radio" name="pov-azure-source" value="spiffe_wlc"
+                         :checked="povAzureSource === 'spiffe_wlc'" @change="choosePovAzureSource('spiffe_wlc')"
+                         class="border-gray-300 text-blue-600 focus:ring-blue-500">
+                  SPIFFE + Workload Credentials <span class="text-[11px] text-gray-500">privileged password for jobs only</span>
+                </label>
+              </div>
+
+              <template x-if="povAzureSource === 'spiffe' || povAzureSource === 'spiffe_wlc'">
+                <div class="space-y-3 rounded-lg border border-gray-200 p-3">
+                  <p class="text-[11px] text-gray-500">
+                    The dashboard presents its own JWT-SVID
+                    (<code class="font-mono">spiffe://&lt;trust domain&gt;/dashboard</code>, audience
+                    <code class="font-mono">api://AzureADTokenExchange</code>) to Entra ID as a client
+                    assertion for the app registration in <span class="font-medium">Client ID</span>
+                    below, through a federated identity credential on that app. Entra fetches the
+                    issuer's keys from <code class="font-mono">&lt;issuer&gt;/keys</code>, so the issuer
+                    must be public. <code class="font-mono">terraform/dashboard_federation/azure</code>
+                    adds the federated credential; <code class="font-mono">terraform/pov_cloud_azure_role</code>
+                    holds the roles a POV needs.
+                  </p>
+                  <div x-show="povAzureStoredSecret()"
+                       class="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 space-y-1">
+                    <p>
+                      <span class="font-medium">A stored client secret still wins.</span>
+                      While one is stored, every Azure call uses it and the federated credential is
+                      never presented. Remove it once Test connection succeeds without it — or
+                      remove it now, save, and test.
+                    </p>
+                    <button type="button" @click="removePovAzureStoredSecret()"
+                            class="bg-white border border-amber-300 hover:bg-amber-100 text-amber-900 font-medium px-2.5 py-1 rounded-lg">
+                      Remove stored secret
+                    </button>
+                  </div>
+                  <div class="text-[11px] space-y-1">
+                    <template x-if="spiffeIdentity">
+                      <div class="space-y-0.5">
+                        <div>
+                          <span class="text-gray-500">Issuer</span>
+                          <span class="font-mono text-gray-800" x-text="spiffeIdentity.issuer || '—'"></span>
+                        </div>
+                        <div>
+                          <span class="text-gray-500">Azure calls use</span>
+                          <span :class="(spiffeIdentity.sources || {}).azure === 'SPIFFE federation' ? 'text-green-700' : 'text-gray-700'"
+                                x-text="(spiffeIdentity.sources || {}).azure || '—'"></span>
+                          <span class="text-gray-400">(as last saved)</span>
+                        </div>
+                        <template x-if="(spiffeIdentity.tokens || {}).azure">
+                          <div>
+                            <span class="font-mono text-gray-800" x-text="spiffeIdentity.tokens.azure.path"></span>
+                            <span x-show="spiffeIdentity.tokens.azure.present && !spiffeIdentity.tokens.azure.error" class="text-green-700"
+                                  x-text="'valid until ' + new Date(spiffeIdentity.tokens.azure.expires_at * 1000).toLocaleTimeString()"></span>
+                            <span x-show="spiffeIdentity.tokens.azure.error" class="text-red-700" x-text="spiffeIdentity.tokens.azure.error"></span>
+                          </div>
+                        </template>
+                        <p x-show="spiffeIdentity.error" class="text-red-700" x-text="spiffeIdentity.error"></p>
+                      </div>
+                    </template>
+                    <div class="pt-1">
+                      <button type="button" @click="checkSpiffeIssuer()" :disabled="spiffeIssuerCheck.running"
+                              class="text-xs bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-2.5 py-1 rounded-lg disabled:opacity-50"
+                              x-text="spiffeIssuerCheck.running ? 'Checking…' : 'Check the issuer is reachable'"></button>
+                      <template x-for="c in (spiffeIssuerCheck.result ? spiffeIssuerCheck.result.checks : [])" :key="'pov-az-' + c.name">
+                        <div>
+                          <span :class="c.ok ? 'text-green-700' : 'text-red-700'" x-text="c.ok ? '✓' : '✗'"></span>
+                          <span class="font-medium text-gray-700" x-text="c.name"></span>
+                          <span class="text-gray-500" x-text="c.detail"></span>
+                        </div>
+                      </template>
+                      <p x-show="spiffeIssuerCheck.error" class="text-red-700" x-text="spiffeIssuerCheck.error"></p>
+                    </div>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Everyday = the federated app (pov-cloud-read); jobs = a password Workload
+                   Credentials mints onto a SEPARATE target app (pov-cloud-provision).
+                   Configuration stays on the Workload Credentials panel. -->
+              <template x-if="povAzureSource === 'spiffe_wlc'">
+                <div class="space-y-2 rounded-lg border border-gray-200 p-3 text-[11px]">
+                  <p class="text-gray-500">
+                    Pages and API calls run as the app in <span class="font-medium">Client ID</span>,
+                    which needs only the <code class="font-mono">POV cloud read</code> role. Build,
+                    power and teardown jobs use a short-lived password Workload Credentials mints onto
+                    its own <span class="font-medium">target</span> app, which holds
+                    <code class="font-mono">POV cloud provision</code> — so no write-capable secret
+                    exists between jobs. Workload Credentials authenticates the dashboard with the
+                    same SPIFFE identity (<code class="font-mono">wlc.jwt</code>), so no PAT is stored.
+                  </p>
+                  <p class="font-medium text-gray-700">On the Workload Credentials panel:</p>
+                  <ul class="list-disc pl-5 text-gray-600 space-y-0.5">
+                    <li>Authentication <span class="font-mono">Workload identity</span>, platform <span class="font-mono">SPIRE</span>, its Service Name and identity audience;</li>
+                    <li>the <span class="font-mono">Workload Credentials</span> audience ticked under Remote Agents → the dashboard's SPIFFE identity;</li>
+                    <li><span class="font-medium">Use dynamic credentials for Azure</span> on, with the target app's dynamic secret named.</li>
+                  </ul>
+                  <template x-if="povWlcAzure">
+                    <div class="space-y-0.5 pt-1">
+                      <div>
+                        <span class="text-gray-500">Azure tier</span>
+                        <span :class="povWlcAzure.source === 'dynamic' ? 'text-green-700' : 'text-amber-700'"
+                              x-text="povWlcAzure.source === 'dynamic' ? 'dynamic (Workload Credentials)' : povWlcAzure.source + ' — turn on dynamic Azure credentials on the Workload Credentials panel'"></span>
+                      </div>
+                      <p x-show="povWlcAzure.problem" class="text-red-700" x-text="povWlcAzure.problem"></p>
+                      <div x-show="povWlcAzure.everyday">
+                        <span class="text-gray-500">Everyday</span>
+                        <span :class="povWlcAzure.everyday && !povWlcAzure.everyday.problem ? 'text-green-700' : 'text-red-700'"
+                              x-text="povWlcAzure.everyday ? (povWlcAzure.everyday.problem || povWlcAzure.everyday.source) : ''"></span>
+                      </div>
+                      <template x-for="l in (povWlcAzure.leases || [])" :key="'pov-az-lease-' + l.purpose">
+                        <div>
+                          <span class="text-gray-500" x-text="l.purpose === 'provision' ? 'Jobs' : l.purpose"></span>
+                          <span class="font-mono text-gray-700" x-text="l.secret_name || '—'"></span>
+                          <span x-show="l.last_error" class="text-red-700" x-text="l.last_error"></span>
+                          <span x-show="!l.last_error && l.usable" class="text-green-700"
+                                x-text="'lease live until ' + new Date(l.expires_at).toLocaleTimeString()"></span>
+                          <span x-show="!l.last_error && !l.usable" class="text-gray-500">minted when a job runs</span>
+                        </div>
+                      </template>
+                      <p class="text-gray-400">As last saved.</p>
+                    </div>
+                  </template>
+                  <button type="button" @click="openPanel({ key: 'workload_credentials', label: 'Workload Credentials' })"
+                          class="text-xs bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-2.5 py-1 rounded-lg">
+                    Open Workload Credentials →
+                  </button>
+                  <p class="text-gray-400">Save this panel first — opening another discards unsaved changes here.</p>
+                </div>
+              </template>
+
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
@@ -5552,7 +5697,7 @@
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                          placeholder="00000000-0000-0000-0000-000000000000">
                 </div>
-                <div>
+                <div x-show="povAzureSource === 'secret'">
                   <label class="block text-sm font-medium text-gray-700 mb-1">Client secret</label>
                   <input type="password" x-model="panelCfg.azure_client_secret" autocomplete="new-password"
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -5584,8 +5729,15 @@
                 </p>
               </div>
               <p class="text-[11px] text-gray-400">
-                Give this service principal <span class="font-medium">Contributor</span> on
-                its own subscription, or on a resource group it may create groups beside.
+                <span x-show="povAzureSource === 'secret'">Give this service principal
+                <span class="font-medium">Contributor</span> on its own subscription, or the
+                <code>POV cloud provision</code> role from <code>terraform/pov_cloud_azure_role</code>.</span>
+                <span x-show="povAzureSource === 'spiffe'">Give the app in Client ID the
+                <code>POV cloud provision</code> role from <code>terraform/pov_cloud_azure_role</code>
+                on a subscription kept for POVs.</span>
+                <span x-show="povAzureSource === 'spiffe_wlc'">Give the app in Client ID
+                <code>POV cloud read</code>, and the Workload Credentials target app
+                <code>POV cloud provision</code>, both from <code>terraform/pov_cloud_azure_role</code>.</span>
                 Each POV becomes one resource group named <code>povenv-&lt;name&gt;</code>,
                 and destroying the POV deletes that group whole.
               </p>
@@ -8758,6 +8910,9 @@ function settingsPage() {
     // only, derived on open from what is stored (see openPanel), never in panelCfg.
     povAwsSource: 'key',
     povWlcSources: null,     // read-only: /api/secrets/credential-sources' AWS row, for 'spiffe_wlc'
+    // 'secret' | 'spiffe' | 'spiffe_wlc' — the Azure twin of povAwsSource, derived the same way.
+    povAzureSource: 'secret',
+    povWlcAzure: null,       // read-only: the same endpoint's Azure row
 
     // ── Slide-over panel state ───────────────────────────────────────────
     panel: null,
@@ -9508,10 +9663,19 @@ function settingsPage() {
           this.povAwsSource = !federated ? 'key'
             : (c.wlc_aws_everyday_source === 'federation' ? 'spiffe_wlc' : 'spiffe');
           this.spiffeIssuerCheck = { running: false, result: null, error: '' };
+          // Azure: the client id stays either way — with SPIFFE it names the app whose
+          // federated credential trusts the dashboard — so only a stored SECRET decides.
+          const storedAzureSecret = (c._secrets_set || []).includes('azure_client_secret');
+          const azureFederated = !storedAzureSecret && c.dashboard_spiffe_identity_enabled
+                                 && c.dashboard_spiffe_aud_azure;
+          this.povAzureSource = !azureFederated ? 'secret'
+            : (c.wlc_azure_everyday_source === 'federation' ? 'spiffe_wlc' : 'spiffe');
           this.povWlcSources = null;
+          this.povWlcAzure = null;
           try {
             const r = await API.get('/api/secrets/credential-sources');
             this.povWlcSources = (r.clouds || []).find(x => x.cloud === 'aws') || null;
+            this.povWlcAzure = (r.clouds || []).find(x => x.cloud === 'azure') || null;
           } catch (e) { /* read-only status; admin-only, and the panel still saves without it */ }
           this.spiffeIdentity = null;
           try {
@@ -10161,6 +10325,35 @@ function settingsPage() {
         .filter(f => f !== 'aws_secret_access_key');
       if (!this.panelSecretsTouched.includes('aws_secret_access_key')) {
         this.panelSecretsTouched.push('aws_secret_access_key');
+      }
+    },
+
+    // Azure twin of choosePovAwsSource. The federated path needs the identity and the
+    // Azure audience (api://AzureADTokenExchange) on; 'spiffe_wlc' also makes the SPIFFE
+    // identity Azure's EVERYDAY credential (wlc_azure_everyday_source = federation).
+    // Never clears the stored secret — removePovAzureStoredSecret() is the explicit click.
+    choosePovAzureSource(src) {
+      this.povAzureSource = src;
+      if (src === 'spiffe' || src === 'spiffe_wlc') {
+        this.panelCfg.dashboard_spiffe_identity_enabled = true;
+        this.panelCfg.dashboard_spiffe_aud_azure = true;
+      }
+      this.panelCfg.wlc_azure_everyday_source = src === 'spiffe_wlc' ? 'federation' : 'lease';
+    },
+
+    povAzureStoredSecret() {
+      return (this.panelCfg._secrets_set || []).includes('azure_client_secret')
+        || !!(this.panelCfg.azure_client_secret || '');
+    },
+
+    // Blanks the client secret only: the client id is the app the federated credential
+    // lives on, and is still needed. Touched, or the save keeps the stored secret.
+    removePovAzureStoredSecret() {
+      this.panelCfg.azure_client_secret = '';
+      this.panelCfg._secrets_set = (this.panelCfg._secrets_set || [])
+        .filter(f => f !== 'azure_client_secret');
+      if (!this.panelSecretsTouched.includes('azure_client_secret')) {
+        this.panelSecretsTouched.push('azure_client_secret');
       }
     },
 

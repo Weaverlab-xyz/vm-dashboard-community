@@ -1621,6 +1621,10 @@ class PovCloudFeatureConfig(BaseModel):
     # Credentials serves only jobs (services/workload_credential_lease). The same key the
     # Workload Credentials panel binds; that panel keeps the rest of WLC's settings.
     wlc_aws_everyday_source: str = "lease"
+    # The Azure twins. With the SPIFFE identity, azure_client_id is the app whose
+    # federated credential trusts the dashboard, and azure_client_secret stays blank.
+    dashboard_spiffe_aud_azure: bool = False
+    wlc_azure_everyday_source: str = "lease"
     azure_client_id: str = ""
     azure_client_secret: str = ""       # encrypted at rest
     azure_tenant_id: str = ""

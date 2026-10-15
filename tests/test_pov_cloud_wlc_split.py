@@ -179,9 +179,12 @@ def test_an_unconfigured_wlc_names_what_is_missing():
 
 
 def test_verify_never_names_the_metered_mint():
-    src = open(os.path.join(_ROOT, "web_dashboard", "services", "pov_cloud_aws.py"),
+    # The check is shared by every driver (pov_cloud_env.verify_jobs_lease), so it is
+    # pinned where it lives rather than in each driver's thin delegate.
+    src = open(os.path.join(_ROOT, "web_dashboard", "services", "pov_cloud_env.py"),
                encoding="utf-8").read()
-    body = src.split("async def _verify_provisioning_leg", 1)[1].split("\ndef ", 1)[0]
+    body = src.split("async def verify_jobs_lease", 1)[1].split("\ndef ", 1)[0]
+    assert "test_connection" in body, "the shared check no longer calls the session test"
     for banned in ("generate", ".refresh(", ".credentials("):
         assert banned not in body.split('"""', 2)[-1], (
             f"the provisioning check reaches {banned!r}, a billed issuance")
