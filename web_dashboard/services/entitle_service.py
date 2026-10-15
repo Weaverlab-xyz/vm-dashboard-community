@@ -43,22 +43,47 @@ _MACHINE_ENDPOINT = "/public/v1/accessRequests"
 
 
 def _auth() -> tuple:
-    """``(api_url, auth headers)``: the stored token, or the platform identity.
+    """``(base url, auth headers)``: the stored token, or the platform identity.
 
-    Native mode keeps the historical base, the full ``entitle_api_url``. Workload
-    mode takes ``entitle_workload_api_url`` through ``entitle_public_api.auth``.
+    Both modes go through ``entitle_public_api.auth``, whose base is scheme + host
+    only. The native branch used to take the FULL ``entitle_api_url`` — whose
+    shipped default carries ``/v1`` — and append ``/public/v1/…`` to it, so every
+    token-mode request went to ``/v1/public/v1/accessRequests``.
     """
     from . import entitle_public_api
-    if entitle_public_api.uses_workload():
-        try:
-            return entitle_public_api.auth()
-        except entitle_public_api.EntitleApiError as exc:
-            raise EntitleError(str(exc)) from exc
-    api_url = _cfg("entitle_api_url").rstrip("/")
-    token = _cfg("entitle_api_token")
-    if not api_url or not token:
-        raise EntitleError("Entitle is not configured (api url or token missing).")
-    return api_url, {"Authorization": f"Bearer {token}"}
+    try:
+        return entitle_public_api.auth()
+    except entitle_public_api.EntitleApiError as exc:
+        raise EntitleError(str(exc)) from exc
+
+
+def request_target(target: dict) -> dict:
+    """The access-request ``target`` in the shape Entitle's public API takes.
+
+    ``{"type": "role", "role": {"id": …}}`` or ``{"type": "bundle", "bundle": {"id": …}}``
+    (docs.beyondtrust.com/entitle/reference/accessrequests_create). The operation
+    matrix and its callers write the short ``{"bundle_id": …}`` / ``{"role_id": …}``
+    form, which Entitle rejects; an already-shaped target passes through.
+    """
+    target = dict(target or {})
+    if target.get("type") in ("role", "bundle"):
+        return target
+    if target.get("bundle_id"):
+        return {"type": "bundle", "bundle": {"id": str(target["bundle_id"])}}
+    if target.get("role_id"):
+        return {"type": "role", "role": {"id": str(target["role_id"])}}
+    raise EntitleError(
+        f"Entitle target {target!r} names neither a bundle_id nor a role_id")
+
+
+def _unwrap(payload):
+    """The request object out of a response. Entitle wraps it as ``{"result": …}``
+    — a one-element list on create — and the bare object is accepted too."""
+    if isinstance(payload, dict) and "result" in payload:
+        payload = payload["result"]
+    if isinstance(payload, list):
+        payload = payload[0] if payload else {}
+    return payload if isinstance(payload, dict) else {}
 
 
 async def submit_machine_request(
@@ -70,7 +95,12 @@ async def submit_machine_request(
     behalf_of_email: str,
     justification: str = "Dashboard-issued machine-identity elevation",
 ) -> str:
-    """Open a machine-identity access request. Returns the Entitle request id."""
+    """Open a machine-identity access request. Returns the Entitle request id.
+
+    ``duration`` is SECONDS on the wire, and must be one of the durations the target
+    role's or bundle's workflow allows. ``behalfOf`` is ``{"id": …}``, where Entitle
+    accepts a UUID, an email or an EUID — not an ``email`` key.
+    """
     import httpx
 
     if not behalf_of_email:
@@ -81,10 +111,10 @@ async def submit_machine_request(
     api_url, auth = _auth()
 
     body = {
-        "duration": duration_minutes,
+        "duration": int(duration_minutes) * 60,
         "justification": f"{justification} (operation={operation}, payload={payload_hash[:12]})",
-        "target": target,
-        "behalfOf": {"email": behalf_of_email},
+        "target": request_target(target),
+        "behalfOf": {"id": behalf_of_email},
     }
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -100,17 +130,17 @@ async def submit_machine_request(
             f"Entitle rejected machine request ({resp.status_code}): {resp.text[:300]}"
         )
     try:
-        parsed = resp.json()
+        parsed = _unwrap(resp.json())
     except ValueError as exc:
         raise EntitleError(f"Entitle response was not JSON: {resp.text[:300]}") from exc
-    rid = parsed.get("id") or parsed.get("request_id")
+    rid = parsed.get("id") or parsed.get("request_id") or parsed.get("number")
     if not rid:
         raise EntitleError(f"Entitle response missing request id: {parsed}")
     return str(rid)
 
 
 async def get_machine_request(request_id: str) -> dict:
-    """Fetch the current state of a machine access request."""
+    """Fetch the current state of a machine access request (unwrapped)."""
     import httpx
 
     api_url, auth = _auth()
@@ -128,12 +158,39 @@ async def get_machine_request(request_id: str) -> dict:
         raise EntitleError(
             f"Entitle poll error ({resp.status_code}): {resp.text[:300]}"
         )
-    return resp.json()
+    try:
+        return _unwrap(resp.json())
+    except ValueError as exc:
+        raise EntitleError(f"Entitle poll response was not JSON: {resp.text[:300]}") from exc
+
+
+async def find_user(email: str) -> Optional[dict]:
+    """The Entitle user ``email`` names, or None — the machine identity's existence
+    check for Test connection. A read: it requests nothing and grants nothing."""
+    from . import entitle_public_api
+    try:
+        users = await _get_paged("/public/v1/users", {"search": email})
+    except entitle_public_api.EntitleApiError as exc:
+        raise EntitleError(str(exc)) from exc
+    want = email.strip().lower()
+    for user in users:
+        if str(user.get("email") or "").strip().lower() == want:
+            return user
+    return None
+
+
+async def _get_paged(path: str, params: dict) -> list:
+    from . import entitle_public_api
+    return await entitle_public_api.get_paged(path, params, what="users", max_pages=1)
 
 
 # Status values per the design's state machine §6.1. Anything not in the
 # terminal sets keeps the poll alive.
-_PENDING_STATES = {"pending", "submitted", "in_review", "awaiting_approval", "approved_pending_grant"}
+# Entitle's own values (accessrequests_show): approved, cancelled, failed, granted,
+# permissionInProgress, rejected, revoked, waitingForIT, waitingForApproval. Compared
+# lowercased; "approved" is NOT granted — the permission is still being applied.
+_PENDING_STATES = {"pending", "submitted", "in_review", "awaiting_approval", "approved_pending_grant",
+                   "approved", "permissioninprogress", "waitingforit", "waitingforapproval"}
 _GRANTED_STATES = {"granted", "active"}
 _DENIED_STATES = {"denied", "rejected", "failed", "expired", "revoked", "cancelled", "canceled"}
 

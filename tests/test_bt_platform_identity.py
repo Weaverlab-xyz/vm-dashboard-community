@@ -378,7 +378,10 @@ def test_entitle_workload_auth_uses_the_identity_and_the_workload_url():
 def test_entitle_native_is_unchanged():
     with _config(entitle_api_url="https://api.us.entitle.io/v1", entitle_api_token="tok"):
         assert eapi.auth() == ("https://api.us.entitle.io", {"Authorization": "Bearer tok"})
-        assert esvc._auth() == ("https://api.us.entitle.io/v1", {"Authorization": "Bearer tok"})
+        # The machine-request client shares that base. It used to keep the FULL
+        # entitle_api_url, so with the shipped /v1 default every request went to
+        # /v1/public/v1/accessRequests — a 404 for every machine elevation.
+        assert esvc._auth() == ("https://api.us.entitle.io", {"Authorization": "Bearer tok"})
 
 
 def test_an_entitle_tenant_cfg_ignores_workload_mode():

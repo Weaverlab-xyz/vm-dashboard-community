@@ -63,8 +63,20 @@ class Settings(BaseSettings):
     # BeyondTrust tenant singletons, which is the one thing the profile split exists to
     # prevent. The POV's own read-only view of the selected cloud is /pov/cloud.
     pov_cloud_platform: str = ""
+    # GCP privilege for POV provisioning jobs. "" = the credential's own roles (a key,
+    # or the SPIFFE identity's service account). "entitle" = that service account holds
+    # only a read role, and every GCP write requests the provision role JUST IN TIME
+    # through Entitle, on behalf of entitle_machine_identity_email — the Entitle user
+    # the service account is assigned to on the GCP integration. Its own switch, not
+    # cloud_identity_gate_enabled: that gate belongs to the cloud consoles' deploys.
+    pov_gcp_provision_source: str = ""
+    pov_gcp_entitle_target_type: str = "role"     # "role" | "bundle"
+    pov_gcp_entitle_target_id: str = ""           # the Entitle role or bundle id
+    # Must be one of the durations the target's Entitle workflow allows. Grants end by
+    # TTL — nothing revokes early, because Entitle's revoke needs a person's PAT.
+    pov_gcp_entitle_grant_minutes: int = 60
 
-    vmware_enabled: bool = True         # VMs router + /vms page
+    vmware_enabled: bool = True        # VMs router + /vms page
     # The three BeyondTrust products the dashboard drives are gated independently —
     # customers routinely license one or two, not all three. They replaced a single
     # `beyondtrust_enabled` flag; feature_flag_migration.seed_beyondtrust_split copies
