@@ -241,6 +241,14 @@ curl -H "Authorization: Bearer $DASHBOARD_JWT" \
 
 ---
 
+## Workload identity
+
+Instead of a Personal Access Token, the dashboard's REST calls to EPM-L can present the dashboard's
+own workload identity: set **Authentication → Workload identity** on this panel, after
+setting up the shared identity and adding EPM-L to its Pathfinder registration's
+**Product Scopes**. The PAT is then not used at all; the site ID falls back to the shared one when blank. Not yet verified live — see
+[BeyondTrust platform identity](platform-identity.md).
+
 ## Troubleshooting
 
 The dashboard maps the gateway's error responses to actionable messages.

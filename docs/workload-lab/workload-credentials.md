@@ -144,6 +144,13 @@ In the second mode the container asks its own platform for a short-lived token
 for its own identity, and Pathfinder accepts it because a **Workload Identity**
 registered there names that identity's issuer and a constraint on its claims.
 
+The identity settings below (platform, service name, audience, token file, client
+ID) are no longer on this panel. They are on **Settings → Integrations →
+BeyondTrust platform identity**, because PRA, Password Safe, EPM-L and Entitle can
+use the same identity. The keys are unchanged. See
+[BeyondTrust platform identity](../integrations/beyondtrust/platform-identity.md).
+The registration's **Product Scopes** must include **Secrets** for this product.
+
 **It is not Azure-only.** `wlc_identity_platform` selects which platform is
 asked, because [cloud-hosting.md](../operations/cloud-hosting.md) documents this dashboard
 running as a managed container on Azure Container Apps, GCP Cloud Run or AWS ECS:

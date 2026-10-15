@@ -9,6 +9,12 @@ Uses the same OAuth client-credentials pair as terraform_pra_service:
   bt_client_id     - OAuth2 client credentials
   bt_client_secret
 
+``pra_auth_mode = workload`` swaps the token call for the shared BeyondTrust
+platform identity (services/bt_platform_identity.py): no ``/oauth2/token``, the
+container's OIDC token + ``X-BT-Service-Name`` instead, sent to
+``pra_workload_api_url``. REST only — the sra Terraform provider still takes the
+client credentials above.
+
 Endpoints (the same surface the sra terraform provider calls):
   POST   /oauth2/token                                 (client credentials, Basic auth)
   GET    /api/config/v1/vault/account-group
@@ -46,7 +52,15 @@ def _cfg(key: str) -> str:
     return getattr(settings, key, "") or ""
 
 
+def _uses_workload() -> bool:
+    from . import bt_platform_identity
+    return bt_platform_identity.uses_workload("pra")
+
+
 def configured() -> bool:
+    if _uses_workload():
+        from . import bt_platform_identity
+        return not bt_platform_identity.missing("pra")
     return all(_cfg(k) for k in ("bt_api_host", "bt_client_id", "bt_client_secret"))
 
 
@@ -73,13 +87,26 @@ async def _token(client: httpx.AsyncClient, host: str) -> str:
     return token
 
 
+async def _auth(client: httpx.AsyncClient) -> tuple[str, dict]:
+    """``(base, auth headers)`` for this install's PRA, in either auth mode."""
+    if _uses_workload():
+        from . import bt_platform_identity
+        try:
+            return (bt_platform_identity.api_url("pra"),
+                    bt_platform_identity.headers("pra"))
+        except bt_platform_identity.IdentityError as exc:
+            raise PRAApiError(str(exc)) from exc
+    host = _host()
+    token = await _token(client, host)
+    return host, {"Authorization": f"Bearer {token}"}
+
+
 async def _list_config(path: str, label: str) -> list[dict]:
     """GET a PRA config-API collection and normalize to ``[{id, name}]``.
     Raises PRAApiError on any failure — callers treat listing as best-effort."""
-    host = _host()
     async with httpx.AsyncClient(timeout=20.0, headers={"Accept": "application/json"}) as client:
-        token = await _token(client, host)
-        resp = await client.get(f"{host}{path}", headers={"Authorization": f"Bearer {token}"})
+        host, auth = await _auth(client)
+        resp = await client.get(f"{host}{path}", headers=auth)
         if resp.status_code != 200:
             raise PRAApiError(f"GET {path} failed ({resp.status_code}): {resp.text[:400]}")
         items = resp.json()
@@ -110,10 +137,8 @@ async def create_k8s_tunnel_jump(*, name: str, hostname: str, url: str,
     ``tunnel_type=k8s``). Resolves the Jump Group + Jumpoint names to ids first
     (both must already exist). This is the REST replacement for the Terraform path,
     which the sra provider blocks for k8s (see module docstring)."""
-    host = _host()
     async with httpx.AsyncClient(timeout=30.0, headers={"Accept": "application/json"}) as client:
-        token = await _token(client, host)
-        auth = {"Authorization": f"Bearer {token}"}
+        host, auth = await _auth(client)
 
         async def _get_list(path: str, label: str) -> list[dict]:
             r = await client.get(f"{host}{path}", headers=auth)
@@ -149,11 +174,9 @@ async def create_k8s_tunnel_jump(*, name: str, hostname: str, url: str,
 async def delete_protocol_tunnel_jump(jump_id) -> None:
     """Delete a protocol-tunnel jump by id (best-effort teardown). 404 is treated
     as already-gone."""
-    host = _host()
     async with httpx.AsyncClient(timeout=30.0, headers={"Accept": "application/json"}) as client:
-        token = await _token(client, host)
-        resp = await client.delete(f"{host}{_TUNNEL_PATH}/{jump_id}",
-                                   headers={"Authorization": f"Bearer {token}"})
+        host, auth = await _auth(client)
+        resp = await client.delete(f"{host}{_TUNNEL_PATH}/{jump_id}", headers=auth)
         if resp.status_code not in (200, 204, 404):
             raise PRAApiError(f"delete tunnel jump {jump_id} failed ({resp.status_code}): {resp.text[:300]}")
 

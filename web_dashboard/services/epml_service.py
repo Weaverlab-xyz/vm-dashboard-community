@@ -13,7 +13,13 @@ Token (PAT_ prefix, no token exchange). PATs are bound to the site that was
 active when they were created, so the configured site id must match.
 
 PAT and site id are read from config_service (DB-encrypted) with .env
-fallback (EPML_PAT / EPML_SITE_ID / EPML_BASE_URL). Package download links
+fallback (EPML_PAT / EPML_SITE_ID / EPML_BASE_URL).
+
+``epml_auth_mode = workload`` replaces the PAT with the shared BeyondTrust
+platform identity (services/bt_platform_identity.py): this container's own
+OIDC token plus ``X-BT-Service-Name``, trusted by a Pathfinder Workload
+Identity whose Product Scopes include EPM-L. Nothing stored. The site id then
+falls back to the shared ``bt_platform_site_id`` when ``epml_site_id`` is blank. Package download links
 are pre-signed S3 URLs (~30 min) fetched WITHOUT the Authorization header.
 sync_packages_to_storage() uploads packages via storage_service, into the named
 backend or the active one — so they land beside playbooks and scripts and appear
@@ -62,6 +68,9 @@ def _get_site_id() -> str:
         from ..config import settings
         site_id = settings.epml_site_id
     site_id = _sanitize_site_id(site_id or "")
+    if not site_id and _uses_workload():
+        from . import bt_platform_identity
+        site_id = bt_platform_identity.site_id()
     if not site_id:
         raise EpmlError(
             "EPM-L Site ID is not configured. "
@@ -91,13 +100,26 @@ def _get_api_base() -> str:
     return f"{base}/site/{_get_site_id()}/epm/linux"
 
 
+def _uses_workload() -> bool:
+    from . import bt_platform_identity
+    return bt_platform_identity.uses_workload("epml")
+
+
+def _auth_headers() -> dict:
+    """The PAT, or the platform identity's token + service name."""
+    if _uses_workload():
+        from . import bt_platform_identity
+        try:
+            return bt_platform_identity.headers("epml")
+        except bt_platform_identity.IdentityError as exc:
+            raise EpmlError(str(exc)) from exc
+    return {"Authorization": f"Bearer {_get_pat()}"}
+
+
 def _client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
         base_url=_get_api_base(),
-        headers={
-            "Authorization": f"Bearer {_get_pat()}",
-            "Accept": "application/json",
-        },
+        headers={**_auth_headers(), "Accept": "application/json"},
         timeout=30.0,
     )
 
@@ -107,6 +129,14 @@ def _raise_for_api_error(resp: httpx.Response, action: str) -> None:
     status = resp.status_code
     body = resp.text or ""
     lowered = body.lower()
+    if status in (401, 403) and _uses_workload():
+        # None of the PAT wording below applies: there is no PAT. The platform
+        # collapses site, scope and service-name mismatches into one 401.
+        from . import bt_platform_identity
+        raise EpmlError(
+            f"BeyondTrust declined the workload identity (HTTP {status})"
+            + bt_platform_identity.rejection_hint("epml")
+            + (f" Response: {body[:200]}" if body else ""))
     if status == 401 and "access denied for this site" in lowered:
         raise EpmlError(
             "BeyondTrust rejected the request for this site: the Site ID is "

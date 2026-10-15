@@ -1626,6 +1626,51 @@
               </div>
             </div>
           </div>
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Authentication</p>
+            <div class="space-y-3">
+              <div>
+                <select x-model="panelCfg.ps_auth_mode"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="oauth">OAuth client credentials (above)</option>
+                  <option value="workload">Workload identity (BeyondTrust platform identity)</option>
+                </select>
+                <p class="text-[11px] text-gray-400 mt-1">
+                  <strong>Workload identity</strong> presents this dashboard's own identity token instead of
+                  a stored credential — set it up once on the
+                  <button type="button" class="text-blue-600 hover:underline"
+                          @click="openPanel(integrations.find(i => i.key === 'bt_platform_identity'))">BeyondTrust
+                    platform identity</button> panel, and add this product to its registration's
+                  <strong>Product Scopes</strong> in Pathfinder. Not yet verified live for this product.
+                </p>
+              </div>
+              <div x-show="panelCfg.ps_auth_mode === 'workload'" x-cloak class="space-y-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Workload API URL</label>
+                <input type="text" x-model="panelCfg.ps_workload_api_url"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="https://api.beyondtrust.io/site/{site}/...">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  Where calls go on workload identity auth; <code>{site}</code> is the site ID from
+                  the platform identity panel. The default is a <strong>best guess</strong> at the
+                  Pathfinder gateway path — if calls answer 404 or 421, this is the field to fix
+                  (it may be the product's own host instead).
+                </p>
+              </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">
+                    Service name <span class="text-gray-400 font-normal">(optional override)</span>
+                  </label>
+                  <input type="text" x-model="panelCfg.ps_workload_service_name"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="(blank = the platform identity's service name)">
+                </div>
+                <p class="text-[11px] text-amber-700">
+                  Covers the dashboard's own REST calls. ps-cli, the Secrets Safe backend, the Ansible runner and the passwordsafe Terraform provider still use the client credentials above — keep them set.
+                </p>
+              </div>
+            </div>
+          </div>
           <!-- Password Safe resource registration (optional, per-VM-deploy) -->
           <div class="border-t border-gray-100 pt-4">
             <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Resource registration (VMs)</p>
@@ -2993,6 +3038,51 @@
             </div>
           </div>
           <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Authentication</p>
+            <div class="space-y-3">
+              <div>
+                <select x-model="panelCfg.pra_auth_mode"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="oauth">OAuth client credentials (above)</option>
+                  <option value="workload">Workload identity (BeyondTrust platform identity)</option>
+                </select>
+                <p class="text-[11px] text-gray-400 mt-1">
+                  <strong>Workload identity</strong> presents this dashboard's own identity token instead of
+                  a stored credential — set it up once on the
+                  <button type="button" class="text-blue-600 hover:underline"
+                          @click="openPanel(integrations.find(i => i.key === 'bt_platform_identity'))">BeyondTrust
+                    platform identity</button> panel, and add this product to its registration's
+                  <strong>Product Scopes</strong> in Pathfinder. Not yet verified live for this product.
+                </p>
+              </div>
+              <div x-show="panelCfg.pra_auth_mode === 'workload'" x-cloak class="space-y-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Workload API URL</label>
+                <input type="text" x-model="panelCfg.pra_workload_api_url"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="https://api.beyondtrust.io/site/{site}/...">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  Where calls go on workload identity auth; <code>{site}</code> is the site ID from
+                  the platform identity panel. The default is a <strong>best guess</strong> at the
+                  Pathfinder gateway path — if calls answer 404 or 421, this is the field to fix
+                  (it may be the product's own host instead).
+                </p>
+              </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">
+                    Service name <span class="text-gray-400 font-normal">(optional override)</span>
+                  </label>
+                  <input type="text" x-model="panelCfg.pra_workload_service_name"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="(blank = the platform identity's service name)">
+                </div>
+                <p class="text-[11px] text-amber-700">
+                  Covers the dashboard's own REST calls (pickers, k8s tunnel jumps). The sra Terraform provider — Shell Jump, Web Jump, RDP and tunnel provisioning — still uses the client credentials above — keep them set.
+                </p>
+              </div>
+            </div>
+          </div>
+          <div class="border-t border-gray-100 pt-4">
             <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Configuration API account</p>
             <p class="text-xs text-gray-400 mb-3">
               For the few calls the SRA Terraform provider cannot make — the PRA Vault accounts used by
@@ -3376,11 +3466,41 @@
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                        placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
               </div>
-              <div>
+              <div x-show="panelCfg.epml_auth_mode !== 'workload'">
                 <label class="block text-sm font-medium text-gray-700 mb-1">EPM-L Personal Access Token</label>
                 <input type="password" x-model="panelCfg.epml_pat"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                        placeholder="••••••••">
+              </div>
+            </div>
+          </div>
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Authentication</p>
+            <div class="space-y-3">
+              <div>
+                <select x-model="panelCfg.epml_auth_mode"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="pat">Personal Access Token (stored)</option>
+                  <option value="workload">Workload identity (BeyondTrust platform identity)</option>
+                </select>
+                <p class="text-[11px] text-gray-400 mt-1">
+                  <strong>Workload identity</strong> presents this dashboard's own identity token instead of
+                  a stored credential — set it up once on the
+                  <button type="button" class="text-blue-600 hover:underline"
+                          @click="openPanel(integrations.find(i => i.key === 'bt_platform_identity'))">BeyondTrust
+                    platform identity</button> panel, and add this product to its registration's
+                  <strong>Product Scopes</strong> in Pathfinder. Not yet verified live for this product.
+                </p>
+              </div>
+              <div x-show="panelCfg.epml_auth_mode === 'workload'" x-cloak class="space-y-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">
+                    Service name <span class="text-gray-400 font-normal">(optional override)</span>
+                  </label>
+                  <input type="text" x-model="panelCfg.epml_workload_service_name"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="(blank = the platform identity's service name)">
+                </div>
               </div>
             </div>
           </div>
@@ -4503,6 +4623,51 @@
             <input type="password" x-model="panelCfg.entitle_api_token"
                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                    placeholder="••••••••">
+          </div>
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Authentication</p>
+            <div class="space-y-3">
+              <div>
+                <select x-model="panelCfg.entitle_auth_mode"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="token">API token (above)</option>
+                  <option value="workload">Workload identity (BeyondTrust platform identity)</option>
+                </select>
+                <p class="text-[11px] text-gray-400 mt-1">
+                  <strong>Workload identity</strong> presents this dashboard's own identity token instead of
+                  a stored credential — set it up once on the
+                  <button type="button" class="text-blue-600 hover:underline"
+                          @click="openPanel(integrations.find(i => i.key === 'bt_platform_identity'))">BeyondTrust
+                    platform identity</button> panel, and add this product to its registration's
+                  <strong>Product Scopes</strong> in Pathfinder. Not yet verified live for this product.
+                </p>
+              </div>
+              <div x-show="panelCfg.entitle_auth_mode === 'workload'" x-cloak class="space-y-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Workload API URL</label>
+                <input type="text" x-model="panelCfg.entitle_workload_api_url"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="https://api.beyondtrust.io/site/{site}/...">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  Where calls go on workload identity auth; <code>{site}</code> is the site ID from
+                  the platform identity panel. The default is a <strong>best guess</strong> at the
+                  Pathfinder gateway path — if calls answer 404 or 421, this is the field to fix
+                  (it may be the product's own host instead).
+                </p>
+              </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">
+                    Service name <span class="text-gray-400 font-normal">(optional override)</span>
+                  </label>
+                  <input type="text" x-model="panelCfg.entitle_workload_service_name"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="(blank = the platform identity's service name)">
+                </div>
+                <p class="text-[11px] text-amber-700">
+                  Covers the dashboard's own REST reads and access requests. Resource registration (the entitleio/entitle Terraform provider) still uses the Terraform Provider API Key / API Token — keep one set.
+                </p>
+              </div>
+            </div>
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Terraform Provider API Key</label>
@@ -7610,79 +7775,42 @@
       </template>
 
       <!-- Workload Credentials (preview): site + PAT, then per-cloud dynamic secrets -->
-      <template x-if="panel?.key === 'workload_credentials' && !panelLoading">
+      <template x-if="panel?.key === 'bt_platform_identity' && !panelLoading">
         <div class="space-y-5">
+          <p class="text-sm text-gray-500">
+            One identity for every BeyondTrust product this dashboard calls. Instead of a
+            stored token or client secret, the dashboard presents its own short-lived identity
+            token — from the cloud it runs on, or its own SPIFFE identity — and Pathfinder
+            trusts it because you registered a <strong>Workload Identity</strong> under
+            <strong>Administration → Workload Identities</strong>. Register it <strong>once</strong>
+            and tick a <strong>Product Scope</strong> for each product you switch to workload
+            identity: Workload Credentials (Secrets), PRA, Password Safe, EPM for Linux,
+            Entitle. Each product then opts in with its own <strong>Authentication</strong>
+            setting.
+            <a href="/docs/integrations/beyondtrust/platform-identity" target="_blank"
+               class="text-blue-600 hover:text-blue-800 underline">Guide</a>.
+          </p>
           <div class="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
-            <p class="text-sm text-amber-900">
-              <span class="font-semibold">Preview.</span>
-              Workload Credentials is not yet generally available, and its API may still
-              change. Requires a <strong>US-region</strong> Pathfinder site with the
-              feature enabled.
+            <p class="text-xs text-amber-900">
+              Terraform, <code>ps-cli</code> and the Ansible runner cannot present a workload
+              identity — the sra, passwordsafe and entitle providers take client credentials or
+              an API key only. Those features keep using the stored credentials on each
+              product's panel.
             </p>
           </div>
-          <p class="text-sm text-gray-500">
-            Mint <strong>short-lived</strong> AWS and Azure credentials on demand instead of
-            storing static keys. This is additive: each cloud is opted in separately, and any
-            cloud left off keeps using the credentials it uses today. GCP is absent because
-            Workload Credentials mints AWS and Azure only — a mixed install is normal.
-            Enable/disable the feature with the Preview toggle.
-            <a href="/docs/workload-lab/workload-credentials" target="_blank"
-               class="text-blue-600 hover:text-blue-800 underline">Integration guide</a>.
-          </p>
-
-          <div>
-            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Connection</p>
+          <div class="space-y-3">
             <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">API base URL</label>
-              <input type="text" x-model="panelCfg.wlc_api_base_url"
+              <label class="block text-sm font-medium text-gray-700 mb-1">Pathfinder site ID</label>
+              <input type="text" x-model="panelCfg.bt_platform_site_id"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
-                     placeholder="https://api.beyondtrust.io">
-            </div>
-            <div class="mt-3">
-              <label class="block text-sm font-medium text-gray-700 mb-1">Site ID</label>
-              <input type="text" x-model="panelCfg.wlc_site_id"
-                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
-                     placeholder="00000000-0000-0000-0000-000000000000">
+                     placeholder="(blank = the Workload Credentials or EPM-L site ID)">
               <p class="text-[11px] text-gray-400 mt-1">
-                Your site (tenant) GUID — the <code>tenant_id</code> claim in the access token
-                your browser holds after signing in to Pathfinder.
+                Fills <code>{site}</code> in each product's workload API URL. Open
+                <code>https://app.beyondtrust.io/api/platform/currentSite</code> while signed in
+                and copy <code>site_id</code>. The registration must be on this same site, or
+                every call answers <code>401 Access denied for this site</code>.
               </p>
             </div>
-            <div class="mt-3">
-              <label class="block text-sm font-medium text-gray-700 mb-1">Authentication</label>
-              <select x-model="panelCfg.wlc_auth_mode"
-                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-                <option value="pat">Personal Access Token (stored)</option>
-                <option value="workload">Workload identity (nothing stored)</option>
-              </select>
-              <p class="text-[11px] text-gray-400 mt-1">
-                <strong>Workload identity</strong> is available when the platform hands this
-                container its own identity token. The token is presented to Pathfinder, which
-                trusts it because you registered a <strong>Workload Identity</strong> there — so
-                this install holds <strong>no BeyondTrust credential at all</strong>. Registering
-                the trust is a one-time action in the Pathfinder GUI under
-                <strong>Administration → Workload Identities</strong>; there is no API for it.
-                See <a href="/docs/operations/cloud-hosting" target="_blank"
-                       class="text-blue-600 hover:text-blue-800 underline">Cloud hosting</a>.
-              </p>
-            </div>
-            <div class="mt-3" x-show="(panelCfg.wlc_auth_mode || 'pat') !== 'workload'" x-cloak>
-              <label class="block text-sm font-medium text-gray-700 mb-1">Personal Access Token</label>
-              <input type="password" x-model="panelCfg.wlc_pat" autocomplete="new-password"
-                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
-                     :placeholder="(panelCfg._secrets_set || []).includes('wlc_pat')
-                                   ? '•••••••• stored — leave blank to keep'
-                                   : 'Paste the token'">
-              <p class="text-[11px] text-gray-400 mt-1">
-                Created under <strong>Manage Profile → Personal Access Tokens</strong>. Stored
-                encrypted; the box is always empty — leave it blank to keep the stored token,
-                type to replace it, or clear it to remove it. A PAT is scoped to a single
-                site. <strong>This is the one long-lived credential this mode still needs</strong>
-                — it replaces the per-cloud static keys rather than eliminating secrets entirely.
-                The workload-identity mode above removes it.
-              </p>
-            </div>
-            <div class="mt-3 space-y-3" x-show="panelCfg.wlc_auth_mode === 'workload'" x-cloak>
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Identity platform</label>
                 <select x-model="panelCfg.wlc_identity_platform"
@@ -7789,6 +7917,117 @@
                   neither has an equivalent.
                 </p>
               </div>
+          </div>
+          <div>
+            <div class="flex items-center gap-2">
+              <button type="button" @click="testBtIdentity()" :disabled="btIdTest.running"
+                      class="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50">
+                <span x-text="btIdTest.running ? 'Testing…' : 'Test identity'"></span>
+              </button>
+              <span x-show="btIdTest.ok === true" x-cloak
+                    class="text-xs text-green-700" x-text="btIdTest.message"></span>
+            </div>
+            <p x-show="btIdTest.ok === false" x-cloak
+               class="text-xs text-red-600 mt-2" x-text="btIdTest.error"></p>
+            <pre x-show="btIdTest.ok === true && btIdTest.claims" x-cloak
+                 class="text-[11px] bg-gray-50 border border-gray-200 rounded p-2 mt-2 overflow-x-auto"
+                 x-text="btIdTest.claims"></pre>
+            <p class="text-[11px] text-gray-400 mt-1">
+              Fetches a token and shows its <code>iss</code>, <code>aud</code>,
+              <code>sub</code> and <code>exp</code> — the values your registration's issuer and
+              claim conditions must match. <strong>Free</strong>, and it calls no BeyondTrust
+              endpoint, so a pass proves this container has an identity, not that Pathfinder
+              accepts it; each product's own test does that. Tests the <strong>saved</strong>
+              values — save first.
+            </p>
+          </div>
+        </div>
+      </template>
+
+      <template x-if="panel?.key === 'workload_credentials' && !panelLoading">
+        <div class="space-y-5">
+          <div class="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
+            <p class="text-sm text-amber-900">
+              <span class="font-semibold">Preview.</span>
+              Workload Credentials is not yet generally available, and its API may still
+              change. Requires a <strong>US-region</strong> Pathfinder site with the
+              feature enabled.
+            </p>
+          </div>
+          <p class="text-sm text-gray-500">
+            Mint <strong>short-lived</strong> AWS and Azure credentials on demand instead of
+            storing static keys. This is additive: each cloud is opted in separately, and any
+            cloud left off keeps using the credentials it uses today. GCP is absent because
+            Workload Credentials mints AWS and Azure only — a mixed install is normal.
+            Enable/disable the feature with the Preview toggle.
+            <a href="/docs/workload-lab/workload-credentials" target="_blank"
+               class="text-blue-600 hover:text-blue-800 underline">Integration guide</a>.
+          </p>
+
+          <div>
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Connection</p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">API base URL</label>
+              <input type="text" x-model="panelCfg.wlc_api_base_url"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="https://api.beyondtrust.io">
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Site ID</label>
+              <input type="text" x-model="panelCfg.wlc_site_id"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="00000000-0000-0000-0000-000000000000">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Your site (tenant) GUID — the <code>tenant_id</code> claim in the access token
+                your browser holds after signing in to Pathfinder.
+              </p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Authentication</label>
+              <select x-model="panelCfg.wlc_auth_mode"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="pat">Personal Access Token (stored)</option>
+                <option value="workload">Workload identity (nothing stored)</option>
+              </select>
+              <p class="text-[11px] text-gray-400 mt-1">
+                <strong>Workload identity</strong> is available when the platform hands this
+                container its own identity token. The token is presented to Pathfinder, which
+                trusts it because you registered a <strong>Workload Identity</strong> there — so
+                this install holds <strong>no BeyondTrust credential at all</strong>. Registering
+                the trust is a one-time action in the Pathfinder GUI under
+                <strong>Administration → Workload Identities</strong>; there is no API for it.
+                See <a href="/docs/operations/cloud-hosting" target="_blank"
+                       class="text-blue-600 hover:text-blue-800 underline">Cloud hosting</a>.
+              </p>
+            </div>
+            <div class="mt-3" x-show="(panelCfg.wlc_auth_mode || 'pat') !== 'workload'" x-cloak>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Personal Access Token</label>
+              <input type="password" x-model="panelCfg.wlc_pat" autocomplete="new-password"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     :placeholder="(panelCfg._secrets_set || []).includes('wlc_pat')
+                                   ? '•••••••• stored — leave blank to keep'
+                                   : 'Paste the token'">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Created under <strong>Manage Profile → Personal Access Tokens</strong>. Stored
+                encrypted; the box is always empty — leave it blank to keep the stored token,
+                type to replace it, or clear it to remove it. A PAT is scoped to a single
+                site. <strong>This is the one long-lived credential this mode still needs</strong>
+                — it replaces the per-cloud static keys rather than eliminating secrets entirely.
+                The workload-identity mode above removes it.
+              </p>
+            </div>
+            <div class="mt-3 rounded-lg bg-blue-50 border border-blue-200 px-3 py-2"
+                 x-show="panelCfg.wlc_auth_mode === 'workload'" x-cloak>
+              <p class="text-xs text-blue-900">
+                Workload identity uses the <strong>BeyondTrust platform identity</strong> — the
+                platform, service name and audience are set once there and shared with PRA,
+                Password Safe, EPM-L and Entitle.
+                <button type="button" class="underline"
+                        @click="openPanel(integrations.find(i => i.key === 'bt_platform_identity'))">Open
+                  BeyondTrust platform identity</button>.
+                Its registration's <strong>Product Scopes</strong> must include
+                <strong>Secrets</strong>.
+              </p>
             </div>
             <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
@@ -8414,6 +8653,10 @@ function settingsPage() {
       // one or two, not all three. Each key derives its own config flag via
       // _feature_to_cfg_key (password_safe -> password_safe_enabled), so renaming one
       // silently repoints its toggle at a key nothing reads.
+      // Config-only: no product of its own, just the identity the four below (and
+      // Workload Credentials) can authenticate with instead of a stored credential.
+      { key: 'bt_platform_identity', label: 'BeyondTrust platform identity', group: 'beyondtrust', hasConfig: true, enabled: true, configOnly: true,
+        desc: 'Authenticate to PRA, Password Safe, EPM for Linux, Entitle and Workload Credentials with this dashboard\'s own workload identity instead of stored tokens or client secrets. One Pathfinder Workload Identity registration covers every product it is scoped to.' },
       { key: 'password_safe', label: 'Password Safe',          group: 'beyondtrust', hasConfig: true,  enabled: false,
         desc: 'Secret and managed-account checkout, VM / database / Kubernetes onboarding, and scheduled credential rotation.' },
       { key: 'pra',          label: 'Privileged Remote Access', group: 'beyondtrust', hasConfig: true,  enabled: false,
@@ -8504,6 +8747,7 @@ function settingsPage() {
     // Unmetered GET /session probe (Test connection in the Workload Credentials panel).
     // Distinct from wlcSources: that reports stored lease state, this authenticates live.
     wlcTest: { running: false, ok: null, error: '', message: '' },
+    btIdTest: { running: false, ok: null, error: '', message: '', claims: '' },
 
     // Skytap "Test connection". One page of the template catalogue, which proves the
     // token AND what it can see — an account that authenticates but exposes no templates
@@ -9190,6 +9434,7 @@ function settingsPage() {
       this.panelCfg = {};
       this.panelSecretsTouched = [];
       this.wlcTest = { running: false, ok: null, error: '', message: '' };
+      this.btIdTest = { running: false, ok: null, error: '', message: '', claims: '' };
       this.skytapTest = { running: false, ok: null, error: '', message: '' };
       this.povCloudTest = { running: false, ok: null, error: '', message: '' };
       this.panelError = '';
@@ -9822,6 +10067,19 @@ function settingsPage() {
         this.wlcTest = { running: false, ok: true, error: '', message: r.message || 'Connected.' };
       } catch (e) {
         this.wlcTest = { running: false, ok: false, error: e.message || String(e), message: '' };
+      }
+    },
+
+    // Fetch the shared BeyondTrust platform identity's token and show its claims.
+    // Free and local — no BeyondTrust endpoint is called. Reads the SAVED config.
+    async testBtIdentity() {
+      this.btIdTest = { running: true, ok: null, error: '', message: '', claims: '' };
+      try {
+        const r = await API.post('/api/setup/bt-platform-identity/test', {});
+        this.btIdTest = { running: false, ok: true, error: '', message: r.message || 'Got a token.',
+                          claims: JSON.stringify(r.claims || {}, null, 2) };
+      } catch (e) {
+        this.btIdTest = { running: false, ok: false, error: e.message || String(e), message: '', claims: '' };
       }
     },
 

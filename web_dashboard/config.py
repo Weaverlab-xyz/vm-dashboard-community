@@ -495,6 +495,12 @@ class Settings(BaseSettings):
     pscli_client_id: str = ""
     pscli_client_secret: str = ""
     pscli_api_account_name: str = ""  # Password Safe run-as user — REQUIRED by the passwordsafe TF provider block
+    # Password Safe REST auth: "oauth" (pscli_client_id/secret) or "workload" (the
+    # shared BeyondTrust platform identity). ps-cli, the Ansible runner and the
+    # passwordsafe Terraform provider keep using the client credentials either way.
+    ps_auth_mode: str = "oauth"
+    ps_workload_api_url: str = "https://api.beyondtrust.io/site/{site}/passwordsafe"
+    ps_workload_service_name: str = ""
 
     # Optional Password Safe VM resource registration (per-deploy opt-in, mirrors
     # entitle_registration_*). Onboards a built VM as a managed system + the baked-in
@@ -583,6 +589,13 @@ class Settings(BaseSettings):
     bt_client_secret: str = ""
     bt_jump_group_name: str = ""  # set via setup wizard / settings panel
     bt_jumpoint_name: str = ""    # name of the pre-existing Jumpoint in PRA (required for Terraform path)
+    # PRA REST auth: "oauth" (bt_client_id/secret above) or "workload" (the shared
+    # BeyondTrust platform identity — see services/bt_platform_identity.py). Workload
+    # covers the dashboard's own REST calls only; the sra Terraform provider still
+    # needs bt_client_id/secret. The URL is a template; {site} is the Pathfinder site.
+    pra_auth_mode: str = "oauth"
+    pra_workload_api_url: str = "https://api.beyondtrust.io/site/{site}/pra"
+    pra_workload_service_name: str = ""          # optional X-BT-Service-Name override
     bt_ps_deploy_key_title: str = "Docker Deploy Key"  # Password Safe secret title
 
     # ── Optional cloud-DATABASE Password Safe onboarding (AWS) ────────────────
@@ -982,6 +995,9 @@ class Settings(BaseSettings):
     epml_base_url: str = "https://api.beyondtrust.io"
     epml_site_id: str = ""       # Pathfinder site UUID; PATs are bound to the site active at creation
     epml_pat: str = ""           # Personal Access Token (PAT_ prefix); encrypted at rest when set via the UI
+    # "pat" (above) or "workload" (the shared BeyondTrust platform identity — no PAT).
+    epml_auth_mode: str = "pat"
+    epml_workload_service_name: str = ""
 
     # EC2 deploy — instance profile + SSH keypair for dashboard-provisioned instances.
     # This block used to carry the local Packer/OVF image-building pipeline too: OVA +
@@ -2068,6 +2084,12 @@ class Settings(BaseSettings):
     # rather than letting the provider fall back. See entitle_registration_service.
     entitle_api_url: str = "https://api.us.entitle.io/v1"
     entitle_api_token: str = ""                     # bearer token (Key Vault secret in prod)
+    # Entitle REST auth: "token" (entitle_api_token) or "workload" (the shared
+    # BeyondTrust platform identity). The entitleio/entitle Terraform provider still
+    # needs entitle_api_key / entitle_api_token either way.
+    entitle_auth_mode: str = "token"
+    entitle_workload_api_url: str = "https://api.beyondtrust.io/site/{site}/entitle"
+    entitle_workload_service_name: str = ""
 
     # Entitle resource registration — as the dashboard builds Linux VMs and
     # cloud databases it registers each as an Entitle integration (SSH ephemeral
@@ -2424,6 +2446,12 @@ class Settings(BaseSettings):
     workload_credentials_enabled: bool = False
     wlc_api_base_url: str = "https://api.beyondtrust.io"
     wlc_site_id: str = ""                           # site (tenant) GUID — the `tenant_id` claim in your access JWT
+    # The Pathfinder site for the shared BeyondTrust platform identity, used by the
+    # {site} in each product's workload API URL. Blank falls back to wlc_site_id, then
+    # epml_site_id. The identity settings below (wlc_identity_*, wlc_service_name,
+    # wlc_entra_client_id) are that shared identity: kept under their wlc_ names so no
+    # install has to migrate, and edited on the "BeyondTrust platform identity" panel.
+    bt_platform_site_id: str = ""
     wlc_pat: str = ""                               # Personal Access Token; SECRET — registered in secret_hygiene.SECRET_REGISTRY
     # How this deployment authenticates: "pat" (the stored token above) or
     # "workload" (this container's own cloud identity, trusted by a Workload
@@ -2436,7 +2464,7 @@ class Settings(BaseSettings):
     # configured before the mode covered more than Azure keep working.
     # See docs/operations/cloud-hosting.md → "No PAT".
     wlc_auth_mode: str = "pat"
-    # Which platform vouches for this container: "azure" | "gcp" | "aws" | "file".
+    # Which platform vouches for this container: "azure" | "gcp" | "aws" | "file" | "spire".
     # Blank reads as "azure", because every install that predates this setting is
     # an Azure one. AWS serves a workload identity token only on EKS (IRSA or Pod
     # Identity); ECS and plain EC2 have no OIDC endpoint, so a dashboard there

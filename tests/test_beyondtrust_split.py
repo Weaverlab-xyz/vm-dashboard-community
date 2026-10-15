@@ -115,6 +115,9 @@ clouddb_ps_ssm_account_suffix clouddb_ps_ssm_public_key_path clouddb_ps_ssm_ssl
 clouddb_ps_ssm_plugin_private_key clouddb_ps_ssm_plugin_passphrase
 clouddb_ps_ssm_key_directory
 pra_config_api_client_id pra_config_api_client_secret
+pra_auth_mode pra_workload_api_url pra_workload_service_name
+ps_auth_mode ps_workload_api_url ps_workload_service_name
+epml_auth_mode epml_workload_service_name
 passwordsafe_azure_db_registration_method clouddb_ps_platform_azure_postgres
 clouddb_ps_platform_azure_mysql clouddb_ps_platform_azure_sqlserver
 clouddb_ps_functional_account_azure_postgres clouddb_ps_functional_account_azure_mysql
@@ -236,6 +239,13 @@ windows_ssh_enabled windows_rdp_default
 # Oracle platform (no plugin), and these name its workgroup, platform, referenced
 # functional account and the sqlplus image that creates the managed user. On the Password
 # Safe panel beside the plugin platforms they parallel.
+
+# ADDED since the split, deliberately: `{pra,ps,epml}_auth_mode`, `{pra,ps}_workload_api_url`
+# and `{pra,ps,epml}_workload_service_name`. Each product can authenticate its REST calls
+# with the shared BeyondTrust platform identity (services/bt_platform_identity.py) instead
+# of its stored credential, so each panel carries its own opt-in, its own gateway URL and
+# an optional X-BT-Service-Name override. Per product, not shared, because a customer
+# licenses and scopes them separately in Pathfinder.
 
 # ADDED since the split, deliberately: `windows_ssh_enabled` and `windows_rdp_default`.
 # A Windows server build used to get a Remote RDP jump and nothing else; it now switches

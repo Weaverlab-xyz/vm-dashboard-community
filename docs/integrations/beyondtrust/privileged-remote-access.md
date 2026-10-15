@@ -165,6 +165,14 @@ consequences — is in **[Gateway hosts](gateways.md)**.
 
 ---
 
+## Workload identity
+
+Instead of the OAuth client credentials, the dashboard's REST calls to PRA can present the dashboard's
+own workload identity: set **Authentication → Workload identity** on this panel, after
+setting up the shared identity and adding PRA to its Pathfinder registration's
+**Product Scopes**. The `sra` Terraform provider still uses the client credentials, so keep them set. Not yet verified live — see
+[BeyondTrust platform identity](platform-identity.md).
+
 ## Troubleshooting
 
 **PRA jump item wasn't created** — the jump item is created by Terraform with the `sra`

@@ -31,6 +31,11 @@ as one set when you browse `integrations/`.
 - **Entitle** — just-in-time cloud identity and access requests. `entitle_enabled`. See
   [Entitle](beyondtrust/entitle.md).
 
+All four, plus Workload Credentials, can authenticate with the dashboard's own
+**workload identity** instead of a stored token or client secret — one Pathfinder
+registration scoped to each product. See
+[BeyondTrust platform identity](beyondtrust/platform-identity.md).
+
 ---
 
 ## Four products, four feature flags

@@ -153,30 +153,45 @@ def _missing() -> list:
     if not _cfg("wlc_site_id"):
         out.append("wlc_site_id")
     if auth_mode() == AUTH_MODE_WORKLOAD:
-        if not _cfg("wlc_service_name"):
-            out.append("wlc_service_name")
-        platform = identity_platform()
-        if platform == PLATFORM_SPIRE:
-            # The dashboard mints this token itself, for the audience set here, and
-            # only while its identity and the Workload Credentials audience are on.
-            if not identity_audience():
-                out.append("wlc_identity_audience")
-            for key in SPIRE_SETTINGS:
-                if _cfg(key).strip().lower() not in ("1", "true", "yes", "on"):
-                    out.append(key)
-        elif platform in FILE_PLATFORMS:
-            # The audience is not this container's to choose on these platforms —
-            # it is baked into the projected token by whoever configured the
-            # service account. What CAN be missing is the token itself.
-            if not identity_token_path():
-                out.append("wlc_identity_token_file")
-        elif not identity_audience():
-            out.append("wlc_identity_audience")
+        out.extend(identity_missing())
     elif not (_raw_cfg("wlc_pat") or _cfg("wlc_pat")):
         # Raw first, and not only to avoid the resolve: a self-referential PAT IS
         # set, and reporting it as missing would send the operator to paste in a
         # token that is already there. `_auth_headers` names the real problem.
         out.append("wlc_pat")
+    return out
+
+
+def identity_missing(service_name: str = "") -> list:
+    """Which settings the workload identity itself still needs.
+
+    The half of :func:`_missing` that is about the token and not about Workload
+    Credentials: no site id, no PAT. It is shared because the same identity now
+    authenticates PRA, Password Safe, EPM-L and Entitle too (see
+    ``bt_platform_identity``), and each of those asks the same question.
+    ``service_name`` is a product's own override; when given, a blank shared
+    ``wlc_service_name`` is not missing.
+    """
+    out = []
+    if not (service_name.strip() or _cfg("wlc_service_name")):
+        out.append("wlc_service_name")
+    platform = identity_platform()
+    if platform == PLATFORM_SPIRE:
+        # The dashboard mints this token itself, for the audience set here, and
+        # only while its identity and the Workload Credentials audience are on.
+        if not identity_audience():
+            out.append("wlc_identity_audience")
+        for key in SPIRE_SETTINGS:
+            if _cfg(key).strip().lower() not in ("1", "true", "yes", "on"):
+                out.append(key)
+    elif platform in FILE_PLATFORMS:
+        # The audience is not this container's to choose on these platforms —
+        # it is baked into the projected token by whoever configured the
+        # service account. What CAN be missing is the token itself.
+        if not identity_token_path():
+            out.append("wlc_identity_token_file")
+    elif not identity_audience():
+        out.append("wlc_identity_audience")
     return out
 
 
