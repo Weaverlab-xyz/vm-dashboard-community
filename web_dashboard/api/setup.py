@@ -1625,6 +1625,16 @@ class PovCloudFeatureConfig(BaseModel):
     # federated credential trusts the dashboard, and azure_client_secret stays blank.
     dashboard_spiffe_aud_azure: bool = False
     wlc_azure_everyday_source: str = "lease"
+    # GCP: the workload identity provider (a resource name — GCP's "audience") and the
+    # service account it acts as, both the Remote Agents panel's keys; and the Entitle
+    # just-in-time provision role (services/pov_cloud_gcp._privileged).
+    dashboard_spiffe_aud_gcp: str = ""
+    gcp_federation_service_account: str = ""
+    pov_gcp_provision_source: str = ""
+    pov_gcp_entitle_target_type: str = "role"
+    pov_gcp_entitle_target_id: str = ""
+    pov_gcp_entitle_grant_minutes: int = 60
+    entitle_machine_identity_email: str = ""
     azure_client_id: str = ""
     azure_client_secret: str = ""       # encrypted at rest
     azure_tenant_id: str = ""

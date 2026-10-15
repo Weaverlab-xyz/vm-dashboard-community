@@ -32,7 +32,11 @@ bills while detached.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import hashlib
 import logging
+import time
 
 from . import gcp_service, pov_cloud_env as env
 from .gcp_service import GCPError
@@ -179,29 +183,98 @@ def _verify_sync(project: str, region: str) -> str:
     return _zone_sync(project, region)
 
 
+def _credential_label() -> str:
+    """Which credential ``gcp_service._gcp_creds`` answers with, in words — the same
+    order: a stored key, then the SPIFFE identity, then Application Default Credentials."""
+    from . import cloud_federation
+    if cloud_federation.source("gcp") == "stored key":
+        return "a stored service-account key"
+    if cloud_federation.active("gcp"):
+        sa = _cfg("gcp_federation_service_account")
+        return ("the dashboard's SPIFFE identity as " + sa) if sa else (
+            "the dashboard's SPIFFE identity (its workload identity principal)")
+    return "Application Default Credentials"
+
+
+def _not_configured_message() -> str:
+    from . import cloud_federation
+    why = cloud_federation.reason("gcp")
+    return ("No GCP project is configured. Set the project id, then choose Service account "
+            "key and paste one, or choose SPIFFE identity and set the workload identity "
+            "provider" + (f" (federation is not in use: {why})." if why else "."))
+
+
 async def verify() -> tuple[bool, str]:
     """Prove the credential, the project and the region, in one cheap read.
 
     An expected failure is a RETURN VALUE, not an exception — a caught exception
     stringified into a response body is what CodeQL's stack-trace-exposure rule fires on.
+    With Entitle provisioning on, also prove the jobs' half without requesting anything.
     """
     if not configured():
-        return False, ("No GCP credentials are configured. Add them in "
-                       "Settings → Integrations → POV cloud provider.")
+        return False, _not_configured_message()
     region = default_region()
+    label = _credential_label()
     try:
         project = _project()
         zone = await gcp_service._to_thread(_verify_sync, project, region)
     except env.CloudEnvError as exc:
         return False, str(exc)
     except GCPError as exc:
-        return False, f"GCP refused the call: {exc}"
+        return False, f"GCP refused the call made with {label}: {exc}"
     except Exception:  # noqa: BLE001
         logger.warning("GCP POV verify failed", exc_info=True)
-        return False, ("GCP did not answer. Check the service-account key, that the "
-                       f"Compute Engine API is enabled, and that {region} is available "
-                       "to this project.")
-    return True, f"Connected to GCP project {project} ({region}, first zone {zone})."
+        return False, (f"GCP did not answer the call made with {label}. Check the "
+                       f"credential, that the Compute Engine API is enabled, and that "
+                       f"{region} is available to this project.")
+    msg = f"Connected to GCP project {project} ({region}, first zone {zone}), using {label}."
+    if not entitle_provisioning():
+        return True, msg
+    ok, entitle_msg = await _verify_entitle_leg(project)
+    return ok, f"{msg} {entitle_msg}"
+
+
+async def _verify_entitle_leg(project: str) -> tuple[bool, str]:
+    """The jobs' privilege, proven WITHOUT requesting it.
+
+    A request is not a harmless probe: an auto-approved one GRANTS the provision role. So
+    this checks only what a request depends on — the target is set, Entitle answers and
+    knows the machine user — and that the service account has no standing write
+    privilege, which is the point of the whole arrangement.
+    """
+    from . import entitle_service
+    email = (_cfg("entitle_machine_identity_email") or "").strip()
+    if not email:
+        return False, ("Jobs request their GCP role from Entitle, but no Entitle machine "
+                       "user is set (entitle_machine_identity_email).")
+    if not (_cfg("pov_gcp_entitle_target_id") or "").strip():
+        return False, ("Jobs request their GCP role from Entitle, but no Entitle role or "
+                       "bundle id is set for them.")
+    try:
+        user = await entitle_service.find_user(email)
+    except entitle_service.EntitleError as exc:
+        return False, f"Jobs request their GCP role from Entitle, and Entitle refused: {exc}"
+    except Exception:  # noqa: BLE001
+        logger.warning("Entitle machine-user lookup failed", exc_info=True)
+        return False, ("Jobs request their GCP role from Entitle, and Entitle did not "
+                       "answer. Check its API URL and the platform identity's scopes.")
+    if user is None:
+        return False, (f"Jobs request their GCP role from Entitle as {email}, but Entitle "
+                       f"has no user with that email. Add it to the IdP group Entitle "
+                       f"syncs, then assign it the service account on the GCP integration.")
+    try:
+        standing = await gcp_service._to_thread(_held_permissions, project)
+    except Exception:  # noqa: BLE001
+        logger.warning("GCP testIamPermissions failed", exc_info=True)
+        standing = None
+    if standing:
+        return True, (f"Jobs request the {_target_label()} from Entitle as {email} (user "
+                      f"found, nothing requested) — but the service account ALREADY holds "
+                      f"{', '.join(sorted(standing)[:3])}"
+                      f"{'…' if len(standing) > 3 else ''} on {project}, a standing write "
+                      f"privilege that makes the request moot. Remove it.")
+    return True, (f"Jobs request the {_target_label()} from Entitle as {email}: user "
+                  f"found, nothing requested, and no standing write privilege on {project}.")
 
 
 # ── naming ───────────────────────────────────────────────────────────────────
@@ -438,14 +511,156 @@ def _create_vms_sync(project: str, env_id: str, region: str, specs: list,
 
 async def create_network(env_id: str, region: str, cidr: str, sub_cidr: str,
                          zones: list | None = None) -> dict:
-    return await gcp_service._to_thread(
-        _create_network_sync, _project(env_id), env_id, region, cidr, sub_cidr, zones)
+    project = _project(env_id)
+    async with _privileged(project, f"create_network:{env_id}"):
+        return await gcp_service._to_thread(
+            _create_network_sync, project, env_id, region, cidr, sub_cidr, zones)
 
 
 async def create_vms(env_id: str, region: str, specs: list, net: dict) -> list:
-    return await gcp_service._to_thread(
-        _create_vms_sync, net.get("project") or _project(env_id), env_id, region, specs,
-        net)
+    project = net.get("project") or _project(env_id)
+    async with _privileged(project, f"create_vms:{env_id}"):
+        return await gcp_service._to_thread(
+            _create_vms_sync, project, env_id, region, specs, net)
+
+
+# ── privilege for writes: Entitle, just in time ──────────────────────────────
+#
+# With ``pov_gcp_provision_source = entitle`` the service account the dashboard runs as
+# holds only the read role. Every write below runs inside ``_privileged``, which asks
+# Entitle for the provision role on behalf of the machine user the service account is
+# assigned to, waits for GCP to report the permissions, and lets Entitle's TTL end the
+# grant. One grant serves every write until it nears expiry — a POV build is a handful
+# of writes, and a request per write would mean an approval record and an IAM
+# propagation wait each.
+
+PROVISION_OPERATION = "gcp:pov:provision"
+
+# What the provision role adds and the read role lacks — the set a fresh grant is
+# waited on, and the set Test connection checks the service account does NOT hold
+# standing. terraform/pov_cloud_gcp_role grants exactly these in its provision role;
+# tests/test_pov_cloud_gcp_entitle.py pins the two lists together.
+PROVISION_PERMISSIONS = (
+    "compute.networks.create",
+    "compute.networks.delete",
+    "compute.networks.updatePolicy",
+    "compute.subnetworks.create",
+    "compute.subnetworks.delete",
+    "compute.subnetworks.use",
+    "compute.subnetworks.useExternalIp",
+    "compute.firewalls.create",
+    "compute.firewalls.delete",
+    "compute.instances.create",
+    "compute.instances.delete",
+    "compute.instances.start",
+    "compute.instances.stop",
+    "compute.instances.setMetadata",
+    "compute.instances.setLabels",
+    "compute.instances.setTags",
+    "compute.disks.create",
+    "compute.images.useReadOnly",
+)
+
+_IAM_WAIT_S = 300
+_IAM_POLL_S = 10
+_grant_locks: dict = {}
+
+
+def entitle_provisioning() -> bool:
+    return (_cfg("pov_gcp_provision_source") or "").strip().lower() == "entitle"
+
+
+def _grant_minutes() -> int:
+    try:
+        return max(1, int(_cfg("pov_gcp_entitle_grant_minutes") or 60))
+    except (TypeError, ValueError):
+        return 60
+
+
+def _target_label() -> str:
+    kind = (_cfg("pov_gcp_entitle_target_type") or "role").strip().lower()
+    return "bundle" if kind == "bundle" else "role"
+
+
+def _entitle_target() -> dict:
+    target_id = (_cfg("pov_gcp_entitle_target_id") or "").strip()
+    if not target_id:
+        raise env.CloudEnvError(
+            "GCP provisioning is set to request its role from Entitle, but no Entitle role "
+            "or bundle id is set. Set it in Settings → Integrations → POV cloud provider.")
+    return {f"{_target_label()}_id": target_id}
+
+
+def _grant_lock() -> asyncio.Lock:
+    """One lock per event loop: two jobs that both find no live grant must not both
+    file a request, and the second would only wait for the first's grant anyway."""
+    loop = asyncio.get_running_loop()
+    lock = _grant_locks.get(id(loop))
+    if lock is None:
+        lock = _grant_locks[id(loop)] = asyncio.Lock()
+    return lock
+
+
+def _held_permissions(project: str) -> set:
+    """The subset of PROVISION_PERMISSIONS the current credential holds on ``project``.
+    ``projects.testIamPermissions`` needs no permission of its own."""
+    session = gcp_service._authed_session()
+    resp = session.post(
+        f"https://cloudresourcemanager.googleapis.com/v1/projects/{project}:testIamPermissions",
+        json={"permissions": list(PROVISION_PERMISSIONS)}, timeout=30)
+    if resp.status_code >= 400:
+        raise env.CloudEnvError(
+            f"GCP would not report this credential's permissions on {project} "
+            f"(HTTP {resp.status_code}).")
+    return set((resp.json() or {}).get("permissions") or [])
+
+
+def _wait_for_permissions(project: str) -> None:
+    """Block until the granted role is visible to GCP, or fail naming what is missing.
+
+    Entitle reports ``granted`` once it has written the IAM binding; GCP applies a
+    policy change eventually, typically within a minute or two. Starting the build before
+    that is a 403 on the first insert that reads as "Entitle granted the wrong role".
+    """
+    deadline = time.monotonic() + _IAM_WAIT_S
+    want = set(PROVISION_PERMISSIONS)
+    while True:
+        missing = want - _held_permissions(project)
+        if not missing:
+            return
+        if time.monotonic() >= deadline:
+            raise env.CloudEnvError(
+                f"Entitle granted the {_target_label()}, but after {_IAM_WAIT_S // 60} "
+                f"minutes the service account still lacks {', '.join(sorted(missing)[:4])}"
+                f"{'…' if len(missing) > 4 else ''} on {project}. Check the Entitle target "
+                f"is the POV cloud provision role on this project.")
+        time.sleep(_IAM_POLL_S)
+
+
+@contextlib.asynccontextmanager
+async def _privileged(project: str, action: str):
+    """The provision role for the writes inside, when Entitle supplies it; else a no-op."""
+    if not entitle_provisioning():
+        yield None
+        return
+    from . import cloud_identity_service as cis
+    minutes = _grant_minutes()
+    async with contextlib.AsyncExitStack() as stack:
+        async with _grant_lock():
+            try:
+                handle = await stack.enter_async_context(cis.elevate(
+                    "gcp", PROVISION_OPERATION,
+                    duration_minutes=minutes,
+                    payload_hash=hashlib.sha256(f"{project}:{action}".encode()).hexdigest(),
+                    target=_entitle_target(),
+                    gated=False,
+                    reuse_min_remaining_minutes=max(10, minutes // 3)))
+            except cis.CloudIdentityError as exc:
+                raise env.CloudEnvError(
+                    f"Entitle did not grant the GCP provision {_target_label()}: {exc}") from exc
+            if not handle.extra.get("reused"):
+                await gcp_service._to_thread(_wait_for_permissions, project)
+        yield handle
 
 
 # ── read ─────────────────────────────────────────────────────────────────────
@@ -626,7 +841,8 @@ def _power_sync(project: str, env_id: str, action: str) -> int:
 
 async def power(env_id: str, region: str, action: str) -> None:
     project = _project(env_id)
-    count = await gcp_service._to_thread(_power_sync, project, env_id, action)
+    async with _privileged(project, f"power:{env_id}:{action}"):
+        count = await gcp_service._to_thread(_power_sync, project, env_id, action)
     logger.info("POV %s: %s %d GCE instances", env_id, action, count)
 
 
@@ -714,7 +930,8 @@ def _delete_sync(project: str, env_id: str, region: str) -> list:
 
 async def delete_environment(env_id: str, region: str) -> None:
     project = _project(env_id)
-    removed = await gcp_service._to_thread(_delete_sync, project, env_id, region)
+    async with _privileged(project, f"delete:{env_id}"):
+        removed = await gcp_service._to_thread(_delete_sync, project, env_id, region)
     logger.info("POV %s: removed %d GCP resources from %s/%s", env_id, len(removed),
                 project, region)
 
@@ -745,8 +962,9 @@ def _remove_vms_sync(project: str, env_id: str, names: list) -> list:
 
 
 async def remove_vms(env_id: str, region: str, names: list) -> list:
-    removed = await gcp_service._to_thread(_remove_vms_sync, _project(env_id), env_id,
-                                           names)
+    project = _project(env_id)
+    async with _privileged(project, f"remove_vms:{env_id}"):
+        removed = await gcp_service._to_thread(_remove_vms_sync, project, env_id, names)
     if removed:
         logger.info("POV %s: replaced %s", env_id, ", ".join(removed))
     return removed

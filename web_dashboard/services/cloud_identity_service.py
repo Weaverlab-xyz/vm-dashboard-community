@@ -39,7 +39,7 @@ import logging
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Literal, Optional
 
 from ..config import settings
@@ -158,6 +158,9 @@ async def elevate(
     requester_user_id: Optional[str] = None,
     workgroup: Optional[str] = None,
     tenant_id: Optional[str] = None,
+    target: Optional[dict] = None,
+    gated: bool = True,
+    reuse_min_remaining_minutes: Optional[int] = None,
 ) -> AsyncIterator[ElevationHandle]:
     """Context manager wrapping a privileged cloud SDK call.
 
@@ -195,8 +198,25 @@ async def elevate(
                         audit trail + cross-tenant webhook check
                         (Phase 4) work correctly. None preserves
                         pre-multi-tenancy behaviour.
+      target:           the Entitle role/bundle to request, overriding
+                        the operation matrix. For a caller that owns its
+                        own setting (the POV cloud provider's GCP target).
+      gated:            False for a caller with its OWN switch: skips the
+                        master gate and per-cloud flags, which belong to
+                        the cloud consoles' deploy paths, so turning on
+                        one feature does not silently route the other
+                        through Entitle.
+      reuse_min_remaining_minutes:
+                        when set, a grant for the same cloud + operation
+                        that is still live for at least this long is
+                        reused instead of filing another request. Grants
+                        end by TTL (nothing here revokes), so the grant a
+                        previous call obtained is still the machine's;
+                        re-requesting it only adds latency and a second
+                        approval record, and Entitle may refuse a request
+                        for a role the account already holds.
     """
-    if not _is_gate_enabled():
+    if gated and not _is_gate_enabled():
         # Phase 0 path: dormant no-op. Caller proceeds with baseline creds.
         handle = ElevationHandle(
             cloud=cloud,
@@ -216,7 +236,7 @@ async def elevate(
     # Phase 3 per-cloud opt-in: even with the master gate on, a cloud
     # whose flag is False still no-ops so the operator can promote one
     # cloud at a time (AWS → Azure → GCP per §8.2–8.4 of the design).
-    if not is_cloud_enabled(cloud):
+    if gated and not is_cloud_enabled(cloud):
         handle = ElevationHandle(
             cloud=cloud,
             operation=operation,
@@ -239,8 +259,8 @@ async def elevate(
 
     # 1. Validate operation against the configured matrix. Empty matrix +
     #    gate on is a deployment error — fail closed.
-    matrix = get_operation_matrix()
-    target = matrix.get(operation)
+    if target is None:
+        target = get_operation_matrix().get(operation)
     if not target:
         raise CloudIdentityError(
             f"operation '{operation}' is not in cloud_identity_matrix; refusing to "
@@ -249,13 +269,34 @@ async def elevate(
 
     # 2. Cap requested duration at the ceiling. Entitle would reject anyway;
     #    do it locally so the audit row records the operator's intent.
-    ceiling = max(1, int(settings.machine_ttl_ceiling_minutes or 60))
+    ceiling = max(1, _cfg_int("machine_ttl_ceiling_minutes", 60))
     if duration_minutes > ceiling:
         logger.info(
             "elevate: clamping duration %s -> ceiling %s for %s",
             duration_minutes, ceiling, operation,
         )
         duration_minutes = ceiling
+
+    # 2b. A live grant for the same cloud + operation covers this call.
+    if reuse_min_remaining_minutes is not None:
+        reused = _live_activation(cloud, operation, reuse_min_remaining_minutes)
+        if reused is not None:
+            logger.info(
+                "cloud_identity.elevate reusing grant: cloud=%s op=%s request=%s expires=%s",
+                cloud, operation, reused["entitle_request_id"], reused["expires_at"])
+            yield ElevationHandle(
+                cloud=cloud,
+                operation=operation,
+                duration_minutes=duration_minutes,
+                payload_hash=payload_hash,
+                requester_user_id=requester_user_id,
+                entitle_request_id=reused["entitle_request_id"],
+                expires_at=reused["expires_at"],
+                activation_row_id=reused["id"],
+                is_noop=False,
+                extra={"reused": True},
+            )
+            return
 
     # 3. Create activation row (pending) BEFORE submitting so a crash mid-
     #    submit still leaves an audit trail.
@@ -268,7 +309,7 @@ async def elevate(
         tenant_id=tenant_id,
     )
 
-    behalf_email = (settings.entitle_machine_identity_email or "").strip()
+    behalf_email = _cfg_str("entitle_machine_identity_email")
     if not behalf_email:
         _update_activation(activation_row_id, status="failed", denial_reason="machine identity email not configured")
         raise CloudIdentityError(
@@ -294,7 +335,7 @@ async def elevate(
 
     # 5. Poll for terminal state. Cap the total wait at the requested
     #    duration — if Entitle hasn't decided by then the request is moot.
-    poll_ms = max(100, int(settings.entitle_machine_poll_interval_ms or 400))
+    poll_ms = max(100, _cfg_int("entitle_machine_poll_interval_ms", 400))
     deadline = asyncio.get_event_loop().time() + (duration_minutes * 60)
     granted_payload: Optional[dict] = None
     while asyncio.get_event_loop().time() < deadline:
@@ -320,8 +361,16 @@ async def elevate(
         )
 
     # 6. Resolve grant timestamps + flip row to granted.
-    granted_at = _parse_dt(granted_payload.get("granted_at")) or datetime.now(timezone.utc).replace(tzinfo=None)
-    expires_at = _parse_dt(granted_payload.get("expires_at"))
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    granted_at = (_parse_dt(granted_payload.get("granted_at"))
+                  or _parse_dt(granted_payload.get("grantedAt")) or now)
+    # Entitle's request object does not reliably carry an expiry. Without one a
+    # granted row could never be reused, and the sweeper could not tell a live grant
+    # from an expired one — so fall back to the duration requested, counted from
+    # NOW, which can only under-state how long the grant has left.
+    expires_at = (_parse_dt(granted_payload.get("expires_at"))
+                  or _parse_dt(granted_payload.get("expiresAt"))
+                  or now + timedelta(minutes=duration_minutes))
     _update_activation(activation_row_id, status="granted", granted_at=granted_at, expires_at=expires_at)
 
     handle = ElevationHandle(
@@ -419,6 +468,48 @@ def _update_activation(activation_id: str, **fields) -> None:
     try:
         db.query(EntitleActivation).filter(EntitleActivation.id == activation_id).update(update)
         db.commit()
+    finally:
+        db.close()
+
+
+def _cfg_str(key: str) -> str:
+    """config_service first, then settings — what the Settings panels write."""
+    try:
+        from . import config_service
+        value = config_service.get(key)
+    except Exception:  # noqa: BLE001
+        value = ""
+    return str(value or getattr(settings, key, "") or "").strip()
+
+
+def _cfg_int(key: str, default: int) -> int:
+    try:
+        return int(_cfg_str(key) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _live_activation(cloud: str, operation: str, min_remaining_minutes: int) -> Optional[dict]:
+    """The newest granted (or granted-then-completed) activation for ``cloud`` +
+    ``operation`` that is live for at least ``min_remaining_minutes`` more."""
+    from ..database import SessionLocal, EntitleActivation
+    cutoff = (datetime.now(timezone.utc).replace(tzinfo=None)
+              + timedelta(minutes=max(0, int(min_remaining_minutes))))
+    db = SessionLocal()
+    try:
+        row = (db.query(EntitleActivation)
+               .filter(EntitleActivation.cloud == cloud,
+                       EntitleActivation.operation == operation,
+                       EntitleActivation.status.in_(("granted", "completed")),
+                       EntitleActivation.entitle_request_id.isnot(None),
+                       EntitleActivation.expires_at.isnot(None),
+                       EntitleActivation.expires_at > cutoff)
+               .order_by(EntitleActivation.expires_at.desc())
+               .first())
+        if row is None:
+            return None
+        return {"id": row.id, "entitle_request_id": row.entitle_request_id,
+                "expires_at": row.expires_at}
     finally:
         db.close()
 
