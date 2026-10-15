@@ -749,8 +749,22 @@ function templatesPage() {
     async apiJson(url, opts) {
       const res = await this.apiFetch(url, opts);
       const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(body.detail || `${url} failed (${res.status})`);
+      if (!res.ok) throw new Error(this.detailText(body.detail) || `${url} failed (${res.status})`);
       return body;
+    },
+
+    // A 422 from FastAPI's own validation carries `detail` as a LIST of {loc, msg}
+    // objects, not a string; handed straight to new Error() it rendered "[object Object]".
+    detailText(detail) {
+      if (!detail) return '';
+      if (typeof detail === 'string') return detail;
+      if (Array.isArray(detail)) {
+        return detail.map(d => {
+          const loc = (d.loc || []).filter(p => p !== 'body').join('.');
+          return (loc ? loc + ': ' : '') + (d.msg || JSON.stringify(d));
+        }).join('; ');
+      }
+      return JSON.stringify(detail);
     },
 
     async init() {
@@ -876,13 +890,16 @@ function templatesPage() {
           instance_type: v.instance_type, disk_gb: Number(v.disk_gb) || 0,
         })),
       };
+      // The Content-Type is load-bearing: without it fetch() sends a string body as
+      // text/plain, FastAPI does not parse it as JSON, and every save came back a 422.
+      const opts = { headers: { 'Content-Type': 'application/json' },
+                     body: JSON.stringify(payload) };
       try {
         if (f.id) {
           await this.apiJson('/api/pov/cloud-templates/' + encodeURIComponent(f.id),
-                             { method: 'PUT', body: JSON.stringify(payload) });
+                             { ...opts, method: 'PUT' });
         } else {
-          await this.apiJson('/api/pov/cloud-templates',
-                             { method: 'POST', body: JSON.stringify(payload) });
+          await this.apiJson('/api/pov/cloud-templates', { ...opts, method: 'POST' });
         }
         this.cloudForm = null;
         await this.loadCloudTemplates();
