@@ -5497,7 +5497,7 @@
                       <p class="text-gray-400">As last saved.</p>
                     </div>
                   </template>
-                  <button type="button" @click="openPanel({ key: 'workload_credentials', label: 'Workload Credentials' })"
+                  <button type="button" @click="openPanel(integrations.find(i => i.key === 'workload_credentials'))"
                           class="text-xs bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-2.5 py-1 rounded-lg">
                     Open Workload Credentials →
                   </button>
@@ -5682,7 +5682,7 @@
                       <p class="text-gray-400">As last saved.</p>
                     </div>
                   </template>
-                  <button type="button" @click="openPanel({ key: 'workload_credentials', label: 'Workload Credentials' })"
+                  <button type="button" @click="openPanel(integrations.find(i => i.key === 'workload_credentials'))"
                           class="text-xs bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-2.5 py-1 rounded-lg">
                     Open Workload Credentials →
                   </button>
@@ -8088,7 +8088,6 @@
         </div>
       </template>
 
-      <!-- Workload Credentials (preview): site + PAT, then per-cloud dynamic secrets -->
       <template x-if="panel?.key === 'bt_platform_identity' && !panelLoading">
         <div class="space-y-5">
           <p class="text-sm text-gray-500">
@@ -8258,22 +8257,18 @@
         </div>
       </template>
 
+      <!-- Workload Credentials: site + auth, then per-cloud dynamic secrets -->
       <template x-if="panel?.key === 'workload_credentials' && !panelLoading">
         <div class="space-y-5">
-          <div class="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
-            <p class="text-sm text-amber-900">
-              <span class="font-semibold">Preview.</span>
-              Workload Credentials is not yet generally available, and its API may still
-              change. Requires a <strong>US-region</strong> Pathfinder site with the
-              feature enabled.
-            </p>
-          </div>
+          <p class="text-sm text-gray-500">
+            Requires a <strong>US-region</strong> Pathfinder site with the feature enabled.
+          </p>
           <p class="text-sm text-gray-500">
             Mint <strong>short-lived</strong> AWS and Azure credentials on demand instead of
             storing static keys. This is additive: each cloud is opted in separately, and any
             cloud left off keeps using the credentials it uses today. GCP is absent because
             Workload Credentials mints AWS and Azure only — a mixed install is normal.
-            Enable/disable the feature with the Preview toggle.
+            Enable/disable the feature with its toggle under Integrations → BeyondTrust.
             <a href="/docs/workload-lab/workload-credentials" target="_blank"
                class="text-blue-600 hover:text-blue-800 underline">Integration guide</a>.
           </p>
@@ -8983,6 +8978,11 @@ function settingsPage() {
         desc: 'Where config-management (Ansible) and Kubernetes (kubectl/helm) ops run — in-process or as one-shot cloud tasks (ECS / ACI / Cloud Run).' },
       { key: 'entitle',      label: 'Entitle',                 group: 'beyondtrust', hasConfig: true,  enabled: false,
         desc: 'Register built VMs & databases as Entitle integrations.' },
+      // Generally available since 2026-10-14; was a preview flag before that. The key must
+      // stay `workload_credentials`: _feature_to_cfg_key derives `workload_credentials_enabled`
+      // from it, the key the preview toggle wrote, so a stored install keeps its state.
+      { key: 'workload_credentials', label: 'Workload Credentials', group: 'beyondtrust', hasConfig: true, enabled: false,
+        desc: 'Mint short-lived AWS and Azure credentials on demand instead of storing static keys, and use Workload Credentials as a secrets backend. Requires a US-region Pathfinder site with the feature enabled.' },
       { key: 'skytap',       label: 'Skytap',                  group: 'pov', hasConfig: true,  enabled: false,
         desc: 'Lab platform for customer POV environments — create one from a Skytap template. Available on a POV instance only.' },
       { key: 'pov_cloud',    label: 'POV cloud provider',      group: 'pov', hasConfig: true,  enabled: false,
@@ -9701,6 +9701,7 @@ function settingsPage() {
           password_safe: features.password_safe, pra: features.pra, epml: features.epml,
           portainer: features.portainer,
           ansible: features.ansible, entitle: features.entitle,
+          workload_credentials: features.workload_credentials,
           skytap: features.skytap,
           pov_cloud: features.pov_cloud,
           proxmox: features.proxmox,

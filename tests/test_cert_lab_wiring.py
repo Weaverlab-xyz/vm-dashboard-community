@@ -399,11 +399,11 @@ def test_the_sandbox_scripts_grant_everything_a_ca_build_needs():
     assert not failures, "a CA build would fail on:\n  " + "\n  ".join(failures)
 
 
-def test_it_ships_as_a_preview_flag_alongside_workload_credentials():
+def test_it_ships_as_a_preview_flag_alongside_virtual_desktops():
     setup = _read("web_dashboard", "api", "setup.py")
     flags = setup.split("_PREVIEW_FLAGS = {")[1].split("\n}")[0]
     assert '"cert_lab_enabled"' in flags
-    assert '"workload_credentials_enabled"' in flags, "sanity: the reference preview flag"
+    assert '"vdesktops_enabled"' in flags, "sanity: the reference preview flag"
     # And its config panel is reachable from the flag's Configure link.
     assert '"cert_lab_enabled": "cert_lab"' in setup
     assert '"cert_lab": CertLabFeatureConfig' in setup

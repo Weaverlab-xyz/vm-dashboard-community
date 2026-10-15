@@ -252,13 +252,14 @@ def flags() -> dict:
         # Derived from the three above -- see _DERIVED. Gates the nav link and
         # /workload-lab.
         "workload_lab_enabled": enabled("workload_lab_enabled"),
-        # Workload Credentials. Present here because `main._feature_gate` already gates the
-        # /api/workload-cloud router on it, and a flag one reader can see and the other
-        # cannot is the exact drift this module's `enabled` docstring warns about -- it was
-        # missing, so the Workload Lab's Cloud tab could not render against a router that
-        # was serving. Deliberately NOT added to _DERIVED: `workload_lab_enabled` must keep
-        # resolving as all-preview, or tests/test_permission_catalog.py demands an RBAC
-        # scope for the page.
+        # Workload Credentials, a BeyondTrust integration (GA, no longer a preview flag).
+        # Present here because `main._feature_gate` already gates the /api/workload-cloud
+        # router on it, and a flag one reader can see and the other cannot is the exact
+        # drift this module's `enabled` docstring warns about -- it was missing, so the
+        # Workload Lab's Cloud tab could not render against a router that was serving.
+        # Deliberately NOT added to _DERIVED: it is not a preview flag, so adding it would
+        # stop `workload_lab_enabled` resolving as all-preview, and
+        # tests/test_permission_catalog.py would demand an RBAC scope for the page.
         "workload_credentials_enabled": enabled(
             "workload_credentials_enabled", settings.workload_credentials_enabled),
         "cost_explorer_enabled": enabled("cost_explorer_enabled", settings.cost_explorer_enabled),
@@ -393,6 +394,8 @@ def feature_map() -> dict:
         "portainer_configured": portainer_configured,
         "ansible":      raw["ansible_enabled"],
         "entitle":      raw["entitle_enabled"],
+        # The Settings toggle hydrates from this key (settings.html map[intg.key]).
+        "workload_credentials": raw["workload_credentials_enabled"],
         "aws":          aws_configured,
         "azure":        azure_configured,
         "gcp":          gcp_configured,

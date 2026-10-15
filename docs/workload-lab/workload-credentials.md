@@ -2,10 +2,10 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** a workload needs a credential minted at run time rather than one stored for it.
 
-> **Preview.** Workload Credentials is not yet generally available, and its API may
-> still change. It is gated behind a **preview flag** (Settings → Preview features) and
-> is off by default — nothing about your existing credentials changes until you turn it
-> on. Check with BeyondTrust for availability and roadmap.
+> **Generally available** since 2026-10-14. Workload Credentials is a BeyondTrust
+> integration with its own toggle under **Settings → Integrations → BeyondTrust**. It is
+> off by default — nothing about your existing credentials changes until you turn it on,
+> and even then each cloud is opted in separately.
 
 Workload Credentials (WC; codename *SMoP*, "Secrets Manager on Platform") is
 BeyondTrust's cloud-native secrets product. It does two things the dashboard
@@ -109,14 +109,15 @@ see [Emptying the database](#emptying-the-database-wc-as-the-secrets-backend).
 
 ## Setup
 
-1. Settings → **Preview features** → enable **Workload Credentials
-   (BeyondTrust)**.
+1. Settings → **Integrations** → **BeyondTrust** → enable **Workload Credentials**.
+   An install that turned on the old preview flag finds it already on: the toggle
+   writes the same `workload_credentials_enabled` key.
 2. Click **Configure** on that row and fill in the API base URL, Site ID and
    PAT. Leave **API version** at its default unless BeyondTrust tells you
    otherwise — it is sent as the mandatory `bt-secrets-api-version` header, and
    a wrong value fails in a way that reads like an authentication error.
-3. Go to **Secrets** (`/secrets`), select **BeyondTrust Workload Credentials
-   (preview)** as the backend and click **Test connection**. This calls
+3. Go to **Secrets** (`/secrets`), select **BeyondTrust Workload Credentials**
+   as the backend and click **Test connection**. This calls
    `GET /session`, which validates the token without creating anything.
 4. Create a secret through Browse & Edit to confirm write access.
 
@@ -346,12 +347,12 @@ the dashboard container — see the `--corp-ca` overlay).
 
 ### Settings
 
-All on the **Configure** panel of **Workload Credentials (BeyondTrust)** under Settings →
-Preview features. `secrets_wlc_folder` is also on the Secrets page.
+All on the **Configure** panel of **Workload Credentials** under Settings →
+Integrations → BeyondTrust. `secrets_wlc_folder` is also on the Secrets page.
 
 | Key | Default | What it is |
 |---|---|---|
-| `workload_credentials_enabled` | off | The preview flag |
+| `workload_credentials_enabled` | off | The integration's toggle |
 | `wlc_api_base_url` | `https://api.beyondtrust.io` | API base URL |
 | `wlc_site_id` | blank | The site (tenant) GUID: the `tenant_id` claim in your access token |
 | `wlc_api_version` | `2026-04-28` | Sent as `bt-secrets-api-version`. A wrong value fails like an authentication error |

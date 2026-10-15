@@ -2283,7 +2283,7 @@ class Settings(BaseSettings):
     # them any more — the dashboard mints it from the CA build's own terraform outputs,
     # which is the only moment the enrollment credential exists in this process.
     # See docs/workload-lab/certificates.md.
-    # PREVIEW flag, alongside vdesktops_enabled / workload_credentials_enabled in
+    # PREVIEW flag, alongside vdesktops_enabled in
     # setup._PREVIEW_FLAGS: none of the plugin's four
     # submission paths has been proven against a live CA yet. Off means the dashboard
     # behaves exactly as before, and no CA pool can be created to bill for.
