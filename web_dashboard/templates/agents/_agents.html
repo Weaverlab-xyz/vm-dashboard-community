@@ -434,9 +434,8 @@
       <h3 x-show="migrate.reissue" class="text-lg font-semibold text-gray-800 mb-1">New SPIRE join token for <span x-text="migrate.name"></span></h3>
       <p x-show="migrate.reissue" class="text-sm text-gray-600 mb-1">
         Its SPIRE identity expired while its host was offline, and a join token works only
-        once. Replace <code class="font-mono">SPIRE_JOIN_TOKEN</code> in the agent's
-        <code class="font-mono">.env</code> with the new one below and restart it. The trust
-        bundle has not changed. Do not run <code class="font-mono">down -v</code>.
+        once. Only the token changes: leave the rest of the agent's
+        <code class="font-mono">.env</code> and its <code class="font-mono">spire/bootstrap.crt</code> as they are.
       </p>
       <p x-show="!migrate.reissue" class="text-sm text-gray-600 mb-1">
         The SPIRE entries exist and the agent is bound to
@@ -447,7 +446,28 @@
         The join token below is shown once, works once, and expires in
         <span x-text="Math.round((migrate.join_token_ttl_s || 900) / 60)"></span> minutes.
       </p>
-      <ol class="list-decimal ml-5 space-y-4 text-sm text-gray-700">
+      <ol x-show="migrate.reissue" class="list-decimal ml-5 space-y-4 text-sm text-gray-700">
+        <li>
+          In the agent's <code class="font-mono">.env</code>, replace the
+          <code class="font-mono">SPIRE_JOIN_TOKEN=</code> line with:
+          <div class="flex gap-2 mt-1">
+            <input type="text" readonly :value="migrate.token_line"
+                   class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono bg-gray-50"/>
+            <button @click="copy(migrate.token_line)"
+                    class="text-sm px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 transition">Copy</button>
+          </div>
+        </li>
+        <li>
+          Recreate its containers. Never <code class="font-mono">down -v</code>: that deletes the SPIRE agent's data.
+          <div class="flex gap-2 mt-1">
+            <input type="text" readonly :value="migrate.run + ' --force-recreate'"
+                   class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono bg-gray-50"/>
+            <button @click="copy(migrate.run + ' --force-recreate')"
+                    class="text-sm px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 transition">Copy</button>
+          </div>
+        </li>
+      </ol>
+      <ol x-show="!migrate.reissue" class="list-decimal ml-5 space-y-4 text-sm text-gray-700">
         <li>
           On the agent host, beside its <code class="font-mono">docker-compose.yml</code>, save the trust bundle as
           <code class="font-mono">spire/bootstrap.crt</code>:
@@ -587,7 +607,7 @@ function agentsPage() {
     spireMinVersion: '2.6.0',  // the first agent image that can attest
     spireDismissed: {},        // per-agent "Not now" on the SPIRE banner (localStorage)
     secretsRequireSpire: false, // dashboard-held credentials go only to SPIRE-attested agents
-    migrate: {open: false, reissue: false, name: '', spiffe_id: '', join_token_ttl_s: 900,
+    migrate: {open: false, reissue: false, token_line: '', name: '', spiffe_id: '', join_token_ttl_s: 900,
               bootstrap_pem: '', env: '', run: ''},
     form: {name: '', site: '', description: ''},
     enrol: {name: '', code: '', docker_run: '', docker_run_code_file: '',
@@ -724,6 +744,7 @@ function agentsPage() {
       try {
         const r = await API.post(`/api/agents/${encodeURIComponent(a.id)}/migrate-spire`, {});
         this.migrate = {open: true, reissue: !!reissue, name: a.name, spiffe_id: r.spiffe_id,
+                        token_line: 'SPIRE_JOIN_TOKEN=' + (r.join_token || ''),
                         join_token_ttl_s: r.join_token_ttl_s, bootstrap_pem: r.bootstrap_pem,
                         env: r.env, run: r.run};
         await this.load(true);
