@@ -311,6 +311,100 @@ def test_unmatched_is_capped():
     assert len(pac.unmatched(index, set(), cap=5)) == 5
 
 
+# ── Password Safe's own links: AssetID, DatabaseID, DirectoryID ──────────────
+#
+# The live failure these pin: a powered-off lab listed 52 records as orphans, ~30 of them
+# asset/system PAIRS whose two halves were judged separately, and ~20 directories, cloud
+# accounts, vaults and URLs that no inventory row could ever match.
+
+def _host_system(sid=8, aid=12, ip=""):
+    """An asset-based managed system: linked to its asset, often with no address."""
+    out = {"ManagedSystemID": sid, "SystemName": "WEB-1", "AssetID": aid}
+    if ip:
+        out["IPAddress"] = ip
+    return out
+
+
+def _db_system(sid=20, aid=12):
+    return {"ManagedSystemID": sid, "SystemName": "WEB-1 (Db Instance: app)",
+            "AssetID": aid, "DatabaseID": 100, "IPAddress": "10.0.0.4"}
+
+
+def test_an_address_hit_on_the_asset_claims_its_address_less_system():
+    """The pair the old join split: the asset matched by IP, its system had no address
+    and was listed as an orphan."""
+    index = pac.build_index([_asset(12, "WEB-1", "10.0.0.4")], [_host_system(8, 12)])
+    refs, basis = pac.match_refs({"kind": "vm", "ips": ["10.0.0.4"]}, index)
+    assert set(refs) == {"asset:12", "managed_system:8"} and basis == pac.BASIS_IP
+    assert pac.unmatched(index, set(refs)) == []
+
+
+def test_a_recorded_id_hit_reaches_the_asset_its_attributes_are_on():
+    index = pac.build_index([_asset(12, "WEB-1", "10.0.0.4")], [_host_system(8, 12)])
+    out = pac.match({"kind": "vm", "ps_system_id": "8"}, index,
+                    {"asset:12": [{"AttributeTypeID": 3, "ShortName": "High"}]},
+                    types=_TYPES)
+    assert out["basis"] == pac.BASIS_ID and out["state"] == pac.STATE_OK
+    assert [c["key"] for c in out["attributes"]] == ["Criticality"]
+
+
+def test_an_asset_with_two_linked_systems_is_one_host_not_a_conflict():
+    index = pac.build_index([_asset(12, "WEB-1", "10.0.0.4")],
+                            [_host_system(8, 12, "10.0.0.4"), _host_system(9, 12, "10.0.0.4")])
+    out = pac.match({"kind": "vm", "ips": ["10.0.0.4"]}, index, {"asset:12": []})
+    assert out["state"] == pac.STATE_MATCHED_EMPTY, out["detail"]
+
+
+def test_a_link_to_an_asset_outside_the_read_pulls_in_nothing():
+    index = pac.build_index([], [_host_system(8, 999, "10.0.0.4")])
+    refs, _ = pac.match_refs({"kind": "vm", "ips": ["10.0.0.4"]}, index)
+    assert refs == ["managed_system:8"]
+
+
+def test_a_vm_row_does_not_claim_the_database_system_on_its_host():
+    """It runs ON the machine but belongs to the database row; claiming it for the VM
+    would hide that no database row matched it."""
+    index = pac.build_index([_asset(12, "WEB-1", "10.0.0.4")],
+                            [_host_system(8, 12), _db_system(20, 12)])
+    refs, _ = pac.match_refs({"kind": "vm", "ips": ["10.0.0.4"]}, index)
+    assert "managed_system:20" not in refs
+    assert [o["object_id"] for o in pac.unmatched(index, set(refs))] == ["20"]
+
+
+def test_a_database_row_matches_its_database_system_and_never_the_host():
+    """The page writes an attribute to every record a row matched, so a database row
+    that claimed the asset under it would tag the whole machine."""
+    index = pac.build_index([_asset(12, "WEB-1", "10.0.0.4")],
+                            [_host_system(8, 12), _db_system(20, 12)])
+    by_id, basis = pac.match_refs({"kind": "database", "ps_system_id": "20"}, index)
+    assert by_id == ["managed_system:20"] and basis == pac.BASIS_ID
+    by_ip, _ = pac.match_refs({"kind": "database", "ips": ["10.0.0.4"]}, index)
+    assert by_ip == ["managed_system:20"]
+    # An address shared only with a host matches nothing, rather than the host.
+    host_only = pac.build_index([_asset(12, "WEB-1", "10.0.0.4")], [_host_system(8, 12)])
+    assert pac.match_refs({"kind": "database", "ips": ["10.0.0.4"]}, host_only) == ([], "")
+
+
+def test_records_are_categorised_by_the_links_password_safe_keeps():
+    index = pac.build_index(
+        [_asset(12, "WEB-1", "10.0.0.4")],
+        [_host_system(8, 12), _db_system(20, 12),
+         {"ManagedSystemID": 30, "SystemName": "corp.example.com", "DirectoryID": 7},
+         {"ManagedSystemID": 31, "SystemName": "pfsense", "IPAddress": "10.0.0.13"},
+         {"ManagedSystemID": 32, "SystemName": "123456789012.signin.aws.amazon.com"},
+         {"ManagedSystemID": 33, "SystemName": "https://tenant.example.com"}])
+    got = {o["object_id"]: o["category"] for o in pac.unmatched(index, set())}
+    assert got == {"12": "host", "8": "host", "20": "database", "30": "directory",
+                   "31": "host", "32": "other", "33": "other"}
+
+
+def test_host_orphans_sort_first_so_the_cap_costs_the_rest():
+    systems = [{"ManagedSystemID": i, "SystemName": f"acct{i}"} for i in range(1, 10)]
+    index = pac.build_index([_asset(500, "ZZZ", "10.0.0.9")], systems)
+    out = pac.unmatched(index, set(), cap=3)
+    assert out[0]["name"] == "ZZZ" and out[0]["category"] == pac.CATEGORY_HOST
+
+
 # ── the index ────────────────────────────────────────────────────────────────
 
 def test_a_row_without_an_id_is_skipped_rather_than_keyed_on_none():

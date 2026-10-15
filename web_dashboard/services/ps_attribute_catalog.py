@@ -36,6 +36,17 @@ Hence two tiers, first hit wins:
 
 There is deliberately **no name tier**. It would be redundant — the address-less population
 *is* the tier-1 population — and it is the exact shape of the two bugs above.
+
+**A hit pulls in its host.** A managed system names its Asset in ``AssetID``; that link is
+Password Safe's own, not an inference, so whichever of the pair a resource matched, the
+other comes with it. Without it an IP-matched asset left its address-less managed system
+listed as an orphan, and a tier-1 system hit never reached the asset its attributes are on.
+Database and directory systems are deliberately NOT pulled into a host row: a database
+system hangs off the asset it runs on, and it belongs to the database row.
+
+**Not every record is a host.** A tenant also holds directories, cloud accounts, key
+vaults and application endpoints. The inventory has no row any of those could match, so
+listing them as "decommissioned hosts" was simply wrong; :func:`category` sorts them out.
 """
 import ipaddress
 
@@ -52,6 +63,16 @@ MATCH_KEYS = (
 )
 
 MATCHED_OBJECT_KEYS = ("kind", "object_id", "name")
+
+# What a Password Safe record IS, for the orphan list. Decided by the links Password Safe
+# itself keeps (``DatabaseID`` / ``DirectoryID`` / ``AssetID``) and by whether it carries a
+# usable address — never by ``EntityTypeID``, whose numbering this code has no verified
+# table for, and which ps_database_catalog already found misfiles the custom-plugin systems.
+CATEGORY_HOST = "host"            # an asset, or a system on one / with a real address
+CATEGORY_DATABASE = "database"    # a database managed system
+CATEGORY_DIRECTORY = "directory"  # a directory (domain) managed system
+CATEGORY_OTHER = "other"          # cloud account, key vault, application, URL, ...
+CATEGORIES = (CATEGORY_HOST, CATEGORY_DATABASE, CATEGORY_DIRECTORY, CATEGORY_OTHER)
 
 # The two Password Safe object kinds this reads. Assets carry the attributes Smart Rules
 # filter on; managed systems are what the dashboard itself creates.
@@ -198,16 +219,54 @@ def _object_name(obj) -> str:
     return ""
 
 
+def _linked_id(obj, *keys) -> str:
+    for key in keys:
+        value = obj.get(key)
+        if value not in (None, "", 0, "0"):
+            return str(value)
+    return ""
+
+
+def category(obj, kind, addresses) -> str:
+    """Which of :data:`CATEGORIES` one raw Password Safe object is.
+
+    Links first, because they are Password Safe's own statement: a ``DatabaseID`` or a
+    ``DirectoryID`` says what the system governs even when it also sits on an asset. Then
+    the host evidence — an ``AssetID`` or a usable address. Whatever is left (no link, no
+    address) is a cloud account, a vault, an application or a URL: nothing a deployment
+    inventory has a row for.
+
+    The one population that lands in ``other`` wrongly is a plugin-onboarded cloud VM's
+    system whose VM has since been destroyed (127.0.0.1 placeholder, packed locator, no
+    asset). While the VM exists it matches on its recorded id, so this only decides which
+    heading a genuine orphan is filed under — it is still listed.
+    """
+    if kind == KIND_ASSET:
+        return CATEGORY_HOST
+    if _linked_id(obj, "DatabaseID", "DatabaseId"):
+        return CATEGORY_DATABASE
+    if _linked_id(obj, "DirectoryID", "DirectoryId"):
+        return CATEGORY_DIRECTORY
+    if _linked_id(obj, "AssetID", "AssetId") or addresses:
+        return CATEGORY_HOST
+    return CATEGORY_OTHER
+
+
 def build_index(assets=None, systems=None) -> dict:
     """Index Password Safe objects for matching.
 
-    Returns ``{"objects": {ref: {...}}, "by_id": {system_id: ref}, "by_ip": {addr: [ref]}}``
-    where ``ref`` is ``"<kind>:<object_id>"``.
+    Returns ``{"objects": {ref: {...}}, "by_id": {system_id: ref}, "by_ip": {addr: [ref]},
+    "systems_by_asset": {asset_ref: [system_ref]}}`` where ``ref`` is
+    ``"<kind>:<object_id>"``.
 
     ``by_id`` holds managed systems only — it is keyed on the ``ps_managed_system_id`` the
     dashboard recorded, and an Asset has no such recorded id anywhere.
+
+    A system's ``asset_ref`` is kept only when that asset is in the index too: a link to an
+    asset outside the read (another workgroup) has nothing to pull in.
     """
     objects, by_id, by_ip = {}, {}, {}
+    pending_links = []
     for kind, rows in ((KIND_ASSET, assets or []), (KIND_SYSTEM, systems or [])):
         for obj in rows:
             if not isinstance(obj, dict):
@@ -220,17 +279,33 @@ def build_index(assets=None, systems=None) -> dict:
                 continue
             addresses = object_addresses(obj)
             objects[ref] = {"kind": kind, "object_id": object_id,
-                            "name": _object_name(obj), "addresses": addresses}
+                            "name": _object_name(obj), "addresses": addresses,
+                            "category": category(obj, kind, addresses), "asset_ref": ""}
             if kind == KIND_SYSTEM:
                 by_id.setdefault(object_id, ref)
+                asset_id = _linked_id(obj, "AssetID", "AssetId")
+                if asset_id:
+                    pending_links.append((ref, f"{KIND_ASSET}:{asset_id}"))
             for addr in addresses:
                 by_ip.setdefault(addr, [])
                 if ref not in by_ip[addr]:
                     by_ip[addr].append(ref)
-    return {"objects": objects, "by_id": by_id, "by_ip": by_ip}
+    # Resolved after both kinds are in, so the order the collections arrive in is moot.
+    systems_by_asset = {}
+    for ref, asset_ref in pending_links:
+        if asset_ref in objects:
+            objects[ref]["asset_ref"] = asset_ref
+            systems_by_asset.setdefault(asset_ref, []).append(ref)
+    return {"objects": objects, "by_id": by_id, "by_ip": by_ip,
+            "systems_by_asset": systems_by_asset}
 
 
 # ── matching ─────────────────────────────────────────────────────────────────
+
+def _group_of(ref, objects) -> str:
+    """The host a ref belongs to: its linked asset when it has one, else itself."""
+    return objects.get(ref, {}).get("asset_ref") or ref
+
 
 def _coalesce(refs, objects) -> list:
     """One logical host per (kind) at an address.
@@ -239,15 +314,58 @@ def _coalesce(refs, objects) -> list:
     NORMAL case — Password Safe holds both, and the attributes live on the Asset. Treating
     that pair as ambiguous would fire on the common case and render no chips at all. So
     the pair coalesces, and only two records of the SAME kind are a genuine conflict.
+
+    Judged per HOST, not per record: an asset and every system linked to it by ``AssetID``
+    are one group, so an asset carrying two systems is one machine, not a conflict. Two
+    groups of one kind — two assets at one address — still are.
     """
-    seen, out = set(), []
+    seen, groups = set(), set()
     for ref in refs:
-        kind = objects.get(ref, {}).get("kind", "")
+        group = _group_of(ref, objects)
+        if group in groups:
+            continue
+        kind = objects.get(group, {}).get("kind", "")
         if kind in seen:
-            return []          # two of one kind — the caller reports ambiguity
+            return []          # two hosts of one kind — the caller reports ambiguity
         seen.add(kind)
-        out.append(ref)
-    return out
+        groups.add(group)
+    return list(refs)
+
+
+def _expand(refs, index, resource_kind) -> list:
+    """``refs`` plus what Password Safe itself links them to, scoped to this resource.
+
+    A system pulls in its asset; an asset pulls in its HOST systems. Then the result is cut
+    to what this resource can be: a database row keeps only database systems, and every
+    row other than a database or directory drops database and directory systems — those
+    describe what runs ON the machine, and claiming them for the machine would hide that
+    they match nothing.
+    """
+    objects = index.get("objects", {})
+    by_asset = index.get("systems_by_asset", {})
+    out = list(refs)
+    for ref in refs:
+        obj = objects.get(ref, {})
+        linked = [obj["asset_ref"]] if obj.get("asset_ref") else []
+        if obj.get("kind") == KIND_ASSET:
+            linked = [r for r in by_asset.get(ref, ())
+                      if objects.get(r, {}).get("category") == CATEGORY_HOST]
+        for extra in linked:
+            if extra not in out:
+                out.append(extra)
+
+    def cat(ref):
+        return objects.get(ref, {}).get("category", CATEGORY_HOST)
+
+    if resource_kind == "database":
+        # Database systems ONLY — not the asset under them, and not the host at the same
+        # address. The inventory page writes an attribute to every record a row matched,
+        # so a database row that claimed its host would tag the whole machine when the
+        # operator meant the database.
+        return [r for r in out if cat(r) == CATEGORY_DATABASE]
+    if resource_kind == "directory":
+        return out
+    return [r for r in out if cat(r) not in (CATEGORY_DATABASE, CATEGORY_DIRECTORY)]
 
 
 def match_refs(resource, index) -> tuple:
@@ -260,17 +378,23 @@ def match_refs(resource, index) -> tuple:
     resource = resource or {}
     objects = index.get("objects", {})
 
+    kind = str(resource.get("kind") or "")
+
     system_id = str(resource.get("ps_system_id") or "").strip()
     if system_id:
         ref = index.get("by_id", {}).get(system_id)
         if ref:
-            return [ref], BASIS_ID
+            # The recorded id is exact, so the scope cut in `_expand` never drops it — a
+            # certificate lab's own system is the whole point of that hit.
+            refs = _expand([ref], index, kind)
+            return (refs if ref in refs else [ref] + refs), BASIS_ID
 
     refs = []
     for addr in addr_list(resource.get("ips")):
         for ref in index.get("by_ip", {}).get(addr, []):
             if ref not in refs:
                 refs.append(ref)
+    refs = _expand(refs, index, kind)
     if not refs:
         return [], ""
     return refs, BASIS_IP
@@ -387,14 +511,23 @@ def unmatched(index, matched_refs, cap=100) -> list:
     Usually a decommissioned host whose record was never cleaned up. Returned as
     :data:`MATCHED_OBJECT_KEYS` plus its addresses; no attributes are read for these, which
     is what keeps the per-object fetch proportional to the page rather than to the tenant.
+
+    Each carries its :data:`CATEGORIES` value. Only ``host`` is a likely decommissioned
+    machine; the rest are records this inventory has no row type for, and the page files
+    them under their own heading rather than calling them stale. Hosts sort first, so the
+    cap — when it bites — costs the records least worth acting on.
     """
     seen = set(matched_refs or ())
+    rank = {c: i for i, c in enumerate(CATEGORIES)}
     out = []
-    for ref, obj in sorted((index.get("objects") or {}).items()):
+    for ref, obj in sorted((index.get("objects") or {}).items(),
+                           key=lambda kv: (rank.get(kv[1].get("category"), len(rank)),
+                                           kv[0])):
         if ref in seen:
             continue
         out.append({**{k: obj.get(k, "") for k in MATCHED_OBJECT_KEYS},
-                    "addresses": obj.get("addresses", [])})
+                    "addresses": obj.get("addresses", []),
+                    "category": obj.get("category") or CATEGORY_HOST})
         if len(out) >= cap:
             break
     return out

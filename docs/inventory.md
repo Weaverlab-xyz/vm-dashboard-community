@@ -76,6 +76,23 @@ managed system has no usable address of its own. A row can match an **asset**, a
 **managed system**, or both. A row two Password Safe records both claim is shown as
 ambiguous rather than guessed.
 
+* **An asset brings its managed systems, and the reverse.** Password Safe links a managed
+  system to its asset, so a match on either half claims both. Database and directory
+  systems are the exception: they belong to the database or directory row, not to the
+  host they run on.
+* **Database rows match database systems only.** The id comes from onboarding, or, for a
+  registered database, from the managed account it was registered with. A database row
+  never claims the host underneath it, so an attribute set on it does not tag the machine.
+* **Directories, Certificate Lab CAs, SPIRE labs and Kubernetes workload identities**
+  match by the system id their onboarding recorded.
+* **A synced hypervisor VM matches by its last-known address.** Hypervisors report an
+  address only for a running guest with its tools installed. The dashboard keeps the last
+  one it saw, so a VM still matches while it is powered off. A VM that has never been
+  synced while running has no address yet. Start it once with VMware Tools, Hyper-V
+  Integration Services or the QEMU guest agent installed, and let a sync run.
+* Names are never used to match. Display names here and system names in Password Safe
+  often differ, and a wrong match would send attribute changes to the wrong record.
+
 **What the column can tell you**, beyond the chips:
 
 * *not fetched* — this row matched, but its attributes were not read this time. A read
@@ -83,8 +100,12 @@ ambiguous rather than guessed.
 * A header note when the tenant-level read did not fully work: Password Safe is
   unreachable, this appliance version does not serve an endpoint, or the credentials lack
   permission. An empty column never silently means "no attributes".
-* Admins also see a panel of **Password Safe records nothing here corresponds to**. These
-  are usually hosts that were decommissioned without being removed from Password Safe.
+* Admins also see **Password Safe records nothing here corresponds to**, in two panels:
+  * **Host records**: assets, and managed systems on an asset or with an address. These
+    are usually hosts that were decommissioned without being removed from Password Safe,
+    or synced VMs that have never reported an address.
+  * **Other records**: database and directory systems, cloud accounts, vaults and
+    application endpoints. None of these is a stale machine.
 
 The read is cached for 15 minutes. **Refresh** re-reads the dashboard's records, not
 necessarily Password Safe.

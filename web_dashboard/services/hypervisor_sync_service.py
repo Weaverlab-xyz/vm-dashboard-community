@@ -343,7 +343,16 @@ def _upsert(db: Session, connection_id: str, vms: list, started: datetime) -> No
         row.power_state = vm.get("power_state")
         row.vcpus = vm.get("vcpus")
         row.mem_mib = vm.get("mem_mib")
-        row.ip_addresses = json.dumps(vm.get("ip_addresses") or [])
+        # Last-known, not last-seen. Every agent reports an address only for a RUNNING
+        # guest with tools in it, so a stopped VM's page carries none — and writing that
+        # absence over the stored list erased the one key a synced VM matches its Password
+        # Safe record by (it has no recorded system id). A powered-off lab fleet then
+        # listed every one of its records as an orphan. A page that DOES carry addresses
+        # still replaces the list whole, so a re-addressed guest converges on its next boot.
+        if vm.get("ip_addresses"):
+            row.ip_addresses = json.dumps(vm["ip_addresses"])
+        elif row.ip_addresses is None:
+            row.ip_addresses = "[]"
         row.scope = vm.get("scope")
         row.vm_type = vm.get("vm_type")
         row.tags = json.dumps(vm.get("tags") or [])
