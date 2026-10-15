@@ -82,8 +82,9 @@ the product's own, rather than as a second Password Safe list. A tick on one is 
 The **environment group is the presenter's to-do list**, served with `presenter: true`.
 It is never hidden by the Setup tab's choice and never offered in its picker, it is counted
 apart (`summary.todo_done` / `todo_total`) rather than in the customer's numbers, and it is
-left off the customer's page and the after-POV summary. The SE's Use cases tab lists it
-last.
+left off the customer's page, both Use cases pages and the after-POV summary. It is drawn
+in one place: its own section at the very end of the SE's **Setup** tab, where its items
+are ticked like any use case.
 
 ### Three states, and three words that are not the estate page's
 

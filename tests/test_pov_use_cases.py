@@ -647,7 +647,9 @@ def test_a_group_with_nothing_in_scope_renders_no_heading():
         src = _read(os.path.join(_TPL, *name.split("/")))
         sec = re.search(r'<div class="chk-section"[^>]*>', src)
         assert sec, f"{name} has no checklist section"
-        assert 'x-show="inScope(g).length"' in sec.group(0), \
+        # Either alone, or after the presenter guard the SE's two pages carry.
+        assert ('x-show="inScope(g).length"' in sec.group(0)
+                or 'x-show="!g.presenter && inScope(g).length"' in sec.group(0)), \
             f"{name} renders a group heading for a group with nothing in scope"
 
 

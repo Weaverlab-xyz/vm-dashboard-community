@@ -310,6 +310,19 @@ def test_the_picker_ticks_a_whole_heading_and_never_offers_the_presenters_list()
     assert "g.presenter" in count, "the picker's count includes the presenter's list"
 
 
+def test_the_presenters_list_is_on_setup_and_not_on_either_use_cases_page():
+    detail = _read(_DETAIL)
+    tab = detail.split("x-show=\"tab === 'use-cases'\"", 1)[1].split("<!-- ── Summary", 1)[0]
+    assert 'x-show="!g.presenter && inScope(g).length"' in tab, \
+        "the Use cases tab draws the presenter's to-do list"
+    setup = detail.split("x-show=\"tab === 'setup'\"", 1)[1].split("<!-- ── Overview", 1)[0]
+    assert 'x-for="g in presenterGroups"' in setup, "Setup has no presenter section"
+    assert "get presenterGroups()" in detail
+    lead = _read(os.path.join(_ROOT, "web_dashboard", "templates", "use_cases.html"))
+    assert 'x-show="!g.presenter && inScope(g).length"' in lead, \
+        "the /use-cases page draws the presenter's to-do list"
+
+
 def test_setup_and_overview_carry_start_and_suspend():
     """The list page's power controls, on the two tabs a POV is run from. Both buttons
     show while the runstate is stale -- the gating rule the list page learnt the hard way."""

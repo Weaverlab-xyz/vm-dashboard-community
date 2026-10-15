@@ -133,8 +133,8 @@ OT = "ot"
 # something a prospect evaluates; they are what the SE sets up, checks and narrates about
 # the POV itself. So the group is served with ``presenter: true`` and every consumer treats
 # it that way: it is kept out of the use-case counts, off the customer's page, out of the
-# Setup tab's picker and out of the after-POV summary. The SE's Use cases tab still lists
-# it, last and labelled, so the ticks have somewhere to live.
+# Setup tab's picker, off both Use cases pages and out of the after-POV summary. It is drawn
+# in one place only -- its own section at the end of the SE's Setup tab.
 ENVIRONMENT = "environment"
 
 GROUPS = POV_PRODUCTS + (OT, ENVIRONMENT)
@@ -158,8 +158,8 @@ _GROUP_BLURBS = {
         "and the integrator who needs two hours on one of them.",
     ENVIRONMENT: "Not a customer use case. What the presenter sets up, checks and shows "
                  "about the POV itself — who can reach it, what runs inside the customer's "
-                 "network, what is left when it is destroyed. Not counted, and not on the "
-                 "customer's page.",
+                 "network, what is left when it is destroyed. Not counted as a use case, and "
+                 "never on the customer's page.",
 }
 
 # One doc per group, and each one exists on disk (a guard test walks them). The product

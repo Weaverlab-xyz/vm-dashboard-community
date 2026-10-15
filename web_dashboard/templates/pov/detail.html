@@ -243,6 +243,47 @@
         <p x-show="env.setup && env.setup.complete" class="text-sm text-green-700 mt-4">
           Everything this dashboard can set up is in place.
         </p>
+
+        <!-- The presenter's to-do list, last on Setup: what the SE sets up, checks and
+             shows about the POV itself. Not a use case — it is not on the Use cases tab,
+             not counted in the customer's numbers and never on the customer's page.
+             Ticks go through the same progress rows as a use case. -->
+        <template x-for="g in presenterGroups" :key="'todo-' + g.group">
+          <section class="mt-6 pt-5 border-t border-gray-100">
+            <div class="flex items-baseline justify-between mb-1">
+              <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide" x-text="g.label"></h2>
+              <p class="text-xs text-gray-500"
+                 x-text="(summary.todo_done || 0) + ' of ' + (summary.todo_total || 0) + ' done'"></p>
+            </div>
+            <p class="text-xs text-gray-500 mb-3" x-text="g.blurb"></p>
+            <ul class="space-y-2">
+              <template x-for="c in g.use_cases" :key="'todo-' + c.id">
+                <li class="flex items-start gap-3 rounded-lg border border-gray-100 p-3">
+                  <input type="checkbox" class="mt-0.5"
+                         :checked="c.progress.state === 'done'"
+                         :disabled="busy === c.id"
+                         @change="toggleDone(c, $event.target)"
+                         :aria-label="'Mark ' + c.title + ' done'">
+                  <div class="flex-1 min-w-0">
+                    <p class="text-sm"
+                       :class="c.progress.state === 'done' ? 'text-gray-400 line-through' : 'text-gray-900'">
+                      <a x-show="c.state === 'ready'" :href="c.target" class="hover:underline" x-text="c.title"></a>
+                      <span x-show="c.state !== 'ready'" x-text="c.title"></span>
+                    </p>
+                    <p class="text-xs text-gray-500 mt-0.5" x-text="c.summary"></p>
+                    <p class="text-[11px] text-gray-400 mt-1">
+                      <span x-text="c.minutes + ' min'"></span>
+                      <a x-show="c.docs" :href="c.docs" target="_blank" rel="noopener noreferrer"
+                         class="ml-2 text-blue-600 hover:underline">Guide →</a>
+                      <span x-show="c.progress.state === 'done'"
+                            x-text="' · done by ' + (c.progress.by || 'someone')"></span>
+                    </p>
+                  </div>
+                </li>
+              </template>
+            </ul>
+          </section>
+        </template>
       </div>
 
       <!-- ── Overview ─────────────────────────────────────────────────── -->
@@ -700,15 +741,12 @@
           <p>
             Grouped by the product each one proves, with the OT use cases on their own, and
             narrowed to the products this POV includes. What is wired decides what each card
-            says. The presenter's to-do list comes last and is not counted.
+            says.
           </p>
           <p class="chk-progress">
             <b x-text="summary.done"></b> run ·
             <b x-text="summary.skipped"></b> skipped ·
             <b x-text="summary.total"></b> in scope
-            <span x-show="summary.todo_total">
-              · presenter to-do <b x-text="summary.todo_done || 0"></b>/<b x-text="summary.todo_total"></b>
-            </span>
           </p>
         </div>
 
@@ -716,13 +754,12 @@
              group with nothing in scope renders nothing at all — not an empty heading —
              which is the same thing the customer's page and the /use-cases lead do. -->
         <template x-for="g in groups" :key="g.group">
-          <div class="chk-section" x-show="inScope(g).length">
-            <!-- The presenter's to-do group is the SE's checklist, not the customer's: it
-                 is not counted above and never reaches the customer's page. -->
+          <!-- The presenter's to-do group is not a use case: it lives at the end of the
+               Setup tab instead, and is never drawn here. -->
+          <div class="chk-section" x-show="!g.presenter && inScope(g).length">
             <h2>
               <span x-text="g.label"></span>
-              <span class="chk-count"
-                    x-text="g.presenter ? 'for you, not the customer' : inScope(g).length + ' in scope'"></span>
+              <span class="chk-count" x-text="inScope(g).length + ' in scope'"></span>
             </h2>
             <p class="chk-blurb" x-show="g.blurb" x-text="g.blurb"></p>
 
@@ -2382,6 +2419,11 @@
       // now the one rule across all three surfaces rather than two of them.
       inScope(g) {
         return (g.use_cases || []).filter(c => c.state !== 'out_of_scope');
+      },
+
+      // The presenter's to-do list, drawn at the end of the Setup tab and nowhere else.
+      get presenterGroups() {
+        return this.groups.filter(g => g.presenter);
       },
 
       // The box is the source of truth for what the operator ASKED for; the server is the
