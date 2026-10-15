@@ -457,8 +457,17 @@ async def list_templates(platform: str = Query(_DEFAULT_PLATFORM),
 
     Served from ``pov_platform_cache``, not from the platform — see the note above
     ``list_environments``.
+
+    Except on a cloud: a cloud's templates are our own rows, not a platform round trip,
+    and served through the cache a template saved on POV → Templates stayed missing from
+    the create form and the blueprint picker until the next reconcile.
     """
     name, _mod = _adapter(platform)
+    if name in lab_platforms.CLOUD_PLATFORMS:
+        from ..services import pov_cloud_env
+        return {"platform": name, "as_of": None, "stale": False, "note": "",
+                "templates": await asyncio.to_thread(pov_cloud_env.list_templates_sync,
+                                                     name)}
     return {"platform": name,
             **await _cached_listing(db, pov_platform_cache.KIND_TEMPLATES, name,
                                     "templates", refresh=refresh)}
@@ -983,13 +992,13 @@ def broker(env_id: str, payload: BrokerRequest | None = None,
         raise HTTPException(
             status_code=409,
             detail="this environment was never created on the platform, so there is no "
-                   "VM to install a broker on.")
+                   "VM to install a control node on.")
     if lab_platforms.capabilities(env.platform).get("bootstrap_injection") != "metadata":
         raise HTTPException(
             status_code=409,
             detail=f"{lab_platforms.capabilities(env.platform)['label']} does not deliver "
-                   f"bootstrap data the way this broker install expects; it needs its own "
-                   f"broker path.")
+                   f"bootstrap data the way this control node install expects; it needs its "
+                   f"own control node path.")
 
     job = job_service.create_job(
         db, job_type="pov_env_broker",

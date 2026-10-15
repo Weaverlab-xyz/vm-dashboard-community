@@ -246,7 +246,7 @@ async def _install_broker(db: Session, env: PovEnvironment, job_id: str) -> None
     job log, because a warning that only exists in a container log is a warning nobody
     reads.
     """
-    job_service.update_progress(db, job_id, 90, "Installing the POV broker agent…")
+    job_service.update_progress(db, job_id, 90, "Installing the POV control node agent…")
     try:
         summary = await pov_broker.ensure_broker(db, env, job_id=job_id)
         job_service.append_job_log(db, job_id, summary)
@@ -255,7 +255,7 @@ async def _install_broker(db: Session, env: PovEnvironment, job_id: str) -> None
         pov_broker.record_broker_error(db, env, str(exc))
         job_service.append_job_log(
             db, job_id,
-            f"WARNING: the environment is up but its broker agent is not: {exc}")
+            f"WARNING: the environment is up but its control node agent is not: {exc}")
 
 
 async def refresh_vms(db: Session, env: PovEnvironment) -> int:
@@ -596,8 +596,8 @@ async def run_env_add_vms(job_id: str, meta: dict) -> None:
 
         job_service.append_job_log(
             db, job_id,
-            "The new guests are not Config-Management targets yet: the broker agent's "
-            "policy is written at enrolment. Press Broker on the POV to grant them, and "
+            "The new guests are not Config-Management targets yet: the control node agent's "
+            "policy is written at enrolment. Press Rebuild control node on the POV to grant them, and "
             "tick them on the VMs tab first if you want to run anything on them.")
         job_service.set_completed(db, job_id, {
             "environment_id": env.id,
@@ -751,7 +751,7 @@ async def run_env_destroy(job_id: str, meta: dict) -> None:
             job_service.append_job_log(db, job_id, pov_broker.teardown(db, env))
         except Exception as exc:  # noqa: BLE001
             logger.warning("POV %s: broker teardown failed", env.id, exc_info=True)
-            problems.append(f"broker agent teardown failed: {exc}")
+            problems.append(f"control node agent teardown failed: {exc}")
 
         if env.platform_environment_id:
             job_service.update_progress(db, job_id, 50,

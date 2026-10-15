@@ -22,7 +22,7 @@ The gate that makes them exclusive, and the per-feature matrix, are in
 A POV instance also needs a **lab platform** — the thing a POV environment actually runs
 on. Skytap is the first one; see [Skytap](skytap.md) for its
 prerequisites, the API token it needs, and the
-[template contract](skytap.md#the-template-contract) its broker VM has to
+[template contract](skytap.md#the-template-contract) its control node VM has to
 satisfy.
 
 **Who sees which POV.** A **POV Presenter** sees only the POVs they own: the ones they
@@ -42,7 +42,7 @@ step in order:
 
 1. environment running
 2. every guest's OS known
-3. broker agent enrolled
+3. control node agent enrolled
 4. PRA Gateway
 5. Resource Broker
 6. Entitle agent
@@ -65,7 +65,7 @@ table sideways:
   it was last confirmed, VM count, the PRA, Password Safe and Entitle tenants, use cases
   done, expiry, the sleep timer or schedule, spend, template and who created the POV.
 - **The small line under each step** shows what that step's column says on the list. For
-  example, the broker's status and VM, the Gateway's name and whether it has a deploy key,
+  example, the control node's status and VM, the Gateway's name and whether it has a deploy key,
   the Resource Broker's installer, zone and key, the wired counts for PRA, Password Safe
   and Entitle, and whether the share link is live.
 

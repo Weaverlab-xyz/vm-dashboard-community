@@ -43,7 +43,7 @@ PLANT = "plant"
 ZONES = (ENTERPRISE, DMZ, PLANT)
 
 LABELS = {
-    ENTERPRISE: "Enterprise (POV broker and targets)",
+    ENTERPRISE: "Enterprise (POV control node and targets)",
     DMZ: "DMZ (OT broker, Entitle agent)",
     PLANT: "Plant (OT simulator)",
 }
@@ -158,7 +158,7 @@ def rules(network_cidr: str) -> dict:
                 _rule("ingress", "tcp", (SSH,), dmz,
                       "the Entitle agent mints accounts over SSH"),
                 _rule("egress", "all", (), ANYWHERE,
-                      "the broker dials the dashboard, PRA and Password Safe"),
+                      "the control node dials the dashboard, PRA and Password Safe"),
             ],
         },
         DMZ: {
@@ -167,7 +167,7 @@ def rules(network_cidr: str) -> dict:
             "rules": [
                 _rule("ingress", "all", (), dmz, "within the DMZ"),
                 _rule("ingress", "tcp", (SSH,), ent,
-                      "the broker agent's Ansible runs and the Shell Jump"),
+                      "the control node agent's Ansible runs and the Shell Jump"),
                 _rule("egress", "tcp", DMZ_EGRESS_TCP, ANYWHERE,
                       "the Entitle agent, its installs, and DNS"),
                 _rule("egress", "udp", DMZ_EGRESS_UDP, ANYWHERE, "DNS"),
@@ -180,7 +180,7 @@ def rules(network_cidr: str) -> dict:
             "rules": [
                 _rule("ingress", "all", (), plant, "within the plant"),
                 _rule("ingress", "tcp", plant_ports(), ent,
-                      "the PRA Gateway's jump items and the broker agent"),
+                      "the PRA Gateway's jump items and the control node agent"),
                 _rule("ingress", "tcp", plant_ports_from_dmz(), dmz,
                       "the Entitle agent and the HMI adapter"),
                 _rule("egress", "all", (), whole, "inside the POV network only"),

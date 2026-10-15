@@ -1216,7 +1216,7 @@
           // the rule above never sees it.
           if (p.broker_status === 'offline' || p.broker_status === 'revoked') {
             povOut.push({ id: 'pov:broker:' + p.id, severity: 'warn',
-                          title: p.name + "'s broker agent is " + p.broker_status,
+                          title: p.name + "'s control node agent is " + p.broker_status,
                           detail: p.broker_error || 'every in-environment install is leased by it',
                           time: null, href: to });
           }

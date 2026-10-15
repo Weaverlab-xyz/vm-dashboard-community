@@ -488,7 +488,7 @@ def test_a_broker_whose_policy_predates_the_grant_is_refused():
         rb.preflight(db, env)
         raise AssertionError("a policy without agent_ansible was accepted")
     except rb.ResourceBrokerError as exc:
-        assert "policy.yaml predates" in str(exc) and "Broker" in str(exc)
+        assert "policy.yaml predates" in str(exc) and "Rebuild control node" in str(exc)
     finally:
         db.close()
 

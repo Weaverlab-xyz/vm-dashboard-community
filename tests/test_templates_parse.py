@@ -208,9 +208,9 @@ def test_pov_ladder_colspan_matches_the_managed_table():
         src = fh.read()
 
     theads = [m.group(0) for m in re.finditer(r"<thead\b.*?</thead>", src, re.S)]
-    managed = [t for t in theads if ">Broker<" in t]
+    managed = [t for t in theads if ">Control node<" in t]
     assert len(managed) == 1, (
-        f"expected exactly one <thead> carrying a Broker column, found {len(managed)}")
+        f"expected exactly one <thead> carrying a Control node column, found {len(managed)}")
     n_th = len(re.findall(r"<th\b", managed[0]))
 
     spans = {int(v) for v in re.findall(r':colspan="(\d+)"', src)}

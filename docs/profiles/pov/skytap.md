@@ -11,8 +11,8 @@ instance the integration is masked off and Settings refuses to enable it.
 
 > **What the dashboard does with an environment.** Create it from a template, power it on
 > and off, and destroy it. Enrol an **agent inside it** — see
-> [The broker VM](#the-broker-vm) and the [template contract](#the-template-contract).
-> Install a **BeyondTrust Gateway** on that broker, registered into the POV's own PRA
+> [The control node VM](#the-control-node-vm) and the [template contract](#the-template-contract).
+> Install a **BeyondTrust Gateway** on that control node, registered into the POV's own PRA
 > tenant ([the POV Gateway](gateway-and-broker.md#the-pov-gateway)), and a **Password Safe
 > Resource Broker** on a Windows VM beside it
 > ([the Resource Broker](gateway-and-broker.md#the-resource-broker)).
@@ -36,7 +36,7 @@ instance the integration is masked off and Settings refuses to enable it.
 | Credential | An **API security token** from the Skytap account page — **not** your account password |
 | Network | Outbound HTTPS from the dashboard to `cloud.skytap.com` |
 | Network, for template builds only | Outbound **TCP to an arbitrary high port** at a Skytap NAT address. Only the automatic runner install needs this — see [building a template](#building-a-template). An egress rule that allows 443 to the API host and nothing else will block it, and the builder says so rather than reporting a generic connection failure |
-| Network **from the guest** | A route to a container runtime, unless the base template already carries one: either outbound HTTPS from the **broker VM** to `download.docker.com`, **or** the guest's own distro repository carrying `podman` + `podman-docker`, which is the fallback and is usually already reachable. This is the guest's route out, not the dashboard's — the only prerequisite on this list that nothing on this side can test for you. A build that cannot reach either still bakes, with the reason in the **Runner** column, and the POV's first **Broker** press tries again |
+| Network **from the guest** | A route to a container runtime, unless the base template already carries one: either outbound HTTPS from the **control node VM** to `download.docker.com`, **or** the guest's own distro repository carrying `podman` + `podman-docker`, which is the fallback and is usually already reachable. This is the guest's route out, not the dashboard's — the only prerequisite on this list that nothing on this side can test for you. A build that cannot reach either still bakes, with the reason in the **Runner** column, and the POV's first **Install control node** press tries again |
 
 ### Getting the token
 
@@ -132,16 +132,16 @@ implement is silently ignored, and an unscoped list looks exactly like a correct
 | Action | What happens |
 |---|---|
 | **Reconcile** | Every ten minutes, and on **Re-check platform**: read every managed environment back, update its runstate, rate-limit flag and idle timer, and flag one that has vanished. Never destroys anything |
-| **Build a template** | Instantiate a base template into a scratch environment, check it against [the template contract](#the-template-contract), install the metadata runner on its broker VM, save the environment back as a **new template**, then reap the scratch environment. See [building a template](#building-a-template) |
-| **Create** | Instantiate a template, set the idle timer, power on, wait for it to settle, read the VMs back, then enrol [the broker agent](#the-broker-vm) |
+| **Build a template** | Instantiate a base template into a scratch environment, check it against [the template contract](#the-template-contract), install the metadata runner on its control node VM, save the environment back as a **new template**, then reap the scratch environment. See [building a template](#building-a-template) |
+| **Create** | Instantiate a template, set the idle timer, power on, wait for it to settle, read the VMs back, then enrol [the control node's agent](#the-control-node-vm) |
 | **Start / Suspend** | A runstate change, then a poll until it settles |
-| **Broker** | Re-issue the enrolment code and re-write the bootstrap. The remedy for every way the first attempt can fail |
-| **Gateway** | Start a BeyondTrust Gateway container on the broker VM, registered into this POV's PRA tenant |
-| **Resource Broker** | Run the staged Password Safe installer on a Windows VM, over WinRM from the broker |
+| **Install control node** (**Rebuild control node** once its agent is online) | Re-issue the enrolment code and re-write the bootstrap. The remedy for every way the first attempt can fail |
+| **Gateway** | Start a BeyondTrust Gateway container on the control node VM, registered into this POV's PRA tenant |
+| **Resource Broker** | Run the staged Password Safe installer on a Windows VM, over WinRM from the control node |
 | **Wire** | One PRA jump item per VM through this POV's Gateway, one Password Safe managed system through its Resource Broker, and one Entitle integration per Linux guest |
 | **Share** | Publish every VM as one password-protected, time-limited `publish_set`; re-sharing revokes the previous link first |
 | **Auto-delete** | Reap the whole environment when its timer expires, warning on a ladder as the deadline approaches |
-| **Destroy** | Revoke the share link, reap the PAM artifacts, revoke the broker agent, then delete the configuration and everything Skytap keeps inside it |
+| **Destroy** | Revoke the share link, reap the PAM artifacts, revoke the control node's agent, then delete the configuration and everything Skytap keeps inside it |
 
 Three orderings are load-bearing, and each is wrong in a way that leaves a resource nobody
 can reclaim:
@@ -165,23 +165,23 @@ Three smaller rules worth knowing:
   through provisioning is exactly the one that most needs reaping.
 - **An empty VM read never prunes.** A transient error returning zero VMs would otherwise
   delete every VM row — later taking the PAM artifact columns with it — and record success.
-- **The broker step cannot fail the provision.** An environment that is up with no agent in
+- **The control node install cannot fail the provision.** An environment that is up with no agent in
   it is running, billing and reapable; failing it would trade a fixable gap for a destroyed
-  environment. The reason lands on the row next to a **Broker** button that re-runs it, and
+  environment. The reason lands on the row next to an **Install control node** button that re-runs it, and
   never in the row's `error_message`, which means "this environment is broken".
 
 ---
 
-## The broker VM
+## The control node VM
 
 Everything the dashboard does *inside* a POV after it is running goes through one VM in
-the environment: the **broker**. It runs the [remote agent](../../remote-agents.md), and the
+the environment: the **control node**. It runs the [remote agent](../../remote-agents.md), and the
 agent dials out — because a POV lives on a lab platform's private network and this
 dashboard has no route into it. The Gateway install, the Resource Broker install and the
 per-VM wire-up all wait on this one thing, so it is worth setting up properly once.
 
-Which VM? **Leave Broker VM name blank and the POV works it out: the one Linux VM in the
-template.** A broker is a Docker host by construction, so on the usual shape — one Linux
+Which VM? **Leave Control node VM name blank and the POV works it out: the one Linux VM in the
+template.** A control node is a Docker host by construction, so on the usual shape — one Linux
 guest beside some Windows ones — its OS identifies it and its name does not have to. That
 matters because templates come from wherever the SE got them, and a guest called
 `BtPocLin01` was never going to match a name this dashboard guessed.
@@ -191,10 +191,10 @@ The full order it resolves in, and why each step exists:
 | | |
 |---|---|
 | 1. **The name you typed**, if you typed one | Matched exactly and case-insensitively, and **refused** if nothing matches rather than falling through to a guess. A name you wrote down is an instruction: "contains broker" also matches a customer VM called `password-broker`, and the cost of that mistake is an agent installed on a machine nobody expected |
-| 2. **The VM already brokered** | An enrolled broker is not *guessed* away from. The agent's identity lives on that guest, so re-resolving onto a different VM leaves a container polling from a machine nothing points at. Below the typed name, deliberately — otherwise **name VM** would be silently ignored on the POVs that most need it |
+| 2. **The VM that is already the control node** | An enrolled control node is not *guessed* away from. The agent's identity lives on that guest, so re-resolving onto a different VM leaves a container polling from a machine nothing points at. Below the typed name, deliberately — otherwise **name VM** would be silently ignored on the POVs that most need it |
 | 3. **The only Linux VM** | Uniqueness, never position. "The first Linux VM" is not a decision a position in a list can make, but "the only one" is a fact about the template. VMs already named as the [Entitle agent host](wiring.md) or the [Resource Broker host](gateway-and-broker.md#the-resource-broker) are excluded — those are deliberately different machines |
 | 4. **A VM called `broker`**, if several Linux guests remain | The old convention, kept as a tie-break |
-| 5. Otherwise it **refuses, naming the candidates** | So you can pick one. The Broker column reads `none` with the reason beside it |
+| 5. Otherwise it **refuses, naming the candidates** | So you can pick one. The Control node column reads `none` with the reason beside it |
 
 **A blank OS is not Linux.** Skytap does not report a guest OS as a field — the dashboard
 infers it from whatever text the platform hands back, and it answers "unknown" rather than
@@ -203,21 +203,21 @@ whose OS reads `—` on the POV's **VMs tab** is therefore skipped by step 3, by
 and by every other POV feature. **Set it yourself in the OS column on that tab**; it is
 stored separately from the platform's own answer, so it survives every later refresh. That
 one control is the remedy for most "this VM is being ignored" questions, not just for the
-broker.
+control node.
 
-You can also correct the name after the fact: **name VM** beside the Broker column sets it
+You can also correct the name after the fact: **name VM** beside the Control node column sets it
 on a POV that already exists, which is what answers a step-5 refusal.
 
 A POV that also runs a Resource Broker needs a **second** special VM — a Windows Server
 2019 or 2022 x64 guest with WinRM enabled, on the same automatic network. See
 [the Resource Broker](gateway-and-broker.md#the-resource-broker); the rest of this section is
-about the Linux broker.
+about the Linux control node.
 
 That VM needs three things:
 
 | | |
 |---|---|
-| **Docker**, enabled at boot | The agent is a container, and so is the Gateway it later runs beside itself. **Enabled** matters as much as installed: a POV boots the template, so a daemon that is merely running when the template was baked is a broker with no runtime on every POV. The build installs Docker CE if the base template carries no runtime, enables it, and leaves an existing one alone — Podman works if `docker` resolves to it, though what the builder bakes is Docker, because the agent drives the Engine API over the socket rather than a CLI |
+| **Docker**, enabled at boot | The agent is a container, and so is the Gateway it later runs beside itself. **Enabled** matters as much as installed: a POV boots the template, so a daemon that is merely running when the template was baked is a control node with no runtime on every POV. The build installs Docker CE if the base template carries no runtime, enables it, and leaves an existing one alone — Podman works if `docker` resolves to it, though what the builder bakes is Docker, because the agent drives the Engine API over the socket rather than a CLI |
 | **An automatic network** | Skytap's metadata service answers only on VMs attached to one. On a manual network the VM gets no metadata at all, which looks exactly like a missing runner |
 | **The metadata runner** | Below. Skytap hands `user_data` to the guest and **nothing executes it** |
 
@@ -238,9 +238,9 @@ starts the agent container. Two lines in it are load-bearing:
   cleared, and 401s forever. That reads as a revoked agent, not as a stale volume.
 - **The code file is written `umask 022`.** The container runs as uid 10001 and cannot read
   a root-owned `0600` file; the agent says so and exits rather than enrolling.
-- **The Docker socket is mounted**, which is root on the broker VM. The Agents page
+- **The Docker socket is mounted**, which is root on the control node VM. The Agents page
   deliberately does *not* emit that mount — an operator's own agent host is theirs, and
-  adding it there is a separate considered act. A POV broker is different: the dashboard
+  adding it there is a separate considered act. A POV control node is different: the dashboard
   created that VM from a template for this POV, and running the Gateway beside itself is
   the machine's only job.
 - **And the container joins that socket's group**, resolved on the guest with `stat` at
@@ -252,12 +252,12 @@ starts the agent container. Two lines in it are load-bearing:
   because the dashboard never chose it; a guest with no socket gets no flag rather than an
   empty argument.
 
-### SPIRE on the broker
+### SPIRE on the control node
 
 When **Let agents attest through SPIRE** is on (Settings → Integrations → Remote Agents)
-and this dashboard's [SPIRE server](../../spiffe.md) answers, the broker **attests through
+and this dashboard's [SPIRE server](../../spiffe.md) answers, the control node **attests through
 SPIRE**, so its signing key is held only in memory. Nothing to configure per POV: each
-**Broker** run does what **Migrate to SPIRE** does for a hand-installed agent:
+control node install (**Install control node** or **Rebuild control node**) does what **Migrate to SPIRE** does for a hand-installed agent:
 
 - it mints the enrolment code first, then a one-use **join token** for
   `spiffe://<trust domain>/node/<agent id>`;
@@ -274,18 +274,18 @@ the same locked-down settings. It then **waits up to two minutes for an SVID**:
 | gets none: the SPIRE port is blocked, a proxy inspects TLS, or an image cannot be pulled | its **enrolment code**, exactly as before. The script prints a warning and `spire-agent`'s last log lines, and removes the sidecars |
 
 **The fallback is the design.** A customer's network that stops SPIRE is the usual case
-on site, and a broker on an Ed25519 key is worth more than one that never comes up.
+on site, and a control node on an Ed25519 key is worth more than one that never comes up.
 
-The **Broker** job's last line, and an **SPIRE** or **Ed25519** label beside the Broker
-status on the POV list, say which way it went. If you expected SPIRE and got Ed25519, the
-broker VM could not reach **SPIRE server address for agents** over plain TCP. Teardown
-removes the broker's SPIRE entries along with the agent.
+The control node install job's last line, and an **SPIRE** or **Ed25519** label beside the
+control node status on the POV list, say which way it went. If you expected SPIRE and got Ed25519, the
+control node VM could not reach **SPIRE server address for agents** over plain TCP. Teardown
+removes the control node's SPIRE entries along with the agent.
 
 Port 8081 is the default. On an instance that shares its environment with another
 dashboard, as the reference POV instance does on port 8091, set **SPIRE server address for
-agents** to `host:port` first: a blank one sends brokers to the other dashboard's server.
+agents** to `host:port` first: a blank one sends control nodes to the other dashboard's server.
 
-Before it mints anything, the Broker run checks that address: it opens TLS to it and
+Before it mints anything, the control node install checks that address: it opens TLS to it and
 requires the certificate to chain to this dashboard's own trust bundle and to name
 `spiffe://<trust domain>/spire/server`. If something else answers, such as another
 dashboard's server, SPIRE is not offered and the job says which address to fix, instead of
@@ -306,7 +306,7 @@ can:
    short decoder that writes the script to a temporary file and runs it. `base64` and
    `gzip` are in coreutils and BusyBox alike.
 
-The Broker job says when it had to do 2 or 3. A POV large enough that even 3 does not fit
+The control node install job says when it had to do 2 or 3. A POV large enough that even 3 does not fit
 is refused with both sizes named. Cloud POVs use the same 16 KB limit, which is EC2's.
 
 ### The ordering that matters
@@ -330,7 +330,7 @@ downstream of a catalogue that could only be authored by hand in Skytap's own co
 matters most where the existing catalogue was built for an **on-premises** approach: a
 template carrying a full product stack inside the environment is the wrong shape for the
 SaaS-first POV this dashboard runs, where PRA, Password Safe and Entitle are *tenants*
-reached from outside and the environment needs only the customer-like VMs plus a broker.
+reached from outside and the environment needs only the customer-like VMs plus a control node.
 
 A template is immutable — there is no *edit a template* call — so authoring is a bake:
 
@@ -354,19 +354,19 @@ until somebody notices.
 ### What the build does about the runner and Docker
 
 This is the point of the page. [The template contract](#the-template-contract) below
-requires the broker VM to carry a metadata runner, because Skytap hands `user_data` to the
+requires the control node VM to carry a metadata runner, because Skytap hands `user_data` to the
 guest and **nothing executes it**. Before this, that runner existed only as an example in
 this document for somebody to copy into an image by hand — and it is the single most common
 way a POV fails.
 
 **And a runner with no container runtime is the same failure one line later.** The payload
 ends in `docker run`; everything above it is a `mkdir`, a heredoc and two `|| true`s. A
-broker VM with a perfect runner and no Docker therefore reads the payload, dies on that
+control node VM with a perfect runner and no Docker therefore reads the payload, dies on that
 line, and re-reads it every twenty seconds forever — while the POV page says `enrolling`
 and names nothing, exactly as if no runner existed. Base templates that carry neither are
 common: a stock AlmaLinux 8 guest has no `docker`, no `podman`, and no socket.
 
-The build installs both. It publishes SSH on the broker VM, reads the login from Skytap's
+The build installs both. It publishes SSH on the control node VM, reads the login from Skytap's
 own [stored credentials](#capabilities), installs the runner and its systemd unit, then a
 container runtime if — and only if — `docker` does not already resolve, and revokes the
 published service in a `finally`. If the VM carries more than one credential it tries
@@ -375,14 +375,14 @@ box holding a stale login beside a good one builds rather than refusing.
 
 **And since 2026-09-16 the injected bootstrap installs a runtime too**, using the same
 block, so a POV made from a template that baked without one repairs itself on the first
-**Broker** press instead of sitting at `enrolling`. That does not make the bake redundant:
+**Install control node** press instead of sitting at `enrolling`. That does not make the bake redundant:
 an install at bake time lands on every POV made from the template, before anyone is waiting
 fourteen minutes for it.
 
 **Docker CE first, the distro's Podman second.** Docker CE comes from
 `download.docker.com` and is what the agent's use of the Engine API is tested against, so
 it leads. But a lab guest routinely reaches its own distro mirror and no external CDN at
-all — a Skytap AlmaLinux 8 broker resolves `appstream` and `baseos` perfectly and cannot
+all — a Skytap AlmaLinux 8 control node resolves `appstream` and `baseos` perfectly and cannot
 reach Docker's — so every step of that install is non-fatal, and `podman` +
 `podman-docker` from the guest's own repository is the fallback. Podman serves the same
 Engine API on the same socket path, so the agent cannot tell the difference. **Podman on a
@@ -444,14 +444,14 @@ case where that does not matter: the address is used once and revoked in the sam
 
 **Verify** checks a template — including one somebody else authored — against the contract
 without building anything. Each check is reported on its own, never collapsed into one
-badge, because "no broker VM" and "the broker is on a manual network" have different fixes:
+badge, because "no control node" and "the control node is on a manual network" have different fixes:
 
 | Check | `fail` means |
 |---|---|
-| Broker VM | No broker VM could be resolved, so a POV from this template has nowhere to run its agent: either the name you typed matches nothing, or nothing distinguishes the template's Linux guests. The report names the VMs it *did* find. Note a template read has no POV, so the per-VM OS override cannot apply here — a template whose only Linux guest reports no OS fails this check while the POV built from it resolves fine once you set the OS on its VMs tab |
-| Broker network | The broker is on a manual network. The metadata service answers **only** on automatic networks, so the guest would receive no bootstrap at all — which looks exactly like a missing runner |
+| Control node | No control node could be resolved, so a POV from this template has nowhere to run its agent: either the name you typed matches nothing, or nothing distinguishes the template's Linux guests. The report names the VMs it *did* find. Note a template read has no POV, so the per-VM OS override cannot apply here — a template whose only Linux guest reports no OS fails this check while the POV built from it resolves fine once you set the OS on its VMs tab |
+| Control node network | The control node is on a manual network. The metadata service answers **only** on automatic networks, so the guest would receive no bootstrap at all — which looks exactly like a missing runner |
 | Resource Broker host | Never fails. No Windows guest is a **warning**: a PRA-and-Entitle POV does not need one |
-| Workload VMs | Never fails. A broker-only template is a **warning** — a POV built from it has nothing to demonstrate |
+| Workload VMs | Never fails. A control-node-only template is a **warning** — a POV built from it has nothing to demonstrate |
 
 Only a `fail` stops a build. A warning is a statement about what a template is *for*, not a
 defect in it.
@@ -480,7 +480,7 @@ Three guards, because a running environment costs money whether or not anyone is
 
 Skytap's `bootstrap_injection` mechanism is **`metadata`**: the platform stores the payload
 and the guest fetches it. There is no cloud-init datasource and nothing runs it for you, so
-the broker VM in your template must carry a small runner.
+the control node VM in your template must carry a small runner.
 
 > **The builder writes this for you.** [Building a template](#building-a-template) generates
 > the runner from the same marker constants the dashboard writes into the payload, installs
@@ -615,7 +615,7 @@ runstate, a rate-limit flag and an idle timer, and never a VM list. Adding a per
 VM read to it would turn one call into one per POV.
 
 `pov_environment_vms` is refreshed by three things: a provision, a power action, and the
-add-VMs job. **Broker** does it too, via `run_env_broker`, which is the shortest way to pick
+add-VMs job. **Rebuild control node** (or **Install control node**) does it too, via `run_env_broker`, which is the shortest way to pick
 up a guest added outside the dashboard — and it is what you would press for a new guest
 anyway, since a Config-Management grant is written at enrolment.
 
@@ -643,7 +643,7 @@ a platform lacks degrades visibly instead of failing late:
 | Templates | yes — `/v2/templates` |
 | Runstate | yes — running / suspended / stopped / halted |
 | Idle suspend | yes — `suspend_on_idle`, per environment, in seconds |
-| Bootstrap injection | **metadata** — per-VM `user_data`, read by the guest at `http://169.254.169.254/skytap`. Used by [the broker VM](#the-broker-vm) |
+| Bootstrap injection | **metadata** — per-VM `user_data`, read by the guest at `http://169.254.169.254/skytap`. Used by [the control node VM](#the-control-node-vm) |
 | Share link | yes — publish sets, with a password and an expiry. The expiry is **two** fields, `expiration_date` + `expiration_date_tz`; sending the date alone is a 400 that names the tz |
 | Stored credentials | yes — `…/vms/{id}/credentials`. Used by [the Resource Broker install](gateway-and-broker.md#there-is-no-login-field-on-purpose), which is why the dashboard stores no Windows password for a POV |
 | Verify | yes — one page of `/v2/templates`, surfaced as **Test connection** in Settings |
@@ -664,7 +664,7 @@ guest and the guest fetches it; another platform might run a script on the guest
 The distinction matters because Skytap's metadata service works **only on VMs attached to
 automatic networks**, and nothing executes `user_data` for you — there is no cloud-init
 datasource, so the guest must fetch it. That is what
-[the template contract](#the-template-contract) above specifies, and it is why the broker
+[the template contract](#the-template-contract) above specifies, and it is why the control node's agent
 install refuses outright on a platform whose mechanism is anything other than `metadata`
 rather than failing somewhere inside a job.
 
@@ -687,23 +687,23 @@ rather than failing somewhere inside a job.
 | **Test connection** says the host could not be reached | DNS, a firewall or an outbound proxy | Not a credential problem. Check outbound HTTPS to the API URL from wherever the dashboard runs |
 | VM counts show `—` | The collection read did not include the VM array | Expected. Open the environment for the measured count — a dash means "not measured", never zero |
 | "publishing the share link failed … `Expiration date tz is invalid`" | Skytap did not accept the expiry's timezone. A publish set's expiry is **two** fields — `expiration_date` and `expiration_date_tz` — and the date alone is a 400 naming the tz | Fixed: the dashboard now sends both, the date in UTC and the zone as `UTC`. If it recurs, the message names the zone it sent — change `SHARE_EXPIRY_TZ` in `services/skytap_service.py` to one the account accepts |
-| The Broker column reads **none** and the row names other VMs | The broker could not be resolved. Three different causes, and the message says which | If it says **no VM reports a Linux OS**: set the OS in the VMs tab's OS column for the guest that runs Docker. If it says **several VMs could be the broker**: press **name VM** beside the Broker column and name one. If it says **no VM is named X**: you typed a name this template does not use — clear it to auto-detect, or correct it |
-| The broker resolved to the **wrong** guest | The template has one Linux VM and it is not the Docker host | Press **name VM** and name the right one. A typed name always wins over auto-detect |
-| The Broker column reads **none** on a POV that used to work | A second Linux VM was added, so auto-detect became ambiguous | This refuses rather than silently moving the broker. Name the original with **name VM**. An *already enrolled* broker is never moved by this |
-| The Broker column reads **enrolling** and never changes | Nothing executed the payload, or it executed and died | The broker VM has no metadata runner ([template contract](#the-template-contract)), **has no `docker`**, is on a manual network, or cannot reach the agent endpoint. Fix it and press **Broker** to re-issue |
-| "no agent enrolled within 14 minutes" | Same causes as above | **Read the whole message first.** When this dashboard built the template, the failure names it: *"built that template (…) and recorded 'docker: MISSING' on its broker VM"* means the runtime is the cause and the bootstrap's own install could not fix it either. Otherwise: the bootstrap is still on the VM — `user_data` is only cleared on a successful enrolment, so being able to read it proves the agent never enrolled. On the guest, `journalctl -u dashboard-bootstrap-runner -n1 -o cat` names the line that failed and `docker logs dashboard-agent`, if it ever started, names the rest |
-| "nothing is listening at /var/run/docker.sock" | The runtime is installed and its API is not running | Almost always Podman with `podman.socket` not started — the `docker` command answers while nothing serves the Engine API, and the agent uses only the API. `systemctl enable --now podman.socket` on the broker VM, then press **Broker**. The install does this itself; seeing this means it did not take |
-| "/var/run/docker.sock … is a DIRECTORY … NOT EMPTY" | A `docker run -v` created one on a host whose daemon was down, and something has since been written into it | The install clears an **empty** one itself — `rmdir`, never `rm -rf` — so seeing this means there is content in it. Look at what is inside, remove it, make sure the daemon is up, and press **Broker** again |
+| The Control node column reads **none** and the row names other VMs | The control node could not be resolved. Three different causes, and the message says which | If it says **no VM reports a Linux OS**: set the OS in the VMs tab's OS column for the guest that runs Docker. If it says **several VMs could be the control node**: press **name VM** beside the Control node column and name one. If it says **no VM is named X**: you typed a name this template does not use — clear it to auto-detect, or correct it |
+| The control node resolved to the **wrong** guest | The template has one Linux VM and it is not the Docker host | Press **name VM** and name the right one. A typed name always wins over auto-detect |
+| The Control node column reads **none** on a POV that used to work | A second Linux VM was added, so auto-detect became ambiguous | This refuses rather than silently moving the control node. Name the original with **name VM**. An *already enrolled* control node is never moved by this |
+| The Control node column reads **enrolling** and never changes | Nothing executed the payload, or it executed and died | The control node VM has no metadata runner ([template contract](#the-template-contract)), **has no `docker`**, is on a manual network, or cannot reach the agent endpoint. Fix it and press **Install control node** to re-issue |
+| "no agent enrolled within 14 minutes" | Same causes as above | **Read the whole message first.** When this dashboard built the template, the failure names it: *"built that template (…) and recorded 'docker: MISSING' on its control node"* means the runtime is the cause and the bootstrap's own install could not fix it either. Otherwise: the bootstrap is still on the VM — `user_data` is only cleared on a successful enrolment, so being able to read it proves the agent never enrolled. On the guest, `journalctl -u dashboard-bootstrap-runner -n1 -o cat` names the line that failed and `docker logs dashboard-agent`, if it ever started, names the rest |
+| "nothing is listening at /var/run/docker.sock" | The runtime is installed and its API is not running | Almost always Podman with `podman.socket` not started — the `docker` command answers while nothing serves the Engine API, and the agent uses only the API. `systemctl enable --now podman.socket` on the control node VM, then press **Install control node**. The install does this itself; seeing this means it did not take |
+| "/var/run/docker.sock … is a DIRECTORY … NOT EMPTY" | A `docker run -v` created one on a host whose daemon was down, and something has since been written into it | The install clears an **empty** one itself — `rmdir`, never `rm -rf` — so seeing this means there is content in it. Look at what is inside, remove it, make sure the daemon is up, and press **Install control node** again |
 | "this dashboard does not know its own public URL" | No pinned audience and no `public_base_url` | An agent inside a customer network needs an address. Set it in Settings → Integrations → Remote Agents |
-| "the agent endpoint is `http://…`" | The audience is plaintext | The agent refuses to sign over plaintext, so the broker would never enrol. Terminate TLS and correct **Public base URL** |
-| A build fails with "does not satisfy the template contract" | The base template has no broker VM, or its broker is on a manual network | Read the contract report on the build row. Press **Discard** to reap the scratch environment, fix the base template, and build again |
-| The **Runner** column reads `failed` and names a firewall | The SSH install could not reach the published port | It dials a NAT-ed high port, not `cloud.skytap.com`. Either open that egress or clear **Install the metadata runner and Docker** and paste the install script onto the broker VM by hand — the template itself is fine |
-| The **Runner** column reads `failed` with "refused all N stored credentials" | Every login stored against the broker VM was rejected by its sshd | The detail names the usernames it tried. Correct the credential on that VM in Skytap and build again — SSH answered, so this is the login and not the route |
+| "the agent endpoint is `http://…`" | The audience is plaintext | The agent refuses to sign over plaintext, so the control node would never enrol. Terminate TLS and correct **Public base URL** |
+| A build fails with "does not satisfy the template contract" | The base template has no control node VM, or its control node is on a manual network | Read the contract report on the build row. Press **Discard** to reap the scratch environment, fix the base template, and build again |
+| The **Runner** column reads `failed` and names a firewall | The SSH install could not reach the published port | It dials a NAT-ed high port, not `cloud.skytap.com`. Either open that egress or clear **Install the metadata runner and Docker** and paste the install script onto the control node VM by hand — the template itself is fine |
+| The **Runner** column reads `failed` with "refused all N stored credentials" | Every login stored against the control node VM was rejected by its sshd | The detail names the usernames it tried. Correct the credential on that VM in Skytap and build again — SSH answered, so this is the login and not the route |
 | The **Runner** column reads `failed` with "the install exited …" | A login worked but the script did not finish | It installs as root, so check that the credential you left is an administrator with `sudo`. The detail carries the state read back off the VM afterwards, so it says which half landed. The template still bakes; paste the script in by hand |
-| The **Runner** detail says `docker at boot: disabled` | The daemon is up but its unit is not enabled | The build refuses this rather than baking it: a template is booted for every POV, so a daemon that is only running *now* gives each one a broker with no runtime. `systemctl enable docker` on the broker VM and build again — `dnf install docker-ce` leaves it disabled on the RHEL family |
-| The **Runner** detail says `docker: MISSING` | The runner landed and neither runtime did | No route from the **guest** to `download.docker.com` *and* no `podman` in its own repository (see [prerequisites](#prerequisites)) — the detail names what it tried. The template is still usable: the POV's first **Broker** press runs the same install again, and a POV whose broker still will not enrol now says this in the job's own error. Install a runtime by hand and re-bake to fix it for every POV; the runner on the VM is already correct |
-| The **Runner** column reads `skipped` | You cleared the checkbox, or no broker VM was resolved | Not a failure. Paste the install script from **POV → Templates** onto the broker VM |
+| The **Runner** detail says `docker at boot: disabled` | The daemon is up but its unit is not enabled | The build refuses this rather than baking it: a template is booted for every POV, so a daemon that is only running *now* gives each one a control node with no runtime. `systemctl enable docker` on the control node VM and build again — `dnf install docker-ce` leaves it disabled on the RHEL family |
+| The **Runner** detail says `docker: MISSING` | The runner landed and neither runtime did | No route from the **guest** to `download.docker.com` *and* no `podman` in its own repository (see [prerequisites](#prerequisites)) — the detail names what it tried. The template is still usable: the POV's first **Install control node** press runs the same install again, and a POV whose control node still will not enrol now says this in the job's own error. Install a runtime by hand and re-bake to fix it for every POV; the runner on the VM is already correct |
+| The **Runner** column reads `skipped` | You cleared the checkbox, or no control node VM was resolved | Not a failure. Paste the install script from **POV → Templates** onto the control node VM |
 | A build row shows a **build env** that is still running | The build failed, or you asked to keep it | It is billing. Press **Discard** to reap it. A failed build keeps the id on purpose, so this always works |
 | Discard says the environment could not be deleted | Skytap refused the delete | The row stays visible with its id rather than being marked discarded — marking it would hide a running environment. Clear the cause and press Discard again |
-| A POV built from a new template still reads **enrolling** | The runner is present but the broker cannot reach the agent endpoint | The runner is not the only requirement — see [the broker VM](#the-broker-vm). Check Docker and the automatic network, then press **Broker** |
-| The broker was online and 401s after a re-run | Its state volume survived a re-broker | The generated bootstrap removes it. A hand-run `docker run` that skipped that line leaves the old identity in place — remove the `dashboard_agent_state` volume and press **Broker** |
+| A POV built from a new template still reads **enrolling** | The runner is present but the control node cannot reach the agent endpoint | The runner is not the only requirement — see [the control node VM](#the-control-node-vm). Check Docker and the automatic network, then press **Install control node** |
+| The control node was online and 401s after a re-run | Its state volume survived a control node rebuild | The generated bootstrap removes it. A hand-run `docker run` that skipped that line leaves the old identity in place — remove the `dashboard_agent_state` volume and press **Rebuild control node** |

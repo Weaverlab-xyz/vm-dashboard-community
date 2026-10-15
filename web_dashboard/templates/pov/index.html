@@ -261,7 +261,7 @@
         </p>
       </div>
       <div x-show="current.bootstrap_injection">
-        <label class="block text-sm font-medium text-gray-700 mb-1">Broker VM name</label>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Control node VM name</label>
         <!-- No `value`, deliberately. Pre-filling this would make every POV carry a
              TYPED name, which takes the resolver's exact-match rung and switches
              auto-detect off permanently. -->
@@ -331,7 +331,7 @@
             <th class="px-4 py-2 text-left font-medium">Name</th>
             <th class="px-4 py-2 text-left font-medium">Status</th>
             <th class="px-4 py-2 text-left font-medium">Power</th>
-            <th class="px-4 py-2 text-left font-medium">Broker</th>
+            <th class="px-4 py-2 text-left font-medium">Control node</th>
             <th class="px-4 py-2 text-left font-medium">Gateway</th>
             <th class="px-4 py-2 text-left font-medium">Wired</th>
             <th class="px-4 py-2 text-left font-medium">Use cases</th>
@@ -409,7 +409,7 @@
                       :class="e.broker_auth === 'spiffe' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-500'"
                       :title="e.broker_auth === 'spiffe'
                               ? 'Attested through SPIRE: its signing key is held in memory only'
-                              : 'Enrolled with an Ed25519 key kept on the broker VM'"
+                              : 'Enrolled with an Ed25519 key kept on the control node'"
                       x-text="e.broker_auth === 'spiffe' ? 'SPIRE' : 'Ed25519'"></span>
                 <!-- The reason lives here rather than in error_message: a POV whose broker
                      did not come up is running, billing and reapable. -->
@@ -430,7 +430,7 @@
                          placeholder="auto — the only Linux VM"
                          class="w-full border border-gray-300 rounded px-1 py-0.5 text-xs font-mono">
                   <div class="flex gap-1">
-                    <button @click="saveBroker(e, true)" class="text-xs px-2 py-0.5 rounded bg-blue-600 text-white">Save &amp; broker</button>
+                    <button @click="saveBroker(e, true)" class="text-xs px-2 py-0.5 rounded bg-blue-600 text-white">Save &amp; install</button>
                     <button @click="saveBroker(e, false)" class="text-xs px-2 py-0.5 rounded border border-gray-300">Save only</button>
                     <button @click="editingBroker = ''" class="text-xs px-2 py-0.5 text-gray-500">Cancel</button>
                   </div>
@@ -604,8 +604,8 @@
                       <button @click="installEntitleAgent(e)"
                               :disabled="!actionable(e) || !e.broker_agent_id || busyAgent === e.id"
                               :title="e.broker_agent_id
-                                      ? 'Install the Entitle agent on this POV's Linux host (k3s), and mint its token in this POV's tenant'
-                                      : 'Press Broker first — the install runs through the POV's broker agent'"
+                                      ? 'Install the Entitle agent on this POV’s Linux host (k3s), and mint its token in this POV’s tenant'
+                                      : 'Press Install control node first — the install runs through the agent on the POV’s control node'"
                               class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed"
                               x-text="busyAgent === e.id ? 'installing…'
                                       : (e.entitle_agent_token_name ? 're-install agent' : 'install agent')"></button>
@@ -744,7 +744,7 @@
                         :disabled="!actionable(e) || !e.platform_environment_id"
                         :title="e.broker_status === 'none' ? 'Install the agent inside this environment' : 'Re-issue the enrolment code and re-write the bootstrap'"
                         class="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
-                        x-text="e.broker_status === 'online' ? 'Re-broker' : 'Broker'"></button>
+                        x-text="e.broker_status === 'online' ? 'Rebuild control node' : 'Install control node'"></button>
                 {# Turns a POV somebody built by hand into a one-press recipe. Writes
                    through the ordinary create endpoint, so the name, its uniqueness and
                    the three tenant ids are validated server-side at SAVE -- which is the
@@ -1858,8 +1858,8 @@ function povPage() {
         });
         this.editingBroker = '';
         this.notice = install
-          ? `${env.name}: installing the broker agent — watch job ${data.job_id}.`
-          : `${env.name}: broker VM name saved.`;
+          ? `${env.name}: installing the control node's agent — watch job ${data.job_id}.`
+          : `${env.name}: control node VM name saved.`;
         await this.load();
       } catch (e) { this.error = e.message; }
     },
@@ -1881,7 +1881,7 @@ function povPage() {
         this.editingGateway = '';
         const gw = data.gateway || {};
         this.notice = `${env.name}: ${gw.reused ? 'reusing' : 'created'} Gateway `
-          + `${gw.gateway_name} in PRA and installing it on the broker VM — watch job ${data.job_id}.`;
+          + `${gw.gateway_name} in PRA and installing it on the control node — watch job ${data.job_id}.`;
         await this.load();
       } catch (e) {
         this.error = e.message;
@@ -1900,7 +1900,7 @@ function povPage() {
         });
         this.editingGateway = '';
         this.notice = install
-          ? `${env.name}: installing the Gateway on the broker VM — watch job ${data.job_id}.`
+          ? `${env.name}: installing the Gateway on the control node — watch job ${data.job_id}.`
           : `${env.name}: Gateway settings saved.`;
         await this.load();
       } catch (e) { this.error = e.message; }
@@ -2246,7 +2246,7 @@ function povPage() {
         await this.post(`/api/pov/managed/${env.id}/broker`, null);
         // No duration here: the wait is derived server-side from the enrolment code's
         // TTL, and a number typed into the UI is one that drifts the moment that changes.
-        this.notice = `${env.name}: installing the broker agent. It waits for the agent ` +
+        this.notice = `${env.name}: installing the control node's agent. It waits for the agent ` +
                       `to enrol — watch the job for progress.`;
         await this.load();
       } catch (e) { this.error = e.message; }

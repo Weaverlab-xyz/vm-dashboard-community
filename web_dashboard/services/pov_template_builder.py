@@ -602,7 +602,7 @@ fi
 # Working, not merely installed. A package that landed beside a daemon that will not start
 # fails the bootstrap in the same place as a guest that never had one.
 if ! docker version >/dev/null 2>&1; then
-  echo "the broker VM still has no working 'docker' after this script. The injected bootstrap ends in 'docker run', so every POV built from this template would sit at 'enrolling' with nothing in the job to say why. Fix the runtime on this VM before baking it." >&2
+  echo "the control node still has no working 'docker' after this script. The injected bootstrap ends in 'docker run', so every POV built from this template would sit at 'enrolling' with nothing in the job to say why. Fix the runtime on this VM before baking it." >&2
   exit 1
 fi
 
@@ -615,11 +615,11 @@ fi
 # have. A dangling podman-docker symlink and a leftover mount directory both fail a single
 # `-S` with one message that fits neither.
 if [ -d {sock} ]; then
-  echo "{sock} on this broker VM is a DIRECTORY, not a socket, and it is NOT EMPTY so this script would not remove it. A 'docker run -v {sock}:...' on a host whose daemon was not running creates one, and every later run then mounts an empty directory into the agent. Look at what is inside it, remove it, make sure the daemon is up, and press Broker again." >&2
+  echo "{sock} on this control node is a DIRECTORY, not a socket, and it is NOT EMPTY so this script would not remove it. A 'docker run -v {sock}:...' on a host whose daemon was not running creates one, and every later run then mounts an empty directory into the agent. Look at what is inside it, remove it, make sure the daemon is up, and press Broker again." >&2
   exit 1
 fi
 if [ ! -e {sock} ]; then
-  echo "'docker' works on this broker VM but nothing is listening at {sock}. The agent speaks the Engine API over that socket directly and never runs the command, so it would start, enrol, come up green, and then fail every Gateway and Config-Management job. Under Podman run 'systemctl enable --now podman.socket'; under Docker check that dockerd is running." >&2
+  echo "'docker' works on this control node but nothing is listening at {sock}. The agent speaks the Engine API over that socket directly and never runs the command, so it would start, enrol, come up green, and then fail every Gateway and Config-Management job. Under Podman run 'systemctl enable --now podman.socket'; under Docker check that dockerd is running." >&2
   exit 1
 fi
 
@@ -635,7 +635,7 @@ _DOCKER_BOOT_GATE = """# AND enabled at boot, which is the check that matters fo
 # baked and then booted, every time, for every POV. "Running now" is worth nothing here.
 if command -v systemctl >/dev/null 2>&1 && systemctl cat docker.service >/dev/null 2>&1; then
   if ! systemctl is-enabled docker >/dev/null 2>&1; then
-    echo "docker is running on the broker VM but its unit is NOT enabled at boot, and 'systemctl enable docker' did not take. A template is baked and then booted, so every POV built from this one would come up with no daemon and sit at 'enrolling'. Enable it on this VM before baking." >&2
+    echo "docker is running on the control node but its unit is NOT enabled at boot, and 'systemctl enable docker' did not take. A template is baked and then booted, so every POV built from this one would come up with no daemon and sit at 'enrolling'. Enable it on this VM before baking." >&2
     exit 1
   fi
 # The SAME rule for a Podman guest, which used to fall through this gate entirely. The
@@ -650,7 +650,7 @@ elif command -v systemctl >/dev/null 2>&1 && systemctl cat podman.socket >/dev/n
   # second, so demanding the first would fail a guest that is genuinely correct.
   if ! systemctl is-enabled podman.socket >/dev/null 2>&1 \\
      && ! systemctl is-enabled podman.service >/dev/null 2>&1; then
-    echo "podman answers on this broker VM but NEITHER podman.socket NOR podman.service is enabled at boot. A template is baked and then booted, so every POV built from this one would come up with a working 'docker' command and nothing listening on the socket - which enrols, goes green, and fails every Gateway and Config-Management job. Run 'systemctl enable --now podman.socket' on this VM before baking." >&2
+    echo "podman answers on this control node but NEITHER podman.socket NOR podman.service is enabled at boot. A template is baked and then booted, so every POV built from this one would come up with a working 'docker' command and nothing listening on the socket - which enrols, goes green, and fails every Gateway and Config-Management job. Run 'systemctl enable --now podman.socket' on this VM before baking." >&2
     exit 1
   fi
 fi
@@ -663,7 +663,7 @@ echo "docker: ready and enabled at boot"
 # start is worth more than the power cycle it may not survive.
 _DOCKER_BOOT_NOTE = """if command -v systemctl >/dev/null 2>&1 && systemctl cat docker.service >/dev/null 2>&1; then
   if ! systemctl is-enabled docker >/dev/null 2>&1; then
-    echo "NOTE: docker is running but its unit is not enabled at boot; this broker will have no runtime after a power cycle. Run 'systemctl enable docker' on this VM."
+    echo "NOTE: docker is running but its unit is not enabled at boot; this control node will have no runtime after a power cycle. Run 'systemctl enable docker' on this VM."
   fi
 fi
 echo "docker: ready"
@@ -775,9 +775,9 @@ def check_contract(vms: list[dict], broker_vm_name: str) -> list[dict]:
     except pov_broker.BrokerError as exc:
         # The resolver already names what it found and what to do about it, so this
         # passes the sentence straight through rather than composing a second one.
-        out.append(_result("broker VM", CHECK_FAIL, str(exc)))
+        out.append(_result("control node", CHECK_FAIL, str(exc)))
     if broker is not None:
-        out.append(_result("broker VM", CHECK_PASS,
+        out.append(_result("control node", CHECK_PASS,
                            f"{broker.get('name')} will run the agent."))
 
         # An automatic network is what the metadata service answers on. `nic_type` is the
@@ -789,22 +789,22 @@ def check_contract(vms: list[dict], broker_vm_name: str) -> list[dict]:
         kinds.discard("")
         if not nics:
             out.append(_result(
-                "broker network", CHECK_WARN,
-                "the platform reported no network interfaces for the broker VM, so "
+                "control node network", CHECK_WARN,
+                "the platform reported no network interfaces for the control node, so "
                 "whether it can reach the metadata service is unknown."))
         elif "automatic" in kinds:
-            out.append(_result("broker network", CHECK_PASS,
-                               "the broker VM is on an automatic network."))
+            out.append(_result("control node network", CHECK_PASS,
+                               "the control node is on an automatic network."))
         elif kinds:
             out.append(_result(
-                "broker network", CHECK_FAIL,
-                f"the broker VM's network is {', '.join(sorted(kinds))}, not automatic. "
+                "control node network", CHECK_FAIL,
+                f"the control node's network is {', '.join(sorted(kinds))}, not automatic. "
                 f"The metadata service answers only on automatic networks, so the guest "
                 f"would receive no bootstrap at all."))
         else:
             out.append(_result(
-                "broker network", CHECK_WARN,
-                "the platform did not report a network type for the broker VM. Confirm it "
+                "control node network", CHECK_WARN,
+                "the platform did not report a network type for the control node. Confirm it "
                 "is on an automatic network before relying on this template."))
 
     windows = [v for v in vms if str(v.get("os_family") or "") == "windows"]
@@ -825,11 +825,11 @@ def check_contract(vms: list[dict], broker_vm_name: str) -> list[dict]:
     workload = [v for v in vms if v is not broker]
     if workload:
         out.append(_result("workload VMs", CHECK_PASS,
-                           f"{len(workload)} VM(s) besides the broker."))
+                           f"{len(workload)} VM(s) besides the control node."))
     else:
         out.append(_result(
             "workload VMs", CHECK_WARN,
-            "this template contains only the broker, so a POV built from it has nothing "
+            "this template contains only the control node, so a POV built from it has nothing "
             "to demonstrate."))
 
     return out
@@ -878,7 +878,7 @@ async def _ssh_install(host: str, port: int, logins: list[tuple[str, str]], *,
         # candidates() cannot return an empty list, but a caller that hand-rolled one would
         # otherwise spend the whole ladder discovering it had nothing to try.
         raise TemplateBuildError(
-            "no usable login was found for the broker VM, so the runner cannot be "
+            "no usable login was found for the control node, so the runner cannot be "
             "installed over SSH. Use the install script from the builder page instead.")
 
     wait = sleep or asyncio.sleep
@@ -907,7 +907,7 @@ async def _ssh_install(host: str, port: int, logins: list[tuple[str, str]], *,
                         probe = await conn.run(_STATE_PROBE, check=False)
                         landed = " ".join((probe.stdout or "").split())[:200]
                         raise TemplateBuildError(
-                            f"the install exited {result.exit_status} on the broker VM as "
+                            f"the install exited {result.exit_status} on the control node as "
                             f"{username}{': ' + stderr if stderr else ''}. State on the VM "
                             f"now: {landed or 'unknown'}. It installs as root, so a "
                             f"credential without sudo gets exactly this far. The template "
@@ -941,7 +941,7 @@ async def _ssh_install(host: str, port: int, logins: list[tuple[str, str]], *,
                 many = (f"all {len(refused)} stored credentials" if len(refused) > 1
                         else "the stored credential")
                 raise TemplateBuildError(
-                    f"the broker VM at {host}:{port} refused {many} "
+                    f"the control node at {host}:{port} refused {many} "
                     f"(tried: {', '.join(refused)}). SSH answered, so this is the login and "
                     f"not the route — correct the credential on that VM in the lab platform "
                     f"and build again, or install the runner by hand from the builder page.")
@@ -952,7 +952,7 @@ async def _ssh_install(host: str, port: int, logins: list[tuple[str, str]], *,
             await wait(_SSH_RETRY_WAIT_S)
 
     raise TemplateBuildError(
-        f"could not reach the broker VM over SSH at {host}:{port} after "
+        f"could not reach the control node over SSH at {host}:{port} after "
         f"{_SSH_ATTEMPTS} attempts ({last}). This connects to a NAT-ed high port on the "
         f"lab platform, not to the API host — an egress rule that allows only HTTPS to the "
         f"API URL will block it. Use the install script from the builder page instead.")
@@ -972,7 +972,7 @@ async def prepare_broker_vm(mod, env_id: str, vm: dict) -> str:
     nic = next((n for n in nics if n.get("id")), None)
     if nic is None:
         raise TemplateBuildError(
-            f"the broker VM {vm.get('name')!r} has no addressable network interface, so a "
+            f"the control node {vm.get('name')!r} has no addressable network interface, so a "
             f"port cannot be published to reach it.")
 
     published = await mod.publish_service(env_id, vm.get("id"), nic.get("id"), _SSH_PORT)
@@ -984,7 +984,7 @@ async def prepare_broker_vm(mod, env_id: str, vm: dict) -> str:
         # by, so the answer usually arrives on the first attempt. See
         # pov_credentials.candidates.
         logins = pov_credentials.candidates(
-            entries, vm_label=f"the broker VM {vm.get('name')!r}",
+            entries, vm_label=f"the control node {vm.get('name')!r}",
             # A broker VM is Linux by construction — this function reaches it over SSH —
             # so `root` sorts to the front and the usual case authenticates first try.
             os_family="linux",
@@ -1045,11 +1045,11 @@ def runtime_gap_for_template(db: Session, *, platform: str, template_id: str) ->
         return ""
     return (f"This dashboard built that template ({build.name}) on "
             f"{build.created_at:%Y-%m-%d} and recorded '{DOCKER_MISSING_MARKER}' on its "
-            f"broker VM, so it almost certainly has no container runtime: the payload runs "
+            f"control node, so it almost certainly has no container runtime: the payload runs "
             f"as far as 'docker run' and dies there, every {_RUNNER_INTERVAL_S} seconds, "
             f"saying nothing. The bootstrap tries to install one now, which needs the guest "
             f"to reach either {DOCKER_REPO_HOST} or its own distro repository. Install a "
-            f"container runtime on the broker VM and re-bake the template to fix it for "
+            f"container runtime on the control node and re-bake the template to fix it for "
             f"every POV.")
 
 
@@ -1217,15 +1217,15 @@ async def run_template_build(job_id: str, meta: dict) -> None:
             if not meta.get("install_runner", True):
                 build.prepare_method = "skipped"
                 build.prepare_detail = ("the runner install was not requested; paste the "
-                                        "install script onto the broker VM by hand.")
+                                        "install script onto the control node by hand.")
             elif not lab_platforms.supports(build.platform, "published_services"):
                 build.prepare_method = "skipped"
                 build.prepare_detail = (
                     f"{build.platform} cannot publish a port, so there is no route to the "
-                    f"broker VM from here. Paste the install script in by hand.")
+                    f"control node from here. Paste the install script in by hand.")
             elif broker is None:
                 build.prepare_method = "skipped"
-                build.prepare_detail = "no broker VM was resolved."
+                build.prepare_detail = "no control node was resolved."
             else:
                 try:
                     summary = await prepare_broker_vm(

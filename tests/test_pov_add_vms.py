@@ -252,7 +252,7 @@ def test_the_completion_says_the_new_guests_are_not_config_targets_yet():
     finally:
         _restore(original)
     log = _logs(db, job.id) + (job.error_message or "")
-    assert "Press Broker" in log, "the completion note does not name the re-broker"
+    assert "Press Rebuild control node" in log, "the completion note does not name the rebuild"
     db.close()
 
 

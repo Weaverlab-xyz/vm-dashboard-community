@@ -125,26 +125,27 @@ def broker_agent(db: Session, env: PovEnvironment) -> RemoteAgent:
     """
     if not env.broker_agent_id:
         raise GatewayInstallError(
-            "this POV has no broker agent, so there is nothing inside the environment to "
-            "run a Gateway on. Press Broker on the POV first.")
+            "this POV has no control node agent, so there is nothing inside the environment "
+            "to run a Gateway on. Press Install control node on the POV first.")
     agent = db.query(RemoteAgent).filter(RemoteAgent.id == env.broker_agent_id).first()
     if agent is None:
         raise GatewayInstallError(
-            "this POV's broker agent row is gone. Press Broker to enrol a new one.")
+            "this POV's control node agent row is gone. Press Install control node to enrol a "
+            "new one.")
     status = agent_service.status_of(agent)
     if status == "revoked":
         raise GatewayInstallError(
-            f"the broker agent {agent.name!r} has been revoked. Press Broker to re-enrol "
-            f"it.")
+            f"the control node's agent {agent.name!r} has been revoked. Press "
+            f"Install control node to re-enrol it.")
     if status == "enrolling":
         raise GatewayInstallError(
-            f"the broker agent {agent.name!r} has never enrolled. Nothing executes the "
-            f"bootstrap for you — check the broker VM has the metadata runner, then press "
-            f"Broker to re-issue the code.")
+            f"the control node's agent {agent.name!r} has never enrolled. Nothing executes "
+            f"the bootstrap for you — check the control node has the metadata runner, then "
+            f"press Install control node to re-issue the code.")
     if status == "offline":
         raise GatewayInstallError(
-            f"the broker agent {agent.name!r} is offline, so it cannot lease this job. "
-            f"Check the broker VM is powered on and the container is running.")
+            f"the control node's agent {agent.name!r} is offline, so it cannot lease this job. "
+            f"Check the control node is powered on and the container is running.")
     return agent
 
 
@@ -180,9 +181,9 @@ def preflight(db: Session, env: PovEnvironment) -> tuple[RemoteAgent, object]:
         # an editor — which is worth saying, because the generic advice is "edit
         # policy.yaml" and here that would mean SSH into a customer's environment.
         raise GatewayInstallError(
-            f"the broker agent {agent.name!r} reports it may run "
+            f"the control node's agent {agent.name!r} reports it may run "
             f"{', '.join(reported) or 'nothing'} — its policy.yaml predates the Gateway "
-            f"grant. Press Broker on this POV to rewrite it, then try again.")
+            f"grant. Press Rebuild control node on this POV to rewrite it, then try again.")
     if "agent_gateway" not in agent_service.allowed_job_types(agent):
         raise GatewayInstallError(
             f"this dashboard does not permit {agent.name!r} to run Gateway jobs. Widen "
@@ -254,7 +255,7 @@ async def provision(db: Session, env: PovEnvironment, *, name: str = "") -> dict
             raise GatewayInstallError(
                 f"PRA tenant {tenant.name!r} already has a Gateway named {wanted!r} (id "
                 f"{existing.get('id')}) that this POV did not create. It will not be "
-                f"adopted — its key would join this POV's broker to somebody else's "
+                f"adopted — its key would join this POV's control node to somebody else's "
                 f"Gateway. Pick another name, or paste that Gateway's key by hand if it "
                 f"really is this POV's.")
 
@@ -393,7 +394,7 @@ async def status(db: Session, env: PovEnvironment) -> dict:
     if found["connected"] is False:
         return {"state": "disconnected", "nodes": found["nodes"],
                 "detail": (f"{name!r} exists in PRA but no node is connected. If the "
-                           f"broker VM was rebuilt, PRA keeps the dead node — install "
+                           f"control node was rebuilt, PRA keeps the dead node — install "
                            f"again and compare node counts.")}
     if found["connected"] is None:
         return {"state": "unknown", "nodes": found["nodes"],

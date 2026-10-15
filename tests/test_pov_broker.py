@@ -906,7 +906,7 @@ def test_teardown_revokes_and_removes_the_agent_and_is_idempotent():
     assert env.broker_agent_id is None
     # Destroy has to survive every kind of half-finished state, so a second call is a
     # no-op rather than an error.
-    assert "No broker agent" in pov_broker.teardown(db, env)
+    assert "No control node agent" in pov_broker.teardown(db, env)
     db.close()
 
 

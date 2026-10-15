@@ -90,7 +90,7 @@
 
     <div x-show="showRunner" class="px-4 py-3 border-b border-gray-200 bg-gray-50">
       <p class="text-sm text-gray-600 mb-2">
-        Run this as root on the broker VM if you would rather install the metadata runner
+        Run this as root on the control node if you would rather install the metadata runner
         and its container runtime by hand — then bake the environment into a template. It
         is what the build installs automatically, it is idempotent, and it is deliberately
         plain ASCII so it survives being typed into a console with no clipboard.
@@ -133,7 +133,7 @@
       </label>
 
       <label class="block">
-        <span class="text-sm font-medium text-gray-700">Broker VM name</span>
+        <span class="text-sm font-medium text-gray-700">Control node VM name</span>
         <input type="text" x-model="form.broker_vm_name"
                placeholder="auto — the only Linux VM"
                class="mt-1 block w-full rounded-md border-gray-300 text-sm">
@@ -153,9 +153,9 @@
       <label class="flex items-start gap-2 md:col-span-2">
         <input type="checkbox" x-model="form.install_runner" class="mt-1 rounded">
         <span class="text-sm text-gray-700">
-          Install the metadata runner and Docker on the broker VM
+          Install the metadata runner and Docker on the control node
           <span class="block text-xs text-gray-500">
-            Publishes SSH on the broker for the length of the build, installs the runner
+            Publishes SSH on the control node for the length of the build, installs the runner
             and a container runtime, and revokes it. This reaches a NAT-ed high port on the
             lab platform, not the API host — if your egress only allows HTTPS to the API
             URL, clear this and use the install script above. The guest also needs a route
@@ -336,8 +336,8 @@
       <template x-if="!cloudTemplates.length && !cloudForm">
         <p class="text-sm text-gray-500">
           No cloud templates yet. A useful first one is two VMs — a Linux
-          <span class="font-medium">broker</span>, which carries the dashboard agent, the
-          Gateway and the Resource Broker, and one target to demonstrate against.
+          <span class="font-medium">control node</span>, which carries the dashboard agent,
+          the Gateway and the Resource Broker, and one target to demonstrate against.
         </p>
       </template>
 
@@ -355,10 +355,12 @@
                   <span> · Purdue zones</span>
                 </template>
                 <template x-if="t.broker_vm_name">
-                  <span> · broker <span class="font-mono" x-text="t.broker_vm_name"></span></span>
+                  <span> · control node <span class="font-mono" x-text="t.broker_vm_name"></span></span>
                 </template>
                 <template x-if="!t.broker_vm_name">
-                  <span class="text-amber-600"> · no broker VM — its POV will have no agent</span>
+                  <span class="text-amber-600"> · no control node — its POV will have no agent. Set one
+                    VM's role to <span class="font-medium">control node</span> (its name does
+                    not matter)</span>
                 </template>
               </p>
             </div>
@@ -426,7 +428,9 @@
                    class="col-span-2 rounded-md border-gray-300 text-sm font-mono">
             <select x-model="vm.role" class="col-span-2 rounded-md border-gray-300 text-sm">
               <option value="target">target</option>
-              <option value="broker">broker</option>
+              {# Stored as "broker" (VALID_ROLES in pov_cloud_template_service); shown as
+                 control node so it is not read as Password Safe's Resource Broker. #}
+              <option value="broker">control node</option>
             </select>
             <select x-model="vm.os_family" class="col-span-1 rounded-md border-gray-300 text-sm">
               <option value="linux">linux</option>
@@ -454,12 +458,22 @@
         Add a VM
       </button>
       <p class="text-xs text-gray-400 mt-2">
-        Exactly one VM may be the <span class="font-medium">broker</span>. Images are
+        Exactly one VM may be the <span class="font-medium">control node</span> — it runs
+        the dashboard agent and the Gateway, and it is picked by its role, not its name.
+        Images are
         resolved when a POV is built, not now — so a template can name a catalog image
         that has not been promoted to this cloud yet. A <span class="font-medium">cell
         role</span> (Linux targets only) makes Wire up add that cell's PRA items — see
         <a href="/docs/profiles/pov/demo-cells" class="text-blue-600 hover:underline">Demo
         cells in a POV</a>.
+      </p>
+      {# Said in the form, before the save, because the role column is easy to read as
+         decoration: a VM NAMED "broker" with role "target" saved as a template with no
+         control node, and the only sign was the amber line on the list afterwards. #}
+      <p x-show="!cloudForm.vms.some(v => v.role === 'broker')" x-cloak
+         class="text-xs text-amber-700 mt-2">
+        No VM has the <span class="font-medium">control node</span> role, so a POV from
+        this template will have no dashboard agent. Pick it in a VM's role column.
       </p>
 
       <div class="mt-4 flex items-center gap-2">
@@ -500,11 +514,18 @@
       </label>
       <label class="block">
         <span class="text-sm font-medium text-gray-700">Template</span>
+        {# Every platform this instance builds on, not just the one the page is toggled
+           to: a blueprint names its template's platform, so the toggle above only ever
+           decided which half of the list an SE could see. #}
         <select x-model="bp.template_id"
                 class="mt-1 block w-full rounded-md border-gray-300 text-sm">
           <option value="">Choose a template…</option>
-          <template x-for="t in templates" :key="t.id">
-            <option :value="t.id" x-text="t.name"></option>
+          <template x-for="g in bpTemplateGroups" :key="g.platform">
+            <optgroup :label="g.label">
+              <template x-for="t in g.templates" :key="t.id">
+                <option :value="t.id" x-text="t.name"></option>
+              </template>
+            </optgroup>
           </template>
         </select>
       </label>
@@ -514,7 +535,7 @@
                class="mt-1 block w-full rounded-md border-gray-300 text-sm">
       </label>
       <label class="block">
-        <span class="text-sm font-medium text-gray-700">Broker VM name</span>
+        <span class="text-sm font-medium text-gray-700">Control node VM name</span>
         <input type="text" x-model="bp.broker_vm_name"
                placeholder="auto — the only Linux VM"
                class="mt-1 block w-full rounded-md border-gray-300 text-sm">
@@ -603,7 +624,7 @@
       <p class="md:col-span-2 text-xs text-gray-500">
         No secret is stored on a blueprint, and nothing here runs by itself. The Gateway
         deploy key and the Password Safe installer key are per-tenant, and both installs go
-        through the broker agent, which does not exist until minutes after a POV comes up.
+        through the control node's agent, which does not exist until minutes after a POV comes up.
         A blueprint fills these fields in so the panels open ready to press.
       </p>
 
@@ -621,7 +642,7 @@
           <tr>
             <th class="px-4 py-2 font-medium">Name</th>
             <th class="px-4 py-2 font-medium">Template</th>
-            <th class="px-4 py-2 font-medium">Broker VM</th>
+            <th class="px-4 py-2 font-medium">Control node</th>
             <th class="px-4 py-2 font-medium">Tenants</th>
             <th class="px-4 py-2 font-medium"></th>
           </tr>
@@ -702,6 +723,34 @@ function templatesPage() {
 
     get current() {
       return this.platforms.find(p => p.name === this.platform) || {};
+    },
+
+    // The blueprint Template picker: the toggled platform's templates, plus the selected
+    // cloud's when the toggle is on another platform. Cloud templates are already loaded
+    // for their own section, so offering them costs no extra read.
+    get bpTemplateGroups() {
+      const label = name => {
+        const p = this.platforms.find(x => x.name === name);
+        return (p && p.label) || (name || '').toUpperCase();
+      };
+      const groups = [{ platform: this.platform, label: label(this.platform),
+                        templates: this.templates }];
+      if (this.selectedCloud && this.selectedCloud !== this.platform) {
+        groups.push({ platform: this.selectedCloud,
+                      label: label(this.selectedCloud) + ' cloud templates',
+                      templates: this.cloudTemplates });
+      }
+      return groups.filter(g => g.templates.length);
+    },
+
+    // Which platform, and which name, the chosen template belongs to. Ids do not collide
+    // across platforms -- a cloud template id is a UUID, a Skytap one is numeric.
+    bpTemplateChoice(id) {
+      for (const g of this.bpTemplateGroups) {
+        const t = g.templates.find(x => x.id === id);
+        if (t) return { platform: g.platform, name: t.name };
+      }
+      return null;
     },
 
     // Same mapping the POV page uses. The API column for a kind is not derivable from the
@@ -1058,13 +1107,15 @@ function templatesPage() {
       this.savingBp = true;
       this.error = '';
       try {
-        const tpl = this.templates.find(t => t.id === this.bp.template_id);
+        const tpl = this.bpTemplateChoice(this.bp.template_id);
         await this.apiJson('/api/pov/blueprints', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             ...this.bp,
-            platform: this.platform,
+            // The template's platform, not the page toggle's: an AWS template saved
+            // under a Skytap blueprint would provision on Skytap and fail to find it.
+            platform: tpl ? tpl.platform : this.platform,
             template_name: this.bp.template_name || (tpl ? tpl.name : ''),
           }),
         });

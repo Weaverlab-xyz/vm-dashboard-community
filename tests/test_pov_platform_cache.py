@@ -630,6 +630,32 @@ def test_the_page_routes_do_not_call_the_adapter_directly():
         assert "mod.list_" not in body, f"{fn} calls the adapter directly again"
 
 
+def test_cloud_templates_are_read_from_the_database_not_the_cache():
+    """A cloud's templates are our own rows. Through the cache, one saved on POV →
+    Templates was missing from the create form and the blueprint picker until the next
+    reconcile. The cloud branch reads them directly, and off the event loop."""
+    with open(os.path.join(_ROOT, "web_dashboard", "api", "pov.py"),
+              encoding="utf-8") as fh:
+        src = fh.read()
+    body = src.split("async def list_templates(")[1].split("\n@router")[0]
+    cloud = body.split("if name in lab_platforms.CLOUD_PLATFORMS:")[1].split("return {")[1]
+    assert "asyncio.to_thread(pov_cloud_env.list_templates_sync" in cloud
+    assert "_cached_listing(" not in cloud
+
+
+def test_the_blueprint_picker_offers_the_selected_clouds_templates():
+    """The Template picker followed the page's platform toggle, so an AWS cloud template
+    could not be chosen for a blueprint while the page showed Skytap — and a blueprint
+    saved with the toggle's platform would provision on the wrong one."""
+    with open(os.path.join(_ROOT, "web_dashboard", "templates", "pov", "templates.html"),
+              encoding="utf-8") as fh:
+        src = fh.read()
+    assert 'x-for="g in bpTemplateGroups"' in src
+    assert "templates: this.cloudTemplates" in src
+    save = src.split("async saveBlueprint()")[1].split("async deleteBlueprint")[0]
+    assert "platform: tpl ? tpl.platform : this.platform" in save
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

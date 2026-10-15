@@ -52,9 +52,16 @@ authored at **POV → Templates**.
 | Private network | The CIDR this POV's own network gets. Blank uses `10.20.0.0/16` |
 | VMs | Name, role, OS family, image, instance type |
 
-Exactly one VM may carry the **broker** role. It is where the dashboard agent, the Gateway
-and the Resource Broker all land; two of them would mean two agents enrolled for one POV,
-each holding half the wire-up.
+Exactly one VM may carry the **control node** role. It is where the dashboard agent, the
+Gateway and the Resource Broker all land; two of them would mean two agents enrolled for
+one POV, each holding half the wire-up. The Role dropdown shows it as **control node**; in
+the API and the template JSON the value is still `broker` (`"role": "broker"`), and the
+resolved VM comes back as `broker_vm_name`.
+
+**The Role dropdown decides which VM is the control node, not the VM's name.** A VM named
+`broker` whose role is **target** is a target, and the template list then says **no
+control node** — its POV would have no dashboard agent. Set the role on whichever VM
+should carry the agent; its name can be anything.
 
 A VM names either a **catalog image** (a row in the image registry, whose per-cloud id is
 resolved from its promotions) or a **literal image id**. Catalog images are resolved when
@@ -132,7 +139,7 @@ SPIRE server's `SPIRE_JWT_ISSUER` exactly.
    ```
 
    The role trusts exactly `spiffe://<trust domain>/dashboard` with audience
-   `sts.amazonaws.com`. Never trust the whole trust domain, because the POV's broker agents
+   `sts.amazonaws.com`. Never trust the whole trust domain, because the POV's control node agents
    share it.
 4. **Point the panel at the role.** Paste the role ARN into **Role to assume**, save, and
    press **Test connection**. A pass names the assumed role: `Connected to AWS in us-east-2 as
@@ -160,7 +167,7 @@ conditions out while you diagnose.
 - **Everyday calls** use the role above, which needs only `pov-cloud-read`. These are the
   pages, the overview, the environment list and Test connection.
 - **Jobs** take a short-lived lease from BeyondTrust Workload Credentials, minted only when a
-  job needs one. These are build, broker, power and teardown. The lease's target role carries
+  job needs one. These are build, control node install, power and teardown. The lease's target role carries
   `pov-cloud-provision`.
 
 So no write-capable AWS credential is live between jobs. Workload Credentials authenticates
@@ -729,44 +736,44 @@ hardcoded price table goes stale silently and reports a number somebody plans ar
 The figure worth reading is **per month at the current power state**, which includes
 storage. It is the answer to "can I leave this up for the evaluation?".
 
-### The broker VM, on a cloud
+### The control node VM, on a cloud
 
-A POV's broker is the VM that carries the dashboard agent, the Gateway and the Password
+A POV's control node is the VM that carries the dashboard agent, the Gateway and the Password
 Safe Resource Broker. On Skytap the template ships it, the dashboard writes a payload into
 its `user_data`, and a runner inside the guest fetches and executes it. A cloud does the
 last part for you — cloud-init runs user-data — but only **on first boot**. Handing a
 payload to an instance that is already up does nothing at all, silently.
 
-So on a cloud the broker VM is **created by the Broker step, not by the build**, with its
+So on a cloud the control node VM is **created by the control node install, not by the build**, with its
 bootstrap already in user-data. That ordering is forced by the agent's policy, which
 grants the POV's target addresses one at a time — and those addresses do not exist until
 the targets do. The sequence is: build the targets → wait for them → read their addresses
-→ mint the enrolment code → create the broker VM carrying both.
+→ mint the enrolment code → create the control node VM carrying both.
 
 Two consequences worth knowing:
 
-- **An environment shows one fewer VM than its template until the broker lands.** That is
-  the honest reading of "the broker is not installed yet", rather than a VM sitting there
+- **An environment shows one fewer VM than its template until the control node lands.** That is
+  the honest reading of "the control node is not installed yet", rather than a VM sitting there
   doing nothing.
-- **Pressing Broker again rebuilds the VM.** The old one is terminated first, which
-  destroys its agent-state volume with it. On Skytap a re-broker has to remember to delete
+- **Pressing Rebuild control node rebuilds the VM.** The old one is terminated first, which
+  destroys its agent-state volume with it. On Skytap a rebuild has to remember to delete
   that volume — an agent that already enrolled never redeems a second code, so a surviving
   volume gives a container that starts fine and 401s forever. Here it is clean by
   construction.
 
-The broker VM's image must have **cloud-init and Docker**. Build it with the Packer
+The control node VM's image must have **cloud-init and Docker**. Build it with the Packer
 tooling and reference it from the template.
 
-**A cloud broker is never auto-detected, and must not be.** On Skytap the broker is found
+**A cloud control node is never auto-detected, and must not be.** On Skytap the control node is found
 by its OS -- the only Linux VM in the template -- because the template was authored
 elsewhere and the dashboard is adopting one of its guests. A cloud inverts that: the
-template designates its broker by **role**, and the dashboard *builds* it. So after the
+template designates its control node by **role**, and the dashboard *builds* it. So after the
 create, the instance is identified by the **id the driver just returned**, with the role's
 name as a fallback and no inference at any point. Inferring here would pick "the only
 Linux VM" out of rows that by then include this POV's Linux *workload* guests, record one
-of those as the broker, and look completely successful -- the bootstrap did reach the real
-broker via cloud-init, and the agent does enrol. What breaks later is everything that
-excludes the broker from a target list, which would then exclude the wrong machine.
+of those as the control node, and look completely successful -- the bootstrap did reach the real
+control node via cloud-init, and the agent does enrol. What breaks later is everything that
+excludes the control node from a target list, which would then exclude the wrong machine.
 
 **The spent enrolment code stays in user-data.** A cloud's user-data can only be rewritten
 while the instance is stopped, so unlike the Skytap path there is nothing to clear once

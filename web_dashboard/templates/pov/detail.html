@@ -331,7 +331,7 @@
                   x-text="env.ps_application_host_id || 'none — routed by zone'"></dd>
             </div>
             <div class="flex items-center justify-between">
-              <dt class="text-gray-600">Broker agent</dt>
+              <dt class="text-gray-600">Control node agent</dt>
               <dd class="text-xs" :class="env.broker_agent_id ? 'text-green-700' : 'text-gray-400'"
                   x-text="env.broker_agent_id ? 'enrolled' : 'none'"></dd>
             </div>
@@ -482,7 +482,7 @@
           <p class="text-[11px] text-gray-400">
             The copies arrive stopped even while the rest of the environment is running —
             leave "power on after" ticked unless you want them off. They are not
-            Config-Management targets until you press Broker.
+            Config-Management targets until you press Rebuild control node.
           </p>
         </div>
 
@@ -501,8 +501,8 @@
           <!-- The refusal an operator can act on BEFORE pressing Run: policy.yaml is
                written at enrolment, so a guest ticked since then is not granted yet. -->
           <p x-show="env.guest_step_stale" class="text-xs text-amber-700">
-            A guest was allowed since the broker agent was last given its policy. Press
-            Broker on the POV list to rewrite it, or the run will time out.
+            A guest was allowed since the control node's agent was last given its policy. Press
+            Rebuild control node on the POV list to rewrite it, or the run will time out.
           </p>
 
           <div class="flex flex-wrap gap-2 items-center">
@@ -528,7 +528,7 @@
           </div>
 
           <p x-show="!(env.guest_step_resolved || []).length" class="text-xs text-gray-400">
-            Tick a guest above to allow it to be configured. The broker agent is granted a
+            Tick a guest above to allow it to be configured. The control node's agent is granted a
             closed list of addresses, so nothing else can be reached.
           </p>
           <p class="text-[11px] text-gray-400">
@@ -1574,7 +1574,7 @@
         if (s.state === 'done' || s.state === 'skipped') return '';
         if (s.key === 'pra_ps') return this.env.pra_ps_matched_count ? 'Link' : 'Check';
         const labels = {
-          use_cases: 'Choose', vms: 'Set guest OS', broker: 'Install broker', gateway: 'Create & install',
+          use_cases: 'Choose', vms: 'Set guest OS', broker: 'Install control node', gateway: 'Create & install',
           resource_broker: 'Configure', entitle_agent: 'Install agent', wireup: 'Wire up',
           share: 'Share', ot_adapter: 'Deploy adapter',
         };
@@ -1611,10 +1611,10 @@
             this.notice = (data.gateway || {}).detail || data.detail || '';
           } else if (s.action === 'broker') {
             await this.stepPost(`${base}/broker`, null);
-            this.notice = 'Installing the broker agent. It waits for the agent to enrol.';
+            this.notice = 'Installing the agent on the control node. It waits for the agent to enrol.';
           } else if (s.action === 'gateway') {
             const data = await this.stepPost(`${base}/gateway/create`, { name: '', install: true });
-            this.notice = `Created Gateway ${(data.gateway || {}).gateway_name} in PRA; installing it on the broker.`;
+            this.notice = `Created Gateway ${(data.gateway || {}).gateway_name} in PRA; installing it on the control node.`;
           } else if (s.action === 'entitle_agent') {
             const vm = window.prompt(
               'Which Linux VM should host the Entitle agent? It installs single-node k3s there.',
@@ -1825,7 +1825,7 @@
           const data = await res.json().catch(() => ({}));
           if (!res.ok) { this.error = data.detail || `Could not add VMs (${res.status}).`; return; }
           this.notice = `Copying ${this.addPicked.length} VM(s) — watch job ${data.job_id}. `
-                      + `Press Broker afterwards to grant them.`;
+                      + `Press Rebuild control node afterwards to grant them.`;
           this.addPicked = [];
           await this.loadEnv();
         } catch (e) { this.error = 'Could not queue the VM copy.'; }
@@ -1899,7 +1899,7 @@
         }
         if (vm.os_family_reported) return 'Reported by the lab platform.';
         return 'The lab platform did not report an OS for this guest, so the wire-up '
-             + 'skips it and the broker will not resolve it. Set it here.';
+             + 'skips it and control node auto-detection will not consider it. Set it here.';
       },
 
       // What this guest runs, when the platform would not say. Posted on change for the

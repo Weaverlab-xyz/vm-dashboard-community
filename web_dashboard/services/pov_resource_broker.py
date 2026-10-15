@@ -393,9 +393,9 @@ def preflight(db: Session, env: PovEnvironment) -> tuple:
     reported = agent.reported_job_types_list
     if reported and "agent_ansible" not in reported:
         raise ResourceBrokerError(
-            f"the broker agent {agent.name!r} reports it may run "
+            f"the control node's agent {agent.name!r} reports it may run "
             f"{', '.join(reported) or 'nothing'} — its policy.yaml predates the Resource "
-            f"Broker grant. Press Broker on this POV to rewrite it, then try again.")
+            f"Broker grant. Press Rebuild control node on this POV to rewrite it, then try again.")
     if "agent_ansible" not in agent_service.allowed_job_types(agent):
         raise ResourceBrokerError(
             f"this dashboard does not permit {agent.name!r} to run Config Management. "

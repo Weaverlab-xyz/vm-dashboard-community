@@ -61,7 +61,7 @@ Worth being clear about what it is: it discovers Password Safe accounts *inside 
 user works from the PRA console and off VPN, and it needs Builder to enable tunnel and web
 jump, a Gateway on the **Windows** broker, and Jump Clients on the guests. The dashboard's
 slice 6a creates Shell Jump and RDP jump items pinned to the POV's own Gateway on the
-**Linux** broker. That is a real and useful thing the runbook does not do, and it is not a
+**Linux** control node. That is a real and useful thing the runbook does not do, and it is not a
 substitute for use case 20.
 
 ## What the dashboard automates, and what stays manual
@@ -70,7 +70,7 @@ Automated, from the POV page:
 
 - the Skytap environment (deploy, name, power, the customer share link with a generated
   password and a hard expiry), which is the runbook's step 2;
-- the in-environment broker agent;
+- the in-environment control node agent;
 - the **Password Safe Resource Broker** install on the named Windows guest — the runbook's
   step 5, minus creating the resource zone and fetching the install key, which stay in the
   Password Safe console;
@@ -109,13 +109,13 @@ changes.
 
 **Two things will trip you up.**
 
-The guest must be **ticked first**. The broker agent is granted a closed list of `/32`
+The guest must be **ticked first**. The control node's agent is granted a closed list of `/32`
 addresses, so a run at a guest outside that list is refused up front — it would otherwise
 reach the agent and fail as a connection timeout, which reads as a firewall problem.
 
 The grant is written when the agent is **enrolled**, so a guest ticked since then is not
 granted yet. The page says so in amber, and the run is refused with the remedy: press
-**Broker** on the POV list to rewrite the policy. This is the one step in the sequence that
+**Rebuild control node** on the POV list to rewrite the policy. This is the one step in the sequence that
 is not obvious, and it is why the refusal exists instead of a timeout.
 
 What this deliberately is *not*: a way to run arbitrary commands. The file is one you

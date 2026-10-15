@@ -178,7 +178,7 @@ def test_the_gateway_is_locked_until_the_broker_is_enrolled():
     by_key = _by_key(steps.describe(_row(broker_status="offline", broker_agent_id="",
                                          gateway_ready=False)))
     assert by_key["gateway"]["locked"] is True
-    assert by_key["gateway"]["locked_by"] == "Broker agent enrolled"
+    assert by_key["gateway"]["locked_by"] == "Control node agent enrolled"
     assert by_key["wireup"]["locked"] is True
 
 

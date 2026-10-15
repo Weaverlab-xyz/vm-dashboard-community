@@ -210,10 +210,10 @@ def _broker(p: dict):
         # step, and `ensure_broker` waits out the enrolment code's full TTL before
         # returning — so by the time the environment is active there is nothing still
         # coming, and the remedy is already recorded on the row.
-        return READY, error or ("the broker agent was never enrolled. Press Broker to "
-                                "install and enrol it."), "broker"
+        return READY, error or ("the control node's agent was never enrolled. Press "
+                                "Install control node to install and enrol it."), "broker"
     # offline | revoked — the agent existed and does not answer. Re-brokering replaces it.
-    return READY, error or f"the broker agent is {status}. Re-broker to replace it.", "broker"
+    return READY, error or f"the control node's agent is {status}. Install control node to replace it.", "broker"
 
 
 def _gateway(p: dict):
@@ -227,14 +227,14 @@ def _gateway(p: dict):
                 "configured; Check asks the appliance whether a node is connected",
                 "gateway")
     if not p.get("broker_agent_id"):
-        return BLOCKED, "needs an enrolled broker agent to run on", "gateway"
+        return BLOCKED, "needs an enrolled control node agent to run on", "gateway"
     # A missing name or key is no longer a blocker: Create & install makes the Gateway in
     # PRA with the tenant's API account and stores the key it returns.
     if p.get("gateway_name") and not p.get("gateway_has_key"):
         return (READY, f"{p.get('gateway_name')!r} is named but has no deploy key — "
                        f"Create & install, or paste its key", "gateway")
     return (READY, "Create & install creates the Gateway in PRA and installs it on the "
-                   "broker", "gateway")
+                   "control node", "gateway")
 
 
 def _resource_broker(p: dict):
@@ -254,7 +254,7 @@ def _resource_broker(p: dict):
     if not p.get("rb_has_key"):
         missing.append("an installer key")
     if not p.get("broker_agent_id"):
-        missing.append("an enrolled broker agent")
+        missing.append("an enrolled control node agent")
     return BLOCKED, "needs " + _join(missing), "resource_broker"
 
 
@@ -267,7 +267,7 @@ def _entitle_agent(p: dict):
         return DONE, "", ""
     if p.get("entitle_agent_ready"):
         return READY, "", "entitle_agent"
-    return BLOCKED, "needs an enrolled broker agent", "entitle_agent"
+    return BLOCKED, "needs an enrolled control node agent", "entitle_agent"
 
 
 def _wireup(p: dict):
@@ -385,7 +385,7 @@ STEPS = (
     ("use_cases",       "Use cases chosen",                  _use_cases),
     ("environment",     "Environment running",               _environment),
     ("guest_os",        "Every guest's OS known",            _guest_os),
-    ("broker",          "Broker agent enrolled",             _broker),
+    ("broker",          "Control node agent enrolled",       _broker),
     ("gateway",         "PRA Gateway",                       _gateway),
     ("resource_broker", "Resource Broker",                   _resource_broker),
     ("entitle_agent",   "Entitle agent",                     _entitle_agent),

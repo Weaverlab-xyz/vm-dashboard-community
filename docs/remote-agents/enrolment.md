@@ -215,7 +215,7 @@ type" in Live Output reads as a dashboard bug rather than as "this container is 
 behind". The dashboard refuses at enqueue instead, and the refusal names both halves,
 because on a POV both are usually true at once: the image has to be newer **and** the
 policy has to grant `agent_gateway`. On a POV that file is generated rather than edited, so
-the remedy for the second half is the **Broker** button — which is the difference between a
+the remedy for the second half is the **Rebuild control node** button — which is the difference between a
 one-click fix and an SSH session into a customer's environment. Pull
 `chrweav/dashboard-agent:latest` and restart; the agent keeps its identity, so no
 re-enrolment.
@@ -244,7 +244,7 @@ It needs the Docker socket, which is root on the host — the same requirement a
 overlay as the other runners.
 
 The dashboard-side driver for this today is the POV feature, which generates the whole
-policy for a broker VM it created; see
+policy for a control node VM it created; see
 [POV Gateway and Broker](../profiles/pov/gateway-and-broker.md#the-pov-gateway). The same feature uses `agent_ansible`
 to install a [Password Safe Resource Broker](../profiles/pov/gateway-and-broker.md#the-resource-broker) on a
 Windows VM beside it — a `.exe` asset, which the Config-Management runner now installs with

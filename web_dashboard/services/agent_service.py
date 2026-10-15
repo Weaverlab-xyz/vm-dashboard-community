@@ -671,13 +671,13 @@ def gateway_upgrade_hint(agent: RemoteAgent) -> str:
     remedy is the Broker button, not an editor. Saying so here is the difference between
     a one-click fix and an SSH session into a customer's environment.
     """
-    return (f"The broker agent '{agent.name}' reports version "
+    return (f"The control node agent '{agent.name}' reports version "
             f"{agent.agent_version or 'unknown'} and installing a Gateway needs at least "
             f"{'.'.join(str(p) for p in MIN_GATEWAY_VERSION)}. Its policy.yaml also has "
             f"to grant `agent_gateway` and carry a `gateway:` block naming the image. On "
-            f"a POV both are fixed the same way: press **Broker** on the POV to re-issue "
+            f"a POV both are fixed the same way: press **Rebuild control node** on the POV to re-issue "
             f"the enrolment and rewrite the policy, having first pulled a newer "
-            f"chrweav/dashboard-agent onto the broker VM. Nothing was queued.")
+            f"chrweav/dashboard-agent onto the control node. Nothing was queued.")
 
 
 def supports_storage(agent: RemoteAgent) -> bool:

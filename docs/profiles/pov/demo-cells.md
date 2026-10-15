@@ -35,7 +35,7 @@ kind of thing:
 | `vyos`, the network device | No extra items, because the Shell Jump is the demo. The guest is **left out of Entitle**: VyOS rebuilds its user accounts from its own config on every commit, so an account Entitle created over SSH would vanish the first time anyone changed the device. |
 | `ot-broker`, the plant's DMZ broker | No extra items. It is the host for [the OT HMI adapter](#just-in-time-hmi-access-through-entitle) and for the POV's Entitle agent. |
 
-Every role needs a Linux guest. A role cannot be set on the broker VM, because the agent, the
+Every role needs a Linux guest. A role cannot be set on the control node VM, because the agent, the
 Gateway and the Resource Broker all run there.
 
 All of these items go into the POV's own Jump Group, behind the POV's own Gateway. A vendor
@@ -99,7 +99,7 @@ Before pressing it you need:
    [examples/playbooks/ot/](../../../examples/playbooks/ot/README.md). This is the same
    requirement the demo cell has.
 
-**Deploy adapter** queues two runs on the POV's broker agent, against the `ot-broker`
+**Deploy adapter** queues two runs on the POV's control node agent, against the `ot-broker`
 guest. The first rotates the HMI's admin password off FUXA's seeded default. The second
 deploys the adapter, holding that password. It then registers the adapter in the POV's
 Entitle tenant as an agent-brokered integration.
@@ -122,8 +122,8 @@ role; there is no separate zone field to get wrong.
 
 | Zone | Who is in it | Reachable from | Can reach |
 |---|---|---|---|
-| Enterprise | The POV broker (dashboard agent, PRA Gateway, Resource Broker) and every guest with no OT role | Itself; SSH from the DMZ, for the Entitle agent | Anywhere |
-| DMZ | The `ot-broker` guest (Entitle agent, HMI adapter) | Itself; SSH from enterprise, for the broker agent's runs | The POV network, plus HTTPS, port 8080 and DNS outside it |
+| Enterprise | The POV control node (dashboard agent, PRA Gateway, Resource Broker) and every guest with no OT role | Itself; SSH from the DMZ, for the Entitle agent | Anywhere |
+| DMZ | The `ot-broker` guest (Entitle agent, HMI adapter) | Itself; SSH from enterprise, for the control node agent's runs | The POV network, plus HTTPS, port 8080 and DNS outside it |
 | Plant | The `ot-sim` guest | Itself; from enterprise on SSH, the HMI and the PLC protocol ports; from the DMZ on SSH and the HMI | The POV network only. **No internet and no public address.** |
 
 The enterprise zone takes the first /24 of the network, the subnet an unzoned POV would
