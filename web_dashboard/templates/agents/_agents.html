@@ -208,6 +208,14 @@
                           class="text-xs font-medium transition mr-2 text-indigo-600 hover:text-indigo-800">
                     Migrate to SPIRE
                   </button>
+                  <!-- A join-token agent offline past its node SVID cannot re-attest: the token
+                       is single-use. Same endpoint as Migrate; it only mints a new token. -->
+                  <button x-show="spireEnabled && a.auth_mode === 'spiffe' && a.status !== 'online' && a.status !== 'revoked'"
+                          @click="migrateSpire(a, true)"
+                          title="Mint a new one-time SPIRE join token, for an agent whose SPIRE identity expired while its host was offline"
+                          class="text-xs font-medium transition mr-2 text-indigo-600 hover:text-indigo-800">
+                    New SPIRE token
+                  </button>
                   <button @click="reissue(a)"
                           :disabled="a.status === 'revoked'"
                           :class="a.status === 'revoked' ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:text-gray-800'"
@@ -422,8 +430,15 @@
   <div x-show="migrate.open" x-cloak
        class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
     <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl p-6 max-h-[90vh] overflow-y-auto">
-      <h3 class="text-lg font-semibold text-gray-800 mb-1">Migrate <span x-text="migrate.name"></span> to SPIRE</h3>
-      <p class="text-sm text-gray-600 mb-1">
+      <h3 x-show="!migrate.reissue" class="text-lg font-semibold text-gray-800 mb-1">Migrate <span x-text="migrate.name"></span> to SPIRE</h3>
+      <h3 x-show="migrate.reissue" class="text-lg font-semibold text-gray-800 mb-1">New SPIRE join token for <span x-text="migrate.name"></span></h3>
+      <p x-show="migrate.reissue" class="text-sm text-gray-600 mb-1">
+        Its SPIRE identity expired while its host was offline, and a join token works only
+        once. Replace <code class="font-mono">SPIRE_JOIN_TOKEN</code> in the agent's
+        <code class="font-mono">.env</code> with the new one below and restart it. The trust
+        bundle has not changed. Do not run <code class="font-mono">down -v</code>.
+      </p>
+      <p x-show="!migrate.reissue" class="text-sm text-gray-600 mb-1">
         The SPIRE entries exist and the agent is bound to
         <code class="font-mono text-xs break-all" x-text="migrate.spiffe_id"></code>.
         Its current key keeps working until it first attests, so nothing breaks in between.
@@ -572,7 +587,7 @@ function agentsPage() {
     spireMinVersion: '2.6.0',  // the first agent image that can attest
     spireDismissed: {},        // per-agent "Not now" on the SPIRE banner (localStorage)
     secretsRequireSpire: false, // dashboard-held credentials go only to SPIRE-attested agents
-    migrate: {open: false, name: '', spiffe_id: '', join_token_ttl_s: 900,
+    migrate: {open: false, reissue: false, name: '', spiffe_id: '', join_token_ttl_s: 900,
               bootstrap_pem: '', env: '', run: ''},
     form: {name: '', site: '', description: ''},
     enrol: {name: '', code: '', docker_run: '', docker_run_code_file: '',
@@ -701,11 +716,14 @@ function agentsPage() {
       } catch (e) { /* not remembered across reloads; fine */ }
     },
 
-    async migrateSpire(a) {
-      if (!confirm(`Migrate "${a.name}" to SPIRE? The dashboard creates its SPIRE entries and a one-time join token. The agent keeps its current key until it first attests.`)) return;
+    async migrateSpire(a, reissue) {
+      const ask = reissue
+        ? `Mint a new one-time SPIRE join token for "${a.name}"? Use this when its SPIRE identity expired while its host was offline.`
+        : `Migrate "${a.name}" to SPIRE? The dashboard creates its SPIRE entries and a one-time join token. The agent keeps its current key until it first attests.`;
+      if (!confirm(ask)) return;
       try {
         const r = await API.post(`/api/agents/${encodeURIComponent(a.id)}/migrate-spire`, {});
-        this.migrate = {open: true, name: a.name, spiffe_id: r.spiffe_id,
+        this.migrate = {open: true, reissue: !!reissue, name: a.name, spiffe_id: r.spiffe_id,
                         join_token_ttl_s: r.join_token_ttl_s, bootstrap_pem: r.bootstrap_pem,
                         env: r.env, run: r.run};
         await this.load(true);
