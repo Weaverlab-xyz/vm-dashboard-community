@@ -227,6 +227,26 @@ def test_the_beyondtrust_tab_holds_the_beyondtrust_products():
         assert groups.get(key) == "beyondtrust", f"{key} is not on the BeyondTrust tab"
 
 
+def test_workload_credentials_graduated_to_the_beyondtrust_tab():
+    """Generally available since 2026-10-14: a BeyondTrust integration, not a preview
+    flag. All three wirings must hold, it must not be configOnly (no toggle would render
+    and `enabled` would be stripped on save), and the preview list must have let go of it
+    -- two switches for one key would each show a stale state after the other flips it."""
+    key = "workload_credentials"
+    assert _integration_groups().get(key) == "beyondtrust", \
+        "Workload Credentials is not on the BeyondTrust tab"
+    assert key in _feature_model_keys()
+    assert key in _load_map_keys(), "no flag-map entry, so its toggle renders OFF"
+    assert key not in _config_only_keys()
+    setup = _read(_SETUP)
+    block = re.search(r"_CONFIG_ONLY_FEATURES\s*=\s*\{([^}]*)\}", setup).group(1)
+    assert f'"{key}"' not in block
+    preview = setup.split("_PREVIEW_FLAGS = {", 1)[1].split("\n}", 1)[0]
+    assert f'"{key}_enabled"' not in preview, "still listed under Preview features"
+    assert '"workload_credentials": raw["workload_credentials_enabled"]' in _read(_FLAGS), \
+        "feature_map() must serve the toggle the stored key, unrenamed"
+
+
 # ── remote agents specifically ────────────────────────────────────────────────
 
 def test_remote_agents_is_reachable_from_settings():

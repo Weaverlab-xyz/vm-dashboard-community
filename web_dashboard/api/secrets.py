@@ -163,12 +163,12 @@ async def list_backends(request: Request):
             "description": "Secrets are stored in BeyondTrust Password Safe using your configured ps-cli credentials.",
         },
     ]
-    # Preview-only, so it is listed once the flag is on — see
-    # setup._PREVIEW_FLAGS["workload_credentials_enabled"].
+    # Listed only while the Workload Credentials integration is on (Settings ->
+    # Integrations -> BeyondTrust).
     if cs.get_bool("workload_credentials_enabled", False):
         backends.append({
             "id":          "wlc",
-            "label":       "BeyondTrust Workload Credentials (preview)",
+            "label":       "BeyondTrust Workload Credentials",
             "description": "Static KV secrets are stored in BeyondTrust Workload Credentials "
                            "using your configured site and personal access token.",
         })
@@ -437,8 +437,8 @@ async def migrate_secrets(payload: MigratePayload, request: Request):
         # the flag is off, so the UI cannot offer it; a direct API call still can.
         raise HTTPException(
             status_code=400,
-            detail="Workload Credentials is a preview feature and is currently off. "
-                   "Enable it under Settings -> Preview features (and configure the "
+            detail="Workload Credentials is currently off. Enable it under "
+                   "Settings -> Integrations -> BeyondTrust (and configure the "
                    "site) before migrating secrets into it.",
         )
 

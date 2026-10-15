@@ -104,7 +104,7 @@ by calling the vault API, caches the result for 5 minutes, and discards it.
 | **Azure Key Vault** | `azure_kv://` | The dashboard's Azure app: the stored secret or its SPIFFE identity |
 | **GCP Secret Manager** | `gcp_sm://` | The dashboard's service account: the stored key or its SPIFFE identity |
 | **BeyondTrust Secrets Safe** | `bt_safe://` | ps-cli credentials already configured in the dashboard |
-| **BeyondTrust Workload Credentials** | `wlc://` | Site ID, plus either a personal access token or the container's own Azure workload identity (preview — see below) |
+| **BeyondTrust Workload Credentials** | `wlc://` | Site ID, plus either a personal access token or the container's own Azure workload identity (see below) |
 
 Each backend reuses the cloud provider credentials you have already entered —
 no additional IAM setup is needed beyond granting the existing SP / SA / IAM
@@ -367,9 +367,8 @@ Tier 3 still keeps a credential somewhere and fetches it when needed. **Tier 4
 has nothing to fetch**: BeyondTrust Workload Credentials mints a short-lived AWS
 or Azure credential on demand, and it expires on its own.
 
-This is a **preview** feature and is off by default — the product is not yet
-generally available. It is enabled under Settings → Preview features, per cloud,
-and turning it on is
+It is off by default. It is enabled under Settings → Integrations → BeyondTrust →
+**Workload Credentials**, per cloud, and turning it on is
 also what unlocks retiring that deployment's own static keys. Workload
 Credentials additionally works as a Tier 2 backend for ordinary static secrets
 (`wlc://`), which is the cheapest way to verify the connection before anything

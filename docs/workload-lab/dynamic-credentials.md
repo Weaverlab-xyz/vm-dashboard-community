@@ -4,8 +4,9 @@
 
 > **Preview.** Dynamic AWS and Azure are **implemented and have never been exercised
 > against a live dynamic secret.** The lease mechanics below are read off the
-> implementation and the API contract, not off a run. Workload Credentials itself is not
-> yet generally available; it is gated behind a preview flag and off by default.
+> implementation and the API contract, not off a run. Workload Credentials itself is
+> generally available and has its own toggle under Settings → Integrations → BeyondTrust;
+> it is off by default, and each cloud is opted in separately.
 
 The metered half of [Workload Credentials](workload-credentials.md). Instead of the
 dashboard holding a standing AWS access key or Azure client secret, WC mints one per

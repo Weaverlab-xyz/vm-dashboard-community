@@ -380,22 +380,29 @@ def test_the_reference_prefix_is_registered_on_both_sides():
     assert '"wlc://"' in _read("web_dashboard", "services", "secret_hygiene.py")
 
 
-def test_the_feature_is_gated_behind_a_preview_flag():
-    # Workload Credentials is not yet generally available and its API may still
-    # change, so it must not sit among the normal integration toggles.
+def test_the_feature_is_no_longer_a_preview_flag():
+    # Generally available since 2026-10-14, so it left Settings -> Preview features for
+    # the BeyondTrust integrations group. Listed in both places, it would have two
+    # switches for one key.
     src = _read("web_dashboard", "api", "setup.py")
     flags = src.split("_PREVIEW_FLAGS = {", 1)[1].split("\n}", 1)[0]
-    assert "workload_credentials_enabled" in flags
+    assert "workload_credentials_enabled" not in flags
     cfg_map = src.split("_PREVIEW_FLAG_CONFIG = {", 1)[1].split("\n}", 1)[0]
-    assert "workload_credentials" in cfg_map
+    assert "workload_credentials" not in cfg_map
 
 
-def test_the_panel_is_config_only_so_the_preview_flag_owns_the_switch():
-    # If the panel also wrote workload_credentials_enabled, saving config would
-    # silently flip the feature on or off behind the operator.
-    block = _assign_source(_read("web_dashboard", "api", "setup.py"),
-                           "_CONFIG_ONLY_FEATURES")
-    assert "workload_credentials" in block
+def test_the_panel_owns_the_switch_through_the_existing_key():
+    # A normal toggle panel now: NOT config-only (that would strip `enabled` on save, so
+    # the toggle would never persist), with `enabled` declared on the model (pydantic
+    # drops an undeclared key), and keyed "workload_credentials" so _feature_to_cfg_key
+    # derives the SAME `workload_credentials_enabled` the preview flag wrote. Renaming
+    # the key would silently switch every install that had opted in back off.
+    src = _read("web_dashboard", "api", "setup.py")
+    block = _assign_source(src, "_CONFIG_ONLY_FEATURES")
+    assert "workload_credentials" not in block
+    assert "enabled" in _model_fields()
+    assert '"workload_credentials": WorkloadCredentialsFeatureConfig' in src
+    assert 'return f"{feature}_enabled"' in src
 
 
 def test_dynamic_secrets_are_not_reachable_through_the_secrets_backend():
@@ -438,7 +445,9 @@ def test_every_declared_panel_field_is_bound_in_the_template():
     # sees no field, and the value silently never changes.
     import re
     bound = set(re.findall(r"panelCfg\.([a-z_0-9]+)", _panel_html()))
-    missing = [f for f in _model_fields() if f not in bound]
+    # `enabled` is the integration toggle's, not a form field: openPanel deletes it from
+    # panelCfg and savePanelConfig sends `this.panel.enabled` in its place.
+    missing = [f for f in _model_fields() if f not in bound and f != "enabled"]
     assert not missing, f"declared on the model but not bound in settings.html: {missing}"
 
 
@@ -458,23 +467,27 @@ def test_every_bound_panel_field_is_declared_on_the_model():
     assert not extra, f"bound in settings.html but not declared on the model: {extra}"
 
 
-def test_the_panel_does_not_bind_the_preview_flag_itself():
-    # The preview toggle owns workload_credentials_enabled. A second writer for
-    # it here would flip the feature as a side effect of saving config.
+def test_the_panel_does_not_bind_the_flag_key_itself():
+    # The integration toggle writes workload_credentials_enabled through `enabled`. A
+    # second writer for the raw key here would race it on every save.
     assert "panelCfg.workload_credentials_enabled" not in _panel_html()
 
 
-def test_the_panel_carries_a_preview_warning():
-    """The operator has to see this without reading the docs.
-
-    Deliberately checks for the status word only, not a date. This repository is public
-    and a release schedule is BeyondTrust's to announce, so no operator-facing text here
-    carries one.
-    """
+def test_the_panel_no_longer_calls_itself_a_preview():
     html = _panel_html()
-    assert "Preview" in html or "preview" in html
-    for leak in ("2026-10-14", "2026-09-14", "code freeze", "general availability on"):
-        assert leak not in html, f"the panel should not state {leak!r}"
+    assert "Preview" not in html and "preview" not in html, \
+        "Workload Credentials is generally available; the panel still says preview"
+
+
+def test_every_shortcut_opens_the_integrations_entry():
+    """savePanelConfig sends `enabled: this.panel.enabled`, and a save without `enabled`
+    writes it as off. An ad hoc `openPanel({ key: 'workload_credentials', ... })` object
+    has no `enabled`, so saving from it would switch the integration OFF -- harmless
+    while the panel was config-only, a silent kill switch now."""
+    import re
+    html = _read("web_dashboard", "templates", "settings.html")
+    adhoc = re.findall(r"openPanel\(\{\s*key:\s*'workload_credentials'", html)
+    assert not adhoc, "an ad hoc openPanel object would turn the integration off on save"
 
 
 # ── Timestamp envelope tolerance ─────────────────────────────────────────────

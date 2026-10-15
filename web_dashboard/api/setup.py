@@ -2250,25 +2250,27 @@ class NotificationsFeatureConfig(BaseModel):
 
 
 class WorkloadCredentialsFeatureConfig(BaseModel):
-    """Config-only panel (no `enabled`) for the Workload Credentials PREVIEW feature.
+    """Workload Credentials, a BeyondTrust integration (Settings -> Integrations ->
+    BeyondTrust).
 
-    The preview toggle owns `workload_credentials_enabled`; this panel holds the
+    A normal toggle panel: `enabled` maps to `workload_credentials_enabled` through
+    _feature_to_cfg_key, the same key the preview flag wrote before the product went
+    generally available, so a stored install keeps its state. The panel also holds the
     site, the auth mode (a stored PAT, or the BeyondTrust platform identity) and the
-    per-cloud dynamic-secret wiring. See _CONFIG_ONLY_FEATURES.
+    per-cloud dynamic-secret wiring.
 
     The identity itself — platform, service name, audience, token file, client id —
     is NOT here any more: it authenticates PRA, Password Safe, EPM-L and Entitle as
     well, so it lives on BtPlatformIdentityFeatureConfig, a panel that is not behind
-    this feature's preview flag. Same keys, so nothing migrates.
+    this feature's own toggle. Same keys, so nothing migrates.
 
-    Workload Credentials is not yet generally available and its API may still change,
-    which is why it sits behind a preview flag rather than the normal integration
-    toggles: an operator has to opt in knowingly, and the static-credential tier stays
-    fully supported alongside it.
+    The static-credential tier stays fully supported alongside it: the master toggle
+    alone reroutes nothing, each cloud is opted in separately below.
 
     GCP is absent on purpose — WC mints AWS and Azure credentials only, so a GCP
     deployment stays on the static tier. A mixed install is the normal case.
     """
+    enabled: bool = False
     wlc_api_base_url: str = "https://api.beyondtrust.io"
     wlc_site_id: str = ""
     wlc_pat: str = ""
@@ -2382,7 +2384,7 @@ _FEATURE_MODELS = {
 # would be a switch with one position.
 _CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region", "oidc", "worker",
                          "cert_lab", "spire_lab", "directories",
-                         "workload_credentials", "bt_platform_identity",
+                         "bt_platform_identity",
                          "change_windows"}
 
 # Never returned by a feature panel's GET. The app-wide list -- see
@@ -2982,15 +2984,6 @@ _PREVIEW_FLAGS = {
         "administrative credential — so the Password Safe \"SPIFFE SVID\" custom plugin "
         "has a trust domain to govern. Opens tcp/8081 to the sources you name, and "
         "closing it again is the teardown."),
-    # Preview because the product is not yet generally available and its API may still
-    # change. Deliberately no release dates here or in any operator-facing text: this
-    # repository is public, and a schedule is BeyondTrust's to announce. Off means the
-    # dashboard uses today's static cloud credentials, unchanged.
-    "workload_credentials_enabled": (
-        "Workload Credentials (BeyondTrust)",
-        "Preview. Mint short-lived AWS and Azure credentials on demand instead of "
-        "storing static keys, and use Workload Credentials as a secrets backend. "
-        "Requires a US-region Pathfinder site with the feature enabled."),
 }
 
 # Preview flags that ALSO have a config panel — maps the flag key to the
@@ -2998,7 +2991,6 @@ _PREVIEW_FLAGS = {
 # the panel is config-only (see _CONFIG_ONLY_FEATURES).
 _PREVIEW_FLAG_CONFIG = {
     "vdesktops_enabled": "vdesktops",
-    "workload_credentials_enabled": "workload_credentials",
     "cert_lab_enabled": "cert_lab",
     "directories_enabled": "directories",
     "spire_lab_enabled": "spire_lab",
