@@ -94,7 +94,7 @@
          focus" chip on them: the viewer's focus is a demo-profile idea and a POV instance
          has none. Comparing the two here is what kept the axes crossed. -->
     <template x-for="g in povGroups" :key="'pov-' + g.group">
-      <div class="chk-section" x-show="inScope(g).length">
+      <div class="chk-section" x-show="!g.presenter && inScope(g).length">
         <h2>
           <span x-text="g.label"></span>
           <span class="chk-count" x-text="inScope(g).length + ' in scope'"></span>

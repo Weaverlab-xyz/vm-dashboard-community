@@ -66,6 +66,12 @@ class Runbook:
     source: str
     docs: tuple = ()
     use_cases: tuple = ()
+    # The product group the runbook's cards are LISTED under. A runbook is still its own
+    # registry -- its own allowlist, its own order, its own source -- but an SE scoping a
+    # Password Safe POV should see one Password Safe list, not the product's cards and then
+    # the same product again under a document's name. `pov_use_cases._groups` folds the
+    # runbook's cards into this group, after the product's own.
+    group: str = ""
 
 
 # ── BeyondTrust's Skytap Password Safe Cloud POC ──────────────────────────────
@@ -92,6 +98,7 @@ _PS_POC_SKYTAP = Runbook(
     source="Confluence SELab page 870514897, rev 7.0 — "
            "“Using Skytap for a Password Safe Cloud POC: Step-by-Step”",
     docs=("profiles/pov/ps-runbook",),
+    group="password_safe",
     use_cases=(
         UseCase(
             id="pspoc-uc1-onboard-systems",
@@ -262,9 +269,13 @@ def describe(key: str, env_id: str, products: dict) -> dict:
     """One runbook's cards for one POV. Unknown key yields an empty group, never None."""
     runbook = get(key)
     if runbook is None:
-        return {"group": "", "label": "", "blurb": "", "docs": [], "use_cases": []}
+        return {"group": "", "label": "", "blurb": "", "docs": [], "presenter": False,
+                "use_cases": []}
     return {
         "group": runbook.key,
+        # The product group this runbook is listed under -- see `Runbook.group`.
+        "listed_under": runbook.group,
+        "presenter": False,
         "label": runbook.label,
         # The source goes in the blurb rather than a field of its own: every consumer
         # already renders a blurb, and "which document is this" is the first thing an SE

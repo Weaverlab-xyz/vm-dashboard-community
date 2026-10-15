@@ -8,8 +8,8 @@ Cloud POC: Step-by-Step"**, rev 7.0 (2026-09-02), validated by its author agains
 26.2.0.1427. It is 75 pages, and it runs as roughly two 90-minute working sessions.
 
 This page is about how that document and this dashboard fit together. The POV detail
-page's **Use cases** tab carries the runbook as a group of tickable cards, in the
-document's own numbering — so a POC that runs across several sessions and more than one
+page's **Use cases** tab lists the runbook's use cases as tickable cards under the
+**Password Safe** heading, after the product's own cards and in the document's own numbering — so a POC that runs across several sessions and more than one
 person knows where it got to.
 
 ## What the cards are, and are not

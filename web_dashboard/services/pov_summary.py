@@ -139,8 +139,11 @@ def build(db: Session, env: PovEnvironment) -> dict:
 
     Only cards somebody touched are returned. A summary listing every untouched card would
     be the catalog again, and the catalog is not what happened.
+
+    The presenter's to-do list is left out: it is the SE's checklist, not something the
+    customer evaluated, and this is the document that goes into a renewal note.
     """
-    catalog = pov_use_cases.describe(db, env)
+    catalog = pov_use_cases.describe(db, env, for_customer=True)
 
     covered, skipped, notes = [], [], []
     for group in catalog["groups"]:

@@ -179,10 +179,12 @@ def test_the_group_shape_matches_the_product_one():
     A missing key is a group that renders blank rather than one that errors."""
     from web_dashboard.services import pov_cards as C, pov_runbooks as R
     mix = _mixes()[-1]
-    product_keys = set(C.catalog(_ENV, mix)[0].keys())
+    # Plus `listed_under`, the product group the runbook's cards are folded into.
+    product_keys = set(C.catalog(_ENV, mix)[0].keys()) | {"listed_under"}
     for g in R.catalog(_ENV, mix):
         assert set(g.keys()) == product_keys, \
             f"{g.get('group')!r} group keys differ: {sorted(set(g) ^ product_keys)}"
+        assert g["listed_under"] in C.GROUPS, f"{g['group']} is listed under no group"
 
 
 def test_an_unknown_runbook_key_yields_an_empty_group_never_none():

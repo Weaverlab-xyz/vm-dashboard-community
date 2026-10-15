@@ -478,7 +478,7 @@ def self_view(db: Session, user) -> dict:
             "runstate": env.runstate or "",
         },
         "accessor": describe_one(row) if row else {},
-        "use_cases": pov_use_cases.describe(db, env),
+        "use_cases": pov_use_cases.describe(db, env, for_customer=True),
         "share": share_view(db, env),
         "wired": wired_view(db, env),
         # Whether the prospect may start a suspended environment, and why not when

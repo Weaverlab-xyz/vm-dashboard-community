@@ -4,9 +4,10 @@ The third axis, and the one that only exists because a POV is not an instance.
 
 It also owns the FOURTH. ``pov_runbooks`` groups the same card shape by the published
 procedure a POV is being run against rather than by product, and this module is where the
-two registries meet: :func:`_groups` appends its catalog and both write paths consult its
-``find_card``. The split is deliberate -- a product group's membership is derived from what
-a card declares, and a runbook's is an editorial list a document decided.
+two registries meet: :func:`_catalog` folds its cards into their product group and both
+write paths consult its ``find_card``. The split is deliberate -- a product group's
+membership is derived from what a card declares, and a runbook's is an editorial list a
+document decided.
 
 ``feature_flags.install_profile`` gates — it decides whether a feature exists here at all.
 ``pov_cards`` groups — it decides which product each card is proving. Neither can answer
@@ -141,30 +142,58 @@ def describe_row(row: PovUseCaseProgress | None) -> dict:
     }
 
 
+def _catalog(env_id: str, products: dict) -> list:
+    """Both registries as one list of groups, each runbook folded into its product group.
+
+    `pov_cards` groups cards by the PRODUCT each one proves and `pov_runbooks` holds the
+    published PROCEDURES a POV is run against. They are disjoint by card id and emit the
+    same card shape. A runbook used to be appended as a group of its own, which put two
+    Password Safe lists on every page; now its cards are listed under the product group it
+    names (``listed_under``), after the product's own, and each carries the runbook's label
+    in ``source`` so a page can still say where it came from. A runbook naming no group, or
+    one not in the catalog, is still appended on its own rather than lost.
+    """
+    groups = pov_cards.catalog(env_id, products)
+    by_key = {g["group"]: g for g in groups}
+    for book in pov_runbooks.catalog(env_id, products):
+        for card in book["use_cases"]:
+            card["source"] = book["label"]
+        host = by_key.get(book.get("listed_under") or "")
+        if host is None:
+            groups.append(book)
+            continue
+        host["use_cases"].extend(book["use_cases"])
+        host["docs"] = host["docs"] + [d for d in book["docs"] if d not in host["docs"]]
+        host["blurb"] = f"{host['blurb']} Includes {book['label']}: {book['blurb']}"
+    return groups
+
+
 def _groups(db: Session, env: PovEnvironment, products: dict,
-            include_excluded: bool = False) -> list:
+            include_excluded: bool = False, for_customer: bool = False) -> list:
     """The catalog for this POV with each card's progress merged in.
 
-    Two registries, appended rather than merged: `pov_cards` groups cards by the PRODUCT
-    each one proves and `pov_runbooks` groups them by the published PROCEDURE a POV is being
-    run against. They are disjoint by card id and both emit the same group shape, so every
-    consumer below -- `_summarize`, the detail page's group loop, `pov_summary.by_group` --
-    takes them without knowing which is which. Runbooks come last because a product is what
-    the evaluation was scoped to and a runbook is what somebody is working through today.
+    Every consumer below -- `_summarize`, the detail page's group loop,
+    `pov_summary.by_group` -- takes the groups from :func:`_catalog` without knowing which
+    registry produced a card.
 
     The chosen use cases (``pov_use_case_scope``) are applied last. A card outside them is
     dropped, and so is a group left with none -- unless ``include_excluded``, which keeps
     them with ``in_pov: false`` for the picker on the Setup tab and nothing else.
+
+    The presenter's to-do group (``pov_cards.PRESENTER_GROUPS``) is not a use case, so the
+    choice never hides it, and ``for_customer`` drops it entirely: the customer's page has
+    no business showing the SE's checklist.
     """
     rows = _rows(db, env)
     chosen, excluded = pov_use_case_scope.parse(env)
-    groups = (pov_cards.catalog(env.id, products)
-              + pov_runbooks.catalog(env.id, products))
     kept = []
-    for group in groups:
+    for group in _catalog(env.id, products):
+        if for_customer and group.get("presenter"):
+            continue
         cards = []
         for card in group["use_cases"]:
-            card["in_pov"] = pov_use_case_scope.includes(card, chosen, excluded)
+            card["in_pov"] = (bool(group.get("presenter"))
+                              or pov_use_case_scope.includes(card, chosen, excluded))
             if not (card["in_pov"] or include_excluded):
                 continue
             card["progress"] = describe_row(rows.get(card["id"]))
@@ -176,32 +205,42 @@ def _groups(db: Session, env: PovEnvironment, products: dict,
 
 
 def _summarize(groups: list) -> dict:
-    """``{done, skipped, total, cards}`` — and ``total`` counts only what this POV CAN run.
+    """``{done, skipped, total, cards, todo_done, todo_total}`` — and ``total`` counts only
+    what this POV CAN run.
 
     A POV wired into one product has most of the catalog out of scope, and reporting
     "3 of 32" against it would read as a POV that is going badly rather than one that is
     scoped. ``cards`` keeps the honest denominator for anyone who wants it.
+
+    The presenter's to-do list is counted apart (``todo_*``): it is not something the
+    customer evaluates, so it is in neither the numerator nor the denominator of theirs.
     """
-    every = [c for g in groups for c in g["use_cases"] if c.get("in_pov", True)]
+    every = [c for g in groups if not g.get("presenter")
+             for c in g["use_cases"] if c.get("in_pov", True)]
     in_scope = [c for c in every if c["state"] != "out_of_scope"]
+    todo = [c for g in groups if g.get("presenter") for c in g["use_cases"]]
     return {
         "done": sum(1 for c in in_scope if c["progress"]["state"] == "done"),
         "skipped": sum(1 for c in in_scope if c["progress"]["state"] == "skipped"),
         "total": len(in_scope),
         "cards": len(every),
+        "todo_done": sum(1 for c in todo if c["progress"]["state"] == "done"),
+        "todo_total": len(todo),
     }
 
 
 def describe(db: Session, env: PovEnvironment, wireup: dict | None = None,
-             include_excluded: bool = False) -> dict:
+             include_excluded: bool = False, for_customer: bool = False) -> dict:
     """The payload the POV page's Use cases tab reads.
 
     ``include_excluded`` is for the Setup tab's use-case picker only: it keeps the cards
     outside the chosen use cases, flagged ``in_pov: false``, and the summary still counts
-    only the ones in the POV.
+    only the ones in the POV. ``for_customer`` is for the customer's own page, and leaves
+    the presenter's to-do list out.
     """
     products = products_for(db, env, wireup)
-    groups = _groups(db, env, products, include_excluded=include_excluded)
+    groups = _groups(db, env, products, include_excluded=include_excluded,
+                     for_customer=for_customer)
     return {
         "environment_id": env.id,
         "products": products,
@@ -249,13 +288,22 @@ def set_state(db: Session, env: PovEnvironment, card_id: str, *,
         # The runbook registry is the second half of the allowlist, not a fallback: a card
         # id belongs to exactly one of the two, and an id in neither is still refused.
         group_key, card = pov_runbooks.find_card(card_id)
+        if card is not None:
+            # Filed under the group the card is LISTED in, which is what a page renders.
+            group_key = pov_runbooks.get(group_key).group or group_key
     if card is None:
         raise UseCaseError(f"no POV use case with id {card_id!r}")
+    presenter = pov_cards.is_presenter_group(group_key)
+    # The presenter's to-do list is not on the customer's page, so a customer write to one
+    # of its items is a hand-built request rather than a click.
+    if presenter and by_kind == KIND_ACCESSOR:
+        raise UseCaseError(f"{card.title!r} is on the presenter's to-do list, not one of "
+                           f"this POV's use cases.")
     # A card outside this POV's chosen use cases is hidden from every page, so a write to
     # one can only come from a tab opened before the choice changed. Refused rather than
     # stored: a tick nobody can see is not evidence of anything.
     chosen, excluded = pov_use_case_scope.parse(env)
-    if not pov_use_case_scope.includes(
+    if not presenter and not pov_use_case_scope.includes(
             {"id": card.id, "products": card.requires_products}, chosen, excluded):
         raise UseCaseError(f"{card.title!r} is not one of this POV's use cases. Add it on "
                            f"the Setup tab's Use cases chosen step first.")
