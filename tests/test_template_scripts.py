@@ -234,6 +234,50 @@ def test_the_nested_tag_scanner_catches_the_bug_it_was_written_for():
         "the extractor no longer surfaces a nested open tag, so the guard above is blind")
 
 
+# A Jinja output expression whose string literal carries a quote of the OTHER kind, e.g.
+# {{ "'arc'" if x else "''" }}. Autoescape turns that inner quote into an HTML entity.
+_JINJA_EXPR = re.compile(r"\{\{(.*?)\}\}", re.S)
+_QUOTE_IN_LITERAL = re.compile(r""""[^"]*'[^"]*"|'[^']*"[^']*'""")
+
+
+def _escaped_quote_exprs(src: str) -> list:
+    return [m.group(0) for m in _JINJA_EXPR.finditer(src)
+            if _QUOTE_IN_LITERAL.search(m.group(1))
+            and not re.search(r"\|\s*(safe|tojson)", m.group(1))]
+
+
+def test_no_jinja_expression_emits_a_quote_into_an_inline_script():
+    """Autoescape rewrites a quote that a {{ }} expression prints, and the JS dies on it.
+
+    Shipped live in 26.10.29 (the Entra-for-AWS/GCP Windows work, 69dfc47e): the deploy
+    forms on /aws and /gcp defaulted a field with
+
+        entra_join_mode: {{ "'arc'" if windows_arc_entra_default else "''" }},
+
+    which renders as entra_join_mode: &#39;&#39;, -- a SyntaxError on the '&'. The whole
+    block is discarded, awsDashboard / gcpDashboard are never defined, and both pages
+    rendered the header and tab strip with every panel empty. Every other guard here was
+    green: the quotes balance in the SOURCE, it is only the rendered output that breaks.
+
+    Put the quotes outside the expression -- '{{ 'arc' if x else '' }}' -- or use |tojson.
+    """
+    bad = []
+    for path, offset, src in _blocks():
+        for expr in _escaped_quote_exprs(src):
+            bad.append("%s (block at line %d): %s" % (path.relative_to(_ROOT), offset, expr))
+    assert not bad, (
+        "these print a quote through autoescape, which renders as an HTML entity and "
+        "discards the whole script block:\n  " + "\n  ".join(bad))
+
+
+def test_the_escaped_quote_scanner_catches_the_bug_it_was_written_for():
+    """The guard above must fail on the real shape, and pass the fixed one."""
+    shipped = """entra_join_mode: {{ "'arc'" if d else "''" }},"""
+    fixed = """entra_join_mode: '{{ 'arc' if d else '' }}', x: {{ v | tojson }},"""
+    assert _escaped_quote_exprs(shipped), "the scanner no longer sees the shipped defect"
+    assert not _escaped_quote_exprs(fixed), "the scanner flags the fixed form"
+
+
 def test_the_scanner_actually_catches_the_bug_it_was_written_for():
     """A guard that cannot fail is not a guard. This is the literal shipped defect."""
     broken = """

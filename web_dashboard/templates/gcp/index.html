@@ -1855,7 +1855,7 @@ function gcpDashboard() {
       machine_type: 'e2-medium', zone: '', subnetwork: '', disk_size_gb: 20,
       create_external_ip: false,
       register_in_entitle: false, register_in_passwordsafe: false,
-      ad_directory_id: '', ad_ou: '', entra_join_mode: {{ "'arc'" if windows_arc_entra_default else "''" }}, enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
+      ad_directory_id: '', ad_ou: '', entra_join_mode: '{{ 'arc' if windows_arc_entra_default else '' }}', enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
       submitting: false, error: '',
     },
     adDirs: [],
@@ -1908,7 +1908,7 @@ function gcpDashboard() {
       docker_deploy_key_ref: '',
       register_in_entitle: false,
       register_in_passwordsafe: false,
-      ad_directory_id: '', ad_ou: '', entra_join_mode: {{ "'arc'" if windows_arc_entra_default else "''" }}, enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
+      ad_directory_id: '', ad_ou: '', entra_join_mode: '{{ 'arc' if windows_arc_entra_default else '' }}', enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
       ssh_key_secret_override: '',
       sshKeySecrets: [],
     },
@@ -2509,7 +2509,7 @@ function gcpDashboard() {
         jump_group: '', jumpoint_name: '',
         register_in_entitle: false,
         register_in_passwordsafe: false,
-        ad_directory_id: '', ad_ou: '', entra_join_mode: {{ "'arc'" if windows_arc_entra_default else "''" }}, enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
+        ad_directory_id: '', ad_ou: '', entra_join_mode: '{{ 'arc' if windows_arc_entra_default else '' }}', enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
         ssh_key_secret_override: '',
         sshKeySecrets: [],
       };
@@ -2564,7 +2564,7 @@ function gcpDashboard() {
           ? 'e2-medium' : (this.networkOpts.machine_types?.[0] || 'e2-medium'),
         zone: '', subnetwork: '', disk_size_gb: 20, create_external_ip: false,
         register_in_entitle: false, register_in_passwordsafe: false,
-        ad_directory_id: '', ad_ou: '', entra_join_mode: {{ "'arc'" if windows_arc_entra_default else "''" }}, enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
+        ad_directory_id: '', ad_ou: '', entra_join_mode: '{{ 'arc' if windows_arc_entra_default else '' }}', enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
         submitting: false, error: '',
       };
       this.loadAdDirs();

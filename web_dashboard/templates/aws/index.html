@@ -2245,7 +2245,7 @@
         praCredBackend: '', pra_credential_ref: '',
         register_in_entitle: false,
         register_in_passwordsafe: false,
-        ad_directory_id: '', ad_ou: '', entra_join_mode: {{ "'arc'" if windows_arc_entra_default else "''" }}, enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
+        ad_directory_id: '', ad_ou: '', entra_join_mode: '{{ 'arc' if windows_arc_entra_default else '' }}', enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
         ssh_key_secret_override: '',
         sshKeySecrets: [],
       },
@@ -2904,7 +2904,7 @@
           praCredBackend: '', pra_credential_ref: '',
           register_in_entitle: false,
           register_in_passwordsafe: false,
-          ad_directory_id: '', ad_ou: '', entra_join_mode: {{ "'arc'" if windows_arc_entra_default else "''" }}, enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
+          ad_directory_id: '', ad_ou: '', entra_join_mode: '{{ 'arc' if windows_arc_entra_default else '' }}', enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
           ssh_key_secret_override: '',
           sshKeySecrets: [],
         };
