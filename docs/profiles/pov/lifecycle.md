@@ -125,8 +125,8 @@ never end up with looser rules than a cloud VM.
 
 It enqueues the identical `pov_env_destroy` job the Destroy button creates. The reaper
 never learns the teardown order — the share link, then the Entitle integrations, then the
-Password Safe managed systems, then the PRA jump items, then the Gateway, then the broker
-agent, then the environment. That ordering lives in one place and this feature cannot get
+Password Safe managed systems, then the PRA jump items, then the Gateway, then the control
+node's agent, then the environment. That ordering lives in one place and this feature cannot get
 it wrong.
 
 A POV is only ever reaped from `active` or `failed` — the same pair

@@ -235,7 +235,7 @@ def test_a_guest_named_after_the_last_broker_run_is_refused_with_press_broker():
         gs.preflight(db, env, vm_name="dc01", asset=asset)
         raise AssertionError("a guest outside the recorded grant was accepted")
     except gs.GuestStepError as exc:
-        assert "Press Broker" in str(exc) and "timeout" in str(exc)
+        assert "Press Rebuild control node" in str(exc) and "timeout" in str(exc)
     db.close()
 
 
@@ -378,7 +378,7 @@ def test_a_pov_with_no_broker_agent_is_refused():
         gs.preflight(db, env, vm_name="app01", asset="Setup.ps1")
         raise AssertionError("a POV with no broker agent was accepted")
     except gs.GuestStepError as exc:
-        assert "Broker" in str(exc)
+        assert "Install control node" in str(exc)
     db.close()
 
 
@@ -393,7 +393,7 @@ def test_an_agent_that_does_not_report_ansible_is_told_to_re_broker():
         gs.preflight(db, env, vm_name="app01", asset="Setup.ps1")
         raise AssertionError("an agent with no ansible grant was accepted")
     except gs.GuestStepError as exc:
-        assert "policy.yaml" in str(exc) and "Press Broker" in str(exc)
+        assert "policy.yaml" in str(exc) and "Press Rebuild control node" in str(exc)
     db.close()
 
 

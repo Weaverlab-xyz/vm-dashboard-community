@@ -37,12 +37,12 @@ advisory lock. Two cold instances started together can wedge on it. Start this s
 finish, then start the other.
 
 **Its agent endpoint must be reachable from inside your POV environments.** POV wiring works
-by running an agent on a broker VM *inside* the customer environment, which polls outward —
-see [the broker VM](skytap.md#the-broker-vm) for what that VM must carry.
+by running an agent on a control node VM *inside* the customer environment, which polls outward —
+see [the control node VM](skytap.md#the-control-node-vm) for what that VM must carry.
 That means `/api/agent` on this instance has to be reachable over public HTTPS from there.
-The provision refuses the broker step outright when this instance does not know its own
+The provision refuses the control node install outright when this instance does not know its own
 public URL, or when that URL is plaintext: the agent will not sign over `http://`, so a
-broker installed against one would never enrol.
+control node installed against one would never enrol.
 When you host it beyond your LAN, use the gateway-sidecar split in
 [cloud-hosting.md](../../operations/cloud-hosting.md) so the agent endpoint is separate from the UI, and keep
 the UI behind its own allowlist. A UI 404 that returns in microseconds is the allowlist
@@ -71,15 +71,18 @@ catalogue nobody could author from here, and because the parts of the
 image — the metadata runner and a container runtime — had no automation at all.
 
 **A blueprint** is a saved POV recipe: the fields the create form asks, under one name. Pick
-one on the POV page and it fills the form; you still type the POV's own name. For a given
+one on the POV page and it fills the form; you still type the POV's own name. On
+**POV → Templates**, the blueprint form's **Template** picker lists the selected cloud's
+templates alongside the lab platform's, and a blueprint saved from a cloud template builds
+on that cloud. For a given
 *kind* of POV — a Password Safe evaluation, a PRA-only demo — every field except the name
 has the same right answer every time, and two SEs building "the same" POV should build the
 same POV.
 
 | A blueprint carries | It does not carry |
 |---|---|
-| The template, project and broker VM name | The POV's **name** — that is per-POV by definition |
-| … and a blank broker VM name stays blank, which means auto-detect | |
+| The template, project and control node VM name | The POV's **name** — that is per-POV by definition |
+| … and a blank control node VM name stays blank, which means auto-detect | |
 | The idle timeout and an expiry override | The **workgroup**, which decides RBAC and the expiry exempt list. Not something a saved recipe should set silently |
 | The three tenant references | Any **secret** — see below |
 | The POV type — which [use cases](design/use-cases.md#choosing-the-povs-use-cases) it tests | |
@@ -90,9 +93,9 @@ same POV.
 A blueprint supplies values for the fields a request left blank and nothing else. Everything
 after that is the same provision job that runs without one — a blueprint that forked the
 flow would be a second place for the rules about orphaned environments to drift. If you
-typed a broker VM name before picking a recipe, the recipe does not overwrite it — and a
+typed a control node VM name before picking a recipe, the recipe does not overwrite it — and a
 blank one is left blank rather than filled with a default, because blank now *means*
-auto-detect ([which VM runs the agent](skytap.md#the-broker-vm)). A recipe that helpfully
+auto-detect ([which VM runs the agent](skytap.md#the-control-node-vm)). A recipe that helpfully
 wrote `broker` into that field would switch auto-detection off for every POV made from
 it.
 
@@ -105,7 +108,7 @@ error into a job, against an environment that already exists.
 It is tempting to have a blueprint chain the Gateway, Resource Broker and wire-up straight
 off a provision. It cannot, for two reasons that are worth stating rather than discovering:
 
-- **Both installs run through the broker agent**, which does not exist until minutes after
+- **Both installs run through the control node's agent**, which does not exist until minutes after
   the environment comes up. A step enqueued at provision time would find no agent.
 - **Both need a credential that is per-tenant, not per-recipe** — a PRA deploy key and the
   Password Safe installer key. A blueprint that carried those would spread two secrets

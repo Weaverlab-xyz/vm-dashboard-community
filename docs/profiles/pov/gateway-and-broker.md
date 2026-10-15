@@ -10,17 +10,17 @@ The point at which a POV becomes *reachable*. **POV page → the Gateway column 
 
 A POV's VMs live on the lab platform's private network, and every PRA jump item a later
 release creates has to name a Gateway that can see them. This installs one: a BeyondTrust
-Gateway container, on the broker VM from [the broker section](skytap.md#the-broker-vm),
+Gateway container, on the control node VM from [the control node section](skytap.md#the-control-node-vm),
 registered into the PRA tenant [this POV is wired into](standing-one-up.md#the-tenant-registry).
 
 **The dashboard creates the Gateway in PRA for you.** It uses the tenant's API account
 (the client id and secret on the tenant) to create a clustered Linux Gateway, reads the
-Docker deploy key PRA returns for it, and installs it on the broker. The sequence is:
+Docker deploy key PRA returns for it, and installs it on the control node. The sequence is:
 
 1. On the POV, press **edit** in the Gateway column. The name defaults to `POV-<pov name>`;
    change it if you want.
 2. Press **Create & install**. The dashboard creates the Gateway in the customer's PRA,
-   stores its deploy key, and queues the install. The broker agent starts the container
+   stores its deploy key, and queues the install. The control node's agent starts the container
    and the job reports what happened on the VM.
 3. Press **check** to ask PRA whether a node of it is connected.
 
@@ -29,7 +29,7 @@ Gateways (PRA **Management > API Configuration**). Without it the create answers
 the refusal says so.
 
 **A Gateway that already exists under that name is refused, never adopted.** Its deploy key
-would join this POV's broker to a Gateway somebody else made, inside the customer's
+would join this POV's control node to a Gateway somebody else made, inside the customer's
 appliance, and a name proves nothing about who owns it. Pick another name, or use the
 manual path below if it really is this POV's Gateway.
 
@@ -44,12 +44,12 @@ it ever deletes. See [Teardown](#teardown).
 ### Where the deploy key goes, and where it does not
 
 It is stored encrypted with the same Fernet key as every other secret here, and it reaches
-the broker VM over the agent's **sealed per-job channel** — fetched once the job is
+the control node VM over the agent's **sealed per-job channel** — fetched once the job is
 running, bound to a key that exists only for that fetch.
 
 It is deliberately *not* in the job's metadata, *not* in the signed job envelope, and
 above all **not in the lab platform's `user_data`**. That last one is the important
-distinction from [the enrolment code](skytap.md#the-broker-vm), which does
+distinction from [the enrolment code](skytap.md#the-control-node-vm), which does
 ride that channel: an enrolment code is single-use and lives fifteen minutes, whereas a
 PRA deploy key is neither. Every node registered with it joins the same Gateway — that is
 exactly what makes the cloud gateway hosts a cluster — so anyone with read access to the
@@ -57,7 +57,7 @@ environment seeing it once is enough.
 
 ### What the agent will and will not do
 
-The Gateway image comes from the **broker's `policy.yaml`**, never from the job. A job
+The Gateway image comes from the **control node's `policy.yaml`**, never from the job. A job
 says only *install* or *remove*; there is no image field, no container name and no
 privileged flag anywhere in the protocol. That is the same rule the Config-Management and
 hypervisor runners follow, and `examples/remote-agent/policy.example.yaml` documents the
@@ -83,7 +83,7 @@ network fetch of executable content, so `policy.yaml` grants and the operator pr
 That rule is unchanged, and [the remote-agent guide](../../remote-agents.md) still
 describes it.
 
-**A POV broker is the exception, because every clause of that argument inverts.** The
+**A POV control node is the exception, because every clause of that argument inverts.** The
 dashboard built the VM, wrote the `policy.yaml` and *chose the image names*, so leaving the
 fetch to a person who was never told produced `agent_gateway` failing with *"is not present
 on this host"* on a machine nobody had ever logged into. The **bootstrap** therefore pulls
@@ -100,20 +100,20 @@ The agent's **own** image, plus the ones the generated policy names:
 
 **`chrweav/dashboard-agent:latest` is on that list for a different reason, and it is the
 one that used to be missing.** `docker run` fetches an image only when it is *absent*
-locally, so a broker VM resolved that tag exactly once — at first bootstrap — and every
-re-brokering afterwards started the copy cached in the guest's image store on the day the
-VM was built. A broker is long-lived, so **an agent fix could not reach a POV that already
-had an agent**: it merged, it was tagged, `:latest` moved, you pressed **Broker** to pick
+locally, so a control node VM resolved that tag exactly once — at first bootstrap — and every
+rebuild afterwards started the copy cached in the guest's image store on the day the
+VM was built. A control node is long-lived, so **an agent fix could not reach a POV that already
+had an agent**: it merged, it was tagged, `:latest` moved, you pressed **Rebuild control node** to pick
 it up, and the guest ran the same old binary and failed the same old way. Pressing
-**Broker** now refreshes the agent as well as its runners.
+**Rebuild control node** now refreshes the agent as well as its runners.
 
-The pull runs **before** the agent is replaced, so a slow registry costs a re-broker
+The pull runs **before** the agent is replaced, so a slow registry costs a rebuild
 nothing, and it is **non-fatal**: a POV with an enrolled agent and one missing image
 refuses one job and names it, which beats a bootstrap that died at a registry hiccup and
 left no agent at all. If a pull did fail you get the old refusal, which is now accurate —
-`docker pull` it on the broker and run the job again.
+`docker pull` it on the control node and run the job again.
 
-This needs **outbound HTTPS from the broker VM to Docker Hub**, alongside the runtime
+This needs **outbound HTTPS from the control node VM to Docker Hub**, alongside the runtime
 install's own need for either `download.docker.com` or the guest's distro repository.
 
 ### The bootstrap installs a container runtime
@@ -122,16 +122,16 @@ Since 2026-09-16 the injected payload installs one when the guest has none, usin
 block a [template bake](skytap.md#what-the-build-does-about-the-runner-and-docker) runs —
 Docker CE first, `podman` + `podman-docker` from the guest's own repository as the
 fallback. A POV built from a template that baked without a runtime therefore repairs itself
-on the first **Broker** press, instead of sitting at `enrolling` and saying nothing.
+on the first **Install control node** press, instead of sitting at `enrolling` and saying nothing.
 
-It is idempotent and skips a guest that already resolves `docker`, so a healthy broker and
+It is idempotent and skips a guest that already resolves `docker`, so a healthy control node and
 every cloud POV pay nothing for it. It runs before the image pulls (which need a runtime)
-and before the `docker rm -f`, so a slow or failed install costs a re-broker nothing.
+and before the `docker rm -f`, so a slow or failed install costs a rebuild nothing.
 
 **Podman is a supported runtime here.** It serves the same Engine API on the same socket,
 and the agent only ever speaks that API — it never runs the `docker` command. Which is why
 the install **enables and starts** `podman.socket` and then checks that something is
-actually listening: the shim answering while nothing serves the API is a broker that
+actually listening: the shim answering while nothing serves the API is a control node that
 enrols, goes green, and fails every Gateway and Config-Management job.
 
 Enabling alone leaves the guest with no API until its next reboot; starting alone leaves it
@@ -140,33 +140,33 @@ falls back to `podman.service`, the API service running persistently.
 
 ### Telling the dashboard what a guest runs
 
-The broker VM is found by its **OS**, not its name — the only Linux VM in the template,
-unless you name one ([the order it resolves in](skytap.md#the-broker-vm)). That rests on
+The control node VM is found by its **OS**, not its name — the only Linux VM in the template,
+unless you name one ([the order it resolves in](skytap.md#the-control-node-vm)). That rests on
 the OS column being populated, and Skytap does not report a guest OS as a field: the
 dashboard infers it from whatever text comes back and answers "unknown" rather than guess
 wrong.
 
-So a guest whose **OS** column reads `—` on the POV's VMs tab is invisible to the broker's
+So a guest whose **OS** column reads `—` on the POV's VMs tab is invisible to the control node's
 auto-detection, and to the wire-up, guest steps, functional accounts and the Password Safe
 half besides. Set it in that column. It is stored separately from the platform's own
 answer — the platform's stays visible as the blank option — so a later refresh cannot
 overwrite it, and clearing it hands the question back. Only `linux` and `windows`: a third
 value would just be a new way of saying unknown.
 
-### How big the broker VM has to be
+### How big the control node VM has to be
 
 One vCPU is enough. It did not used to be: the Config-Management runner asked for a flat
 2.0 CPUs, and **Docker refuses a create whose CPU limit exceeds the host's CPU count** —
 `400 Range of CPUs is from 0.01 to 1.00, as there are only 1 CPUs available`. So a
-one-vCPU broker could not run Config Management at all, which is the size most lab
+one-vCPU control node could not run Config Management at all, which is the size most lab
 templates give it. The runner now clamps its ceiling to what the host reports.
 
 Memory is the real floor: the runner caps a run at 1 GiB and the controller alone is
-~150-200 MB once its dependencies import, so give the broker **at least 2 GB of RAM**.
+~150-200 MB once its dependencies import, so give the control node **at least 2 GB of RAM**.
 
 ### Why "is it there?" is the wrong question
 
-A Gateway is a **cluster**, not a host. Re-installing on a rebuilt broker VM adds a node
+A Gateway is a **cluster**, not a host. Re-installing on a rebuilt control node VM adds a node
 and PRA parks the dead one, so the name is present either way. The check therefore asks
 whether a *node* is connected, and reports the node count next to it — if that number is
 climbing across reinstalls, old nodes need retiring in the appliance.
@@ -178,21 +178,21 @@ nothing.
 
 ### Upgrading a POV that predates this
 
-A broker enrolled before this release has a `policy.yaml` with no `agent_gateway` grant
+A control node enrolled before this release has a `policy.yaml` with no `agent_gateway` grant
 and no `gateway:` block, and an agent image below **2.4.0**, the build that first carried
-the `agent_gateway` handler. Both are fixed by pressing **Broker** on the POV, which
+the `agent_gateway` handler. Both are fixed by pressing **Rebuild control node** on the POV, which
 pulls the current agent image, re-issues the enrolment and rewrites the policy. The
-install refuses with that remedy rather than queueing a job the broker would decline.
+install refuses with that remedy rather than queueing a job the control node would decline.
 
-Check it landed on the **Agents** page: the broker's reported version is the build that is
-actually running, and it moves on every agent change — a re-broker that leaves it
+Check it landed on the **Agents** page: the control node's reported version is the build that is
+actually running, and it moves on every agent change — a rebuild that leaves it
 unchanged did not fetch anything.
 
 ### Teardown
 
-Destroying a POV queues the Gateway removal first, then revokes the broker, then deletes
+Destroying a POV queues the Gateway removal first, then revokes the control node's agent, then deletes
 the environment. The removal is **tidiness, not reaping** — the environment delete takes
-the container with it either way — so a POV whose broker is already gone still destroys
+the container with it either way — so a POV whose control node is already gone still destroys
 cleanly, with a line in the job log saying the PRA-side node will linger.
 
 The stored deploy key is cleared synchronously, because that is local state and leaving a
@@ -213,8 +213,8 @@ Broker column → edit.**
 
 A Password Safe Resource Broker gives the tenant reach into the POV's private network, the
 way [the Gateway](#the-pov-gateway) does for PRA. It is a **Windows** program — Server 2019
-or 2022 x64 — so it does not live on the broker VM, which is a Linux Docker host. A POV
-therefore has two special VMs: the Linux broker running the agent and the Gateway, and a
+or 2022 x64 — so it does not live on the control node VM, which is a Linux Docker host. A POV
+therefore has two special VMs: the Linux control node running the agent and the Gateway, and a
 Windows host running the Resource Broker.
 
 **The dashboard cannot download the installer.** The package is generated per Password Safe
@@ -312,14 +312,14 @@ that was fine.
 ### What it grants, and why the scope is narrow
 
 Installing the broker runs a **playbook, as root, on a host in the customer's
-environment**. That is a much larger grant than the discovery sweep the broker already has,
+environment**. That is a much larger grant than the discovery sweep the control node's agent already has,
 so it gets its own target list in the generated `policy.yaml` — scoped to the named
 Resource Broker host alone, or to the POV's Windows guests before one has been named, on
-5985/5986 and nothing else. The Linux broker's own address is deliberately not in it.
+5985/5986 and nothing else. The Linux control node's own address is deliberately not in it.
 
-A POV brokered before this release has no `agent_ansible` grant at all. Press **Broker** to
-rewrite its policy; the install refuses with that remedy rather than queueing a job the
-broker would decline.
+A POV whose control node was installed before this release has no `agent_ansible` grant at
+all. Press **Rebuild control node** to rewrite its policy; the install refuses with that remedy rather than queueing a job the
+control node would decline.
 
 ### How long it takes
 
@@ -343,19 +343,19 @@ to have reaped it.
 ## Failure modes
 
 **The Gateway install refuses with "its policy.yaml predates the Gateway grant".** The
-broker was enrolled before this release. Press **Broker** — see
+control node was enrolled before this release. Press **Rebuild control node** — see
 [upgrading](#upgrading-a-pov-that-predates-this).
 
 **A job fails with an error that a merged fix was supposed to have removed** — the
 canonical one being Config Management refused with *"could not create the Ansible runner
-(400): Range of CPUs is from 0.01 to 1.00"*. The broker is running an older agent than
+(400): Range of CPUs is from 0.01 to 1.00"*. The control node is running an older agent than
 the release notes describe. Compare the version on the **Agents** page against the one in
-the build you expect, and press **Broker**; before this release no amount of re-brokering
+the build you expect, and press **Rebuild control node**; before this release no amount of rebuilding
 would have changed it, because nothing ever re-pulled the agent image.
 
 **The Gateway registers online and every tunnel times out.** `privileged` is missing from
-the broker's `gateway:` block, so the container has no `NET_ADMIN`/`/dev/net/tun`. A
-re-broker rewrites the policy with it.
+the control node's `gateway:` block, so the container has no `NET_ADMIN`/`/dev/net/tun`. A
+control node rebuild rewrites the policy with it.
 
 **The Resource Broker install hangs and the job times out.** Almost always a missing
 `ZONE` — the installer prompts for it and nothing can answer. The dashboard refuses to
@@ -367,5 +367,5 @@ that VM is empty, or holds something the parser will not guess at. See
 [there is no login field](#there-is-no-login-field-on-purpose).
 
 **The Gateway check says `disconnected` but the container is running.** Look at the node
-count. A rebuilt broker VM adds a node and PRA keeps the dead one; the Gateway is a
+count. A rebuilt control node VM adds a node and PRA keeps the dead one; the Gateway is a
 cluster, and old nodes are retired in the appliance, not here.

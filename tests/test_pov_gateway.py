@@ -166,7 +166,7 @@ def test_a_pov_with_no_broker_is_refused_with_the_button_to_press():
         pov_gateway.preflight(db, env)
         raise AssertionError("a POV with no broker was accepted")
     except pov_gateway.GatewayInstallError as exc:
-        assert "Press Broker" in str(exc)
+        assert "Press Install control node" in str(exc)
     finally:
         db.close()
 
@@ -195,7 +195,7 @@ def test_an_old_broker_is_refused_with_the_remedy_naming_the_button():
         pov_gateway.preflight(db, env)
         raise AssertionError("an old agent was accepted")
     except pov_gateway.GatewayInstallError as exc:
-        assert "2.4" in str(exc) and "Broker" in str(exc)
+        assert "2.4" in str(exc) and "Rebuild control node" in str(exc)
     finally:
         db.close()
 
@@ -209,7 +209,7 @@ def test_a_broker_whose_policy_predates_the_grant_is_refused():
         pov_gateway.preflight(db, env)
         raise AssertionError("a policy without the grant was accepted")
     except pov_gateway.GatewayInstallError as exc:
-        assert "policy.yaml predates" in str(exc) and "Broker" in str(exc)
+        assert "policy.yaml predates" in str(exc) and "Rebuild control node" in str(exc)
     finally:
         db.close()
 

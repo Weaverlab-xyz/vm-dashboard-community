@@ -466,7 +466,7 @@ def test_a_broker_that_may_not_run_config_management_is_refused_with_the_remedy(
         ea.preflight(db, env)
         raise AssertionError("a broker with no ansible grant was accepted")
     except ea.EntitleAgentError as exc:
-        assert "policy.yaml" in str(exc) and "Broker" in str(exc)
+        assert "policy.yaml" in str(exc) and "Rebuild control node" in str(exc)
     finally:
         db.close()
 
@@ -484,7 +484,7 @@ def test_a_host_outside_the_policy_the_broker_holds_says_press_broker():
         ea.preflight(db, env)
         raise AssertionError("a host outside the written policy was accepted")
     except ea.EntitleAgentError as exc:
-        assert "Press Broker" in str(exc)
+        assert "Press Rebuild control node" in str(exc)
         assert "do not" in str(exc) and "policy.yaml" in str(exc)
     finally:
         db.close()

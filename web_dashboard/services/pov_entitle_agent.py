@@ -715,9 +715,9 @@ def preflight(db: Session, env: PovEnvironment) -> tuple:
     reported = agent.reported_job_types_list
     if reported and "agent_ansible" not in reported:
         raise EntitleAgentError(
-            f"the broker agent {agent.name!r} reports it may run "
+            f"the control node's agent {agent.name!r} reports it may run "
             f"{', '.join(reported) or 'nothing'} — its policy.yaml predates the Config "
-            f"Management grant. Press Broker on this POV to rewrite it, then try again.")
+            f"Management grant. Press Rebuild control node on this POV to rewrite it, then try again.")
     if "agent_ansible" not in agent_service.allowed_job_types(agent):
         raise EntitleAgentError(
             f"this dashboard does not permit {agent.name!r} to run Config Management. "
@@ -750,9 +750,9 @@ def preflight(db: Session, env: PovEnvironment) -> tuple:
     if granted and (vm.private_ip or "").strip() not in granted:
         raise EntitleAgentError(
             f"{vm.name} is this POV's Entitle agent host, but its address is not in the "
-            f"policy the broker agent was last given, so the agent will refuse the run. "
-            f"Press Broker on this POV to rewrite the policy, then try again — do not "
-            f"edit policy.yaml on the broker VM, the next Broker run replaces it.")
+            f"policy the control node's agent was last given, so the agent will refuse the "
+            f"run. Press Rebuild control node on this POV to rewrite the policy, then try again "
+            f"— do not edit policy.yaml on the control node, the next rebuild replaces it.")
     return agent, vm, tenant
 
 

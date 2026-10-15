@@ -262,9 +262,9 @@ def preflight(db: Session, env: PovEnvironment, *, vm_name: str, asset: str,
     reported = agent.reported_job_types_list
     if reported and "agent_ansible" not in reported:
         raise GuestStepError(
-            f"the broker agent {agent.name!r} reports it may run "
+            f"the control node's agent {agent.name!r} reports it may run "
             f"{', '.join(reported) or 'nothing'} — its policy.yaml predates the "
-            f"guest-step grant. Press Broker on this POV to rewrite it, then try again.")
+            f"guest-step grant. Press Rebuild control node on this POV to rewrite it, then try again.")
     if "agent_ansible" not in agent_service.allowed_job_types(agent):
         raise GuestStepError(
             f"this dashboard does not permit {agent.name!r} to run Config Management. "
@@ -312,7 +312,7 @@ def preflight(db: Session, env: PovEnvironment, *, vm_name: str, asset: str,
     if granted and (vm.private_ip or "").strip() not in granted:
         raise GuestStepError(
             f"{vm.name} is on this POV's guest-step list but its address is not in the "
-            f"policy the broker agent was last given. Press Broker to rewrite it — "
+            f"policy the control node's agent was last given. Press Rebuild control node to rewrite it — "
             f"without that the run reaches the agent and fails as a connection timeout.")
     return agent, vm
 

@@ -362,7 +362,7 @@ def test_clearing_a_role_stores_a_blank_so_a_seed_cannot_restore_it():
 def test_a_template_refuses_a_cell_role_on_the_broker_or_a_windows_vm():
     base = {"image_id": "ami-1", "instance_type": "t3.medium"}
     for vm, needle in (
-            ({"name": "b", "role": "broker", "cell_role": "ot-sim", **base}, "broker"),
+            ({"name": "b", "role": "broker", "cell_role": "ot-sim", **base}, "control node"),
             ({"name": "w", "os_family": "windows", "cell_role": "vyos", **base}, "Linux")):
         try:
             pov_cloud_template_service._validate_vms([vm])

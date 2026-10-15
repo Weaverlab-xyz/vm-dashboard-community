@@ -384,6 +384,16 @@ def known_regions(cloud: str) -> list:
 
 async def list_templates(cloud: str) -> list:
     """The cloud POV templates for this cloud, in the shape READ_CONTRACT asks for."""
+    return list_templates_sync(cloud)
+
+
+def list_templates_sync(cloud: str) -> list:
+    """``list_templates`` for a caller on a worker thread.
+
+    `GET /api/pov/templates` reads a cloud's templates through this rather than the
+    platform-listing cache: they are rows in our own database, so the cache only added a
+    TTL during which a template saved a moment ago was missing from every picker.
+    """
     from ..database import PovCloudTemplate, PovCloudTemplateVM, SessionLocal
 
     db = SessionLocal()
@@ -448,7 +458,7 @@ async def create_environment(cloud: str, template_id: str, name: str, *,
 
     if sum(1 for v in vm_rows if (v.role or "") == "broker") > 1:
         raise CloudEnvError(
-            f"template {row.name!r} declares more than one broker VM; exactly one VM "
+            f"template {row.name!r} declares more than one control node; exactly one VM "
             f"carries the dashboard agent, the Gateway and the Resource Broker")
 
     # Targets only. The broker VM is created later, by `create_broker_vm`, because its
@@ -459,8 +469,8 @@ async def create_environment(cloud: str, template_id: str, name: str, *,
     specs = vm_specs(row, vm_rows, cloud, region)
     if not specs:
         raise CloudEnvError(
-            f"template {row.name!r} declares only a broker VM. A POV needs at least one "
-            f"target for the broker to reach, or there is nothing to demonstrate.")
+            f"template {row.name!r} declares only a control node. A POV needs at least one "
+            f"target for the control node to reach, or there is nothing to demonstrate.")
 
     logger.info("POV %s: creating network in %s (%s)", env_id, region, cidr)
     if getattr(row, "purdue_zones", False):
@@ -508,13 +518,13 @@ async def create_broker_vm(cloud: str, env_id: str, template_id: str,
                      bootstrap=bootstrap)
     if not specs:
         raise CloudEnvError(
-            f"template {row.name!r} declares no broker VM, so there is nowhere for the "
-            f"agent to run. Edit the template and mark one VM as the broker.")
+            f"template {row.name!r} declares no control node, so there is nowhere for "
+            f"the agent to run. Edit the template and mark one VM as the control node.")
 
     network = await mod.read_network(env_id, region)
     if not network:
         raise CloudEnvError(
-            f"the network for {env_id} could not be read back, so a broker VM cannot be "
+            f"the network for {env_id} could not be read back, so a control node cannot be "
             f"placed in it. Check the environment still exists in {region}.")
 
     await mod.remove_vms(env_id, region, [specs[0]["name"]])

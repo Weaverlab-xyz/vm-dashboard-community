@@ -707,17 +707,17 @@ def _status(report, check):
 
 def test_a_template_with_a_broker_and_a_workload_passes():
     report = b.check_contract([_vm("broker"), _vm("app")], "broker")
-    assert _status(report, "broker VM") == b.CHECK_PASS, report
-    assert _status(report, "broker network") == b.CHECK_PASS, report
+    assert _status(report, "control node") == b.CHECK_PASS, report
+    assert _status(report, "control node network") == b.CHECK_PASS, report
     assert _status(report, "workload VMs") == b.CHECK_PASS, report
     assert b.contract_ok(report), report
 
 
 def test_no_broker_vm_is_a_failure_that_names_what_it_found():
     report = b.check_contract([_vm("app"), _vm("db")], "broker")
-    assert _status(report, "broker VM") == b.CHECK_FAIL, report
+    assert _status(report, "control node") == b.CHECK_FAIL, report
     assert not b.contract_ok(report), report
-    detail = next(r["detail"] for r in report if r["check"] == "broker VM")
+    detail = next(r["detail"] for r in report if r["check"] == "control node")
     assert "app" in detail and "db" in detail, detail
 
 
@@ -725,25 +725,25 @@ def test_the_broker_match_is_exact_not_fuzzy():
     """'contains broker' also matches a customer VM called password-broker, and the cost of
     that wrong answer is an agent installed on a machine nobody expected."""
     report = b.check_contract([_vm("password-broker")], "broker")
-    assert _status(report, "broker VM") == b.CHECK_FAIL, report
+    assert _status(report, "control node") == b.CHECK_FAIL, report
 
 
 def test_the_broker_match_is_case_insensitive():
     report = b.check_contract([_vm("Broker"), _vm("app")], "broker")
-    assert _status(report, "broker VM") == b.CHECK_PASS, report
+    assert _status(report, "control node") == b.CHECK_PASS, report
 
 
 def test_a_manual_network_is_a_failure():
     """The metadata service answers ONLY on automatic networks. On a manual one the guest
     receives no bootstrap at all, which looks exactly like a missing runner."""
     report = b.check_contract([_vm("broker", network_type="manual"), _vm("app")], "broker")
-    assert _status(report, "broker network") == b.CHECK_FAIL, report
+    assert _status(report, "control node network") == b.CHECK_FAIL, report
     assert not b.contract_ok(report), report
 
 
 def test_an_unknown_network_type_warns_rather_than_assuming_good():
     report = b.check_contract([_vm("broker", network_type=""), _vm("app")], "broker")
-    assert _status(report, "broker network") == b.CHECK_WARN, report
+    assert _status(report, "control node network") == b.CHECK_WARN, report
     # A warning must not block a bake.
     assert b.contract_ok(report), report
 
@@ -769,7 +769,7 @@ def test_a_broker_only_template_warns_about_having_nothing_to_demonstrate():
 
 def test_the_default_broker_name_is_used_when_none_is_given():
     report = b.check_contract([_vm(pov_broker.DEFAULT_BROKER_VM_NAME), _vm("app")], "")
-    assert _status(report, "broker VM") == b.CHECK_PASS, report
+    assert _status(report, "control node") == b.CHECK_PASS, report
 
 
 # ── prepare_broker_vm ────────────────────────────────────────────────────────
@@ -1012,7 +1012,7 @@ def test_an_unreachable_host_still_retries_the_whole_set():
                 raise AssertionError("an unreachable host must fail")
     finally:
         b._SSH_ATTEMPTS = saved
-    assert "could not reach the broker VM" in msg, msg
+    assert "could not reach the control node" in msg, msg
     assert len(waits) == 2, f"expected attempts-1 waits, got {waits}"
     assert ssh.attempts == ["root", "root", "root"], ssh.attempts
 

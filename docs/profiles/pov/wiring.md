@@ -175,17 +175,17 @@ a private one, and for a long time the agent was the one prerequisite this dashb
 not satisfy.
 
 It installs one now. **Tenants column → install agent**, beside the POV's Entitle tenant.
-It runs through the POV's broker agent as a Config-Management job, so there is nothing new
-on the wire and no agent image to rebuild — but the broker's `policy.yaml` has to carry
-the grant, so a POV brokered before this shipped needs **Broker** pressed once to rewrite
-it. The refusal says so.
+It runs through the POV's control node agent as a Config-Management job, so there is nothing new
+on the wire and no agent image to rebuild — but the control node's `policy.yaml` has to carry
+the grant, so a POV whose control node was installed before this shipped needs **Rebuild
+control node** pressed once to rewrite it. The refusal says so.
 
 That grant is a **closed list of addresses**, not a job type, so pointing the POV at a
-*different* host needs **Broker** pressed again too. The install checks the host against
-the policy the last Broker run actually wrote and refuses with that remedy — worth knowing
+*different* host needs **Rebuild control node** pressed again too. The install checks the host against
+the policy the last control node install actually wrote and refuses with that remedy — worth knowing
 because the agent's own refusal, if it gets that far, tells you to add a line to
 `policy.yaml` and restart the agent. On a POV do not: that file is written by the
-dashboard's bootstrap and the next Broker run replaces whatever you put there.
+dashboard's bootstrap and the next control node rebuild replaces whatever you put there.
 
 What it does, on a **Linux** guest named on the POV (default `entitle`):
 
@@ -233,16 +233,16 @@ succeed and leave the run failing exactly as before. The task installs `python3.
 repos are unreachable, the task fails by name and the remedy is to bake `python3` into
 the template.
 
-**Not the broker VM.** The named host defaults to a VM called `entitle` and the guessed
-fallback deliberately excludes the broker: k3s brings its own containerd and its own
-iptables rules, and the broker is the one guest whose job is to keep alive the channel
+**Not the control node VM.** The named host defaults to a VM called `entitle` and the guessed
+fallback deliberately excludes the control node: k3s brings its own containerd and its own
+iptables rules, and the control node is the one guest whose job is to keep alive the channel
 this install runs over. Nothing stops you naming it on purpose.
 
-The exclusion is by **enrolled VM id as well as by name**, because the broker no longer
+The exclusion is by **enrolled VM id as well as by name**, because the control node no longer
 has to be named anything in particular — it is auto-detected as the only Linux VM when
 nothing is typed, so on a template whose Docker host is called `BtPocLin01` a name
 comparison would miss it entirely. It works the other way round too: a guest already
-named as the Entitle host is excluded from the *broker's* auto-detection, so the two
+named as the Entitle host is excluded from the *control node's* auto-detection, so the two
 never quietly select each other.
 
 **Teardown destroys the token**, and it has to. Entitle refuses to mint a name it already
@@ -268,7 +268,7 @@ tenant when it does not.
 
 Destroying a POV removes the Entitle integrations **first**, then off-boards the managed
 systems, then removes the jump items, then destroys the Entitle agent's token — all before
-the Gateway, the broker agent and the environment itself.
+the Gateway, the control node agent and the environment itself.
 
 The agent token goes *after* the integrations and not with them, because an integration
 names the agent it routes through: reversed, Entitle would be left holding integrations
@@ -341,7 +341,7 @@ If it still reports nothing — and it often will, because the OS is inferred fr
 text the platform hands back rather than read from a field — **set it yourself in the OS
 column on the POV's VMs tab**. That is stored separately from the platform's own answer,
 so it survives every later refresh, and it unblocks this VM everywhere at once: the jump
-items, the Password Safe half, guest steps, functional accounts, and the broker's own
+items, the Password Safe half, guest steps, functional accounts, and the control node's own
 auto-detection. Refreshing forever is not the remedy for a platform that will never say.
 
 **Every VM's Password Safe half failed with `is not support. Use https`.** Fixed — the

@@ -41,6 +41,9 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 # name reads as an FQDN to half the tooling downstream and as a label to the other half.
 _VM_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
+# "broker" is the stored value of the role the UI and docs call the CONTROL NODE. Renamed on
+# the surface only (it read as Password Safe's Resource Broker); the value is in every saved
+# template row and in `broker_vm_name` across the POV tables, so it stays.
 VALID_ROLES = ("target", "broker")
 VALID_OS_FAMILIES = ("linux", "windows")
 
@@ -165,7 +168,7 @@ def _validate_vms(vms: list) -> list:
             raise CloudTemplateError(f"VM {name!r}: {exc}") from exc
         if cell_role and role == "broker":
             raise CloudTemplateError(
-                f"VM {name!r} is the broker and a {cell_role}; the broker carries the "
+                f"VM {name!r} is the control node and a {cell_role}; the control node carries the "
                 f"agent, the Gateway and the Resource Broker, so a cell image goes on "
                 f"a target")
 
@@ -196,13 +199,13 @@ def _validate_vms(vms: list) -> list:
 
     if brokers > 1:
         raise CloudTemplateError(
-            f"{brokers} VMs are marked as the broker. Exactly one VM carries the "
+            f"{brokers} VMs are marked as the control node. Exactly one VM carries the "
             f"dashboard agent, the Gateway and the Resource Broker.")
     if brokers == 0:
         # Not a refusal: a template of pure targets is a legitimate thing to build, and a
         # warning in a JSON response is a warning nobody reads. The broker install refuses
         # by name later, which is the visible version of this.
-        logger.info("cloud template saved with no broker VM; its POV will have no agent")
+        logger.info("cloud template saved with no control node VM; its POV will have no agent")
     return clean
 
 
