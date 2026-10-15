@@ -141,38 +141,12 @@ async def verify() -> tuple[bool, str]:
 
 
 def _provisioning_split() -> bool:
-    """SPIFFE identity for everyday calls, Workload Credentials for jobs
-    (``wlc_aws_everyday_source = federation`` with AWS dynamic credentials on)."""
-    from . import workload_credential_lease as leases
-    return leases.dynamic_enabled("aws") and leases.everyday_from_federation("aws")
+    return env.jobs_lease_split("aws")
 
 
 async def _verify_provisioning_leg() -> tuple[bool, str]:
-    """The jobs' credential, proven WITHOUT minting it.
-
-    ``test_connection`` is ``GET /session``: it authenticates to Workload Credentials the
-    way a mint would — on the SPIFFE path, with the dashboard's ``wlc.jwt`` — and is
-    unmetered. A real issuance is billed, so a button an operator is told to press until
-    it goes green must never call ``generate``; the lease itself is minted when the first
-    job needs it, and its outcome shows under Workload Credentials → Active credential
-    source.
-    """
-    from . import workload_credentials_service as wlc
-    if not wlc.configured():
-        return False, ("Jobs take a Workload Credentials lease, but Workload Credentials is "
-                       "not configured: set " + ", ".join(wlc.missing_settings()) + ".")
-    try:
-        await aws_service._to_thread(wlc.test_connection)
-    except wlc.WorkloadCredentialsError as exc:
-        return False, f"Jobs take a Workload Credentials lease, and Workload Credentials refused: {exc}"
-    except Exception:  # noqa: BLE001
-        logger.warning("Workload Credentials session check failed", exc_info=True)
-        return False, ("Jobs take a Workload Credentials lease, and Workload Credentials did "
-                       "not answer. Check its API URL and site.")
-    from . import workload_credential_lease as leases
-    name = leases.secret_name_for("aws", leases.PURPOSE_PROVISION) or "(no secret named)"
-    return True, (f"Jobs take a Workload Credentials lease from {name}: authenticated, "
-                  f"not minted (a lease is billed; the first job mints it).")
+    # Resolved at call time, not bound as a default, so a patched _to_thread is honoured.
+    return await env.verify_jobs_lease("aws", aws_service._to_thread)
 
 
 # ── create ───────────────────────────────────────────────────────────────────

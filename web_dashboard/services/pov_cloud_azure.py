@@ -39,6 +39,7 @@ import base64
 import ipaddress
 import itertools
 import logging
+import re
 import secrets
 import string
 
@@ -221,6 +222,68 @@ async def _clients():
 
 # ── verify ───────────────────────────────────────────────────────────────────
 
+# Entra's AADSTS codes for a refused CLIENT ASSERTION, by what fixes them. A federated
+# credential that does not match and an issuer whose keys Entra could not use are fixed
+# in different places — the app's federated credentials blade vs the dashboard's gateway
+# and SPIRE_JWT_ISSUER — so the generic "did not answer" would send the operator to the
+# wrong one. Codes: learn.microsoft.com/entra/identity-platform/reference-error-codes.
+_AADSTS_HINTS = {
+    "AADSTS70021": ("no federated identity credential on that app matches this token's "
+                    "issuer, subject and audience — check the credential "
+                    "terraform/dashboard_federation/azure created"),
+    "AADSTS700211": "the federated credential names a different issuer than the token's",
+    "AADSTS700212": "the token's audience is not api://AzureADTokenExchange",
+    "AADSTS700213": "the federated credential names a different subject than the token's",
+    "AADSTS700222": "the federated credential names a different subject than the token's",
+    "AADSTS50027": "Entra could not validate the token: check <issuer>/keys is reachable",
+    "AADSTS700024": "the dashboard's token has expired: its token loop is not refreshing",
+    "AADSTS7000215": "the stored client secret is wrong or expired",
+    "AADSTS7000222": "the stored client secret has expired",
+    "AADSTS700016": "no app with that client id exists in that tenant",
+    "AADSTS90002": "that tenant id does not exist",
+}
+
+
+def _aadsts_message(exc: Exception) -> str:
+    """The AADSTS code in an Entra refusal, with what fixes it — or "" if there is none.
+    Only the code and our own hint reach the response, never the SDK's full text."""
+    found = re.search(r"AADSTS\d+", str(exc))
+    if not found:
+        return ""
+    code = found.group(0)
+    hint = _AADSTS_HINTS.get(code, "see Entra's error-code reference for it")
+    if code == "AADSTS50027":
+        from . import dashboard_identity
+        hint = (f"Entra could not validate the dashboard's token: check "
+                f"{dashboard_identity.issuer()}/keys is reachable from the internet")
+    return f"{code}: {hint}"
+
+
+def _credential_label() -> str:
+    """Which credential ``azure_service._ensure_creds`` answers request-path calls with,
+    in words — the same order: a Workload Credentials lease (unless the everyday credential
+    is the SPIFFE identity), then a stored secret, then federation."""
+    from . import cloud_federation, config_service
+    from . import workload_credential_lease as leases
+    if leases.dynamic_enabled("azure") and not leases.everyday_from_federation("azure"):
+        return "a Workload Credentials lease"
+    app = (config_service.get("azure_client_id") or "").strip()
+    as_app = f" as app {app}" if app else ""
+    if cloud_federation.source("azure") == "stored key":
+        return f"a stored client secret{as_app}"
+    if cloud_federation.active("azure"):
+        return f"the dashboard's SPIFFE identity{as_app}"
+    return "Password Safe or the environment"
+
+
+def _not_configured_message() -> str:
+    from . import cloud_federation
+    why = cloud_federation.reason("azure")
+    return ("No Azure credential is configured. Choose Client secret and paste one, or "
+            "choose SPIFFE identity and set the client id, tenant and subscription"
+            + (f" (federation is not in use: {why})." if why else "."))
+
+
 async def verify() -> tuple[bool, str]:
     """Prove the credential and the subscription, without a side effect.
 
@@ -229,9 +292,9 @@ async def verify() -> tuple[bool, str]:
     and the fix for that is structural rather than a wider except.
     """
     if not configured():
-        return False, ("No Azure credentials are configured. Add them in "
-                       "Settings → Integrations → POV cloud provider.")
+        return False, _not_configured_message()
     region = default_region()
+    label = _credential_label()
     try:
         resource, _compute, _network, sub_id = await _clients()
         # A bounded read that proves the credential AND what the subscription can see.
@@ -240,13 +303,20 @@ async def verify() -> tuple[bool, str]:
         await azure_service._to_thread(
             lambda: list(itertools.islice(resource.resource_groups.list(), 1)))
     except AzureError as exc:
-        return False, f"Azure refused the call: {exc}"
-    except Exception:  # noqa: BLE001
+        return False, f"Azure refused the call made with {label}: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        refused = _aadsts_message(exc)
+        if refused:
+            return False, f"Entra ID refused {label}. {refused}."
         logger.warning("Azure POV verify failed", exc_info=True)
-        return False, ("Azure did not answer. Check the client id, secret, tenant and "
-                       "subscription, and that the service principal has Contributor on "
-                       "the subscription.")
-    return True, f"Connected to Azure subscription {sub_id} ({region})."
+        return False, (f"Azure did not answer the call made with {label}. Check the "
+                       f"client id, tenant and subscription, and the app's role on the "
+                       f"subscription.")
+    msg = f"Connected to Azure subscription {sub_id} ({region}), using {label}."
+    if not env.jobs_lease_split("azure"):
+        return True, msg
+    ok, wlc_msg = await env.verify_jobs_lease("azure", azure_service._to_thread)
+    return ok, f"{msg} {wlc_msg}"
 
 
 def _custom_data(payload: str):

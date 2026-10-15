@@ -632,3 +632,41 @@ async def wait_for_runstate(cloud: str, env_id: str, target: str,
     raise CloudEnvError(
         f"{env_id} did not reach {target!r} within {timeout_s // 60} minutes; its VMs "
         f"report {seen}. Check the {cloud} console, then retry the action.")
+
+
+# ── Test connection: the jobs' credential, when it is a Workload Credentials lease ──
+
+def jobs_lease_split(cloud: str) -> bool:
+    """SPIFFE identity for ``cloud``'s everyday calls, Workload Credentials for its jobs
+    (``wlc_<cloud>_everyday_source = federation`` with that cloud's dynamic tier on)."""
+    from . import workload_credential_lease as leases
+    return leases.dynamic_enabled(cloud) and leases.everyday_from_federation(cloud)
+
+
+async def verify_jobs_lease(cloud: str, run_in_thread) -> tuple[bool, str]:
+    """The jobs' credential, proven WITHOUT minting it. Shared by every driver's verify.
+
+    ``test_connection`` is ``GET /session``: it authenticates to Workload Credentials the
+    way a mint would — on the SPIFFE path, with the dashboard's ``wlc.jwt`` — and is
+    unmetered. A real issuance is billed, so a button an operator is told to press until
+    it goes green must never call ``generate``; the lease itself is minted when the first
+    job needs it, and its outcome shows under Workload Credentials → Active credential
+    source. ``run_in_thread`` is the calling driver's own ``_to_thread``, so the HTTP call
+    runs on that cloud's pool.
+    """
+    from . import workload_credential_lease as leases
+    from . import workload_credentials_service as wlc
+    if not wlc.configured():
+        return False, ("Jobs take a Workload Credentials lease, but Workload Credentials is "
+                       "not configured: set " + ", ".join(wlc.missing_settings()) + ".")
+    try:
+        await run_in_thread(wlc.test_connection)
+    except wlc.WorkloadCredentialsError as exc:
+        return False, f"Jobs take a Workload Credentials lease, and Workload Credentials refused: {exc}"
+    except Exception:  # noqa: BLE001
+        logger.warning("Workload Credentials session check failed", exc_info=True)
+        return False, ("Jobs take a Workload Credentials lease, and Workload Credentials did "
+                       "not answer. Check its API URL and site.")
+    name = leases.secret_name_for(cloud, leases.PURPOSE_PROVISION) or "(no secret named)"
+    return True, (f"Jobs take a Workload Credentials lease from {name}: authenticated, "
+                  f"not minted (a lease is billed; the first job mints it).")
