@@ -258,9 +258,30 @@ def test_the_agent_sync_scenario():
     assert stored["scope"] == deep, "a deep VMX path must survive the round trip"
     _ok("the guest OS code and a long VMX path both round-trip through the cache")
 
+    # Agents report an address only for a running guest, so a stopped VM's page carries
+    # none. Overwriting with that absence erased the only key a synced VM matches its
+    # Password Safe record by, and a powered-off lab listed every record as an orphan.
+    def _ips():
+        return [v for v in hss.list_vms(db, cid) if v["vm_id"] == "OS01"][0]["ip_addresses"]
+
+    hss._upsert(db, cid, [{"vm_id": "OS01", "name": "labelled", "power_state": "on",
+                           "ip_addresses": ["192.168.68.10"]}], datetime.utcnow())
+    hss._upsert(db, cid, [{"vm_id": "OS01", "name": "labelled", "power_state": "off"}],
+                datetime.utcnow())
+    assert _ips() == ["192.168.68.10"], "a stopped VM's page erased its last-known address"
+    hss._upsert(db, cid, [{"vm_id": "OS01", "name": "labelled", "ip_addresses": []}],
+                datetime.utcnow())
+    assert _ips() == ["192.168.68.10"], "an empty address list is not a new address"
+    _ok("a page with no addresses keeps the last-known ones")
+
+    hss._upsert(db, cid, [{"vm_id": "OS01", "name": "labelled",
+                           "ip_addresses": ["192.168.68.44"]}], datetime.utcnow())
+    assert _ips() == ["192.168.68.44"], "a re-addressed guest kept its old address"
+    _ok("a page that does carry addresses replaces them whole")
+
     db.close()
     ran = len(_STEPS) - start
-    assert ran == 18, f"expected 18 checkpoints, ran {ran}"
+    assert ran == 20, f"expected 20 checkpoints, ran {ran}"
 
 
 if __name__ == "__main__":

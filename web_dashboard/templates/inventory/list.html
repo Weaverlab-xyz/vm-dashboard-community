@@ -314,19 +314,35 @@
      workgroup-filtered rather than admin-gated, and an orphan is by definition a record
      the row filter cannot vet, so listing one would disclose a machine the caller is not
      entitled to see on the page above. The API simply omits the key for a non-admin. #}
-  <div x-show="(ps.orphans || []).length" x-cloak class="mb-6">
-    <details class="bg-white rounded-xl border border-gray-200 shadow-sm">
+  <div x-show="(ps.orphans || []).length" x-cloak class="mb-6 space-y-2">
+    <details x-show="psOrphans(true).length" class="bg-white rounded-xl border border-gray-200 shadow-sm">
       <summary class="px-4 py-3 text-sm text-gray-700 cursor-pointer select-none">
-        <span class="font-medium" x-text="(ps.orphans || []).length"></span>
-        Password Safe record(s) match nothing in this inventory
-        <span class="text-gray-400 font-normal">— often a host that was decommissioned without removing it</span>
+        <span class="font-medium" x-text="psOrphans(true).length"></span>
+        Password Safe host record(s) match nothing in this inventory
+        <span class="text-gray-400 font-normal">— often a host that was decommissioned without removing it, or a synced VM that has never reported an address</span>
       </summary>
       <div class="border-t border-gray-100 px-4 py-3 space-y-1 max-h-64 overflow-y-auto">
-        <template x-for="o in (ps.orphans || [])" :key="o.kind + o.object_id">
+        <template x-for="o in psOrphans(true)" :key="o.kind + o.object_id">
           <p class="text-xs text-gray-600">
             <span class="font-medium" x-text="o.name || ('#' + o.object_id)"></span>
-            <span class="text-gray-400" x-text="' · ' + (o.kind === 'asset' ? 'asset' : 'managed system')"></span>
+            <span class="text-gray-400" x-text="' · ' + psOrphanLabel(o)"></span>
             <span class="text-gray-400 font-mono" x-text="(o.addresses || []).length ? ' · ' + o.addresses.join(', ') : ' · no address'"></span>
+          </p>
+        </template>
+      </div>
+    </details>
+    <details x-show="psOrphans(false).length" class="bg-white rounded-xl border border-gray-200 shadow-sm">
+      <summary class="px-4 py-3 text-sm text-gray-700 cursor-pointer select-none">
+        <span class="font-medium" x-text="psOrphans(false).length"></span>
+        other Password Safe record(s) with no inventory row
+        <span class="text-gray-400 font-normal">— database and directory systems, cloud accounts, vaults and applications; not hosts, so not stale machines</span>
+      </summary>
+      <div class="border-t border-gray-100 px-4 py-3 space-y-1 max-h-64 overflow-y-auto">
+        <template x-for="o in psOrphans(false)" :key="o.kind + o.object_id">
+          <p class="text-xs text-gray-600">
+            <span class="font-medium" x-text="o.name || ('#' + o.object_id)"></span>
+            <span class="text-gray-400" x-text="' · ' + psOrphanLabel(o)"></span>
+            <span class="text-gray-400 font-mono" x-text="(o.addresses || []).length ? ' · ' + o.addresses.join(', ') : ''"></span>
           </p>
         </template>
       </div>
@@ -1083,6 +1099,21 @@
         const how = ps.basis === 'id' ? 'matched by recorded system id' : 'matched by address';
         const shared = ps.shared_with ? ' — also matched by ' + ps.shared_with + ' other resource(s)' : '';
         return names + ' (' + how + ')' + shared;
+      },
+
+      // Unmatched Password Safe records, split by what they ARE. Only a host is a likely
+      // decommissioned machine; a directory, cloud account, vault or application endpoint
+      // has no row type here to match, and calling it stale was simply wrong. A record
+      // from a server too old to send `category` counts as a host, which is what it was
+      // always shown as.
+      psOrphans(hosts) {
+        return (this.ps.orphans || []).filter(o => ((o.category || 'host') === 'host') === hosts);
+      },
+
+      psOrphanLabel(o) {
+        if (o.kind === 'asset') return 'asset';
+        return ({ database: 'database system', directory: 'directory system',
+                  other: 'managed system' })[o.category] || 'managed system';
       },
 
       // Distinct tag KEYS across every row that has any.

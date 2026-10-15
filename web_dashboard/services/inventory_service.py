@@ -142,6 +142,33 @@ def live_or_pending_vm_names(db: Session, job_type: str) -> Set[str]:
     return names
 
 
+# The prefix cloud_database_service.register_database writes ahead of the JSON it keeps
+# in `credentials_ref`. Read here rather than imported: that module is the heaviest in the
+# app, and this is a 60-second-cached read model that must stay cheap to import and test.
+_MANAGED_REF_PREFIX = "psmanaged:"
+
+
+def _db_ps_system_id(row) -> str:
+    """The Password Safe managed system this database is recorded against, or "".
+
+    Two places, by provenance. A PROVISIONED database the dashboard onboarded records it in
+    `ps_managed_system_id`. A REGISTERED one never does: its system id lives inside
+    `credentials_ref`, because that is the managed account the runner checks out — so the
+    exact key was already stored for every imported database, and the matcher never saw it.
+    """
+    recorded = str(getattr(row, "ps_managed_system_id", None) or "").strip()
+    if recorded:
+        return recorded
+    raw = str(getattr(row, "credentials_ref", None) or "")
+    if not raw.startswith(_MANAGED_REF_PREFIX):
+        return ""
+    try:
+        ref = json.loads(raw[len(_MANAGED_REF_PREFIX):])
+    except (TypeError, ValueError):
+        return ""
+    return str((ref or {}).get("system_id") or "").strip() if isinstance(ref, dict) else ""
+
+
 def _db_item(row) -> dict:
     return {
         "id": f"clouddb:{row.id}",
@@ -176,6 +203,12 @@ def _db_item(row) -> dict:
         # could look up.
         "private_host": getattr(row, "private_host", "") or "",
         "port": getattr(row, "port", None),
+        # Password Safe match keys — the same two `_vm_item` carries. Absent until now,
+        # which made every database record in the tenant an orphan. `private_host` counts
+        # only when it is a literal address: a hostname is not a join key here (see
+        # ps_attribute_catalog's module docstring), and `addr_list` drops it.
+        "ips": ps_attribute_catalog.addr_list(getattr(row, "private_host", "")),
+        "ps_system_id": _db_ps_system_id(row),
     }
 
 
@@ -252,6 +285,9 @@ def _certlab_item(row) -> dict:
         "expires_at": _iso(row.expires_at),
         "job_id": row.deploy_job_id,
         "detail_href": "/workload-lab#certificates",
+        # The managed system the CA was registered as, so its Password Safe record matches
+        # this row rather than listing as an orphan.
+        "ps_system_id": str(getattr(row, "ps_system_id", None) or ""),
     }
 
 def _directory_item(row) -> dict:
@@ -277,6 +313,10 @@ def _directory_item(row) -> dict:
         "agent_id": getattr(row, "agent_id", None) or "",
         "host": getattr(row, "host", None) or "",
         "port": getattr(row, "port", None) or 0,
+        # Password Safe match keys: the managed system onboarding recorded, and the DC's
+        # address when `host` is a literal one.
+        "ips": ps_attribute_catalog.addr_list(getattr(row, "host", None)),
+        "ps_system_id": str(getattr(row, "ps_system_id", None) or ""),
     }
 
 
@@ -305,6 +345,7 @@ def _spirelab_item(row) -> dict:
         "expires_at": _iso(row.expires_at),
         "job_id": row.deploy_job_id,
         "detail_href": "/workload-lab#spire",
+        "ps_system_id": str(getattr(row, "ps_system_id", None) or ""),
     }
 
 
@@ -338,6 +379,7 @@ def _workloadk8s_item(row) -> dict:
         "expires_at": _iso(row.expires_at),
         "job_id": None,
         "detail_href": "/workload-lab#kubernetes",
+        "ps_system_id": str(getattr(row, "ps_system_id", None) or ""),
     }
 
 

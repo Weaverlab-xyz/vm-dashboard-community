@@ -233,6 +233,42 @@ def test_db_and_k8s_items_carry_their_expiry():
     assert svc._k8s_item(_k8s_row(expires_at=exp))["expires_at"] == exp.isoformat()
 
 
+def test_a_database_row_carries_its_password_safe_match_keys():
+    """Without these every database record in the tenant listed as an orphan. A
+    REGISTERED row never sets ps_managed_system_id — its system id is the managed account
+    it checks out, inside credentials_ref — so that is read as the fallback."""
+    onboarded = svc._db_item(_db_row(ps_managed_system_id="41", private_host="10.0.0.4"))
+    assert onboarded["ps_system_id"] == "41" and onboarded["ips"] == ["10.0.0.4"]
+
+    registered = svc._db_item(_db_row(
+        source="registered", private_host="alma.example.com",
+        credentials_ref='psmanaged:{"account_id": 9, "system_id": 77}'))
+    assert registered["ps_system_id"] == "77"
+    assert registered["ips"] == [], "a hostname is not a join key"
+
+    # Absent, malformed and non-managed refs all mean "no recorded id", never a crash.
+    for ref in (None, "", "psmanaged:{not json", 'psmanaged:["x"]', "vault:abc"):
+        assert svc._db_item(_db_row(credentials_ref=ref))["ps_system_id"] == "", ref
+
+
+def test_rows_that_recorded_a_password_safe_system_carry_it():
+    """CertLab, ManagedDirectory, SpireLab and WorkloadK8sToken all store the system
+    their onboarding created; the inventory rows dropped it, so the record was an orphan."""
+    common = dict(id="x1", cloud="gcp", name="n", status="ready", workgroup=None,
+                  created_by="bob", created_at=_TS, expires_at=None, deploy_job_id=None,
+                  region="r", ps_system_id="55")
+    assert svc._certlab_item(types.SimpleNamespace(
+        **common, pool_id="p", location="l"))["ps_system_id"] == "55"
+    assert svc._spirelab_item(types.SimpleNamespace(
+        **common, trust_domain="td"))["ps_system_id"] == "55"
+    directory = svc._directory_item(types.SimpleNamespace(
+        **common, source="registered", provider="ad", host="10.0.0.10", port=389))
+    assert directory["ps_system_id"] == "55" and directory["ips"] == ["10.0.0.10"]
+    assert svc._workloadk8s_item(types.SimpleNamespace(
+        **common, profile="p", namespace="ns", service_account="sa",
+        cluster_name="c"))["ps_system_id"] == "55"
+
+
 def test_a_registered_row_reports_its_source():
     """`source` is what excludes a registered resource from the auto-delete timer, in
     both the stamping and the reaping guard — so it has to reach the item."""
