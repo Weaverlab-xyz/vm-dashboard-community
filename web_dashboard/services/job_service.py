@@ -1168,6 +1168,46 @@ def _flip_resource_row(db: Session, job: Job) -> None:
         pass
 
 
+_POV_ENV_JOB_TYPES = ("pov_env_provision", "pov_env_destroy")
+_POV_STRANDED = ("provisioning", "destroying")
+
+
+def _reap_stranded_pov_rows(db: Session, cutoff: datetime) -> int:
+    """Flip POV rows left ``provisioning``/``destroying`` with no live job behind them
+    to ``failed``, so Destroy is offered again.
+
+    Keyed off the jobs rather than the job this pass reconciled: a job failed by an
+    EARLIER pass — before this sweep existed, or by a worker that died between failing
+    the job and touching the row — leaves the row stranded just the same, and
+    ``may_act_on`` refuses Destroy on ``provisioning`` forever. A row younger than the
+    cutoff is skipped: the create endpoint commits the row before it queues the job.
+    """
+    from ..database import PovEnvironment
+    rows = (db.query(PovEnvironment)
+              .filter(PovEnvironment.status.in_(_POV_STRANDED),
+                      PovEnvironment.created_at <= cutoff).all())
+    if not rows:
+        return 0
+    live = set()
+    for job in (db.query(Job)
+                  .filter(Job.job_type.in_(_POV_ENV_JOB_TYPES),
+                          Job.status.in_(("pending", "running"))).all()):
+        live.add((job.metadata_dict or {}).get("environment_id"))
+    n = 0
+    for env in rows:
+        if env.id in live:
+            continue
+        was = env.status
+        env.status = "failed"
+        env.error_message = (
+            f"Interrupted while {was} (the job behind it is no longer running, most "
+            "likely an app restart). Destroy to clean up whatever it did create.")
+        n += 1
+    if n:
+        db.commit()
+    return n
+
+
 def reconcile_stale_jobs(db: Session, stale_after_minutes: int = 10) -> int:
     """Mark ``running`` jobs whose worker died (no heartbeat) as ``failed`` and flip
     their k8s/cloud-DB resource row to ``failed`` so the orphan is visible and
@@ -1206,4 +1246,8 @@ def reconcile_stale_jobs(db: Session, stale_after_minutes: int = 10) -> int:
         # processes run this at startup; the unique dedupe key absorbs the race.
         for job in reconciled:
             notify_job_failed(db, job)
+    try:
+        _reap_stranded_pov_rows(db, cutoff)
+    except Exception:  # noqa: BLE001 - best-effort, like _flip_resource_row
+        db.rollback()
     return n

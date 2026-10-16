@@ -68,6 +68,8 @@
             <span class="text-gray-300 mx-1">·</span>
             <span x-text="env.status"></span>
           </p>
+          <p x-show="env.status === 'failed' && env.error_message"
+             class="text-xs text-red-600 mt-1 break-words" x-text="env.error_message"></p>
         </div>
         <!-- Start / Suspend, on the two tabs an SE runs a POV from. -->
         <div x-show="tab === 'setup' || tab === 'overview'"
@@ -86,6 +88,14 @@
                   :title="powerActionable() ? 'Suspend this POV' : 'Only an active POV can be suspended'"
                   class="text-xs px-3 py-1.5 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
                   x-text="powerBusy === 'suspended' ? 'Suspending…' : 'Suspend'"></button>
+        </div>
+        <!-- A failed POV's one useful action, on every tab: the list page's Destroy sits
+             at the end of a sixteen-column row, which on a phone is no way to find it. -->
+        <div x-show="env.status === 'failed'" class="shrink-0 sm:self-center">
+          <button type="button" @click="destroy()" :disabled="destroyBusy"
+                  title="Delete whatever this POV created on the platform and close it out"
+                  class="text-xs px-3 py-1.5 rounded-lg border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                  x-text="destroyBusy ? 'Destroying…' : 'Destroy'"></button>
         </div>
         <div class="text-right shrink-0">
           <p class="text-xs text-gray-400">Use cases</p>
@@ -1436,6 +1446,26 @@
           this.error = e.message;
         } finally {
           this.powerBusy = '';
+        }
+      },
+
+      destroyBusy: false,
+
+      async destroy() {
+        const e = this.env || {};
+        if (!confirm(`Destroy ${e.name}? This deletes the environment and everything in it on the platform. It cannot be undone.`)) return;
+        this.error = ''; this.notice = '';
+        this.destroyBusy = true;
+        try {
+          const res = await this.apiFetch(`/api/pov/managed/${this.envId}`, { method: 'DELETE' });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.detail || `Could not destroy this POV (${res.status}).`);
+          this.notice = `${e.name}: destroying — job ${data.job_id}.`;
+          await this.loadEnv();
+        } catch (err) {
+          this.error = err.message;
+        } finally {
+          this.destroyBusy = false;
         }
       },
 
