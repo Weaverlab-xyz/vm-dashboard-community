@@ -52,7 +52,7 @@ always meant, and `/use-cases` stays ungated on both.
 behind the auth shell — the docs shell is public, so ordering it by the instance's chosen
 focus would leak that focus to anyone who asks.
 
-On a demo instance `/use-cases` shows every role as a collapsible section. Each header
+On an estate instance `/use-cases` shows every role as a collapsible section. Each header
 shows the role, its one-line description and how many use cases it has; click it to show
 that role's cards, or use **Expand all** / **Collapse all**. The focus role's section starts
 open; with no focus every section starts closed, so the whole catalog fits on one screen.
