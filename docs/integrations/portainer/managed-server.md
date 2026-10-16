@@ -92,8 +92,12 @@ Four things follow from durable state, and they are the whole reason it is opt-i
 
 ## Deploy
 
-1. Open **Containers → Portainer**. The **Managed Portainer server** panel is at
-   the top.
+1. Open **Containers → Portainer**. The **Managed Portainer server** card is at
+   the top; click its header to expand it. The setup cards (this one, **Just-in-time
+   access (Entitle)**, **Connect a Docker host** and **Import from another Portainer**)
+   start collapsed once Portainer is configured, so the environment list sits near the
+   top. Each header shows a *configured* / *not configured* badge, and this card opens
+   by itself while Portainer is not configured.
 2. Pick a **Cloud**, and optionally a **Region** (and a **Zone**, on GCP only). Blank
    region keeps the node's current region; blank zone auto-picks the region's first
    available one, falling back to a sibling if that is capacity-exhausted. The Zone

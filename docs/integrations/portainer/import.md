@@ -48,7 +48,7 @@ python -m web_dashboard.scripts.portainer_migrate inspect --bundle bundle.json
 
 ## Step 2 — import it
 
-**Containers → Portainer → Import from another Portainer** → choose the `.json`. This
+**Containers → Portainer** → expand **Import from another Portainer** → choose the `.json`. This
 enqueues a `portainer_import` job; follow it at `/jobs/{job_id}`.
 
 Optionally pick an environment under **Deploy stacks onto**. Be deliberate: Portainer has

@@ -68,8 +68,8 @@ That is what an Edge agent does: the agent runs on the Docker host and polls **o
 to the node's tunnel port 8000 — which the node's firewall already opens — so nothing
 inbound to your network is required, and no VPN.
 
-1. Open **Containers → Portainer**. Under **Connect a Docker host**, type an environment
-   name and click **Generate join command**.
+1. Open **Containers → Portainer** and expand **Connect a Docker host**. Type an
+   environment name and click **Generate join command**.
 2. Run the generated `docker run` on the Docker host you want managed.
 3. The environment appears within a few seconds; **Refresh** lists it.
 
