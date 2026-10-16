@@ -148,6 +148,16 @@ Clearing `expires_at` in the same commit is what makes it at-most-once.
 stamp). Environments created before both were set stay NULL forever — that is deliberate,
 and the fix is the Expires column's `edit`, not a backfill.
 
+**A POV is stuck in `provisioning` or `destroying`.** Usually an app restart killed the
+job behind it. The stale-job sweep (`job_service.reconcile_stale_jobs`, at startup and every
+minute in the job runner) flips any POV in either state with no pending or running
+`pov_env_provision`/`pov_env_destroy` job to `failed`, with a reason in its error, once the
+row is older than the stale cutoff (10 minutes). From `failed`, Destroy is offered again.
+
+**Where Destroy is for a failed POV.** On the /pov list, at the end of the row. A failed POV's
+own page (`/pov/<id>`, the name link on the dashboard card) also shows its error and a
+Destroy button in the header, because the list's row is out of reach on a phone.
+
 **A POV expired but was not destroyed.** Read the sweep's job log on /jobs; it reports the
 full target list whichever gate is shut. Most often the feature or enforcement has not been
 armed for its hour yet, or `resource_expiry_dry_run` is still on.
