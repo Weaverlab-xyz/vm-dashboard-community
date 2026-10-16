@@ -34,6 +34,13 @@
   that POV lives. (Hence no checkbox markup anywhere in this file, not even quoted in a
   comment — tests/test_use_cases_page greps the whole file for it.)
 
+  EACH ROLE IS A COLLAPSIBLE SECTION, NOT A TAB. Seventy-odd cards stacked in full were a
+  long scroll, but tabs would show one role at a time, and this page's promise is that every
+  role is always on it. A collapsed section still shows the role, its blurb and its card
+  count, so the page opens as the whole catalog in one screen. The focus role opens by
+  default; under the neutral persona every section starts closed. Which sections are open is
+  a per-browser preference, never a filter: `this.groups` is untouched by it.
+
   Nothing here hard-codes a persona key — the groups, their order and their copy all arrive
   from /api/persona/catalog, which reads services/personas.py. A key spelled in this file
   would let the page and the registry disagree, and the disagreement would be invisible.
@@ -144,11 +151,20 @@
        /api/persona/catalog served them, never filtered. ─────────────────────────── -->
   <template x-if="loaded && !isPov">
     <div>
+      <div class="flex justify-end gap-3 mb-2 text-xs">
+        <button type="button" @click="setAll(true)" class="text-blue-600 hover:underline">Expand all</button>
+        <button type="button" @click="setAll(false)" class="text-blue-600 hover:underline">Collapse all</button>
+      </div>
       <template x-for="g in groups" :key="g.persona">
-        <div class="mb-8">
-          <div class="flex items-baseline justify-between mb-3">
-            <div>
-              <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">
+        <div class="mb-3 bg-white rounded-xl border border-gray-200">
+          <!-- The whole header row is the toggle. Spans, not <h2>/<p>: a <button> may only
+               hold phrasing content, so the heading wraps the button instead. -->
+          <h2>
+          <button type="button" @click="toggle(g.persona)"
+                  :aria-expanded="isOpen(g.persona) ? 'true' : 'false'"
+                  class="w-full flex items-center justify-between gap-4 px-4 py-3 text-left rounded-xl hover:bg-gray-50">
+            <span class="min-w-0">
+              <span class="block text-sm font-semibold text-gray-700 uppercase tracking-wide">
                 <span x-text="g.label"></span>
                 <!-- Grey, not coloured: chrome colour is the tenancy signal (ui_theme.py) and
                      a persona accent anywhere — including inside the content area — is the
@@ -157,14 +173,22 @@
                       class="ml-2 text-xs font-medium bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">
                   your focus
                 </span>
-              </h2>
-              <p class="text-xs text-gray-400 mt-0.5" x-text="g.blurb"></p>
-            </div>
-            <span class="text-xs text-gray-400 shrink-0 ml-4"
-                  x-text="g.use_cases.length + (g.use_cases.length === 1 ? ' use case' : ' use cases')"></span>
-          </div>
+              </span>
+              <span class="block text-xs font-normal text-gray-400 mt-0.5" x-text="g.blurb"></span>
+            </span>
+            <span class="flex items-center gap-2 shrink-0">
+              <span class="text-xs font-normal text-gray-400"
+                    x-text="g.use_cases.length + (g.use_cases.length === 1 ? ' use case' : ' use cases')"></span>
+              <svg class="h-4 w-4 text-gray-400 transition-transform" :class="isOpen(g.persona) && 'rotate-180'"
+                   fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+              </svg>
+            </span>
+          </button>
+          </h2>
 
-          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          <div x-show="isOpen(g.persona)" x-cloak
+               class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 px-4 pb-4">
             <template x-for="c in g.use_cases" :key="c.id">
               <!-- Three states, three renders. `masked` carries NO href: a link the client
                    merely styles as inert is one stray middle-click from proving the page 404s
@@ -238,6 +262,9 @@
       povId: '',
       povGroups: [],
       povSummary: null,
+      // Which role sections are expanded, keyed by the persona the API served. A view
+      // preference only: it decides what is folded, never what is in `groups`.
+      open: {},
 
       get isPov() {
         return this.profile === 'pov';
@@ -267,8 +294,36 @@
         } catch (e) {
           this.error = 'Could not load the use-case catalog.';
         }
+        this.restoreOpen();
         if (this.isPov) await this.loadPovs();
         this.loaded = true;
+      },
+
+      // Remembered per browser; first visit opens the focus role (none under neutral).
+      // Wrapped because a browser with site data blocked throws on the read itself.
+      restoreOpen() {
+        let saved = null;
+        try { saved = JSON.parse(localStorage.getItem('vm_cli_use_cases_open') || 'null'); } catch (e) {}
+        this.open = (saved && typeof saved === 'object') ? saved
+          : (this.active ? { [this.active]: true } : {});
+      },
+
+      isOpen(persona) {
+        return !!this.open[persona];
+      },
+
+      toggle(persona) {
+        this.open = { ...this.open, [persona]: !this.open[persona] };
+        this.saveOpen();
+      },
+
+      setAll(value) {
+        this.open = Object.fromEntries(this.groups.map(g => [g.persona, value]));
+        this.saveOpen();
+      },
+
+      saveOpen() {
+        try { localStorage.setItem('vm_cli_use_cases_open', JSON.stringify(this.open)); } catch (e) {}
       },
 
       // /api/pov needs the Authorization header, unlike the two public endpoints above:
