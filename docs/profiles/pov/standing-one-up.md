@@ -123,7 +123,7 @@ left to paste. A field the POV already carries is never overwritten.
 
 ## The tenant registry
 
-The reason this profile exists, made concrete. **POV page → BeyondTrust tenants.**
+The reason this profile exists, made concrete. **POV page → Tenants** tab (`/pov#tenants`).
 
 An estate instance has one PRA appliance, one Password Safe tenant and one Entitle tenant,
 configured in Settings as `bt_api_host`, `pscli_api_url` and `entitle_api_url`. That is the

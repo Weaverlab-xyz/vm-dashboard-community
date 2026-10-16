@@ -47,7 +47,19 @@
 #}
 
 {% block content %}
-<div x-data="povPage()" class="space-y-6">
+{# Four tabs over what used to be one long scroll of inventories, all under the one povPage()
+   component. The header, the Build-a-POV strip and the "Build by hand" form stay above the
+   tab bar: they are how a POV is made, not one of the lists. A tab's `show` mirrors the
+   gate its section always had -- Past only once there is a destroyed POV to list, All
+   environments only for pov:write on a configured platform -- so a stakeholder never sees
+   a tab that would open onto nothing. #}
+{% set tabs = [
+  {'slug': 'mine',    'label': 'Mine'},
+  {'slug': 'past',    'label': 'Past',             'show': 'archive.length'},
+  {'slug': 'tenants', 'label': 'Tenants'},
+  {'slug': 'all',     'label': 'All environments', 'show': 'canManagePlatform && !notConfigured'},
+] %}
+<div x-data='povPage({{ tabs | map(attribute="slug") | list | tojson }})' class="space-y-6">
 
   <div class="flex flex-wrap items-start justify-between gap-4">
     <div>
@@ -57,7 +69,7 @@
       </p>
     </div>
     <div class="flex items-center gap-2">
-      <select x-show="platforms.length > 1" x-model="platform" @change="load()"
+      <select x-show="platforms.length > 1" x-model="platform" @change="load().then(() => ensureTab())"
               class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
         <template x-for="p in platforms" :key="p.name">
           <option :value="p.name" x-text="p.label"></option>
@@ -315,6 +327,20 @@
 
   <div x-show="loading" class="text-sm text-gray-400">Loading…</div>
 
+  <div class="border-b border-gray-200 flex flex-wrap gap-1" role="tablist" aria-label="POV sections">
+    {% for tab in tabs %}
+    <button @click="select('{{ tab.slug }}')" role="tab" type="button"
+            x-show="{{ tab.show or 'true' }}"
+            :aria-selected="activeTab === '{{ tab.slug }}' ? 'true' : 'false'"
+            :class="activeTab === '{{ tab.slug }}'
+                      ? 'border-blue-600 text-blue-700'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+            class="px-3 py-2 -mb-px border-b-2 text-sm font-medium">{{ tab.label }}</button>
+    {% endfor %}
+  </div>
+
+  <div x-show="activeTab === 'mine'" x-cloak role="tabpanel">
+
   <!-- Managed -->
   <div x-show="!loading" class="space-y-3">
     <div class="flex items-baseline justify-between">
@@ -376,8 +402,8 @@
                    The row says when, because a remembered value shown as a current one is
                    the bug this column had: a POV the platform suspended on its idle timer
                    sat here reading "running" forever, and the Start button that would have
-                   undone it was hidden on the strength of that. The platform listing below
-                   is deliberately not consulted; it is a cache now, so a hit there would
+                   undone it was hidden on the strength of that. The platform listing (the
+                   All environments tab) is deliberately not consulted; it is a cache now, so a hit there would
                    be a second remembered value wearing the word "live". #}
                 <span x-text="runstateOf(e) || '—'"
                       :class="staleRunstate(e) ? 'text-gray-400' : ''"></span>
@@ -802,7 +828,11 @@
     </div>
   </div>
 
-  <!-- Past POVs. The table above filters destroyed rows out, which is right for a list of
+  </div>
+
+  <div x-show="activeTab === 'past'" x-cloak role="tabpanel">
+
+  <!-- Past POVs. The Mine tab's table filters destroyed rows out, which is right for a list of
        things you can act on — and is why a finished evaluation had become unreachable
        without its uuid. The record was always kept; this is the way back to it. Read-only
        by construction: there is nothing left to do to one of these. -->
@@ -861,12 +891,15 @@
     </div>
   </div>
 
-  <!-- BeyondTrust tenants -->
+  </div>
+
+  <div x-show="activeTab === 'tenants'" x-cloak role="tabpanel">
+
+  <!-- BeyondTrust tenants. No longer collapsed behind a show/hide toggle: that existed to
+       keep a long page short, and a tab of its own already does. -->
   <div id="bt-tenants" x-show="!loading" class="space-y-3">
     <div class="flex items-baseline justify-between">
       <h2 class="text-lg font-medium text-gray-900">BeyondTrust tenants</h2>
-      <button @click="showTenants = !showTenants" class="text-xs text-blue-600 underline"
-              x-text="showTenants ? 'hide' : 'show'"></button>
     </div>
     <p class="text-xs text-gray-400">
       Which PRA appliance, Password Safe tenant and Entitle tenant a POV is wired into.
@@ -874,7 +907,7 @@
       because several POVs run at once and each belongs to a different customer.
     </p>
 
-    <div x-show="showTenants" class="space-y-3">
+    <div class="space-y-3">
       <div x-show="tenants.length" class="overflow-hidden border border-gray-200 rounded-lg">
         <table class="min-w-full divide-y divide-gray-200 text-sm">
           <thead class="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
@@ -1019,6 +1052,10 @@
     </div>
   </div>
 
+  </div>
+
+  <div x-show="activeTab === 'all'" x-cloak role="tabpanel">
+
   <!-- Fed by GET /api/pov/environments, which is pov:write: it lists environments this
        dashboard did not create, so on a shared lab account it is other customers' POVs.
        Never rendered without write.
@@ -1082,11 +1119,15 @@
     </div>
   </div>
 
+  </div>
+
 </div>
 
 <script>
-function povPage() {
+function povPage(tabSlugs) {
   return {
+    tabSlugs: tabSlugs,
+    activeTab: '',
     loading: true,
     creating: false,
     showCreate: false,
@@ -1142,7 +1183,6 @@ function povPage() {
     blueprints: [],
     selectedBlueprint: '',
     rechecking: false,
-    showTenants: false,
     savingTenant: false,
     editingTenants: '',
     tenantEdit: {},
@@ -1371,7 +1411,33 @@ function povPage() {
     stepClass: povStepClass,
     stepMark: povStepMark,
 
+    // ── Tabs ──────────────────────────────────────────────────────────────
+    // Same contract as remoteAgentsPage.select (agents/index.html): a slug this
+    // page does not have is ignored, and the fragment is rewritten with
+    // replaceState so Back leaves the page rather than walking the tabs.
+    select(slug, push = true) {
+      if (!this.tabSlugs.includes(slug)) return;
+      this.activeTab = slug;
+      if (push) window.history.replaceState(null, '', '#' + slug);
+    },
+
+    // The two gated tabs, in the same terms as their `show` in the tabs list. A fragment
+    // can name one this visitor may not see (#all as a stakeholder) or one with nothing
+    // in it (#past before any POV was destroyed); either would be a page with its tab
+    // hidden and its panel empty, so fall back to Mine once the load has said which.
+    ensureTab() {
+      const hidden = (this.activeTab === 'past' && !this.archive.length)
+        || (this.activeTab === 'all' && !(this.canManagePlatform && !this.notConfigured));
+      if (hidden) this.select('mine', false);
+    },
+
     async init() {
+      // Pick the tab before any load so the page never renders with no panel.
+      // #bt-tenants is the older anchor -- the Blueprints form on /pov/templates links
+      // it -- so it still opens the Tenants tab.
+      let want = (window.location.hash || '').replace(/^#/, '');
+      if (want === 'bt-tenants') want = 'tenants';
+      this.select(this.tabSlugs.includes(want) ? want : this.tabSlugs[0], false);
       try {
         const res = await this.apiFetch('/api/pov/platforms');
         if (!res.ok) { this.error = 'Could not read the lab platform registry.'; this.loading = false; return; }
@@ -1393,14 +1459,7 @@ function povPage() {
         return;
       }
       await this.load();
-      // /pov#bt-tenants is the link the Blueprints form points at when someone asks where
-      // a tenant is set. The section is collapsed by default and only rendered once the
-      // page has loaded, so the hash alone lands on nothing -- open it and go there.
-      if (window.location.hash === '#bt-tenants') {
-        this.showTenants = true;
-        this.$nextTick(() => document.getElementById('bt-tenants')
-          ?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
-      }
+      this.ensureTab();
       // /pov?edit=rb&env=<id> is where the POV detail page's Setup tab sends the Resource
       // Broker step: that form (installer picker, zone, key) lives here, so open it.
       const q = new URLSearchParams(window.location.search);
@@ -1436,7 +1495,7 @@ function povPage() {
       // more: its only consumer is the create form's picker, which is behind a button,
       // and the two reads together were a paged platform GET each -- against ONE
       // instance-wide credential shared by every SE on the install. This one stays
-      // because "All environments on the platform" renders unconditionally below.
+      // because "All environments on the platform" renders unconditionally on its tab.
       this.resetTemplates();
       this.environments = await this.fetchList('/api/pov/environments', 'environments');
       this.loading = false;
