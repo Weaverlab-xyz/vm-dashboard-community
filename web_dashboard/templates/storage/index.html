@@ -3,7 +3,18 @@
 {% block title %}Storage{% endblock %}
 
 {% block content %}
-<div class="max-w-5xl mx-auto py-8 px-4" x-data="storagePage()">
+{# Four tabs over what used to be one long scroll of cards, all under the one storagePage()
+   component: every section reads the same backends / activeBackend state. The EPM-L tab
+   rides the runtime feature flag (`show`), so its button hides when the integration is
+   off. The Move modal sits outside the panels so it opens from the Assets tab. #}
+{% set tabs = [
+  {'slug': 'backend', 'label': 'Backend'},
+  {'slug': 'assets',  'label': 'Assets'},
+  {'slug': 'epml',    'label': 'EPM-L packages', 'show': 'epml.enabled'},
+  {'slug': 'migrate', 'label': 'Migrate'},
+] %}
+<div class="max-w-5xl mx-auto py-8 px-4"
+     x-data='storagePage({{ tabs | map(attribute="slug") | list | tojson }})'>
 
   <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3 sm:mb-1">
     <h1 class="text-2xl font-bold text-gray-800">Storage</h1>
@@ -15,10 +26,24 @@
   </div>
   <p class="text-sm text-gray-500 mb-8">
     Cloud object storage for the dashboard's playbooks, scripts, and other
-    assets. Configure one or more backends; pick one as active. Use
-    <strong>Migrate</strong> to copy assets between backends — the source
+    assets. Configure one or more backends; pick one as active. Use the
+    <a href="#migrate" @click.prevent="select('migrate')" class="font-semibold text-blue-600 hover:underline">Migrate</a> tab to copy assets between backends — the source
     is preserved so you can verify before deleting.
   </p>
+
+  <div class="border-b border-gray-200 mb-6 flex flex-wrap gap-1" role="tablist" aria-label="Storage sections">
+    {% for tab in tabs %}
+    <button @click="select('{{ tab.slug }}')" role="tab" type="button"
+            x-show="{{ tab.show or 'true' }}"
+            :aria-selected="activeTab === '{{ tab.slug }}' ? 'true' : 'false'"
+            :class="activeTab === '{{ tab.slug }}'
+                      ? 'border-blue-600 text-blue-700'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+            class="px-3 py-2 -mb-px border-b-2 text-sm font-medium">{{ tab.label }}</button>
+    {% endfor %}
+  </div>
+
+  <div x-show="activeTab === 'backend'" x-cloak role="tabpanel">
 
   <!-- ── Active backend picker ─────────────────────────────────────────────── -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
@@ -63,240 +88,315 @@
       </template>
     </div>
 
+    <!-- Connection details, one collapsible section per backend. Several can be filled in at
+         once -- a migrate target, the image-registry hub, OCI (which can never be active) --
+         so this is an accordion rather than "show the selected backend only". Collapsed
+         inputs stay bound, so Save still sends every backend's values. -->
+    <p class="text-xs text-gray-500 mb-2">
+      Expand a backend to set its connection details. You can configure several (for a
+      migration target or the image hub) without making them active.
+    </p>
+
     <!-- ── S3 fields ──────────────────────────────────────────────────────── -->
-    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
-      <p class="col-span-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">AWS S3</p>
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Bucket</label>
-        <input type="text" x-model="cfg.storage_s3_bucket"
-               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-               placeholder="infra-asset-store">
-      </div>
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Region <span class="text-gray-400 font-normal">(blank → AWS region)</span></label>
-        <input type="text" x-model="cfg.storage_s3_region"
-               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-               placeholder="us-east-2">
-      </div>
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Key Prefix</label>
-        <input type="text" x-model="cfg.storage_s3_prefix"
-               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-               placeholder="config-mgmt">
-      </div>
-      <div class="col-span-3">
-        <button @click="testBackend('s3')" :disabled="!cfg.storage_s3_bucket || testing.s3"
-                class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50">
-          <span x-show="!testing.s3">Test connection</span>
-          <span x-show="testing.s3" x-cloak>Testing…</span>
-        </button>
+    <div class="mb-3 bg-gray-50 rounded-lg border border-gray-200">
+      <button type="button" @click="toggleFields('s3')"
+              :aria-expanded="openFields === 's3' ? 'true' : 'false'"
+              class="w-full flex items-center gap-2 px-4 py-3 text-left hover:bg-gray-100 rounded-lg">
+        <span class="text-xs font-semibold text-gray-500 uppercase tracking-wide">AWS S3</span>
+        <span x-show="backendMeta('s3').configured" x-cloak class="text-[10px] uppercase font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">configured</span>
+        <span x-show="backendMeta('s3').active" x-cloak class="text-[10px] uppercase font-semibold text-blue-700 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded">active</span>
+        <svg class="ml-auto h-4 w-4 text-gray-400 transition-transform" :class="openFields === 's3' && 'rotate-180'"
+             fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+        </svg>
+      </button>
+      <div x-show="openFields === 's3'" x-cloak class="grid grid-cols-1 sm:grid-cols-3 gap-4 px-4 pb-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Bucket</label>
+          <input type="text" x-model="cfg.storage_s3_bucket"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="infra-asset-store">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Region <span class="text-gray-400 font-normal">(blank → AWS region)</span></label>
+          <input type="text" x-model="cfg.storage_s3_region"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="us-east-2">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Key Prefix</label>
+          <input type="text" x-model="cfg.storage_s3_prefix"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="config-mgmt">
+        </div>
+        <div class="col-span-3">
+          <button @click="testBackend('s3')" :disabled="!cfg.storage_s3_bucket || testing.s3"
+                  class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50">
+            <span x-show="!testing.s3">Test connection</span>
+            <span x-show="testing.s3" x-cloak>Testing…</span>
+          </button>
+        </div>
       </div>
     </div>
 
     <!-- ── Azure fields ──────────────────────────────────────────────────── -->
-    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
-      <p class="col-span-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Azure Blob Storage</p>
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Storage Account</label>
-        <input type="text" x-model="cfg.storage_azure_account"
-               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-               placeholder="myassets">
-      </div>
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Container</label>
-        <input type="text" x-model="cfg.storage_azure_container"
-               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-               placeholder="playbooks">
-      </div>
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Blob Prefix</label>
-        <input type="text" x-model="cfg.storage_azure_prefix"
-               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-               placeholder="config-mgmt">
-      </div>
-      <div class="col-span-3">
-        <button @click="testBackend('azure_blob')" :disabled="!cfg.storage_azure_account || testing.azure_blob"
-                class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50">
-          <span x-show="!testing.azure_blob">Test connection</span>
-          <span x-show="testing.azure_blob" x-cloak>Testing…</span>
-        </button>
+    <div class="mb-3 bg-gray-50 rounded-lg border border-gray-200">
+      <button type="button" @click="toggleFields('azure_blob')"
+              :aria-expanded="openFields === 'azure_blob' ? 'true' : 'false'"
+              class="w-full flex items-center gap-2 px-4 py-3 text-left hover:bg-gray-100 rounded-lg">
+        <span class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Azure Blob Storage</span>
+        <span x-show="backendMeta('azure_blob').configured" x-cloak class="text-[10px] uppercase font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">configured</span>
+        <span x-show="backendMeta('azure_blob').active" x-cloak class="text-[10px] uppercase font-semibold text-blue-700 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded">active</span>
+        <svg class="ml-auto h-4 w-4 text-gray-400 transition-transform" :class="openFields === 'azure_blob' && 'rotate-180'"
+             fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+        </svg>
+      </button>
+      <div x-show="openFields === 'azure_blob'" x-cloak class="grid grid-cols-1 sm:grid-cols-3 gap-4 px-4 pb-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Storage Account</label>
+          <input type="text" x-model="cfg.storage_azure_account"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="myassets">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Container</label>
+          <input type="text" x-model="cfg.storage_azure_container"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="playbooks">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Blob Prefix</label>
+          <input type="text" x-model="cfg.storage_azure_prefix"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="config-mgmt">
+        </div>
+        <div class="col-span-3">
+          <button @click="testBackend('azure_blob')" :disabled="!cfg.storage_azure_account || testing.azure_blob"
+                  class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50">
+            <span x-show="!testing.azure_blob">Test connection</span>
+            <span x-show="testing.azure_blob" x-cloak>Testing…</span>
+          </button>
+        </div>
       </div>
     </div>
 
     <!-- ── GCS fields ────────────────────────────────────────────────────── -->
-    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
-      <p class="col-span-2 text-xs font-semibold text-gray-500 uppercase tracking-wide">Google Cloud Storage</p>
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Bucket</label>
-        <input type="text" x-model="cfg.storage_gcs_bucket"
-               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-               placeholder="my-asset-bucket">
-      </div>
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Object Prefix</label>
-        <input type="text" x-model="cfg.storage_gcs_prefix"
-               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-               placeholder="config-mgmt">
-      </div>
-      <div class="col-span-2">
-        <button @click="testBackend('gcs')" :disabled="!cfg.storage_gcs_bucket || testing.gcs"
-                class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50">
-          <span x-show="!testing.gcs">Test connection</span>
-          <span x-show="testing.gcs" x-cloak>Testing…</span>
-        </button>
+    <div class="mb-3 bg-gray-50 rounded-lg border border-gray-200">
+      <button type="button" @click="toggleFields('gcs')"
+              :aria-expanded="openFields === 'gcs' ? 'true' : 'false'"
+              class="w-full flex items-center gap-2 px-4 py-3 text-left hover:bg-gray-100 rounded-lg">
+        <span class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Google Cloud Storage</span>
+        <span x-show="backendMeta('gcs').configured" x-cloak class="text-[10px] uppercase font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">configured</span>
+        <span x-show="backendMeta('gcs').active" x-cloak class="text-[10px] uppercase font-semibold text-blue-700 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded">active</span>
+        <svg class="ml-auto h-4 w-4 text-gray-400 transition-transform" :class="openFields === 'gcs' && 'rotate-180'"
+             fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+        </svg>
+      </button>
+      <div x-show="openFields === 'gcs'" x-cloak class="grid grid-cols-1 sm:grid-cols-2 gap-4 px-4 pb-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Bucket</label>
+          <input type="text" x-model="cfg.storage_gcs_bucket"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="my-asset-bucket">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Object Prefix</label>
+          <input type="text" x-model="cfg.storage_gcs_prefix"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="config-mgmt">
+        </div>
+        <div class="col-span-2">
+          <button @click="testBackend('gcs')" :disabled="!cfg.storage_gcs_bucket || testing.gcs"
+                  class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50">
+            <span x-show="!testing.gcs">Test connection</span>
+            <span x-show="testing.gcs" x-cloak>Testing…</span>
+          </button>
+        </div>
       </div>
     </div>
 
     <!-- ── OCI Object Storage fields ─────────────────────────────────────── -->
-    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
-      <div class="col-span-2 flex items-center gap-2">
-        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">OCI Object Storage</p>
+    <div class="mb-3 bg-gray-50 rounded-lg border border-gray-200">
+      <button type="button" @click="toggleFields('oci_object_storage')"
+              :aria-expanded="openFields === 'oci_object_storage' ? 'true' : 'false'"
+              class="w-full flex items-center gap-2 px-4 py-3 text-left hover:bg-gray-100 rounded-lg">
+        <span class="text-xs font-semibold text-gray-500 uppercase tracking-wide">OCI Object Storage</span>
         <span class="text-[11px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-200">image hub only</span>
-      </div>
-      <p class="col-span-2 text-xs text-gray-500 -mt-2">
-        Credentials come from the OCI setup wizard — only the bucket is set here.
-        Can host the image-registry hub, but cannot be the <em>active</em> backend:
-        the active backend also decides where Terraform state lives, and Terraform
-        has no OCI state backend.
-      </p>
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Bucket</label>
-        <input type="text" x-model="cfg.storage_oci_bucket"
-               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-               placeholder="dashboard-sandbox-storage">
-      </div>
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Object Prefix</label>
-        <input type="text" x-model="cfg.storage_oci_prefix"
-               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-               placeholder="config-mgmt">
-      </div>
-      <div class="col-span-2">
-        <label class="block text-sm font-medium text-gray-700 mb-1">Namespace <span class="text-gray-400 font-normal">(optional)</span></label>
-        <input type="text" x-model="cfg.storage_oci_namespace"
-               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-               placeholder="looked up from the tenancy when blank">
-      </div>
-      <div class="col-span-2">
-        <button @click="testBackend('oci_object_storage')" :disabled="!cfg.storage_oci_bucket || testing.oci_object_storage"
-                class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50">
-          <span x-show="!testing.oci_object_storage">Test connection</span>
-          <span x-show="testing.oci_object_storage" x-cloak>Testing…</span>
-        </button>
+        <span x-show="backendMeta('oci_object_storage').configured" x-cloak class="text-[10px] uppercase font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">configured</span>
+        <span x-show="backendMeta('oci_object_storage').active" x-cloak class="text-[10px] uppercase font-semibold text-blue-700 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded">active</span>
+        <svg class="ml-auto h-4 w-4 text-gray-400 transition-transform" :class="openFields === 'oci_object_storage' && 'rotate-180'"
+             fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+        </svg>
+      </button>
+      <div x-show="openFields === 'oci_object_storage'" x-cloak class="grid grid-cols-1 sm:grid-cols-2 gap-4 px-4 pb-4">
+        <p class="col-span-2 text-xs text-gray-500">
+          Credentials come from the OCI setup wizard — only the bucket is set here.
+          Can host the image-registry hub, but cannot be the <em>active</em> backend:
+          the active backend also decides where Terraform state lives, and Terraform
+          has no OCI state backend.
+        </p>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Bucket</label>
+          <input type="text" x-model="cfg.storage_oci_bucket"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="dashboard-sandbox-storage">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Object Prefix</label>
+          <input type="text" x-model="cfg.storage_oci_prefix"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="config-mgmt">
+        </div>
+        <div class="col-span-2">
+          <label class="block text-sm font-medium text-gray-700 mb-1">Namespace <span class="text-gray-400 font-normal">(optional)</span></label>
+          <input type="text" x-model="cfg.storage_oci_namespace"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="looked up from the tenancy when blank">
+        </div>
+        <div class="col-span-2">
+          <button @click="testBackend('oci_object_storage')" :disabled="!cfg.storage_oci_bucket || testing.oci_object_storage"
+                  class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50">
+            <span x-show="!testing.oci_object_storage">Test connection</span>
+            <span x-show="testing.oci_object_storage" x-cloak>Testing…</span>
+          </button>
+        </div>
       </div>
     </div>
 
     <!-- ── Local Filesystem / UNC fields ─────────────────────────────────── -->
-    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
-      <div class="col-span-2 flex items-center gap-2">
-        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Local Filesystem / UNC</p>
+    <div class="mb-3 bg-gray-50 rounded-lg border border-gray-200">
+      <button type="button" @click="toggleFields('local')"
+              :aria-expanded="openFields === 'local' ? 'true' : 'false'"
+              class="w-full flex items-center gap-2 px-4 py-3 text-left hover:bg-gray-100 rounded-lg">
+        <span class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Local Filesystem / UNC</span>
         <span class="text-[10px] uppercase font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">local runner only</span>
-      </div>
-      <p class="col-span-2 text-xs text-gray-500 -mt-1">
-        Either a path inside the dashboard container (typically a bind-mounted host
-        directory) or a UNC share like <code class="bg-white px-1 rounded">\\fileserver\share\playbooks</code>.
-        UNC reads go through the SMB protocol — no host-side mount needed. Username /
-        password / domain are only used for UNC.
-      </p>
-      <div class="col-span-2">
-        <label class="block text-sm font-medium text-gray-700 mb-1">Path</label>
-        <input type="text" x-model="cfg.storage_local_path"
-               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-               placeholder="\\fileserver\share\playbooks">
-      </div>
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Username <span class="text-gray-400 font-normal">(UNC only)</span></label>
-        <input type="text" x-model="cfg.storage_local_username"
-               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-               placeholder="svc-dashboard">
-      </div>
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Password <span class="text-gray-400 font-normal">(UNC only, encrypted)</span></label>
-        <input type="password" x-model="cfg.storage_local_password"
-               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-               placeholder="••••••••">
-      </div>
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Domain <span class="text-gray-400 font-normal">(UNC only)</span></label>
-        <input type="text" x-model="cfg.storage_local_domain"
-               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-               placeholder="CORP">
-      </div>
-      <div class="col-span-2">
-        <button @click="testBackend('local')" :disabled="!cfg.storage_local_path || testing.local"
-                class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50">
-          <span x-show="!testing.local">Test connection</span>
-          <span x-show="testing.local" x-cloak>Testing…</span>
-        </button>
+        <span x-show="backendMeta('local').configured" x-cloak class="text-[10px] uppercase font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">configured</span>
+        <span x-show="backendMeta('local').active" x-cloak class="text-[10px] uppercase font-semibold text-blue-700 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded">active</span>
+        <svg class="ml-auto h-4 w-4 text-gray-400 transition-transform" :class="openFields === 'local' && 'rotate-180'"
+             fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+        </svg>
+      </button>
+      <div x-show="openFields === 'local'" x-cloak class="grid grid-cols-1 sm:grid-cols-2 gap-4 px-4 pb-4">
+        <p class="col-span-2 text-xs text-gray-500">
+          Either a path inside the dashboard container (typically a bind-mounted host
+          directory) or a UNC share like <code class="bg-white px-1 rounded">\\fileserver\share\playbooks</code>.
+          UNC reads go through the SMB protocol — no host-side mount needed. Username /
+          password / domain are only used for UNC.
+        </p>
+        <div class="col-span-2">
+          <label class="block text-sm font-medium text-gray-700 mb-1">Path</label>
+          <input type="text" x-model="cfg.storage_local_path"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="\\fileserver\share\playbooks">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Username <span class="text-gray-400 font-normal">(UNC only)</span></label>
+          <input type="text" x-model="cfg.storage_local_username"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="svc-dashboard">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Password <span class="text-gray-400 font-normal">(UNC only, encrypted)</span></label>
+          <input type="password" x-model="cfg.storage_local_password"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="••••••••">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Domain <span class="text-gray-400 font-normal">(UNC only)</span></label>
+          <input type="text" x-model="cfg.storage_local_domain"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="CORP">
+        </div>
+        <div class="col-span-2">
+          <button @click="testBackend('local')" :disabled="!cfg.storage_local_path || testing.local"
+                  class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50">
+            <span x-show="!testing.local">Test connection</span>
+            <span x-show="testing.local" x-cloak>Testing…</span>
+          </button>
+        </div>
       </div>
     </div>
 
     <!-- ── Remote Filesystem / UNC (via agent) fields ────────────────────── -->
-    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
-      <div class="col-span-2 flex items-center gap-2">
-        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Remote Filesystem / UNC (via agent)</p>
+    <div class="mb-3 bg-gray-50 rounded-lg border border-gray-200">
+      <button type="button" @click="toggleFields('agent_local')"
+              :aria-expanded="openFields === 'agent_local' ? 'true' : 'false'"
+              class="w-full flex items-center gap-2 px-4 py-3 text-left hover:bg-gray-100 rounded-lg">
+        <span class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Remote Filesystem / UNC (via agent)</span>
         <span class="text-[10px] uppercase font-semibold text-sky-700 bg-sky-50 border border-sky-200 px-1.5 py-0.5 rounded">via agent</span>
-      </div>
-      <p class="col-span-2 text-xs text-gray-500 -mt-1">
-        The same kind of target as the backend above, reached by a remote agent
-        instead of by this container — so it works when the dashboard is hosted in a
-        cloud with no route to your file server, and it has no
-        <code class="bg-white px-1 rounded">ansible_runner=local</code> constraint.
-        <span class="font-semibold">The path is not configured here.</span> It lives in
-        that agent's own <code class="bg-white px-1 rounded">shares.yaml</code> alongside
-        its <code class="bg-white px-1 rounded">policy.yaml</code> grants the share by
-        name, and the dashboard never holds either. The SMB password can stay there too, or
-        the dashboard can hold it (below) and hand it to the agent sealed, per job. Files move inside a
-        signed job envelope, so playbooks and scripts work and packages
-        (<code class="bg-white px-1 rounded">.rpm</code>,
-        <code class="bg-white px-1 rounded">.deb</code>,
-        <code class="bg-white px-1 rounded">.msi</code>) are too large.
-      </p>
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Agent</label>
-        <select x-model="cfg.storage_agent_id"
-                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-          <option value="">— none —</option>
-          <template x-for="a in agents" :key="a.id">
-            <option :value="a.id" x-text="a.name + (a.status === 'online' ? '' : ' (' + a.status + ')')"></option>
-          </template>
-        </select>
-        <p x-show="agentsError" x-cloak class="text-xs text-amber-700 mt-1" x-text="agentsError"></p>
-      </div>
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Share name</label>
-        <input type="text" x-model="cfg.storage_agent_share"
-               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-               placeholder="playbook-share">
-        <p class="text-xs text-gray-500 mt-1">Name in the agent's <code class="bg-white px-1 rounded">shares.yaml</code>.</p>
-      </div>
-      <div class="col-span-2">
-        <label class="block text-sm font-medium text-gray-700 mb-1">Subpath <span class="text-gray-400 font-normal">(optional)</span></label>
-        <input type="text" x-model="cfg.storage_agent_subpath"
-               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-               placeholder="windows/prod">
-        <p class="text-xs text-gray-500 mt-1">A directory inside the share. Relative only — leave blank for its root.</p>
-      </div>
-      <div class="col-span-2">
-        <label class="block text-sm font-medium text-gray-700 mb-1">SMB password <span class="text-gray-400 font-normal">(optional — held by the dashboard, encrypted)</span></label>
-        <input type="password" x-model="cfg.storage_agent_password" autocomplete="new-password"
-               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-               placeholder="leave blank to keep it in shares.yaml">
-        <p class="text-xs text-gray-500 mt-1">
-          Used only when the share's entry in <code class="bg-white px-1 rounded">shares.yaml</code>
-          says <code class="bg-white px-1 rounded">dashboard_secret: true</code> (agent 2.7+); the
-          username stays there. Delivered sealed to each job, and only to SPIRE-attested agents
-          when Remote Agents requires that.
+        <span x-show="backendMeta('agent_local').configured" x-cloak class="text-[10px] uppercase font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">configured</span>
+        <span x-show="backendMeta('agent_local').active" x-cloak class="text-[10px] uppercase font-semibold text-blue-700 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded">active</span>
+        <svg class="ml-auto h-4 w-4 text-gray-400 transition-transform" :class="openFields === 'agent_local' && 'rotate-180'"
+             fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+        </svg>
+      </button>
+      <div x-show="openFields === 'agent_local'" x-cloak class="grid grid-cols-1 sm:grid-cols-2 gap-4 px-4 pb-4">
+        <p class="col-span-2 text-xs text-gray-500">
+          The same kind of target as the backend above, reached by a remote agent
+          instead of by this container — so it works when the dashboard is hosted in a
+          cloud with no route to your file server, and it has no
+          <code class="bg-white px-1 rounded">ansible_runner=local</code> constraint.
+          <span class="font-semibold">The path is not configured here.</span> It lives in
+          that agent's own <code class="bg-white px-1 rounded">shares.yaml</code> alongside
+          its <code class="bg-white px-1 rounded">policy.yaml</code> grants the share by
+          name, and the dashboard never holds either. The SMB password can stay there too, or
+          the dashboard can hold it (below) and hand it to the agent sealed, per job. Files move inside a
+          signed job envelope, so playbooks and scripts work and packages
+          (<code class="bg-white px-1 rounded">.rpm</code>,
+          <code class="bg-white px-1 rounded">.deb</code>,
+          <code class="bg-white px-1 rounded">.msi</code>) are too large.
         </p>
-      </div>
-      <div class="col-span-2">
-        <button @click="testBackend('agent_local')"
-                :disabled="!cfg.storage_agent_id || !cfg.storage_agent_share || testing.agent_local"
-                class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50">
-          <span x-show="!testing.agent_local">Test connection</span>
-          <span x-show="testing.agent_local" x-cloak>Testing… (up to 90s)</span>
-        </button>
-        <span class="text-xs text-gray-500 ml-2">Runs a real job on the agent — expect this to take a few seconds, not to be instant.</span>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Agent</label>
+          <select x-model="cfg.storage_agent_id"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">— none —</option>
+            <template x-for="a in agents" :key="a.id">
+              <option :value="a.id" x-text="a.name + (a.status === 'online' ? '' : ' (' + a.status + ')')"></option>
+            </template>
+          </select>
+          <p x-show="agentsError" x-cloak class="text-xs text-amber-700 mt-1" x-text="agentsError"></p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Share name</label>
+          <input type="text" x-model="cfg.storage_agent_share"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="playbook-share">
+          <p class="text-xs text-gray-500 mt-1">Name in the agent's <code class="bg-white px-1 rounded">shares.yaml</code>.</p>
+        </div>
+        <div class="col-span-2">
+          <label class="block text-sm font-medium text-gray-700 mb-1">Subpath <span class="text-gray-400 font-normal">(optional)</span></label>
+          <input type="text" x-model="cfg.storage_agent_subpath"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="windows/prod">
+          <p class="text-xs text-gray-500 mt-1">A directory inside the share. Relative only — leave blank for its root.</p>
+        </div>
+        <div class="col-span-2">
+          <label class="block text-sm font-medium text-gray-700 mb-1">SMB password <span class="text-gray-400 font-normal">(optional — held by the dashboard, encrypted)</span></label>
+          <input type="password" x-model="cfg.storage_agent_password" autocomplete="new-password"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="leave blank to keep it in shares.yaml">
+          <p class="text-xs text-gray-500 mt-1">
+            Used only when the share's entry in <code class="bg-white px-1 rounded">shares.yaml</code>
+            says <code class="bg-white px-1 rounded">dashboard_secret: true</code> (agent 2.7+); the
+            username stays there. Delivered sealed to each job, and only to SPIRE-attested agents
+            when Remote Agents requires that.
+          </p>
+        </div>
+        <div class="col-span-2">
+          <button @click="testBackend('agent_local')"
+                  :disabled="!cfg.storage_agent_id || !cfg.storage_agent_share || testing.agent_local"
+                  class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50">
+            <span x-show="!testing.agent_local">Test connection</span>
+            <span x-show="testing.agent_local" x-cloak>Testing… (up to 90s)</span>
+          </button>
+          <span class="text-xs text-gray-500 ml-2">Runs a real job on the agent — expect this to take a few seconds, not to be instant.</span>
+        </div>
       </div>
     </div>
 
@@ -362,6 +462,10 @@
     </button>
   </div>
 
+  </div>
+
+  <div x-show="activeTab === 'epml'" x-cloak role="tabpanel">
+
   <!-- ── BeyondTrust EPM-L packages ───────────────────────────────────────── -->
   <div x-show="epml.enabled" x-cloak
        class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
@@ -372,7 +476,7 @@
       <strong>Install EPM-L</strong> option on the AWS / Azure / GCP build pages, or by
       a config-management playbook.
       <span x-show="!activeBackend" x-cloak class="block text-amber-600 mt-1">
-        No active backend selected. Choose one above first.
+        No active backend selected. Choose one on the <a href="#backend" @click.prevent="select('backend')" class="font-semibold underline">Backend</a> tab first.
       </span>
     </p>
 
@@ -413,6 +517,10 @@
     </p>
   </div>
 
+  </div>
+
+  <div x-show="activeTab === 'assets'" x-cloak role="tabpanel">
+
   <!-- ── Upload (active backend) ──────────────────────────────────────────── -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
     <h2 class="text-base font-semibold text-gray-700 mb-1">Upload an asset</h2>
@@ -421,7 +529,7 @@
       and becomes available on /config-mgmt for runs against your VMs and
       cloud instances.
       <span x-show="!activeBackend" x-cloak class="block text-amber-600 mt-1">
-        No active backend selected. Choose one above before uploading.
+        No active backend selected. Choose one on the <a href="#backend" @click.prevent="select('backend')" class="font-semibold underline">Backend</a> tab before uploading.
       </span>
     </p>
 
@@ -592,6 +700,8 @@
     </div>
   </div>
 
+  </div>
+
   <!-- ── Move modal ───────────────────────────────────────────────────────── -->
   <div x-show="moveModal.open" x-cloak
        class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
@@ -626,6 +736,8 @@
       </div>
     </div>
   </div>
+
+  <div x-show="activeTab === 'migrate'" x-cloak role="tabpanel">
 
   <!-- ── Migrate ──────────────────────────────────────────────────────────── -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
@@ -701,13 +813,19 @@
     </div>
   </div>
 
+  </div>
+
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-function storagePage() {
+function storagePage(tabSlugs) {
   return {
+    tabSlugs: tabSlugs,
+    activeTab: '',
+    // Which backend's connection-fields section is expanded on the Backend tab ('' = none).
+    openFields: '',
     backends: [],
     activeBackend: '',
     cfg: {
@@ -748,10 +866,37 @@ function storagePage() {
     epml: { enabled: false, loading: false, syncing: false, building: false,
             checked: false, packages: [], status: '', error: '' },
 
+    // ── Tabs ──────────────────────────────────────────────────────────────
+    // Same contract as remoteAgentsPage.select (agents/index.html): a slug this
+    // page does not have is ignored, and the fragment is rewritten with
+    // replaceState so Back leaves the page rather than walking the tabs.
+    select(slug, push = true) {
+      if (!this.tabSlugs.includes(slug)) return;
+      this.activeTab = slug;
+      if (push) window.history.replaceState(null, '', '#' + slug);
+    },
+
+    toggleFields(id) {
+      this.openFields = this.openFields === id ? '' : id;
+    },
+
+    // The /api/storage/backends row for one backend, for the section headers' badges.
+    backendMeta(id) {
+      return this.backends.find(b => b.id === id) || {};
+    },
+
     async init() {
       requireAuth();
+      // Pick the tab before the loads so the page never renders with no panel.
+      const want = (window.location.hash || '').replace(/^#/, '');
+      this.select(this.tabSlugs.includes(want) ? want : this.tabSlugs[0], false);
       await Promise.all([this.loadBackends(), this.loadConfig(), this.loadAssets(),
                          this.loadFeatureFlags(), this.loadAgents()]);
+      // Open the active backend's fields, and follow the radio from here on.
+      this.openFields = this.cfg.storage_active_backend || '';
+      this.$watch('cfg.storage_active_backend', v => { if (v) this.openFields = v; });
+      // #epml with the integration off would show an empty panel: fall back.
+      if (this.activeTab === 'epml' && !this.epml.enabled) this.select('backend', false);
     },
 
     async loadFeatureFlags() {
