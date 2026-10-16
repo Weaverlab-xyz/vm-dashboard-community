@@ -27,6 +27,26 @@ The companion docs:
 - [Storage Management](storage-management.md) — where playbooks and
   assets live
 
+
+## The page
+
+`/config-mgmt` has three tabs:
+
+- **Run**: the run form. Pick an asset and a target, optionally a change window,
+  then **Run**.
+- **Targets**: every target the form can pick from, grouped by family (on-premises,
+  each cloud, Kubernetes clusters, databases, agent-reached resources).
+- **Recent runs**: the latest Ansible jobs, each linking to its job log.
+
+The URL fragment selects a tab, so `/config-mgmt#runs` opens straight on Recent runs.
+A bulk selection handed over from the Inventory page always opens on **Run**.
+
+Inside Run, the **Use a secret** section is collapsed by default. It holds the named
+secret variables, become method and password, SSH key, EPM-L token variable and the
+managed-account picker. It opens by itself for a bulk run and as soon as any of those
+fields has a value, and its header shows an **in use** badge while one does. A
+collapsed section still applies: everything set in it goes with the run.
+
 ---
 
 ## Philosophy
@@ -242,7 +262,8 @@ The inventory panel covers the common case — asset, SSH user, extra vars. For 
 that needs a Secrets-Management secret or a Password Safe managed account, use
 **Continue on the Config Management page →**. It carries the selection over and the
 full run form applies to it: named secret vars, become password, SSH key, and the
-managed-account picker.
+managed-account picker. The page opens on the **Run** tab with the **Use a secret**
+section already expanded.
 
 **Every target picks its own managed account.** The form lists each selected VM with
 its own Password Safe dropdown, read from that target's own address. Pick a **default**
@@ -516,7 +537,7 @@ shell scripts. Reference secrets via Ansible's `lookup('env', ...)`,
 the `ansible-vault` integration, or fetched-at-runtime variables that
 the runner reads from the cloud secret store.
 
-**Use a secret without seeing it.** The run form's **Use a secret** panel injects
+**Use a secret without seeing it.** The run form's **Use a secret** section injects
 a Secrets-Management secret (as a named var, become password, or SSH key) — or a
 **BeyondTrust Password Safe managed account** checked out just-in-time — straight
 into the run. The operator never sees the value; it's scrubbed from job output and
