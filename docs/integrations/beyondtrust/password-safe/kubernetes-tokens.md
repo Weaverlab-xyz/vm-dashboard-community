@@ -22,7 +22,7 @@ Two custom plugins, both imported by hand:
 | Kubernetes Service Account Token | `Kubernetes Service Account Token` | Rotates the token in the cluster |
 | PRA Vault Token | `PRA Vault Token` | Writes the rotated value into the PRA Vault `opaque_token` account |
 
-Enable **Kubernetes Token Rotation** in Settings → Integrations → Password Safe, then use the
+Enable **Kubernetes Token Rotation** in Settings → Integrations → Password Safe (the **Kubernetes** tab), then use the
 per-cluster **Token rotation** button on `/k8s` (or tick the box on the provision form).
 Registration applies the rotator RBAC, creates the managed system + account, registers the
 PRA Vault Token account, **syncs** it to the token account, rotates once to prove the path,

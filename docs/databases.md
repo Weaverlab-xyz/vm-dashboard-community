@@ -196,7 +196,7 @@ database, and both can be registered. The dashboard cannot resolve your private 
 tell them apart — it is not on that network. Prefer consistent naming; the import shows
 the exact host it will record.
 
-**Settings** → Integrations → Password Safe → *Database Import*:
+**Settings** → Integrations → Password Safe → *Databases* tab → *Database Import*:
 
 | Key | Default | Purpose |
 |---|---|---|

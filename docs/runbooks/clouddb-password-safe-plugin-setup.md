@@ -9,7 +9,7 @@ Covers what must exist before the settings panel is useful, exactly what to put 
 field, and how to prove the plugin ran.
 
 Feature reference: [Databases → Layer 2](../databases.md#layer-2--password-safe-aws--azure--gcp).
-Panel: **Settings → Integrations → Password Safe → Configure → Database Onboarding**.
+Panel: **Settings → Integrations → Password Safe → Configure → Databases tab → Database Onboarding**.
 
 **Scope:** AWS, Azure and GCP. OCI databases provision and get a tunnel, but have no
 Password Safe onboarding path at all.
@@ -440,7 +440,7 @@ matching the third `:`-segment of the functional account's password — which Pa
 never hands back. The onboarding job says so and names the key above.
 
 **The Cloud Run service (SQL Server).** The dashboard deploys this. In
-Settings → Password Safe → *Cloud Run channel*:
+Settings → Password Safe → *Databases* tab → *GCP (Cloud SQL plugins)* → *Cloud Run channel*:
 
 1. Put each Resource Broker's service account in **Invoker service accounts**. A bare
    email is fine — the dashboard prefixes it. `allUsers` and `allAuthenticatedUsers` are
@@ -572,7 +572,7 @@ of that runs — the service connects with a database login, so there is nothing
 
 ## 2. Azure panel fill-in
 
-**Settings → Integrations → Password Safe → Configure**, then the
+**Settings → Integrations → Password Safe → Configure → Databases** tab, then expand the
 **Azure (Run Command plugins)** subsection.
 
 | Field | Value | Key |
@@ -661,8 +661,8 @@ both a packed address and an IP does not exist. Registration refuses a non-IP
 
 ## 4. GCP panel fill-in
 
-**Settings → Integrations → Password Safe → Configure**, then the **GCP (Cloud SQL
-plugins)** block at the bottom of Database Onboarding.
+**Settings → Integrations → Password Safe → Configure → Databases** tab, then expand the
+**GCP (Cloud SQL plugins)** block at the bottom of Database Onboarding.
 
 | Field | Value |
 |---|---|
