@@ -449,7 +449,7 @@ def _create_network_sync(project: str, env_id: str, region: str, cidr: str,
         project=project,
         firewall_resource=compute_v1.Firewall(
             name=fw_name, network=network.self_link, direction="INGRESS",
-            description=f"POV environment {env_id} — intra-environment only",
+            description=f"POV environment {env_id} - intra-environment only",
             source_ranges=[sub_cidr],
             allowed=[compute_v1.Allowed(I_p_protocol="all")])).result()
 

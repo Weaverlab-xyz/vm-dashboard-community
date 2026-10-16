@@ -213,7 +213,7 @@ def _create_zones_sync(ec2, env_id: str, vpc_id: str, zones: list) -> dict:
         sg_spec["Tags"].append({"Key": env.TAG_ZONE, "Value": name})
         sg = ec2.create_security_group(
             GroupName=f"{env_id}-{name}-sg", VpcId=vpc_id,
-            Description=f"POV environment {env_id} - Purdue {name} zone",
+            Description=_sg_description(f"POV environment {env_id} - Purdue {name} zone"),
             TagSpecifications=[sg_spec])
         sg_id = sg["GroupId"]
         ec2.revoke_security_group_egress(
@@ -268,7 +268,8 @@ def _create_network_sync(env_id: str, region: str, cidr: str, sub_cidr: str,
 
     sg = ec2.create_security_group(
         GroupName=f"{env_id}-sg", VpcId=vpc_id,
-        Description=f"POV environment {env_id} — outbound only, plus intra-environment",
+        Description=_sg_description(
+            f"POV environment {env_id} - outbound only, plus intra-environment"),
         TagSpecifications=[_tag_spec("security-group", env_id, f"{env_id}-sg")])
     sg_id = sg["GroupId"]
     # The ONLY inbound rule: the environment talking to itself. The broker reaches its
