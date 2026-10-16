@@ -334,7 +334,8 @@ without it, so the integration can never be talked into removing one of your acc
 
 ## What a POV leaves behind
 
-**POV page → Past POVs**, or the **Summary** tab on any POV.
+**POV page → Past** tab, or the **Summary** tab on any POV. The Past tab appears once a
+POV has been destroyed.
 
 Destroying a POV removes the environment, the logins, the jump items and the integrations.
 It does not remove the account of what the evaluation covered — that row is marked
