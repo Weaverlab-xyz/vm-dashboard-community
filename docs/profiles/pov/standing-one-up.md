@@ -72,7 +72,7 @@ image — the metadata runner and a container runtime — had no automation at a
 
 **A blueprint** is a saved POV recipe: the fields the create form asks, under one name. Pick
 one on the POV page and it fills the form; you still type the POV's own name. On
-**POV → Templates**, the blueprint form's **Template** picker lists the selected cloud's
+the **Blueprints** tab of **POV → Templates**, the blueprint form's **Template** picker lists the selected cloud's
 templates alongside the lab platform's, and a blueprint saved from a cloud template builds
 on that cloud. For a given
 *kind* of POV — a Password Safe evaluation, a PRA-only demo — every field except the name

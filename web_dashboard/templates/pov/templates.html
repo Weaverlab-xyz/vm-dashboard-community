@@ -35,7 +35,20 @@
 #}
 
 {% block content %}
-<div x-data="templatesPage()" class="space-y-6">
+{# Four tabs over what used to be one long scroll of cards, all under the one templatesPage()
+   component: Build reads the toggled platform's templates, Builds is where a started build
+   is watched, and Blueprints picks from both. The platform toggle and the page banners stay
+   above the tab bar because they scope more than one tab. The Templates tab rides
+   `cloudEnabled` -- it is the cloud template editor, and with no cloud selected it has
+   nothing to show. #}
+{% set tabs = [
+  {'slug': 'build',      'label': 'Build'},
+  {'slug': 'builds',     'label': 'Builds'},
+  {'slug': 'templates',  'label': 'Templates', 'show': 'cloudEnabled'},
+  {'slug': 'blueprints', 'label': 'Blueprints'},
+] %}
+<div x-data='templatesPage({{ tabs | map(attribute="slug") | list | tojson }})'
+     class="space-y-6">
 
   <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
     <div>
@@ -70,13 +83,29 @@
        class="rounded-md bg-amber-50 border border-amber-200 p-4">
     <p class="text-sm text-amber-800">
       <span x-text="current.label || platform"></span> cannot save an environment back as a
-      template, so templates cannot be built on it. Blueprints below still work.
+      template, so templates cannot be built on it. The
+      <a href="#blueprints" @click.prevent="select('blueprints')"
+         class="font-semibold underline">Blueprints</a> tab still works.
     </p>
   </div>
 
   <div x-show="error" class="rounded-md bg-red-50 border border-red-200 p-4">
     <p class="text-sm text-red-800" x-text="error"></p>
   </div>
+
+  <div class="border-b border-gray-200 mb-6 flex flex-wrap gap-1" role="tablist" aria-label="POV template sections">
+    {% for tab in tabs %}
+    <button @click="select('{{ tab.slug }}')" role="tab" type="button"
+            x-show="{{ tab.show or 'true' }}"
+            :aria-selected="activeTab === '{{ tab.slug }}' ? 'true' : 'false'"
+            :class="activeTab === '{{ tab.slug }}'
+                      ? 'border-blue-600 text-blue-700'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+            class="px-3 py-2 -mb-px border-b-2 text-sm font-medium">{{ tab.label }}</button>
+    {% endfor %}
+  </div>
+
+  <div x-show="activeTab === 'build'" x-cloak role="tabpanel" class="space-y-6">
 
   {# ── Build a template ─────────────────────────────────────────────────── #}
   <section class="bg-white rounded-lg shadow-sm border border-gray-200">
@@ -224,6 +253,10 @@
     </div>
   </section>
 
+  </div>
+
+  <div x-show="activeTab === 'builds'" x-cloak role="tabpanel">
+
   {# ── Builds ───────────────────────────────────────────────────────────── #}
   <section class="bg-white rounded-lg shadow-sm border border-gray-200">
     <div class="px-4 py-3 border-b border-gray-200">
@@ -304,11 +337,15 @@
     </div>
   </section>
 
+  </div>
+
+  <div x-show="activeTab === 'templates'" x-cloak role="tabpanel">
+
   {# ── Cloud templates ──────────────────────────────────────────────────────
      The topology a CLOUD POV is built from. No public cloud holds a template, so on a
-     cloud these rows ARE the template — which is why this section replaces the builder
-     above rather than sitting beside it, and why it is hidden entirely when no cloud
-     provider is selected. #}
+     cloud these rows ARE the template — which is why this tab stands in for the Build
+     tab rather than feeding it, and why it is hidden entirely when no cloud provider is
+     selected. #}
   <section x-show="cloudEnabled" x-cloak
            class="bg-white rounded-lg shadow-sm border border-gray-200">
     <div class="px-5 py-4 border-b border-gray-200 flex items-center justify-between gap-3">
@@ -489,6 +526,10 @@
       </div>
     </div>
   </section>
+
+  </div>
+
+  <div x-show="activeTab === 'blueprints'" x-cloak role="tabpanel">
 
   {# ── Blueprints ───────────────────────────────────────────────────────── #}
   <section class="bg-white rounded-lg shadow-sm border border-gray-200">
@@ -680,11 +721,15 @@
       </table>
     </div>
   </section>
+
+  </div>
 </div>
 
 <script>
-function templatesPage() {
+function templatesPage(tabSlugs) {
   return {
+    tabSlugs: tabSlugs,
+    activeTab: '',
     platform: '',
     platforms: [],
     templates: [],
@@ -816,7 +861,20 @@ function templatesPage() {
       return JSON.stringify(detail);
     },
 
+    // ── Tabs ──────────────────────────────────────────────────────────────
+    // Same contract as remoteAgentsPage.select (agents/index.html): a slug this
+    // page does not have is ignored, and the fragment is rewritten with
+    // replaceState so Back leaves the page rather than walking the tabs.
+    select(slug, push = true) {
+      if (!this.tabSlugs.includes(slug)) return;
+      this.activeTab = slug;
+      if (push) window.history.replaceState(null, '', '#' + slug);
+    },
+
     async init() {
+      // Pick the tab before the loads so the page never renders with no panel.
+      const want = (window.location.hash || '').replace(/^#/, '');
+      this.select(this.tabSlugs.includes(want) ? want : this.tabSlugs[0], false);
       this.bp = this.blankBlueprint();
       try {
         const body = await this.apiJson('/api/pov/platforms');
@@ -922,6 +980,8 @@ function templatesPage() {
         this.cloudEnabled = false;
         this.cloudTemplates = [];
       }
+      // #templates with no cloud selected would show an empty panel: fall back.
+      if (this.activeTab === 'templates' && !this.cloudEnabled) this.select('build', false);
     },
 
     async saveCloudTemplate() {
@@ -1071,6 +1131,8 @@ function templatesPage() {
         });
         this.form.name = '';
         this.form.description = '';
+        // A build runs for minutes and its progress is on the Builds tab, not this one.
+        this.select('builds');
         await this.load();
       } catch (e) {
         this.error = e.message;
@@ -1100,7 +1162,8 @@ function templatesPage() {
         source_build_id: b.id,
       });
       this.showBlueprintForm = true;
-      window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+      // The form lives on the Blueprints tab, at its top -- no scroll needed once it shows.
+      this.select('blueprints');
     },
 
     async saveBlueprint() {
