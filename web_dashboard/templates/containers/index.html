@@ -239,17 +239,26 @@
     <!-- Jinja-gated as well as Alpine-hidden: with the feature off the deploy
          surface must not render at all, even though the surrounding Portainer
          panel can still be reached via the #portainer hash. -->
-    <div class="mb-6">
-      <div class="flex flex-wrap items-center justify-between mb-3">
-        <div>
-          <h2 class="text-lg font-semibold text-gray-800">Managed Portainer server</h2>
-          <p class="text-sm text-gray-500 mt-1">
-            Let the dashboard run Portainer CE for you — a single container on a public
-            Container-Optimized-OS GCE VM, firewalled to your allowed sources. A successful
-            deploy fills in the URL and API token below automatically. This node is
-            <strong>ephemeral</strong>: tearing it down wipes its users, environments and settings.
-          </p>
-        </div>
+    <!-- Each Portainer setup surface is a collapsible card, so a configured instance
+         sees its endpoint list near the top instead of below ~570 lines of setup.
+         x-show, never x-if: collapsed inputs stay bound. Default (loadEndpoints):
+         all collapsed when Portainer answers, the managed server open when it is not
+         configured. Each header carries the status the collapsed body would show. -->
+    <div class="mb-3 bg-white rounded-xl border border-gray-200">
+      <div class="flex flex-wrap items-center gap-2 px-4 py-3">
+        <button type="button" @click="togglePortainerSection('managed')"
+                :aria-expanded="portainerOpen.managed ? 'true' : 'false'"
+                class="flex-1 min-w-0 flex flex-wrap items-center gap-2 text-left">
+          <span class="text-base font-semibold text-gray-800">Managed Portainer server</span>
+          <span x-show="portainerNodes.length > 0" x-cloak class="text-[10px] uppercase font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">configured</span>
+          <span x-show="!portainerNodeLoading && portainerNodes.length === 0" x-cloak class="text-[10px] uppercase font-semibold text-gray-500 bg-gray-50 border border-gray-200 px-1.5 py-0.5 rounded">not configured</span>
+          <span x-show="portainerNodes.length > 0 && !portainerNodeTokenConfigured" x-cloak class="text-[10px] uppercase font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">no API token</span>
+          <span x-show="portainerNodeError" x-cloak class="text-[10px] uppercase font-semibold text-red-700 bg-red-50 border border-red-200 px-1.5 py-0.5 rounded">error</span>
+          <svg class="ml-auto h-4 w-4 flex-shrink-0 text-gray-400 transition-transform" :class="portainerOpen.managed && 'rotate-180'"
+               fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </button>
         <div class="flex flex-wrap items-center gap-2 sm:flex-shrink-0 sm:ml-4">
           <button @click="loadPortainerNode()" :disabled="portainerNodeLoading"
                   class="px-2.5 py-1 text-xs font-medium text-gray-600 border border-gray-300 hover:bg-gray-50 rounded-lg transition">
@@ -264,466 +273,514 @@
           </button>
         </div>
       </div>
-
-      <!-- Not deployable yet (no GCP project) -->
-      <div x-show="!portainerNodeLoading && !portainerNodeConfigured" x-cloak
-           class="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm">
-        <p class="text-amber-800 font-medium">A managed Portainer server can't be deployed yet.</p>
-        <p class="text-amber-700 mt-1">
-          Set a GCP project (and the allowed source CIDRs) in
-          <a href="/settings" class="underline font-medium">Settings → Containers</a>.
-          You can still connect your own Portainer server instead.
+      <div x-show="portainerOpen.managed" x-cloak class="px-4 pb-4">
+        <p class="text-sm text-gray-500 mb-3">
+          Let the dashboard run Portainer CE for you — a single container on a public
+          Container-Optimized-OS GCE VM, firewalled to your allowed sources. A successful
+          deploy fills in the URL and API token below automatically. This node is
+          <strong>ephemeral</strong>: tearing it down wipes its users, environments and settings.
         </p>
-      </div>
 
-      <div x-show="portainerNodeError" x-cloak
-           class="mb-3 px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700"
-           x-text="portainerNodeError"></div>
-
-      <div x-show="!portainerNodeLoading && portainerNodeConfigured" x-cloak>
-        <!-- Placement: where the single node runs. Redeploying elsewhere relocates it. -->
-        <div class="bg-white rounded-xl border border-gray-200 p-3 mb-3 text-sm">
-          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div>
-              <label class="block text-xs font-medium text-gray-600 mb-1">Cloud</label>
-              <!-- Same three-cloud picker as the Gateways tab. Changing it RELOCATES
-                   the single node, so the region list has to follow immediately —
-                   leaving the old cloud's regions selectable is how you deploy into a
-                   region that does not exist. -->
-              <select x-model="portainerDeployForm.cloud" @change="portainerCloudChanged()"
-                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
-                <template x-for="c in portainerClouds" :key="c">
-                  <option :value="c" x-text="c.toUpperCase()"></option>
-                </template>
-              </select>
-            </div>
-            <div>
-              <label class="block text-xs font-medium text-gray-600 mb-1">Region</label>
-              <select x-model="portainerDeployForm.region"
-                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono">
-                <option value="">(current / default)</option>
-                <template x-for="r in portainerRegions" :key="r">
-                  <option :value="r" x-text="r"></option>
-                </template>
-              </select>
-            </div>
-            <div x-show="portainerDeployForm.cloud === 'gcp'">
-              <label class="block text-xs font-medium text-gray-600 mb-1">Zone <span class="text-gray-400">(optional)</span></label>
-              <input type="text" x-model="portainerDeployForm.zone"
-                     class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono" placeholder="us-east1-b">
-            </div>
-          </div>
-          <p class="text-[11px] text-gray-400 mt-1">
-            Blank region keeps the node's current region (or the configured default).
-            Only regions with a configured subnet are listed — the node needs a public subnet, and a subnet is regional on every cloud.
-            <span x-show="portainerDeployForm.cloud === 'gcp'" x-cloak>Blank zone uses the region's
-            first available zone; a capacity-exhausted zone auto-falls back to a sibling in the same region.</span>
-            Redeploying to a different region <strong>or cloud</strong> <strong>relocates</strong> the node.
+        <!-- Not deployable yet (no GCP project) -->
+        <div x-show="!portainerNodeLoading && !portainerNodeConfigured" x-cloak
+             class="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm">
+          <p class="text-amber-800 font-medium">A managed Portainer server can't be deployed yet.</p>
+          <p class="text-amber-700 mt-1">
+            Set a GCP project (and the allowed source CIDRs) in
+            <a href="/settings" class="underline font-medium">Settings → Containers</a>.
+            You can still connect your own Portainer server instead.
           </p>
         </div>
 
-        <!-- PRA access (chosen at deploy/redeploy, like the Rancher node) -->
-        <div x-show="portainerDeployOpts.configured" x-cloak
-             class="bg-white rounded-xl border border-gray-200 p-3 mb-3 text-sm">
-          <label class="flex items-center gap-2 font-medium text-gray-700">
-            <input type="checkbox" x-model="portainerDeployForm.web_jump_enabled" class="rounded border-gray-300">
-            Broker the Portainer UI via a PRA Web Jump
-          </label>
-          <p class="text-[11px] text-gray-400 mt-1 ml-6">
-            Creates a <code>portainer-ui</code> Web Jump and stores the generated admin credential in the chosen
-            PRA Vault account group for injected login — the password never appears here. The Gateway's egress IP
-            is auto-added to the node firewall. Applied on Deploy/Redeploy.
-          </p>
-          <div x-show="portainerDeployForm.web_jump_enabled" x-cloak class="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3 ml-6">
-            <div>
-              <label class="block text-xs font-medium text-gray-600 mb-1">Jump Group</label>
-              <select x-model="portainerDeployForm.jump_group"
-                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
-                <option value="">(configured default)</option>
-                <template x-for="g in portainerDeployOpts.jump_groups || []" :key="g.id">
-                  <option :value="g.name" x-text="g.name"></option>
-                </template>
-              </select>
+        <div x-show="portainerNodeError" x-cloak
+             class="mb-3 px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700"
+             x-text="portainerNodeError"></div>
+
+        <div x-show="!portainerNodeLoading && portainerNodeConfigured" x-cloak>
+          <!-- Placement: where the single node runs. Redeploying elsewhere relocates it. -->
+          <div class="bg-white rounded-xl border border-gray-200 p-3 mb-3 text-sm">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Cloud</label>
+                <!-- Same three-cloud picker as the Gateways tab. Changing it RELOCATES
+                     the single node, so the region list has to follow immediately —
+                     leaving the old cloud's regions selectable is how you deploy into a
+                     region that does not exist. -->
+                <select x-model="portainerDeployForm.cloud" @change="portainerCloudChanged()"
+                        class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                  <template x-for="c in portainerClouds" :key="c">
+                    <option :value="c" x-text="c.toUpperCase()"></option>
+                  </template>
+                </select>
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Region</label>
+                <select x-model="portainerDeployForm.region"
+                        class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono">
+                  <option value="">(current / default)</option>
+                  <template x-for="r in portainerRegions" :key="r">
+                    <option :value="r" x-text="r"></option>
+                  </template>
+                </select>
+              </div>
+              <div x-show="portainerDeployForm.cloud === 'gcp'">
+                <label class="block text-xs font-medium text-gray-600 mb-1">Zone <span class="text-gray-400">(optional)</span></label>
+                <input type="text" x-model="portainerDeployForm.zone"
+                       class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono" placeholder="us-east1-b">
+              </div>
             </div>
-            <div>
-              <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
-              <select x-model="portainerDeployForm.jumpoint_name"
-                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
-                <option value="">(configured default)</option>
-                <template x-for="j in portainerDeployOpts.gateways || []" :key="j.id">
-                  <option :value="j.name" x-text="j.name"></option>
-                </template>
-              </select>
-            </div>
-            <div>
-              <label class="block text-xs font-medium text-gray-600 mb-1">Vault Account Group</label>
-              <select x-model.number="portainerDeployForm.vault_account_group_id"
-                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
-                <option :value="null">(none — show password instead)</option>
-                <template x-for="v in portainerDeployOpts.vault_account_groups || []" :key="v.id">
-                  <option :value="v.id" x-text="v.name"></option>
-                </template>
-              </select>
+            <p class="text-[11px] text-gray-400 mt-1">
+              Blank region keeps the node's current region (or the configured default).
+              Only regions with a configured subnet are listed — the node needs a public subnet, and a subnet is regional on every cloud.
+              <span x-show="portainerDeployForm.cloud === 'gcp'" x-cloak>Blank zone uses the region's
+              first available zone; a capacity-exhausted zone auto-falls back to a sibling in the same region.</span>
+              Redeploying to a different region <strong>or cloud</strong> <strong>relocates</strong> the node.
+            </p>
+          </div>
+
+          <!-- PRA access (chosen at deploy/redeploy, like the Rancher node) -->
+          <div x-show="portainerDeployOpts.configured" x-cloak
+               class="bg-white rounded-xl border border-gray-200 p-3 mb-3 text-sm">
+            <label class="flex items-center gap-2 font-medium text-gray-700">
+              <input type="checkbox" x-model="portainerDeployForm.web_jump_enabled" class="rounded border-gray-300">
+              Broker the Portainer UI via a PRA Web Jump
+            </label>
+            <p class="text-[11px] text-gray-400 mt-1 ml-6">
+              Creates a <code>portainer-ui</code> Web Jump and stores the generated admin credential in the chosen
+              PRA Vault account group for injected login — the password never appears here. The Gateway's egress IP
+              is auto-added to the node firewall. Applied on Deploy/Redeploy.
+            </p>
+            <div x-show="portainerDeployForm.web_jump_enabled" x-cloak class="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3 ml-6">
+              <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Jump Group</label>
+                <select x-model="portainerDeployForm.jump_group"
+                        class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                  <option value="">(configured default)</option>
+                  <template x-for="g in portainerDeployOpts.jump_groups || []" :key="g.id">
+                    <option :value="g.name" x-text="g.name"></option>
+                  </template>
+                </select>
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
+                <select x-model="portainerDeployForm.jumpoint_name"
+                        class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                  <option value="">(configured default)</option>
+                  <template x-for="j in portainerDeployOpts.gateways || []" :key="j.id">
+                    <option :value="j.name" x-text="j.name"></option>
+                  </template>
+                </select>
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Vault Account Group</label>
+                <select x-model.number="portainerDeployForm.vault_account_group_id"
+                        class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                  <option :value="null">(none — show password instead)</option>
+                  <template x-for="v in portainerDeployOpts.vault_account_groups || []" :key="v.id">
+                    <option :value="v.id" x-text="v.name"></option>
+                  </template>
+                </select>
+              </div>
             </div>
           </div>
-        </div>
 
-        <div x-show="portainerNodes.length === 0"
-             class="text-sm text-gray-500 py-6 text-center bg-white rounded-xl border border-gray-200">
-          No managed Portainer server running. Click <strong>Deploy Portainer server</strong> to stand one up.
-        </div>
+          <div x-show="portainerNodes.length === 0"
+               class="text-sm text-gray-500 py-6 text-center bg-white rounded-xl border border-gray-200">
+            No managed Portainer server running. Click <strong>Deploy Portainer server</strong> to stand one up.
+          </div>
 
-        <div x-show="portainerNodes.length > 0"
-             class="bg-white rounded-xl shadow-sm overflow-hidden border border-gray-200">
-          <table class="min-w-full divide-y divide-gray-200">
-            <thead class="bg-gray-50">
-              <tr>
-                <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Name</th>
-                <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Cloud</th>
-                <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Zone</th>
-                <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Machine</th>
-                <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">URL</th>
-                <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Status</th>
-                <th class="px-4 py-3 text-right text-xs font-semibold uppercase text-gray-500">Actions</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-gray-100">
-              <template x-for="n in portainerNodes" :key="n.name">
-                <tr class="hover:bg-gray-50">
-                  <td class="px-4 py-3 text-sm font-medium text-gray-900 font-mono" x-text="n.name"></td>
-                  <td class="px-4 py-3 text-sm text-gray-600 uppercase" x-text="n.cloud || 'gcp'"></td>
-                  <td class="px-4 py-3 text-sm text-gray-600" x-text="n.zone || '—'"></td>
-                  <td class="px-4 py-3 text-sm text-gray-600" x-text="n.machine_type || '—'"></td>
-                  <td class="px-4 py-3 text-sm">
-                    <a x-show="n.url" :href="n.url" target="_blank"
-                       class="text-blue-600 hover:underline font-mono break-all" x-text="n.url"></a>
-                    <span x-show="!n.url" class="text-gray-400">—</span>
-                  </td>
-                  <td class="px-4 py-3 text-sm">
-                    <span :class="n.status === 'RUNNING'
-                      ? 'bg-green-100 text-green-700 ring-1 ring-green-200'
-                      : 'bg-gray-100 text-gray-700 ring-1 ring-gray-200'"
-                          class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium">
-                      <span x-text="n.status"></span>
-                    </span>
-                  </td>
-                  <td class="px-4 py-3 text-sm text-right">
-                    <button @click="stopPortainerNode(n)"
-                            :disabled="portainerNodeActionPending === n.name"
-                            class="text-red-600 hover:underline disabled:opacity-40">Stop</button>
-                  </td>
+          <div x-show="portainerNodes.length > 0"
+               class="bg-white rounded-xl shadow-sm overflow-hidden border border-gray-200">
+            <table class="min-w-full divide-y divide-gray-200">
+              <thead class="bg-gray-50">
+                <tr>
+                  <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Name</th>
+                  <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Cloud</th>
+                  <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Zone</th>
+                  <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Machine</th>
+                  <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">URL</th>
+                  <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Status</th>
+                  <th class="px-4 py-3 text-right text-xs font-semibold uppercase text-gray-500">Actions</th>
                 </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-100">
+                <template x-for="n in portainerNodes" :key="n.name">
+                  <tr class="hover:bg-gray-50">
+                    <td class="px-4 py-3 text-sm font-medium text-gray-900 font-mono" x-text="n.name"></td>
+                    <td class="px-4 py-3 text-sm text-gray-600 uppercase" x-text="n.cloud || 'gcp'"></td>
+                    <td class="px-4 py-3 text-sm text-gray-600" x-text="n.zone || '—'"></td>
+                    <td class="px-4 py-3 text-sm text-gray-600" x-text="n.machine_type || '—'"></td>
+                    <td class="px-4 py-3 text-sm">
+                      <a x-show="n.url" :href="n.url" target="_blank"
+                         class="text-blue-600 hover:underline font-mono break-all" x-text="n.url"></a>
+                      <span x-show="!n.url" class="text-gray-400">—</span>
+                    </td>
+                    <td class="px-4 py-3 text-sm">
+                      <span :class="n.status === 'RUNNING'
+                        ? 'bg-green-100 text-green-700 ring-1 ring-green-200'
+                        : 'bg-gray-100 text-gray-700 ring-1 ring-gray-200'"
+                            class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium">
+                        <span x-text="n.status"></span>
+                      </span>
+                    </td>
+                    <td class="px-4 py-3 text-sm text-right">
+                      <button @click="stopPortainerNode(n)"
+                              :disabled="portainerNodeActionPending === n.name"
+                              class="text-red-600 hover:underline disabled:opacity-40">Stop</button>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+          <p x-show="portainerNodeLoginHint" class="mt-2 text-xs text-gray-600" x-cloak>
+            <span class="font-medium text-gray-700">Access:</span> <span x-text="portainerNodeLoginHint"></span>
+          </p>
+          <p x-show="portainerNodes.length > 0 && !portainerNodeTokenConfigured" x-cloak
+             class="mt-2 text-xs text-amber-700">
+            No API token is stored for this node, so the environments below can't be listed yet.
+            Mint one below, or add your own in
+            <a href="/settings" class="underline font-medium">Settings → Containers</a>.
+          </p>
+          <!-- Portainer shows an API token's value exactly once, so "add it in Settings"
+               is only an answer for someone who still has it. Mint signs in as the admin
+               and makes a new one; Stage re-pushes the stored one to the adapter, which
+               keeps its own copy in the cloud's secret store and is the caller most
+               likely to be holding a stale token. -->
+          <div x-show="portainerNodes.length > 0" x-cloak class="mt-2 flex flex-wrap items-center gap-2">
+            <button @click="mintPortainerToken()" :disabled="portainerTokenPending"
+                    class="px-3 py-1.5 text-xs font-medium text-gray-700 border border-gray-300 hover:bg-gray-50 disabled:opacity-50 rounded-lg transition">
+              <span x-show="!portainerTokenPending"
+                    x-text="portainerNodeTokenConfigured ? 'Mint a new API token' : 'Mint an API token'"></span>
+              <span x-show="portainerTokenPending" x-cloak>Minting…</span>
+            </button>
+            <button @click="stagePortainerToken()"
+                    x-show="portainerNodeTokenConfigured && portainerAdapter.fn_id"
+                    :disabled="portainerTokenPending"
+                    class="px-3 py-1.5 text-xs font-medium text-gray-700 border border-gray-300 hover:bg-gray-50 disabled:opacity-50 rounded-lg transition">
+              Re-send the token to the adapter
+            </button>
+            <!-- The deploy configures the firewall once and never revisits it, so the
+                 rule ages out from under a node that is running perfectly well. Every
+                 caller then says the same unhelpful thing — "unreachable" — and the
+                 only cure used to be a redeploy. -->
+            <button @click="reapplyPortainerFirewall()" :disabled="portainerFirewallPending"
+                    title="Re-detect the dashboard's egress address and re-apply the node's ingress rule"
+                    class="px-3 py-1.5 text-xs font-medium text-gray-700 border border-gray-300 hover:bg-gray-50 disabled:opacity-50 rounded-lg transition">
+              <span x-show="!portainerFirewallPending">Re-apply the node firewall</span>
+              <span x-show="portainerFirewallPending" x-cloak>Re-applying…</span>
+            </button>
+          </div>
+          <p x-show="portainerTokenNote" x-cloak class="mt-2 text-xs text-green-700"
+             x-text="portainerTokenNote"></p>
+          <p x-show="portainerTokenError" x-cloak
+             class="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2"
+             x-text="portainerTokenError"></p>
+          <p x-show="portainerFirewallNote" x-cloak class="mt-2 text-xs text-green-700"
+             x-text="portainerFirewallNote"></p>
+          <p x-show="portainerFirewallError" x-cloak
+             class="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2"
+             x-text="portainerFirewallError"></p>
+          <p x-show="portainerNodeDataDiskEnabled" x-cloak class="mt-2 text-xs text-blue-700">
+            Durable state is on: <code x-text="portainerNodeDataDiskName"></code> survives a teardown,
+            so the next deploy comes back with its users, environments and settings. The disk keeps
+            billing until you tear the node down and confirm deleting it.
+          </p>
+          <p x-show="portainerNodeStaleEdgeKeys" x-cloak
+             class="mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2"
+             x-text="portainerNodeStaleEdgeKeys"></p>
+          <p class="mt-2 text-xs text-gray-400">
+            Reachability is governed by the <code>portainer_allowed_source_cidrs</code> firewall rule
+            (tcp 9443/8000; Settings). Stop deletes the VM + firewall and clears the node's runtime config.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Just-in-time access (Entitle) ───────────────────────────────
+         Portainer has no Entitle connector at all, so the portainer_access Cloud
+         Function is the only route to JIT access for it. This card is the supported
+         way to get one: the adapter reads its target from its own environment, so a
+         hand-deploy from the Cloud Functions form that named the wrong Portainer
+         cannot be corrected afterwards.
+
+         `viable` and `ineligible_reason` both come from the API, which reads them
+         from the same portainer_adapter_service.ineligible_reason the pair endpoint
+         checks — so this button can never offer what the endpoint refuses. -->
+    <div x-show="!portainerNodeLoading && portainerNodeConfigured" x-cloak class="mb-3 bg-white rounded-xl border border-gray-200">
+      <div class="flex flex-wrap items-center gap-2 px-4 py-3">
+        <button type="button" @click="togglePortainerSection('jit')"
+                :aria-expanded="portainerOpen.jit ? 'true' : 'false'"
+                class="flex-1 min-w-0 flex flex-wrap items-center gap-2 text-left">
+          <span class="text-base font-semibold text-gray-800">Just-in-time access (Entitle)</span>
+          <span x-show="portainerAdapter.fn_id" x-cloak class="text-[10px] uppercase font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">configured</span>
+          <span x-show="!portainerAdapter.fn_id" x-cloak class="text-[10px] uppercase font-semibold text-gray-500 bg-gray-50 border border-gray-200 px-1.5 py-0.5 rounded">not configured</span>
+          <span x-show="portainerAdapter.stranded" x-cloak class="text-[10px] uppercase font-semibold text-red-700 bg-red-50 border border-red-200 px-1.5 py-0.5 rounded">stranded</span>
+          <svg class="ml-auto h-4 w-4 flex-shrink-0 text-gray-400 transition-transform" :class="portainerOpen.jit && 'rotate-180'"
+               fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </button>
+      </div>
+      <div x-show="portainerOpen.jit" x-cloak class="px-4 pb-4">
+        <div class="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <p class="mt-1 text-xs text-gray-500">
+              Makes Portainer <strong>requestable in Entitle</strong> through a REST integration in
+              Ephemeral Accounts mode. A granted request mints a <code>jit-</code> user and adds it to
+              the team the requester asked for; a revoke removes that membership and the account.
+              Access is granted through <strong>team membership</strong>, so configure the environment
+              access policy on a team once and the per-request part stays reversible. Your real
+              Portainer users are never listed to Entitle, and the adapter refuses to delete an
+              account it did not create.
+            </p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2 sm:flex-shrink-0">
+            <button @click="pairPortainerAdapter()"
+                    x-show="portainerAdapter.viable && !portainerAdapter.fn_id"
+                    :disabled="portainerAdapterPending"
+                    class="px-3 py-1.5 text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 rounded-lg transition">
+              <span x-show="!portainerAdapterPending">Deploy adapter</span>
+              <span x-show="portainerAdapterPending" x-cloak>Deploying…</span>
+            </button>
+            <button @click="removePortainerAdapter()"
+                    x-show="portainerAdapter.fn_id" x-cloak
+                    :disabled="portainerAdapterPending"
+                    class="px-3 py-1.5 text-sm font-medium text-red-600 border border-red-200 hover:bg-red-50 disabled:opacity-50 rounded-lg transition">
+              Remove adapter
+            </button>
+          </div>
+        </div>
+
+        <!-- Not deployable yet — say which prerequisite is missing rather than
+             showing a dead button. -->
+        <p x-show="!portainerAdapter.viable && portainerAdapter.ineligible_reason" x-cloak
+           class="mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2">
+          Not available yet: <span x-text="portainerAdapter.ineligible_reason"></span>
+        </p>
+
+        <!-- Placement, only when there is no managed node to take one from. For a
+             managed node the adapter MUST sit in its cloud and region to reach it
+             over the VPC, so offering a choice would only offer a broken deploy. -->
+        <div x-show="portainerAdapter.viable && !portainerAdapter.fn_id && !portainerNodes.length" x-cloak
+             class="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-700">Cloud</label>
+            <select x-model="portainerAdapterForm.cloud" @change="portainerAdapterCloudChanged()"
+                    class="mt-1 w-full px-3 py-2 text-sm border border-gray-300 rounded-lg font-mono">
+              <template x-for="c in portainerClouds" :key="c">
+                <option :value="c" x-text="c.toUpperCase()"></option>
               </template>
-            </tbody>
-          </table>
-        </div>
-        <p x-show="portainerNodeLoginHint" class="mt-2 text-xs text-gray-600" x-cloak>
-          <span class="font-medium text-gray-700">Access:</span> <span x-text="portainerNodeLoginHint"></span>
-        </p>
-        <p x-show="portainerNodes.length > 0 && !portainerNodeTokenConfigured" x-cloak
-           class="mt-2 text-xs text-amber-700">
-          No API token is stored for this node, so the environments below can't be listed yet.
-          Mint one below, or add your own in
-          <a href="/settings" class="underline font-medium">Settings → Containers</a>.
-        </p>
-        <!-- Portainer shows an API token's value exactly once, so "add it in Settings"
-             is only an answer for someone who still has it. Mint signs in as the admin
-             and makes a new one; Stage re-pushes the stored one to the adapter, which
-             keeps its own copy in the cloud's secret store and is the caller most
-             likely to be holding a stale token. -->
-        <div x-show="portainerNodes.length > 0" x-cloak class="mt-2 flex flex-wrap items-center gap-2">
-          <button @click="mintPortainerToken()" :disabled="portainerTokenPending"
-                  class="px-3 py-1.5 text-xs font-medium text-gray-700 border border-gray-300 hover:bg-gray-50 disabled:opacity-50 rounded-lg transition">
-            <span x-show="!portainerTokenPending"
-                  x-text="portainerNodeTokenConfigured ? 'Mint a new API token' : 'Mint an API token'"></span>
-            <span x-show="portainerTokenPending" x-cloak>Minting…</span>
-          </button>
-          <button @click="stagePortainerToken()"
-                  x-show="portainerNodeTokenConfigured && portainerAdapter.fn_id"
-                  :disabled="portainerTokenPending"
-                  class="px-3 py-1.5 text-xs font-medium text-gray-700 border border-gray-300 hover:bg-gray-50 disabled:opacity-50 rounded-lg transition">
-            Re-send the token to the adapter
-          </button>
-          <!-- The deploy configures the firewall once and never revisits it, so the
-               rule ages out from under a node that is running perfectly well. Every
-               caller then says the same unhelpful thing — "unreachable" — and the
-               only cure used to be a redeploy. -->
-          <button @click="reapplyPortainerFirewall()" :disabled="portainerFirewallPending"
-                  title="Re-detect the dashboard's egress address and re-apply the node's ingress rule"
-                  class="px-3 py-1.5 text-xs font-medium text-gray-700 border border-gray-300 hover:bg-gray-50 disabled:opacity-50 rounded-lg transition">
-            <span x-show="!portainerFirewallPending">Re-apply the node firewall</span>
-            <span x-show="portainerFirewallPending" x-cloak>Re-applying…</span>
-          </button>
-        </div>
-        <p x-show="portainerTokenNote" x-cloak class="mt-2 text-xs text-green-700"
-           x-text="portainerTokenNote"></p>
-        <p x-show="portainerTokenError" x-cloak
-           class="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2"
-           x-text="portainerTokenError"></p>
-        <p x-show="portainerFirewallNote" x-cloak class="mt-2 text-xs text-green-700"
-           x-text="portainerFirewallNote"></p>
-        <p x-show="portainerFirewallError" x-cloak
-           class="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2"
-           x-text="portainerFirewallError"></p>
-        <p x-show="portainerNodeDataDiskEnabled" x-cloak class="mt-2 text-xs text-blue-700">
-          Durable state is on: <code x-text="portainerNodeDataDiskName"></code> survives a teardown,
-          so the next deploy comes back with its users, environments and settings. The disk keeps
-          billing until you tear the node down and confirm deleting it.
-        </p>
-        <p x-show="portainerNodeStaleEdgeKeys" x-cloak
-           class="mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2"
-           x-text="portainerNodeStaleEdgeKeys"></p>
-        <p class="mt-2 text-xs text-gray-400">
-          Reachability is governed by the <code>portainer_allowed_source_cidrs</code> firewall rule
-          (tcp 9443/8000; Settings). Stop deletes the VM + firewall and clears the node's runtime config.
-        </p>
-
-        <!-- ── Just-in-time access (Entitle) ───────────────────────────────
-             Portainer has no Entitle connector at all, so the portainer_access Cloud
-             Function is the only route to JIT access for it. This card is the supported
-             way to get one: the adapter reads its target from its own environment, so a
-             hand-deploy from the Cloud Functions form that named the wrong Portainer
-             cannot be corrected afterwards.
-
-             `viable` and `ineligible_reason` both come from the API, which reads them
-             from the same portainer_adapter_service.ineligible_reason the pair endpoint
-             checks — so this button can never offer what the endpoint refuses. -->
-        <div class="mt-4 pt-4 border-t border-gray-100">
-          <div class="flex flex-wrap items-start justify-between gap-2">
-            <div>
-              <h3 class="text-sm font-semibold text-gray-800">Just-in-time access (Entitle)</h3>
-              <p class="mt-1 text-xs text-gray-500">
-                Makes Portainer <strong>requestable in Entitle</strong> through a REST integration in
-                Ephemeral Accounts mode. A granted request mints a <code>jit-</code> user and adds it to
-                the team the requester asked for; a revoke removes that membership and the account.
-                Access is granted through <strong>team membership</strong>, so configure the environment
-                access policy on a team once and the per-request part stays reversible. Your real
-                Portainer users are never listed to Entitle, and the adapter refuses to delete an
-                account it did not create.
-              </p>
-            </div>
-            <div class="flex flex-wrap items-center gap-2 sm:flex-shrink-0">
-              <button @click="pairPortainerAdapter()"
-                      x-show="portainerAdapter.viable && !portainerAdapter.fn_id"
-                      :disabled="portainerAdapterPending"
-                      class="px-3 py-1.5 text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 rounded-lg transition">
-                <span x-show="!portainerAdapterPending">Deploy adapter</span>
-                <span x-show="portainerAdapterPending" x-cloak>Deploying…</span>
-              </button>
-              <button @click="removePortainerAdapter()"
-                      x-show="portainerAdapter.fn_id" x-cloak
-                      :disabled="portainerAdapterPending"
-                      class="px-3 py-1.5 text-sm font-medium text-red-600 border border-red-200 hover:bg-red-50 disabled:opacity-50 rounded-lg transition">
-                Remove adapter
-              </button>
-            </div>
+            </select>
           </div>
-
-          <!-- Not deployable yet — say which prerequisite is missing rather than
-               showing a dead button. -->
-          <p x-show="!portainerAdapter.viable && portainerAdapter.ineligible_reason" x-cloak
-             class="mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2">
-            Not available yet: <span x-text="portainerAdapter.ineligible_reason"></span>
-          </p>
-
-          <!-- Placement, only when there is no managed node to take one from. For a
-               managed node the adapter MUST sit in its cloud and region to reach it
-               over the VPC, so offering a choice would only offer a broken deploy. -->
-          <div x-show="portainerAdapter.viable && !portainerAdapter.fn_id && !portainerNodes.length" x-cloak
-               class="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div>
-              <label class="block text-xs font-medium text-gray-700">Cloud</label>
-              <select x-model="portainerAdapterForm.cloud" @change="portainerAdapterCloudChanged()"
-                      class="mt-1 w-full px-3 py-2 text-sm border border-gray-300 rounded-lg font-mono">
-                <template x-for="c in portainerClouds" :key="c">
-                  <option :value="c" x-text="c.toUpperCase()"></option>
-                </template>
-              </select>
-            </div>
-            <div>
-              <label class="block text-xs font-medium text-gray-700">Region</label>
-              <select x-model="portainerAdapterForm.region"
-                      class="mt-1 w-full px-3 py-2 text-sm border border-gray-300 rounded-lg font-mono">
-                <option value="">(pick a region)</option>
-                <template x-for="r in (portainerRegionsByCloud[portainerAdapterForm.cloud] || portainerRegions)" :key="r">
-                  <option :value="r" x-text="r"></option>
-                </template>
-              </select>
-            </div>
-            <div>
-              <label class="block text-xs font-medium text-gray-700">Network</label>
-              <select x-model="portainerAdapterForm.network_mode"
-                      class="mt-1 w-full px-3 py-2 text-sm border border-gray-300 rounded-lg font-mono">
-                <option value="public">public</option>
-                <option value="vpc">vpc</option>
-              </select>
-              <p class="mt-1 text-xs text-gray-400">
-                <code>vpc</code> only if this Portainer is reachable from the function's subnet.
-              </p>
-            </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-700">Region</label>
+            <select x-model="portainerAdapterForm.region"
+                    class="mt-1 w-full px-3 py-2 text-sm border border-gray-300 rounded-lg font-mono">
+              <option value="">(pick a region)</option>
+              <template x-for="r in (portainerRegionsByCloud[portainerAdapterForm.cloud] || portainerRegions)" :key="r">
+                <option :value="r" x-text="r"></option>
+              </template>
+            </select>
           </div>
-
-          <!-- Deployed. The endpoint and the integration id are what an operator needs
-               when reconciling this against Entitle's own view. -->
-          <div x-show="portainerAdapter.fn_id" x-cloak
-               class="mt-3 text-xs text-gray-600 space-y-1">
-            <p>
-              <span class="font-medium text-gray-700">Adapter:</span>
-              <code x-text="portainerAdapter.name"></code>
-              <span x-text="'(' + portainerAdapter.cloud.toUpperCase() + ' / ' + portainerAdapter.region + ', ' + portainerAdapter.network_mode + ')'"></span>
-              <span :class="portainerAdapter.status === 'available'
-                      ? 'bg-green-100 text-green-700 ring-1 ring-green-200'
-                      : 'bg-gray-100 text-gray-700 ring-1 ring-gray-200'"
-                    class="ml-1 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
-                    x-text="portainerAdapter.status"></span>
-              <span x-show="portainerAdapter.dry_run" x-cloak
-                    class="ml-1 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 ring-1 ring-amber-200">
-                DRY RUN
-              </span>
-              <!-- Beside the status chip on purpose: the chip says `available`, which
-                   is true of the FUNCTION and says nothing about whether it can still
-                   reach the node it was paired to. -->
-              <span x-show="portainerAdapter.stranded" x-cloak
-                    class="ml-1 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 ring-1 ring-red-200">
-                STRANDED
-              </span>
-            </p>
-            <!-- The node was relocated and the adapter was not. It is a VPC-attached
-                 function deployed BESIDE the node, so a move to another region (or
-                 cloud) leaves it on the old network with nothing failing: the status
-                 stays `available`, the Entitle integration stays live, and the only
-                 symptom is a grant that times out on Entitle's side. Loud, because
-                 every other line on this card reads healthy. -->
-            <p x-show="portainerAdapter.stranded" x-cloak
-               class="text-red-700 bg-red-50 border border-red-200 rounded-lg p-2"
-               x-text="portainerAdapter.stranded_reason"></p>
-            <p x-show="portainerAdapter.target_url" x-cloak>
-              <span class="font-medium text-gray-700">Targets:</span>
-              <code x-text="portainerAdapter.target_url"></code>
-            </p>
-            <p x-show="portainerAdapter.invoke_url" x-cloak>
-              <span class="font-medium text-gray-700">Endpoint Entitle calls:</span>
-              <code class="break-all" x-text="portainerAdapter.invoke_url"></code>
-            </p>
-            <p x-show="portainerAdapter.entitle_integration_id" x-cloak>
-              <span class="font-medium text-gray-700">Entitle integration:</span>
-              <code x-text="portainerAdapter.entitle_integration_id"></code>
-            </p>
-            <p x-show="portainerAdapter.source_cidrs.length" x-cloak>
-              <span class="font-medium text-gray-700">Added to the node firewall:</span>
-              <code x-text="portainerAdapter.source_cidrs.join(', ')"></code>
-              <!-- Otherwise this line is the most convincing thing on a stranded card:
-                   the range really is in the allow-list, it just belongs to a network
-                   the node is no longer on. -->
-              <span x-show="portainerAdapter.stranded" x-cloak class="text-red-700">
-                — from the adapter's own network, which is no longer the node's, so it
-                admits nothing.
-              </span>
-            </p>
-            <!-- The one skippable leg. An adapter with no integration is deployed and
-                 pointed at its Portainer but nothing can request it yet. -->
-            <p x-show="!portainerAdapter.entitle_integration_id && !portainerAdapter.entitle_enabled" x-cloak
-               class="text-amber-700">
-              Entitle registration is disabled, so the adapter is deployed but not requestable.
-              Set <code>entitle_registration_enabled</code> in Settings, then use
-              <strong>Register in Entitle</strong> on the Cloud Functions page.
-            </p>
-            <p x-show="!portainerAdapter.entitle_integration_id && portainerAdapter.entitle_enabled" x-cloak
-               class="text-amber-700">
-              No Entitle integration is recorded for this adapter — check the
-              <code>cloudfn_entitle_register</code> job, or register it from the Cloud Functions page.
-            </p>
-          </div>
-        </div>
-
-        <!-- ── Connect a Docker host (Edge agent) ─────────────────────────── -->
-        <div x-show="portainerNodeTokenConfigured" x-cloak
-             class="mt-4 pt-4 border-t border-gray-100">
-          <h3 class="text-sm font-semibold text-gray-800">Connect a Docker host</h3>
-          <p class="mt-1 text-xs text-gray-500">
-            This server can't reach into your network — it has no Docker socket and no route to a
-            LAN address. An <strong>Edge agent</strong> runs on the Docker host and polls
-            <em>outbound</em> to port <code>8000</code> here, so nothing inbound is needed.
-          </p>
-          <div class="mt-2 flex items-end gap-3">
-            <div class="flex-1 max-w-xs">
-              <label class="block text-xs font-medium text-gray-600 mb-1">Environment name</label>
-              <input type="text" x-model="edgeForm.name" placeholder="lab-docker"
-                     @keydown.enter="registerEdgeEndpoint()"
-                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-            </div>
-            <button @click="registerEdgeEndpoint()"
-                    :disabled="edgeRegistering || !edgeForm.name.trim()"
-                    class="px-3 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-40">
-              <span x-show="!edgeRegistering">Generate join command</span>
-              <span x-show="edgeRegistering">Registering…</span>
-            </button>
-          </div>
-          <div x-show="edgeResult" x-cloak class="mt-3">
-            <div class="flex items-center justify-between">
-              <p class="text-xs text-gray-600">
-                Run this on <span class="font-medium" x-text="edgeResult && edgeResult.name"></span>.
-                <span class="text-amber-700 font-medium">The key is shown once —</span>
-                it isn't stored anywhere.
-              </p>
-              <button @click="copyEdgeCommand()" class="text-xs text-blue-600 hover:underline">Copy</button>
-            </div>
-            <pre class="mt-1 bg-gray-900 text-gray-100 text-xs rounded-lg p-3 overflow-x-auto"
-                 x-text="edgeResult && edgeResult.join_command"></pre>
+          <div>
+            <label class="block text-xs font-medium text-gray-700">Network</label>
+            <select x-model="portainerAdapterForm.network_mode"
+                    class="mt-1 w-full px-3 py-2 text-sm border border-gray-300 rounded-lg font-mono">
+              <option value="public">public</option>
+              <option value="vpc">vpc</option>
+            </select>
             <p class="mt-1 text-xs text-gray-400">
-              The agent appears as environment #<span x-text="edgeResult && edgeResult.endpoint_id"></span>
-              within a few seconds of starting. Re-running Refresh above will list it.
+              <code>vpc</code> only if this Portainer is reachable from the function's subnet.
             </p>
           </div>
         </div>
 
-        <!-- ── Import a migration bundle ──────────────────────────────────── -->
-        <div x-show="portainerNodeTokenConfigured" x-cloak
-             class="mt-4 pt-4 border-t border-gray-100">
-          <h3 class="text-sm font-semibold text-gray-800">Import from another Portainer</h3>
-          <p class="mt-1 text-xs text-gray-500">
-            Merges users, teams, memberships and registries from a migration bundle. Existing
-            names are matched, not duplicated, so re-importing is safe.
-            <strong>Environment connections are never imported</strong> — use the Edge agent above.
+        <!-- Deployed. The endpoint and the integration id are what an operator needs
+             when reconciling this against Entitle's own view. -->
+        <div x-show="portainerAdapter.fn_id" x-cloak
+             class="mt-3 text-xs text-gray-600 space-y-1">
+          <p>
+            <span class="font-medium text-gray-700">Adapter:</span>
+            <code x-text="portainerAdapter.name"></code>
+            <span x-text="'(' + portainerAdapter.cloud.toUpperCase() + ' / ' + portainerAdapter.region + ', ' + portainerAdapter.network_mode + ')'"></span>
+            <span :class="portainerAdapter.status === 'available'
+                    ? 'bg-green-100 text-green-700 ring-1 ring-green-200'
+                    : 'bg-gray-100 text-gray-700 ring-1 ring-gray-200'"
+                  class="ml-1 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
+                  x-text="portainerAdapter.status"></span>
+            <span x-show="portainerAdapter.dry_run" x-cloak
+                  class="ml-1 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 ring-1 ring-amber-200">
+              DRY RUN
+            </span>
+            <!-- Beside the status chip on purpose: the chip says `available`, which
+                 is true of the FUNCTION and says nothing about whether it can still
+                 reach the node it was paired to. -->
+            <span x-show="portainerAdapter.stranded" x-cloak
+                  class="ml-1 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 ring-1 ring-red-200">
+              STRANDED
+            </span>
           </p>
-          <p class="mt-1 text-xs text-gray-400">
-            A Portainer <code>.tar.gz</code> backup can't be uploaded directly: it only restores
-            into a blank Portainer. Open it with a throwaway one, then
-            <code>python -m web_dashboard.scripts.portainer_migrate export</code> to get a bundle.
-            See <a href="/docs/integrations/portainer" class="underline" target="_blank">the Portainer guide</a>.
+          <!-- The node was relocated and the adapter was not. It is a VPC-attached
+               function deployed BESIDE the node, so a move to another region (or
+               cloud) leaves it on the old network with nothing failing: the status
+               stays `available`, the Entitle integration stays live, and the only
+               symptom is a grant that times out on Entitle's side. Loud, because
+               every other line on this card reads healthy. -->
+          <p x-show="portainerAdapter.stranded" x-cloak
+             class="text-red-700 bg-red-50 border border-red-200 rounded-lg p-2"
+             x-text="portainerAdapter.stranded_reason"></p>
+          <p x-show="portainerAdapter.target_url" x-cloak>
+            <span class="font-medium text-gray-700">Targets:</span>
+            <code x-text="portainerAdapter.target_url"></code>
           </p>
-          <div class="mt-2 flex items-end gap-3 flex-wrap">
-            <div>
-              <label class="block text-xs font-medium text-gray-600 mb-1">Bundle (.json)</label>
-              <input type="file" accept=".json,application/json"
-                     @change="pickBundle($event)"
-                     class="text-sm border border-gray-300 rounded-lg px-3 py-2">
-            </div>
-            <div class="max-w-xs">
-              <label class="block text-xs font-medium text-gray-600 mb-1">
-                Deploy stacks onto (optional)
-              </label>
-              <select x-model.number="importForm.endpoint_id"
-                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-                <option :value="null">Skip stacks</option>
-                <template x-for="ep in endpoints" :key="ep.id">
-                  <option :value="ep.id" x-text="ep.name"></option>
-                </template>
-              </select>
-            </div>
-            <button @click="importBundle()"
-                    :disabled="importing || !importForm.content_b64"
-                    class="px-3 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-40">
-              <span x-show="!importing">Import bundle</span>
-              <span x-show="importing">Importing…</span>
-            </button>
-          </div>
-          <p x-show="importForm.filename" x-cloak class="mt-2 text-xs text-gray-600">
-            Selected <code x-text="importForm.filename"></code>.
-            Choosing an environment also <strong>deploys</strong> the bundle's stacks there —
-            that starts containers.
+          <p x-show="portainerAdapter.invoke_url" x-cloak>
+            <span class="font-medium text-gray-700">Endpoint Entitle calls:</span>
+            <code class="break-all" x-text="portainerAdapter.invoke_url"></code>
+          </p>
+          <p x-show="portainerAdapter.entitle_integration_id" x-cloak>
+            <span class="font-medium text-gray-700">Entitle integration:</span>
+            <code x-text="portainerAdapter.entitle_integration_id"></code>
+          </p>
+          <p x-show="portainerAdapter.source_cidrs.length" x-cloak>
+            <span class="font-medium text-gray-700">Added to the node firewall:</span>
+            <code x-text="portainerAdapter.source_cidrs.join(', ')"></code>
+            <!-- Otherwise this line is the most convincing thing on a stranded card:
+                 the range really is in the allow-list, it just belongs to a network
+                 the node is no longer on. -->
+            <span x-show="portainerAdapter.stranded" x-cloak class="text-red-700">
+              — from the adapter's own network, which is no longer the node's, so it
+              admits nothing.
+            </span>
+          </p>
+          <!-- The one skippable leg. An adapter with no integration is deployed and
+               pointed at its Portainer but nothing can request it yet. -->
+          <p x-show="!portainerAdapter.entitle_integration_id && !portainerAdapter.entitle_enabled" x-cloak
+             class="text-amber-700">
+            Entitle registration is disabled, so the adapter is deployed but not requestable.
+            Set <code>entitle_registration_enabled</code> in Settings, then use
+            <strong>Register in Entitle</strong> on the Cloud Functions page.
+          </p>
+          <p x-show="!portainerAdapter.entitle_integration_id && portainerAdapter.entitle_enabled" x-cloak
+             class="text-amber-700">
+            No Entitle integration is recorded for this adapter — check the
+            <code>cloudfn_entitle_register</code> job, or register it from the Cloud Functions page.
           </p>
         </div>
+      </div>
+    </div>
+
+    <!-- ── Connect a Docker host (Edge agent) ─────────────────────────── -->
+    <div x-show="!portainerNodeLoading && portainerNodeConfigured && portainerNodeTokenConfigured" x-cloak class="mb-3 bg-white rounded-xl border border-gray-200">
+      <div class="flex flex-wrap items-center gap-2 px-4 py-3">
+        <button type="button" @click="togglePortainerSection('edge')"
+                :aria-expanded="portainerOpen.edge ? 'true' : 'false'"
+                class="flex-1 min-w-0 flex flex-wrap items-center gap-2 text-left">
+          <span class="text-base font-semibold text-gray-800">Connect a Docker host</span>
+          <span x-show="endpoints.length > 0" x-cloak class="text-[10px] uppercase font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded" x-text="endpoints.length + (endpoints.length === 1 ? ' environment' : ' environments')"></span>
+          <span x-show="endpoints.length === 0" x-cloak class="text-[10px] uppercase font-semibold text-gray-500 bg-gray-50 border border-gray-200 px-1.5 py-0.5 rounded">not configured</span>
+          <svg class="ml-auto h-4 w-4 flex-shrink-0 text-gray-400 transition-transform" :class="portainerOpen.edge && 'rotate-180'"
+               fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </button>
+      </div>
+      <div x-show="portainerOpen.edge" x-cloak class="px-4 pb-4">
+        <p class="text-xs text-gray-500">
+          This server can't reach into your network — it has no Docker socket and no route to a
+          LAN address. An <strong>Edge agent</strong> runs on the Docker host and polls
+          <em>outbound</em> to port <code>8000</code> here, so nothing inbound is needed.
+        </p>
+        <div class="mt-2 flex items-end gap-3">
+          <div class="flex-1 max-w-xs">
+            <label class="block text-xs font-medium text-gray-600 mb-1">Environment name</label>
+            <input type="text" x-model="edgeForm.name" placeholder="lab-docker"
+                   @keydown.enter="registerEdgeEndpoint()"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+          <button @click="registerEdgeEndpoint()"
+                  :disabled="edgeRegistering || !edgeForm.name.trim()"
+                  class="px-3 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-40">
+            <span x-show="!edgeRegistering">Generate join command</span>
+            <span x-show="edgeRegistering">Registering…</span>
+          </button>
+        </div>
+        <div x-show="edgeResult" x-cloak class="mt-3">
+          <div class="flex items-center justify-between">
+            <p class="text-xs text-gray-600">
+              Run this on <span class="font-medium" x-text="edgeResult && edgeResult.name"></span>.
+              <span class="text-amber-700 font-medium">The key is shown once —</span>
+              it isn't stored anywhere.
+            </p>
+            <button @click="copyEdgeCommand()" class="text-xs text-blue-600 hover:underline">Copy</button>
+          </div>
+          <pre class="mt-1 bg-gray-900 text-gray-100 text-xs rounded-lg p-3 overflow-x-auto"
+               x-text="edgeResult && edgeResult.join_command"></pre>
+          <p class="mt-1 text-xs text-gray-400">
+            The agent appears as environment #<span x-text="edgeResult && edgeResult.endpoint_id"></span>
+            within a few seconds of starting. Re-running Refresh above will list it.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Import a migration bundle ──────────────────────────────────── -->
+    <div x-show="!portainerNodeLoading && portainerNodeConfigured && portainerNodeTokenConfigured" x-cloak class="mb-3 bg-white rounded-xl border border-gray-200">
+      <div class="flex flex-wrap items-center gap-2 px-4 py-3">
+        <button type="button" @click="togglePortainerSection('import')"
+                :aria-expanded="portainerOpen.import ? 'true' : 'false'"
+                class="flex-1 min-w-0 flex flex-wrap items-center gap-2 text-left">
+          <span class="text-base font-semibold text-gray-800">Import from another Portainer</span>
+          <span class="text-[10px] uppercase font-semibold text-gray-500 bg-gray-50 border border-gray-200 px-1.5 py-0.5 rounded">optional</span>
+          <svg class="ml-auto h-4 w-4 flex-shrink-0 text-gray-400 transition-transform" :class="portainerOpen.import && 'rotate-180'"
+               fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </button>
+      </div>
+      <div x-show="portainerOpen.import" x-cloak class="px-4 pb-4">
+        <p class="text-xs text-gray-500">
+          Merges users, teams, memberships and registries from a migration bundle. Existing
+          names are matched, not duplicated, so re-importing is safe.
+          <strong>Environment connections are never imported</strong> — use the Edge agent above.
+        </p>
+        <p class="mt-1 text-xs text-gray-400">
+          A Portainer <code>.tar.gz</code> backup can't be uploaded directly: it only restores
+          into a blank Portainer. Open it with a throwaway one, then
+          <code>python -m web_dashboard.scripts.portainer_migrate export</code> to get a bundle.
+          See <a href="/docs/integrations/portainer" class="underline" target="_blank">the Portainer guide</a>.
+        </p>
+        <div class="mt-2 flex items-end gap-3 flex-wrap">
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Bundle (.json)</label>
+            <input type="file" accept=".json,application/json"
+                   @change="pickBundle($event)"
+                   class="text-sm border border-gray-300 rounded-lg px-3 py-2">
+          </div>
+          <div class="max-w-xs">
+            <label class="block text-xs font-medium text-gray-600 mb-1">
+              Deploy stacks onto (optional)
+            </label>
+            <select x-model.number="importForm.endpoint_id"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option :value="null">Skip stacks</option>
+              <template x-for="ep in endpoints" :key="ep.id">
+                <option :value="ep.id" x-text="ep.name"></option>
+              </template>
+            </select>
+          </div>
+          <button @click="importBundle()"
+                  :disabled="importing || !importForm.content_b64"
+                  class="px-3 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-40">
+            <span x-show="!importing">Import bundle</span>
+            <span x-show="importing">Importing…</span>
+          </button>
+        </div>
+        <p x-show="importForm.filename" x-cloak class="mt-2 text-xs text-gray-600">
+          Selected <code x-text="importForm.filename"></code>.
+          Choosing an environment also <strong>deploys</strong> the bundle's stacks there —
+          that starts containers.
+        </p>
       </div>
     </div>
     {% endif %}
@@ -2167,6 +2224,12 @@ function containersDashboard() {
     importForm: { filename: '', content_b64: '', endpoint_id: null },
     importing: false,
 
+    // Portainer tab's collapsible setup cards. Seeded once by loadEndpoints: all closed
+    // when Portainer answers, the managed server open when it is not configured. A
+    // later Refresh never re-opens what the user closed.
+    portainerOpen: { managed: false, jit: false, edge: false, import: false },
+    portainerOpenSeeded: false,
+
     // ── Lifecycle ──────────────────────────────────────────────────────────
     async init() {
       requireAuth();
@@ -2241,7 +2304,15 @@ function containersDashboard() {
         }
       } finally {
         this.endpointsLoading = false;
+        if (!this.portainerOpenSeeded) {
+          this.portainerOpenSeeded = true;
+          if (this.portainerNotConfigured) this.portainerOpen.managed = true;
+        }
       }
+    },
+
+    togglePortainerSection(key) {
+      this.portainerOpen[key] = !this.portainerOpen[key];
     },
 
     async loadContainers() {
