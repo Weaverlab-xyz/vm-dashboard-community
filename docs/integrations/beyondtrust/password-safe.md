@@ -84,7 +84,12 @@ Integrations** once you have logged in.
 
 1. Open **Settings** → **Integrations** → **Password Safe** → toggle on
    (`password_safe_enabled`).
-2. Fill in the **API connection** section:
+2. Click **Configure →**. The panel has four tabs: **Connection** (API connection and
+   authentication), **VMs** (VM registration, PRA Vault key sync, the OT cell checkout),
+   **Databases** (import and onboarding; the Azure and GCP onboarding sections are
+   collapsed until you open them) and **Kubernetes** (token rotation). Every tab is
+   saved together, so you can fill in several tabs and click **Save** once.
+3. On the **Connection** tab, fill in the **API connection** section:
 
    | Field | Example |
    |---|---|
@@ -93,7 +98,7 @@ Integrations** once you have logged in.
    | OAuth Client Secret | (from API Registration) |
    | API run-as account | The BeyondInsight user the OAuth client runs as — required by the Password Safe Terraform provider for VM onboarding |
 
-3. Click **Save**. No container restart is required.
+4. Click **Save**. No container restart is required.
 
 > These are **Settings keys**, not environment variables. The dashboard's config store
 > reads from the database only; exporting an equivalently-named env var has no effect.

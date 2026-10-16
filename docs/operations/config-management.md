@@ -288,7 +288,7 @@ to fifty clusters, so `/run-bulk` rejects the combination with a 400. Named
 connects as the Password Safe account it was registered with, checked out just-in-time.
 A *provisioned* one connects as the stored admin by default, but if it has been
 onboarded into Password Safe you can switch it to its **own** managed account with
-**Settings → Integrations → Password Safe → _Ansible runs connect as the database's own
+**Settings → Integrations → Password Safe → Databases tab → _Ansible runs connect as the database's own
 managed account_**. That account is unique per database by construction, so a bulk run
 over several databases uses a different credential for each with nothing to pick.
 

@@ -13,7 +13,7 @@ OT and hypervisor roles work. Each bundle combines three components:
 | **cloud** | for a cloud: roles in that cloud's own Entitle integration. For AD: membership of the persona's own delegated AD groups | the AWS, Azure or GCP integration you pin for that cloud, or the Entitle integration pinned on your AD directory |
 | **dashboard** | the dashboard's own `dashboard-<scope>-<level>` groups | the directory integration those groups were synced from |
 
-**Settings → Integrations → Entitle → Persona access bundles** shows the catalog as a grid
+**Settings → Integrations → Entitle → Persona access bundles** (a collapsed section; click its header to open it) shows the catalog as a grid
 of personas by clouds:
 
 1. Tick the bundles you want.
