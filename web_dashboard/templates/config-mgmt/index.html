@@ -4,7 +4,15 @@
 {% block title %}Configuration{% endblock %}
 
 {% block content %}
-<div x-data="configMgmt()" class="space-y-6">
+{# Three tabs over what used to be a three-card grid. One Alpine component still owns
+   all of them: the run form reads the same target lists the Targets tab shows, so
+   splitting them into per-tab components would only duplicate that state. #}
+{% set tabs = [
+  {'slug': 'run',     'label': 'Run'},
+  {'slug': 'targets', 'label': 'Targets'},
+  {'slug': 'runs',    'label': 'Recent runs'},
+] %}
+<div x-data='configMgmt({{ tabs | map(attribute="slug") | list | tojson }})' class="space-y-6">
 
   <!-- Header -->
   <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -45,12 +53,23 @@
     <div class="text-sm text-gray-400 text-center py-12">Loading…</div>
   </template>
 
-  <!-- Run panel -->
+  <!-- Tabs: Run / Targets / Recent runs -->
   <template x-if="!loading && hasAnyTarget">
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <div>
 
-      <!-- Left: run form -->
-      <div class="lg:col-span-1 space-y-4">
+      <div class="border-b border-gray-200 mb-6 flex flex-wrap gap-1" role="tablist" aria-label="Configuration sections">
+        {% for tab in tabs %}
+        <button @click="select('{{ tab.slug }}')" role="tab" type="button"
+                :aria-selected="activeTab === '{{ tab.slug }}' ? 'true' : 'false'"
+                :class="activeTab === '{{ tab.slug }}'
+                          ? 'border-blue-600 text-blue-700'
+                          : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+                class="px-3 py-2 -mb-px border-b-2 text-sm font-medium">{{ tab.label }}</button>
+        {% endfor %}
+      </div>
+
+      <!-- Run: the run form -->
+      <div x-show="activeTab === 'run'" x-cloak role="tabpanel" class="max-w-3xl">
 
         <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 space-y-4">
           <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Run an Asset</h2>
@@ -318,145 +337,274 @@
 
           <!-- Use secrets (needs secrets:use) — resolves a Secrets-Management secret
                (DB or vault ref) at run time; the value is never shown, stored, or logged. -->
-          <div x-show="canUseSecrets" x-cloak class="border border-gray-100 rounded-lg p-3 space-y-3">
-            <p class="text-sm font-medium text-gray-700">Use a secret <span class="text-gray-400 font-normal">(you never see the value)</span></p>
+          <div x-show="canUseSecrets" x-cloak class="border border-gray-100 rounded-lg">
+            <!-- Collapsible, like the Storage backend sections: closed by default, opened
+                 for a bulk run or as soon as any field below holds a value. The body is
+                 x-show, never x-if, so collapsed inputs stay bound and still submit. -->
+            <button type="button" @click="secretsOpen = !secretsOpen"
+                    :aria-expanded="secretsOpen ? 'true' : 'false'"
+                    class="w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-gray-50 rounded-lg">
+              <span class="text-sm font-medium text-gray-700">Use a secret <span class="text-gray-400 font-normal">(you never see the value)</span></span>
+              <span x-show="secretsInUse" x-cloak class="text-[10px] uppercase font-semibold text-blue-700 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded">in use</span>
+              <svg class="ml-auto h-4 w-4 text-gray-400 transition-transform" :class="secretsOpen && 'rotate-180'"
+                   fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+              </svg>
+            </button>
+            <div x-show="secretsOpen" x-cloak class="px-3 pb-3 space-y-3">
 
-            <!-- As named variables (local + cloud runners) -->
-            <template x-for="(row, i) in secretRows" :key="i">
-              <div class="flex items-center gap-2">
-                <input x-model="row.var" placeholder="ansible var name"
-                       class="w-1/3 border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono
-                              focus:outline-none focus:ring-2 focus:ring-blue-500">
-                <select x-model="row.source"
-                        class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm
-                               focus:outline-none focus:ring-2 focus:ring-blue-500">
-                  <option value="">— pick a secret —</option>
-                  <template x-for="o in secretOptions" :key="o.key">
-                    <option :value="o.key" x-text="o.description + ' (' + o.key + ')'"></option>
-                  </template>
-                </select>
-                <button @click="removeSecretRow(i)" type="button"
-                        class="text-gray-400 hover:text-red-500 text-lg leading-none px-1">×</button>
+              <!-- As named variables (local + cloud runners) -->
+              <template x-for="(row, i) in secretRows" :key="i">
+                <div class="flex items-center gap-2">
+                  <input x-model="row.var" placeholder="ansible var name"
+                         class="w-1/3 border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono
+                                focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <select x-model="row.source"
+                          class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm
+                                 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">— pick a secret —</option>
+                    <template x-for="o in secretOptions" :key="o.key">
+                      <option :value="o.key" x-text="o.description + ' (' + o.key + ')'"></option>
+                    </template>
+                  </select>
+                  <button @click="removeSecretRow(i)" type="button"
+                          class="text-gray-400 hover:text-red-500 text-lg leading-none px-1">×</button>
+                </div>
+              </template>
+              <button @click="addSecretRow()" type="button"
+                      class="text-xs text-blue-600 hover:underline">+ Add secret as a variable</button>
+              <p class="text-[11px] text-gray-400">
+                Passed to the playbook as that var (redacted from job output). Works on the local
+                <strong>and</strong> cloud runners.
+                <span x-show="cloudSecretHint" x-text="cloudSecretHint"
+                      class="block mt-1 text-amber-600"></span>
+              </p>
+
+              <!-- As credentials (SSH become / key — VM targets only; k8s/DB use no SSH) -->
+              <div x-show="targetKind === 'vm'" x-cloak
+                   class="grid grid-cols-1 sm:grid-cols-2 gap-2 border-t border-gray-100 pt-3">
+                <!-- Escalation method. Mirrors services/ansible_become.BECOME_METHODS, which
+                     is the server-side allowlist — the endpoint validates, so a template that
+                     drifts can only offer fewer, never admit a bad one. -->
+                <div>
+                  <label class="block text-xs font-medium text-gray-600 mb-1">Become method <span class="text-gray-400">(local + agent)</span></label>
+                  <select x-model="becomeMethod"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">— Ansible default (sudo) —</option>
+                    <option value="sudo">sudo</option>
+                    <option value="pbrun">pbrun — BeyondTrust Privilege Management for Unix &amp; Linux</option>
+                    <option value="pmrun">pmrun — BeyondTrust Privilege Management</option>
+                    <option value="doas">doas</option>
+                    <option value="dzdo">dzdo — Delinea/Centrify</option>
+                    <option value="pfexec">pfexec — Solaris</option>
+                    <option value="su">su</option>
+                    <option value="ksu">ksu</option>
+                    <option value="sesu">sesu</option>
+                    <option value="machinectl">machinectl</option>
+                    <option value="runas">runas — Windows</option>
+                  </select>
+                  <p class="text-[11px] text-gray-400 mt-1">
+                    Pick this when the account escalates through a privilege broker rather than
+                    sudo. An account entitled in PMUL usually has no sudoers entry, and the sudo
+                    failure is unreadable: the prompt lands in the module's output and Ansible
+                    reports <code>No start of json char found</code>.
+                  </p>
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-gray-600 mb-1">Become / sudo password <span class="text-gray-400">(local + cloud)</span></label>
+                  <select x-model="secretBecomeSource"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">— none —</option>
+                    <template x-for="o in secretOptions" :key="'b-'+o.key">
+                      <option :value="o.key" x-text="o.description"></option>
+                    </template>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-gray-600 mb-1">SSH private key <span class="text-gray-400">(local + cloud)</span></label>
+                  <select x-model="secretSshKeySource"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="" x-text="targetCloud ? `— auto: the VM's own deploy key —` : '— use configured key —'"></option>
+                    <template x-for="o in secretOptions" :key="'k-'+o.key">
+                      <option :value="o.key" x-text="o.description"></option>
+                    </template>
+                  </select>
+                </div>
               </div>
-            </template>
-            <button @click="addSecretRow()" type="button"
-                    class="text-xs text-blue-600 hover:underline">+ Add secret as a variable</button>
-            <p class="text-[11px] text-gray-400">
-              Passed to the playbook as that var (redacted from job output). Works on the local
-              <strong>and</strong> cloud runners.
-              <span x-show="cloudSecretHint" x-text="cloudSecretHint"
-                    class="block mt-1 text-amber-600"></span>
-            </p>
+              <p x-show="targetKind === 'vm'" x-cloak class="text-[11px] text-gray-400">
+                Credentials are handed to Ansible as the connection/become secret — Ansible <code>no_log</code>s
+                these, so they can't be printed. Become and SSH-key secrets also work on the cloud runner.
+                <span x-show="targetCloud" x-cloak class="block mt-1">
+                  For a cloud VM, <strong>auto</strong> retrieves the keypair the VM was actually deployed with
+                  (from its deploy record) — pick a secret above only to override it.
+                </span>
+              </p>
 
-            <!-- As credentials (SSH become / key — VM targets only; k8s/DB use no SSH) -->
-            <div x-show="targetKind === 'vm'" x-cloak
-                 class="grid grid-cols-1 sm:grid-cols-2 gap-2 border-t border-gray-100 pt-3">
-              <!-- Escalation method. Mirrors services/ansible_become.BECOME_METHODS, which
-                   is the server-side allowlist — the endpoint validates, so a template that
-                   drifts can only offer fewer, never admit a bad one. -->
-              <div>
-                <label class="block text-xs font-medium text-gray-600 mb-1">Become method <span class="text-gray-400">(local + agent)</span></label>
-                <select x-model="becomeMethod"
-                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                  <option value="">— Ansible default (sudo) —</option>
-                  <option value="sudo">sudo</option>
-                  <option value="pbrun">pbrun — BeyondTrust Privilege Management for Unix &amp; Linux</option>
-                  <option value="pmrun">pmrun — BeyondTrust Privilege Management</option>
-                  <option value="doas">doas</option>
-                  <option value="dzdo">dzdo — Delinea/Centrify</option>
-                  <option value="pfexec">pfexec — Solaris</option>
-                  <option value="su">su</option>
-                  <option value="ksu">ksu</option>
-                  <option value="sesu">sesu</option>
-                  <option value="machinectl">machinectl</option>
-                  <option value="runas">runas — Windows</option>
-                </select>
+              <!-- EPM-L installation token — minted at run time, bound to a var. -->
+              <div x-show="targetKind === 'vm'" x-cloak class="border-t border-gray-100 pt-3">
+                <label class="block text-xs font-medium text-gray-600 mb-1">
+                  EPM-L installation token → variable
+                  <span class="text-gray-400 font-normal">(optional)</span>
+                </label>
+                <input x-model="epmlTokenVar" type="text" placeholder="epml_installation_token"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
                 <p class="text-[11px] text-gray-400 mt-1">
-                  Pick this when the account escalates through a privilege broker rather than
-                  sudo. An account entitled in PMUL usually has no sudoers entry, and the sudo
-                  failure is unreadable: the prompt lands in the module's output and Ansible
-                  reports <code>No start of json char found</code>.
+                  Name a variable and the run mints a fresh BeyondTrust EPM-L installation
+                  token for it. The token is fetched server-side at run time, never shown
+                  and never stored on the job — registration tokens are short-lived, so one
+                  saved anywhere would already be dead. See
+                  <code class="bg-gray-100 px-1 rounded">examples/playbooks/linux/epml-activate.yml</code>.
                 </p>
               </div>
-              <div>
-                <label class="block text-xs font-medium text-gray-600 mb-1">Become / sudo password <span class="text-gray-400">(local + cloud)</span></label>
-                <select x-model="secretBecomeSource"
-                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                  <option value="">— none —</option>
-                  <template x-for="o in secretOptions" :key="'b-'+o.key">
-                    <option :value="o.key" x-text="o.description"></option>
-                  </template>
-                </select>
-              </div>
-              <div>
-                <label class="block text-xs font-medium text-gray-600 mb-1">SSH private key <span class="text-gray-400">(local + cloud)</span></label>
-                <select x-model="secretSshKeySource"
-                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                  <option value="" x-text="targetCloud ? `— auto: the VM's own deploy key —` : '— use configured key —'"></option>
-                  <template x-for="o in secretOptions" :key="'k-'+o.key">
-                    <option :value="o.key" x-text="o.description"></option>
-                  </template>
-                </select>
-              </div>
-            </div>
-            <p x-show="targetKind === 'vm'" x-cloak class="text-[11px] text-gray-400">
-              Credentials are handed to Ansible as the connection/become secret — Ansible <code>no_log</code>s
-              these, so they can't be printed. Become and SSH-key secrets also work on the cloud runner.
-              <span x-show="targetCloud" x-cloak class="block mt-1">
-                For a cloud VM, <strong>auto</strong> retrieves the keypair the VM was actually deployed with
-                (from its deploy record) — pick a secret above only to override it.
-              </span>
-            </p>
 
-            <!-- EPM-L installation token — minted at run time, bound to a var. -->
-            <div x-show="targetKind === 'vm'" x-cloak class="border-t border-gray-100 pt-3">
-              <label class="block text-xs font-medium text-gray-600 mb-1">
-                EPM-L installation token → variable
-                <span class="text-gray-400 font-normal">(optional)</span>
-              </label>
-              <input x-model="epmlTokenVar" type="text" placeholder="epml_installation_token"
-                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
-              <p class="text-[11px] text-gray-400 mt-1">
-                Name a variable and the run mints a fresh BeyondTrust EPM-L installation
-                token for it. The token is fetched server-side at run time, never shown
-                and never stored on the job — registration tokens are short-lived, so one
-                saved anywhere would already be dead. See
-                <code class="bg-gray-100 px-1 rounded">examples/playbooks/linux/epml-activate.yml</code>.
-              </p>
-            </div>
+              <!-- Managed account (BeyondTrust Password Safe) — live list, JIT checkout.
+                   Shown for a specific host (on-prem free-text or a cloud VM IP), or in
+                   bulk mode as a PER-TARGET table: every selected object gets its own
+                   account list, read server-side from that object's own address. Kind-
+                   gated too: a k8s/database run is a localhost play with no SSH
+                   connection to authenticate. -->
+              <div x-show="targetKind === 'vm' && (bulk ? bulk.kind === 'vm' : effectiveHost)
+                           && (managedEnabled || managedLoading || bulkTargetsLoading)" x-cloak
+                   class="border-t border-gray-100 pt-3 space-y-2">
+                <p class="text-xs font-medium text-gray-700">Managed account
+                  <span class="text-gray-400 font-normal">(Password Safe — checked out just-in-time)</span></p>
 
-            <!-- Managed account (BeyondTrust Password Safe) — live list, JIT checkout.
-                 Shown for a specific host (on-prem free-text or a cloud VM IP), or in
-                 bulk mode as a PER-TARGET table: every selected object gets its own
-                 account list, read server-side from that object's own address. Kind-
-                 gated too: a k8s/database run is a localhost play with no SSH
-                 connection to authenticate. -->
-            <div x-show="targetKind === 'vm' && (bulk ? bulk.kind === 'vm' : effectiveHost)
-                         && (managedEnabled || managedLoading || bulkTargetsLoading)" x-cloak
-                 class="border-t border-gray-100 pt-3 space-y-2">
-              <p class="text-xs font-medium text-gray-700">Managed account
-                <span class="text-gray-400 font-normal">(Password Safe — checked out just-in-time)</span></p>
+                <!-- ── Bulk: one row per target ──────────────────────────────── -->
+                <template x-if="bulk">
+                  <div class="space-y-2">
+                    <p class="text-[11px] text-blue-700">
+                      Each target checks out <strong>its own</strong> credential. Pick a default
+                      below to pre-select every row, then override any row that differs.
+                    </p>
 
-              <!-- ── Bulk: one row per target ──────────────────────────────── -->
-              <template x-if="bulk">
-                <div class="space-y-2">
-                  <p class="text-[11px] text-blue-700">
-                    Each target checks out <strong>its own</strong> credential. Pick a default
-                    below to pre-select every row, then override any row that differs.
-                  </p>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <div>
+                        <label class="block text-xs font-medium text-gray-600 mb-1">
+                          Default connection account
+                          <span class="text-gray-400">(applies to rows left unset)</span>
+                        </label>
+                        <select x-model="managedAccountKey" @change="resuggestBulkAccounts()"
+                                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                          <option value="">— none —</option>
+                          <template x-for="s in bulkDefaultSystems" :key="'d-'+s.system_id">
+                            <optgroup :label="`${s.name} (${s.ip})`">
+                              <template x-for="a in s.accounts" :key="'d-'+a.account_id">
+                                <option :value="`${s.system_id}:${a.account_id}`"
+                                        x-text="`${a.name}${a.domain ? ' @'+a.domain : ''} ${a.uses_ssh_key ? '[SSH key]' : '[password]'}`"></option>
+                              </template>
+                            </optgroup>
+                          </template>
+                        </select>
+                      </div>
+                      <div>
+                        <label class="block text-xs font-medium text-gray-600 mb-1">
+                          Default become / sudo account <span class="text-gray-400">(optional)</span>
+                        </label>
+                        <select x-model="managedBecomeKey" @change="resuggestBulkAccounts()"
+                                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                          <option value="">— none —</option>
+                          <template x-for="s in bulkDefaultSystems" :key="'db-'+s.system_id">
+                            <optgroup :label="`${s.name} (${s.ip})`">
+                              <template x-for="a in s.accounts" :key="'db-'+a.account_id">
+                                <option :value="`${s.system_id}:${a.account_id}`"
+                                        x-text="`${a.name}${a.domain ? ' @'+a.domain : ''}`"></option>
+                              </template>
+                            </optgroup>
+                          </template>
+                        </select>
+                      </div>
+                    </div>
 
+                    <p x-show="bulkTargetsLoading" class="text-[11px] text-gray-400">
+                      Looking up managed accounts for each target…</p>
+                    <p x-show="!bulkTargetsLoading && bulkTargetsError" x-text="bulkTargetsError"
+                       class="text-[11px] text-amber-600"></p>
+                    <p x-show="bulkTruncated" x-cloak class="text-[11px] text-amber-600">
+                      Too many managed systems matched this selection to list them all. The rows
+                      below may be incomplete — narrow the selection, or run the affected hosts
+                      separately with an account picked from each one's own list.
+                    </p>
+
+                    <div x-show="bulkTargets.length" x-cloak
+                         class="border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-72 overflow-y-auto">
+                      <template x-for="t in bulkTargets" :key="t.inventory_id">
+                        <div class="p-2 space-y-1"
+                             :class="!bulkAccountKeys[t.inventory_id] ? 'bg-amber-50' : ''">
+                          <div class="flex items-baseline justify-between gap-2">
+                            <span class="text-xs font-medium text-gray-700 truncate" x-text="t.name"></span>
+                            <span class="text-[11px] text-gray-400 font-mono shrink-0" x-text="t.host"></span>
+                          </div>
+                          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <select x-model="bulkAccountKeys[t.inventory_id]"
+                                    @change="markBulkManual(t.inventory_id)"
+                                    class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500">
+                              <option value="">— none —</option>
+                              <template x-for="s in (t.systems || [])" :key="t.inventory_id+'-'+s.system_id">
+                                <optgroup :label="`${s.name} (${s.ip})`">
+                                  <template x-for="a in s.accounts" :key="t.inventory_id+'-'+a.account_id">
+                                    <option :value="`${s.system_id}:${a.account_id}`"
+                                            x-text="`${a.name}${a.domain ? ' @'+a.domain : ''} ${a.uses_ssh_key ? '[SSH key]' : '[password]'}`"></option>
+                                  </template>
+                                </optgroup>
+                              </template>
+                            </select>
+                            <select x-model="bulkBecomeKeys[t.inventory_id]"
+                                    @change="markBulkManual(t.inventory_id)"
+                                    class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500">
+                              <option value="">— no become account —</option>
+                              <template x-for="s in (t.systems || [])" :key="t.inventory_id+'-b-'+s.system_id">
+                                <optgroup :label="`${s.name} (${s.ip})`">
+                                  <template x-for="a in s.accounts" :key="t.inventory_id+'-b-'+a.account_id">
+                                    <option :value="`${s.system_id}:${a.account_id}`"
+                                            x-text="`${a.name}${a.domain ? ' @'+a.domain : ''}`"></option>
+                                  </template>
+                                </optgroup>
+                              </template>
+                            </select>
+                          </div>
+                          <p x-show="t.error" x-cloak x-text="t.error" class="text-[11px] text-amber-600"></p>
+                          <p x-show="!t.error && !bulkAccountKeys[t.inventory_id]" x-cloak
+                             class="text-[11px] text-amber-700">
+                            No matching managed account — this target will fall back to the default
+                            account name and, if that host does not have it, fail its own job.
+                          </p>
+                          <p x-show="bulkAccountKeys[t.inventory_id] && t.suggested_basis
+                                     && !bulkManualRows.has(t.inventory_id)" x-cloak
+                             class="text-[11px] text-gray-400"
+                             x-text="({'default-name': 'Matched the default account name.',
+                                       'recorded-system': 'From the Password Safe system this VM was onboarded into.',
+                                       'only-account': 'The only account this host has.'})[t.suggested_basis] || ''"></p>
+                          <p x-show="bulkFailed.find(f => f.inventory_id === t.inventory_id)" x-cloak
+                             class="text-[11px] text-red-600"
+                             x-text="(bulkFailed.find(f => f.inventory_id === t.inventory_id) || {}).error"></p>
+                        </div>
+                      </template>
+                    </div>
+
+                    <p x-show="bulkTargets.length && bulkUnmatchedCount" x-cloak
+                       class="text-[11px] text-amber-700">
+                      <strong x-text="bulkUnmatchedCount"></strong>
+                      of <strong x-text="bulkTargets.length"></strong> targets have no account
+                      selected. You can still run — each one fails only its own job.
+                    </p>
+                  </div>
+                </template>
+
+                <p x-show="!bulk && managedLoading" class="text-[11px] text-gray-400">Looking up managed accounts…</p>
+                <p x-show="!bulk && !managedLoading && managedError" x-text="managedError" class="text-[11px] text-amber-600"></p>
+                <p x-show="!bulk && !managedLoading && !managedError && managedSystems.length === 0"
+                   class="text-[11px] text-gray-400">No Password Safe managed accounts found for this host.</p>
+
+                <template x-if="!bulk && managedSystems.length > 0">
                   <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <div>
-                      <label class="block text-xs font-medium text-gray-600 mb-1">
-                        Default connection account
-                        <span class="text-gray-400">(applies to rows left unset)</span>
-                      </label>
-                      <select x-model="managedAccountKey" @change="resuggestBulkAccounts()"
+                      <label class="block text-xs font-medium text-gray-600 mb-1">Connection account</label>
+                      <select x-model="managedAccountKey"
                               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                         <option value="">— none —</option>
-                        <template x-for="s in bulkDefaultSystems" :key="'d-'+s.system_id">
+                        <template x-for="s in managedSystems" :key="s.system_id">
                           <optgroup :label="`${s.name} (${s.ip})`">
-                            <template x-for="a in s.accounts" :key="'d-'+a.account_id">
+                            <template x-for="a in s.accounts" :key="a.account_id">
                               <option :value="`${s.system_id}:${a.account_id}`"
                                       x-text="`${a.name}${a.domain ? ' @'+a.domain : ''} ${a.uses_ssh_key ? '[SSH key]' : '[password]'}`"></option>
                             </template>
@@ -465,144 +613,29 @@
                       </select>
                     </div>
                     <div>
-                      <label class="block text-xs font-medium text-gray-600 mb-1">
-                        Default become / sudo account <span class="text-gray-400">(optional)</span>
-                      </label>
-                      <select x-model="managedBecomeKey" @change="resuggestBulkAccounts()"
+                      <label class="block text-xs font-medium text-gray-600 mb-1">Become / sudo account <span class="text-gray-400">(optional)</span></label>
+                      <select x-model="managedBecomeKey"
                               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                         <option value="">— none —</option>
-                        <template x-for="s in bulkDefaultSystems" :key="'db-'+s.system_id">
+                        <template x-for="s in managedSystems" :key="'b-'+s.system_id">
                           <optgroup :label="`${s.name} (${s.ip})`">
-                            <template x-for="a in s.accounts" :key="'db-'+a.account_id">
-                              <option :value="`${s.system_id}:${a.account_id}`"
-                                      x-text="`${a.name}${a.domain ? ' @'+a.domain : ''}`"></option>
+                            <template x-for="a in s.accounts" :key="'b-'+a.account_id">
+                              <option :value="`${s.system_id}:${a.account_id}`" x-text="`${a.name}${a.domain ? ' @'+a.domain : ''}`"></option>
                             </template>
                           </optgroup>
                         </template>
                       </select>
                     </div>
                   </div>
-
-                  <p x-show="bulkTargetsLoading" class="text-[11px] text-gray-400">
-                    Looking up managed accounts for each target…</p>
-                  <p x-show="!bulkTargetsLoading && bulkTargetsError" x-text="bulkTargetsError"
-                     class="text-[11px] text-amber-600"></p>
-                  <p x-show="bulkTruncated" x-cloak class="text-[11px] text-amber-600">
-                    Too many managed systems matched this selection to list them all. The rows
-                    below may be incomplete — narrow the selection, or run the affected hosts
-                    separately with an account picked from each one's own list.
-                  </p>
-
-                  <div x-show="bulkTargets.length" x-cloak
-                       class="border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-72 overflow-y-auto">
-                    <template x-for="t in bulkTargets" :key="t.inventory_id">
-                      <div class="p-2 space-y-1"
-                           :class="!bulkAccountKeys[t.inventory_id] ? 'bg-amber-50' : ''">
-                        <div class="flex items-baseline justify-between gap-2">
-                          <span class="text-xs font-medium text-gray-700 truncate" x-text="t.name"></span>
-                          <span class="text-[11px] text-gray-400 font-mono shrink-0" x-text="t.host"></span>
-                        </div>
-                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                          <select x-model="bulkAccountKeys[t.inventory_id]"
-                                  @change="markBulkManual(t.inventory_id)"
-                                  class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500">
-                            <option value="">— none —</option>
-                            <template x-for="s in (t.systems || [])" :key="t.inventory_id+'-'+s.system_id">
-                              <optgroup :label="`${s.name} (${s.ip})`">
-                                <template x-for="a in s.accounts" :key="t.inventory_id+'-'+a.account_id">
-                                  <option :value="`${s.system_id}:${a.account_id}`"
-                                          x-text="`${a.name}${a.domain ? ' @'+a.domain : ''} ${a.uses_ssh_key ? '[SSH key]' : '[password]'}`"></option>
-                                </template>
-                              </optgroup>
-                            </template>
-                          </select>
-                          <select x-model="bulkBecomeKeys[t.inventory_id]"
-                                  @change="markBulkManual(t.inventory_id)"
-                                  class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500">
-                            <option value="">— no become account —</option>
-                            <template x-for="s in (t.systems || [])" :key="t.inventory_id+'-b-'+s.system_id">
-                              <optgroup :label="`${s.name} (${s.ip})`">
-                                <template x-for="a in s.accounts" :key="t.inventory_id+'-b-'+a.account_id">
-                                  <option :value="`${s.system_id}:${a.account_id}`"
-                                          x-text="`${a.name}${a.domain ? ' @'+a.domain : ''}`"></option>
-                                </template>
-                              </optgroup>
-                            </template>
-                          </select>
-                        </div>
-                        <p x-show="t.error" x-cloak x-text="t.error" class="text-[11px] text-amber-600"></p>
-                        <p x-show="!t.error && !bulkAccountKeys[t.inventory_id]" x-cloak
-                           class="text-[11px] text-amber-700">
-                          No matching managed account — this target will fall back to the default
-                          account name and, if that host does not have it, fail its own job.
-                        </p>
-                        <p x-show="bulkAccountKeys[t.inventory_id] && t.suggested_basis
-                                   && !bulkManualRows.has(t.inventory_id)" x-cloak
-                           class="text-[11px] text-gray-400"
-                           x-text="({'default-name': 'Matched the default account name.',
-                                     'recorded-system': 'From the Password Safe system this VM was onboarded into.',
-                                     'only-account': 'The only account this host has.'})[t.suggested_basis] || ''"></p>
-                        <p x-show="bulkFailed.find(f => f.inventory_id === t.inventory_id)" x-cloak
-                           class="text-[11px] text-red-600"
-                           x-text="(bulkFailed.find(f => f.inventory_id === t.inventory_id) || {}).error"></p>
-                      </div>
-                    </template>
-                  </div>
-
-                  <p x-show="bulkTargets.length && bulkUnmatchedCount" x-cloak
-                     class="text-[11px] text-amber-700">
-                    <strong x-text="bulkUnmatchedCount"></strong>
-                    of <strong x-text="bulkTargets.length"></strong> targets have no account
-                    selected. You can still run — each one fails only its own job.
-                  </p>
-                </div>
-              </template>
-
-              <p x-show="!bulk && managedLoading" class="text-[11px] text-gray-400">Looking up managed accounts…</p>
-              <p x-show="!bulk && !managedLoading && managedError" x-text="managedError" class="text-[11px] text-amber-600"></p>
-              <p x-show="!bulk && !managedLoading && !managedError && managedSystems.length === 0"
-                 class="text-[11px] text-gray-400">No Password Safe managed accounts found for this host.</p>
-
-              <template x-if="!bulk && managedSystems.length > 0">
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <div>
-                    <label class="block text-xs font-medium text-gray-600 mb-1">Connection account</label>
-                    <select x-model="managedAccountKey"
-                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                      <option value="">— none —</option>
-                      <template x-for="s in managedSystems" :key="s.system_id">
-                        <optgroup :label="`${s.name} (${s.ip})`">
-                          <template x-for="a in s.accounts" :key="a.account_id">
-                            <option :value="`${s.system_id}:${a.account_id}`"
-                                    x-text="`${a.name}${a.domain ? ' @'+a.domain : ''} ${a.uses_ssh_key ? '[SSH key]' : '[password]'}`"></option>
-                          </template>
-                        </optgroup>
-                      </template>
-                    </select>
-                  </div>
-                  <div>
-                    <label class="block text-xs font-medium text-gray-600 mb-1">Become / sudo account <span class="text-gray-400">(optional)</span></label>
-                    <select x-model="managedBecomeKey"
-                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                      <option value="">— none —</option>
-                      <template x-for="s in managedSystems" :key="'b-'+s.system_id">
-                        <optgroup :label="`${s.name} (${s.ip})`">
-                          <template x-for="a in s.accounts" :key="'b-'+a.account_id">
-                            <option :value="`${s.system_id}:${a.account_id}`" x-text="`${a.name}${a.domain ? ' @'+a.domain : ''}`"></option>
-                          </template>
-                        </optgroup>
-                      </template>
-                    </select>
-                  </div>
-                </div>
-              </template>
-              <p x-show="managedCarWarning" x-text="managedCarWarning"
-                 class="text-[11px] text-amber-600"></p>
-              <p x-show="bulk ? bulkTargets.length : managedSystems.length > 0" class="text-[11px] text-gray-400">
-                Sets <code>ansible_user</code> to the account and injects its credential (SSH key → connection
-                key; password → <code>ansible_ssh_pass</code>). Checked out just-in-time; you never see the value.
-                Works on the <strong>local</strong> and <strong>Azure (ACI)</strong> runners<template x-if="managedEphemeralEnabled"><span>, and on <strong>ECS / Cloud Run</strong> via a short-lived RBAC-locked store copy</template><template x-if="!managedEphemeralEnabled"><span>; not on ECS / Cloud Run</span></template>.
-              </p>
+                </template>
+                <p x-show="managedCarWarning" x-text="managedCarWarning"
+                   class="text-[11px] text-amber-600"></p>
+                <p x-show="bulk ? bulkTargets.length : managedSystems.length > 0" class="text-[11px] text-gray-400">
+                  Sets <code>ansible_user</code> to the account and injects its credential (SSH key → connection
+                  key; password → <code>ansible_ssh_pass</code>). Checked out just-in-time; you never see the value.
+                  Works on the <strong>local</strong> and <strong>Azure (ACI)</strong> runners<template x-if="managedEphemeralEnabled"><span>, and on <strong>ECS / Cloud Run</strong> via a short-lived RBAC-locked store copy</template><template x-if="!managedEphemeralEnabled"><span>; not on ECS / Cloud Run</span></template>.
+                </p>
+              </div>
             </div>
           </div>
 
@@ -624,8 +657,10 @@
             <span x-text="scheduleVerb(running ? 'Queuing…' : '', 'Run')"></span>
           </button>
         </div>
+      </div>
 
-        <!-- Target summary legend -->
+      <!-- Targets: summary legend -->
+      <div x-show="activeTab === 'targets'" x-cloak role="tabpanel" class="max-w-3xl">
         <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
           <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">Available Targets</h2>
 
@@ -744,8 +779,8 @@
         </div>
       </div>
 
-      <!-- Right: recent ansible jobs -->
-      <div class="lg:col-span-2">
+      <!-- Recent runs: recent ansible jobs -->
+      <div x-show="activeTab === 'runs'" x-cloak role="tabpanel">
         <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
           <div class="flex items-center justify-between mb-4">
             <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Recent Runs</h2>
@@ -755,7 +790,8 @@
           <div x-show="jobsLoading" class="text-sm text-gray-400 text-center py-8">Loading…</div>
 
           <div x-show="!jobsLoading && recentJobs.length === 0" class="text-sm text-gray-400 text-center py-8">
-            No runs yet. Select an asset and target above to get started.
+            No runs yet. Pick an asset and target on the
+            <a href="#run" @click.prevent="select('run')" class="text-blue-600 hover:underline">Run</a> tab to get started.
           </div>
 
           <div x-show="!jobsLoading && recentJobs.length > 0" class="overflow-hidden">
@@ -806,8 +842,10 @@
 
 {% block scripts %}
 <script>
-function configMgmt() {
+function configMgmt(tabSlugs) {
   return {
+    tabSlugs: tabSlugs,
+    activeTab: '',
     loading: true,
     targets: [],
     // A selection handed over from /inventory: {ids, kind, names}. IDS ONLY —
@@ -863,6 +901,10 @@ function configMgmt() {
     // services/ansible_become.BECOME_METHODS and set into the trusted var channel.
     becomeMethod: '',
     epmlTokenVar: '',   // bind a minted EPM-L installation token to this Ansible var
+    // Whether the "Use a secret" section is expanded. Closed by default; init() opens it
+    // for a bulk run and whenever secretsInUse turns true. x-show, not x-if, so the
+    // collapsed fields stay bound and still reach the run payload.
+    secretsOpen: false,
     // Managed-account checkout (BeyondTrust Password Safe). customHost backs the
     // free-text "On-prem host" target. On target change we look up the live
     // account list (ids/names only) for that host; the operator picks a connection
@@ -895,6 +937,17 @@ function configMgmt() {
     bulkBecomeKeys: {},
     bulkTruncated: false,
     bulkFailed: [],             // per-target refusals from the last submit
+    // Any field in the "Use a secret" section holds a value — drives its "in use" badge
+    // and the auto-open. Every field that section binds is listed here.
+    get secretsInUse() {
+      return this.secretRows.some(r => (r.var || '').trim() || r.source)
+          || !!(this.secretBecomeSource || this.secretSshKeySource || this.becomeMethod
+                || (this.epmlTokenVar || '').trim()
+                || this.managedAccountKey || this.managedBecomeKey)
+          || Object.values(this.bulkAccountKeys).some(Boolean)
+          || Object.values(this.bulkBecomeKeys).some(Boolean);
+    },
+
     get hasCloudTargets() {
       return this.cloudTargets.aws.length > 0
           || this.cloudTargets.azure.length > 0
@@ -1289,9 +1342,29 @@ function configMgmt() {
       })[id] || id;
     },
 
+    // ── Tabs ──────────────────────────────────────────────────────────────
+    // Same contract as remoteAgentsPage.select (agents/index.html): a slug this
+    // page does not have is ignored, and the fragment is rewritten with
+    // replaceState so Back leaves the page rather than walking the tabs.
+    select(slug, push = true) {
+      if (!this.tabSlugs.includes(slug)) return;
+      this.activeTab = slug;
+      if (push) window.history.replaceState(null, '', '#' + slug);
+    },
+
     async init() {
       requireAuth();
       this.readBulkHandOff();
+      // Pick the tab before the loads so the page never renders with no panel. A bulk
+      // hand-off from /inventory always lands on Run, whatever the fragment says: the
+      // selection it carries is only visible there.
+      const want = (window.location.hash || '').replace(/^#/, '');
+      this.select(this.bulk ? 'run' : (this.tabSlugs.includes(want) ? want : this.tabSlugs[0]), false);
+      // Auto-open the secrets section whenever something in it takes a value — typed,
+      // or pre-selected by a managed-account lookup — so a credential the run will use
+      // is never hidden behind a closed header.
+      this.$watch('secretsInUse', (v) => { if (v) this.secretsOpen = true; });
+      if (this.bulk) this.secretsOpen = true;
       await Promise.all([
         this.loadInventory(),
         this.loadAssets(),
