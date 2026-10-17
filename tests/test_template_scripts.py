@@ -329,6 +329,11 @@ def test_no_string_literal_spans_a_newline_in_static_js():
     bad = []
     for path in sorted((pathlib.Path(_ROOT) / "web_dashboard" / "static" / "js")
                        .rglob("*.js")):
+        # Not js/vendor/: minified third-party code (Alpine), whose regex and template
+        # literals this lexer has no state for. It is pinned to a published release and
+        # still goes through the real parser in test_static_js_actually_parses below.
+        if "vendor" in path.relative_to(pathlib.Path(_ROOT) / "web_dashboard" / "static" / "js").parts:
+            continue
         lines, _ = _scan(path.read_text(encoding="utf-8"))
         bad += [f"{path.relative_to(_ROOT)}:{ln}" for ln in lines]
     assert not bad, (
