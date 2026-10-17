@@ -69,32 +69,37 @@
 
   <!-- Tab Navigation -->
   <div class="border-b border-gray-200 mb-6">
-    <nav class="-mb-px flex gap-8 overflow-x-auto">
-      <button @click="activeTab = 'marketplace'"
+    <nav class="-mb-px flex gap-8 overflow-x-auto" role="tablist" aria-label="Azure sections">
+      <button @click="select('marketplace')" role="tab" type="button"
+              :aria-selected="activeTab === 'marketplace' ? 'true' : 'false'"
               :class="activeTab === 'marketplace' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'"
               class="py-3 px-1 border-b-2 font-medium text-sm transition whitespace-nowrap shrink-0">
         Marketplace Images
         <span x-show="marketplaceImages.length" class="ml-2 bg-gray-100 text-gray-600 text-xs px-2 py-0.5 rounded-full" x-text="marketplaceImages.length"></span>
       </button>
-      <button @click="activeTab = 'private'"
+      <button @click="select('private')" role="tab" type="button"
+              :aria-selected="activeTab === 'private' ? 'true' : 'false'"
               :class="activeTab === 'private' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'"
               class="py-3 px-1 border-b-2 font-medium text-sm transition whitespace-nowrap shrink-0">
         Private Images
         <span x-show="privateImages.length" class="ml-2 bg-gray-100 text-gray-600 text-xs px-2 py-0.5 rounded-full" x-text="privateImages.length"></span>
       </button>
-      <button @click="activeTab = 'vms'"
+      <button @click="select('vms')" role="tab" type="button"
+              :aria-selected="activeTab === 'vms' ? 'true' : 'false'"
               :class="activeTab === 'vms' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'"
               class="py-3 px-1 border-b-2 font-medium text-sm transition whitespace-nowrap shrink-0">
         Azure VMs
         <span x-show="vms.length" class="ml-2 bg-blue-100 text-blue-700 text-xs px-2 py-0.5 rounded-full" x-text="vms.length"></span>
       </button>
-      <button @click="activeTab = 'build'"
+      <button @click="select('build')" role="tab" type="button"
+              :aria-selected="activeTab === 'build' ? 'true' : 'false'"
               :class="activeTab === 'build' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'"
               class="py-3 px-1 border-b-2 font-medium text-sm transition whitespace-nowrap shrink-0">
         Build Image
       </button>
       {% if pra_enabled %}
-      <button @click="switchToOT()"
+      <button @click="select('ot')" role="tab" type="button"
+              :aria-selected="activeTab === 'ot' ? 'true' : 'false'"
               :class="activeTab === 'ot' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'"
               class="py-3 px-1 border-b-2 font-medium text-sm transition whitespace-nowrap shrink-0">
         OT Demo Cell
@@ -1719,7 +1724,9 @@ function azureDashboard() {
     // State
     loading: false,
     credError: '',   // the server's reason, '' when there is none
-    activeTab: 'marketplace',
+    // The shared tab contract (static/js/app.js): select() ignores a tab this render
+    // does not have, clicks rewrite the fragment, pickTab() opens the one it names.
+    ...tabState(['marketplace', 'private', 'vms', 'build'{% if pra_enabled %}, 'ot'{% endif %}]),
     location: '{{ default_location }}',
 
     // Data
@@ -1862,15 +1869,7 @@ function azureDashboard() {
       // One schedule state for the page: dialogs reset it on open, the Build tab on entry.
       this.$watch('activeTab', t => { if (t === 'build') this.scheduleReset(); });
       this.loadSecretBackends();
-      const hash = window.location.hash.slice(1);
-      {% if pra_enabled %}
-      if (hash === 'ot') {
-        this.switchToOT();
-      } else
-      {% endif %}
-      if (['marketplace', 'private', 'vms', 'build'].includes(hash)) {
-        this.activeTab = hash;
-      }
+      this.pickTab();
       API.get('/api/groups/workgroups')
         .then(r => { this.availableWorkgroups = r || []; })
         .catch(() => { this.availableWorkgroups = []; });
@@ -2089,9 +2088,11 @@ function azureDashboard() {
     },
 
     // ── OT demo cell (mirrors the GCP page's tab; docs/profiles/demo/ot-demo-cell.md) ──────────
-    switchToOT() {
-      this.activeTab = 'ot';
-      if (!this.otLoaded) this.loadOTData();
+    // Every way onto a tab -- a click, a deep link, a cross-link -- comes through here,
+    // so a lazily loaded tab loads however it was opened.
+    select(slug, push = true) {
+      if (!this.selectTab(slug, push)) return;
+      if (slug === 'ot' && !this.otLoaded) this.loadOTData();
     },
 
     async loadOTData() {

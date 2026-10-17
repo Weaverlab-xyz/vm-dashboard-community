@@ -79,35 +79,40 @@
 
   <!-- Tab bar -->
   <div class="border-b border-gray-200 mb-6">
-    <nav class="-mb-px flex gap-6 overflow-x-auto">
-      <button @click="activeTab = 'public'"
+    <nav class="-mb-px flex gap-6 overflow-x-auto" role="tablist" aria-label="GCP sections">
+      <button @click="select('public')" role="tab" type="button"
+              :aria-selected="activeTab === 'public' ? 'true' : 'false'"
               :class="activeTab === 'public' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
               class="py-3 border-b-2 text-sm font-medium transition-colors whitespace-nowrap shrink-0">
         Public Images
         <span x-show="publicImages.length" class="ml-1.5 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full"
               x-text="publicImages.length"></span>
       </button>
-      <button @click="switchToCustom()"
+      <button @click="select('custom')" role="tab" type="button"
+              :aria-selected="activeTab === 'custom' ? 'true' : 'false'"
               :class="activeTab === 'custom' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
               class="py-3 border-b-2 text-sm font-medium transition-colors whitespace-nowrap shrink-0">
         Custom Images
         <span x-show="customImages.length" class="ml-1.5 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full"
               x-text="customImages.length"></span>
       </button>
-      <button @click="switchToInstances()"
+      <button @click="select('instances')" role="tab" type="button"
+              :aria-selected="activeTab === 'instances' ? 'true' : 'false'"
               :class="activeTab === 'instances' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
               class="py-3 border-b-2 text-sm font-medium transition-colors whitespace-nowrap shrink-0">
         Compute Instances
         <span x-show="instances.length" class="ml-1.5 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full"
               x-text="instances.length"></span>
       </button>
-      <button @click="activeTab = 'build'"
+      <button @click="select('build')" role="tab" type="button"
+              :aria-selected="activeTab === 'build' ? 'true' : 'false'"
               :class="activeTab === 'build' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
               class="py-3 border-b-2 text-sm font-medium transition-colors whitespace-nowrap shrink-0">
         Build Image
       </button>
       {% if pra_enabled %}
-      <button @click="switchToOT()"
+      <button @click="select('ot')" role="tab" type="button"
+              :aria-selected="activeTab === 'ot' ? 'true' : 'false'"
               :class="activeTab === 'ot' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
               class="py-3 border-b-2 text-sm font-medium transition-colors whitespace-nowrap shrink-0">
         OT Demo Cell
@@ -115,7 +120,8 @@
               x-text="otCells.length"></span>
       </button>
       {% if netcell_enabled %}
-      <button @click="switchToNet()"
+      <button @click="select('net')" role="tab" type="button"
+              :aria-selected="activeTab === 'net' ? 'true' : 'false'"
               :class="activeTab === 'net' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
               class="py-3 border-b-2 text-sm font-medium transition-colors whitespace-nowrap shrink-0">
         Network Cell
@@ -1814,7 +1820,9 @@ function gcpDashboard() {
         this.adminPw.loading = false;
       }
     },
-    activeTab:       'public',
+    // The shared tab contract (static/js/app.js): select() ignores a tab this render
+    // does not have, clicks rewrite the fragment, pickTab() opens the one it names.
+    ...tabState(['public', 'custom', 'instances', 'build'{% if pra_enabled %}, 'ot'{% if netcell_enabled %}, 'net'{% endif %}{% endif %}]),
     projectId:       '',
     loading:         false,
     publicLoading:   false,
@@ -2007,21 +2015,11 @@ function gcpDashboard() {
       // One schedule state for the page: dialogs reset it on open, the Build tab on entry.
       this.$watch('activeTab', t => { if (t === 'build') this.scheduleReset(); });
       this.loadSecretBackends();
-      // Deep links (the home page's OT tile lands on /gcp#ot). switchToOT, not a
-      // bare activeTab write, so the tab's lazy data load runs. The ot branch is
-      // template-gated with the tab pane itself — with PRA off the pane doesn't
-      // render, and activating it would blank the page body.
-      const hash = window.location.hash.slice(1);
-      {% if pra_enabled %}
-      if (hash === 'ot') {
-        this.switchToOT();
-      } else if (hash === 'net') {
-        this.switchToNet();
-      } else
-      {% endif %}
-      if (['public', 'custom', 'instances', 'build'].includes(hash)) {
-        this.activeTab = hash;
-      }
+      // Deep links (the home page's OT tile lands on /gcp#ot) go through select(), so the
+      // tab's lazy data load runs. 'ot' and 'net' are in the tab list only when their
+      // panes render; with PRA off, #ot falls back to the first tab instead of a blank
+      // page body.
+      this.pickTab();
       API.get('/api/groups/workgroups')
         .then(r => { this.availableWorkgroups = r || []; })
         .catch(() => { this.availableWorkgroups = []; });
@@ -2047,9 +2045,14 @@ function gcpDashboard() {
     },
 
     // ── OT demo cell ─────────────────────────────────────────────────────
-    switchToOT() {
-      this.activeTab = 'ot';
-      if (!this.otLoaded) this.loadOTData();
+    // Every way onto a tab -- a click, a deep link, a cross-link -- comes through here,
+    // so a lazily loaded tab loads however it was opened.
+    select(slug, push = true) {
+      if (!this.selectTab(slug, push)) return;
+      if (slug === 'custom' && !this.customImages.length && !this.imagesLoading) this.loadCustomImages();
+      if (slug === 'instances' && !this.instances.length && !this.instancesLoading) this.loadInstances();
+      if (slug === 'ot' && !this.otLoaded) this.loadOTData();
+      if (slug === 'net' && !this.netLoaded) this.loadNetData();
     },
 
     async loadOTData() {
@@ -2076,11 +2079,6 @@ function gcpDashboard() {
     },
 
     // ── Network cell ─────────────────────────────────────────────
-    switchToNet() {
-      this.activeTab = 'net';
-      if (!this.netLoaded) this.loadNetData();
-    },
-
     async loadNetData() {
       this.netLoaded = true;
       if (this.customImages.length === 0 && !this.imagesLoading) this.loadCustomImages();
@@ -2387,13 +2385,6 @@ function gcpDashboard() {
       this.loadPublicImages();
     },
 
-    async switchToCustom() {
-      this.activeTab = 'custom';
-      if (this.customImages.length === 0 && !this.imagesLoading) {
-        await this.loadCustomImages();
-      }
-    },
-
     async loadCustomImages() {
       this.imagesLoading = true;
       try {
@@ -2404,13 +2395,6 @@ function gcpDashboard() {
         this.credError = e.message || 'Failed to load custom images';
       } finally {
         this.imagesLoading = false;
-      }
-    },
-
-    async switchToInstances() {
-      this.activeTab = 'instances';
-      if (this.instances.length === 0 && !this.instancesLoading) {
-        await this.loadInstances();
       }
     },
 

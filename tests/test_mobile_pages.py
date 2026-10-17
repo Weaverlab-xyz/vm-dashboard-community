@@ -177,7 +177,8 @@ def test_a_scrolling_tab_never_wraps_its_own_label():
     strip instead -- azure rendered "Marketplace Images" over two lines in a 46px box."""
     offenders, checked = [], 0
     for rel, src in _pages():
-        for m in re.finditer(r"<nav class=\"[^\"]*-mb-px[^\"]*overflow-x-auto[^\"]*\">(.*?)</nav>",
+        # [^>]* after the class: the cloud pages' strips also carry role="tablist".
+        for m in re.finditer(r"<nav class=\"[^\"]*-mb-px[^\"]*overflow-x-auto[^\"]*\"[^>]*>(.*?)</nav>",
                              src, re.S):
             for tag in re.finditer(r"<(?:button|a)\b[^>]*class=\"([^\"]*)\"", m.group(1)):
                 checked += 1

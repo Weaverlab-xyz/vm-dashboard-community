@@ -102,6 +102,49 @@ def test_every_named_tab_exists_on_its_page():
     assert not failures, "\n  ".join([""] + failures)
 
 
+def _state_pages():
+    """Every page that spreads tabState, whether or not it uses the shared bar.
+
+    The cloud pages (aws, azure, gcp, oci) keep their own bars, because those carry live
+    count badges and each cloud's accent colour, so they are not `set tabs` pages. Their
+    tab list is the literal passed to tabState, with any Jinja flag gates inside it.
+    """
+    for root, _dirs, files in os.walk(_TEMPLATES):
+        for f in files:
+            if not f.endswith(".html"):
+                continue
+            rel = os.path.relpath(os.path.join(root, f), _TEMPLATES).replace("\\", "/")
+            src = _read(rel)
+            m = re.search(r"\.\.\.tabState\(\[([^\]]*)\]\)", src)
+            if m:
+                yield rel, src, set(re.findall(r"'([\w-]+)'", m.group(1)))
+
+
+def test_the_cloud_pages_are_on_the_contract():
+    pages = {rel for rel, _src, _slugs in _state_pages()}
+    missing = {"aws/index.html", "azure/index.html", "gcp/index.html",
+               "oci/index.html"} - pages
+    assert not missing, f"no longer spread tabState: {sorted(missing)}"
+
+
+def test_no_tabbed_page_switches_tabs_by_hand():
+    """`activeTab = 'x'` skips the unknown-slug guard, leaves the URL behind, and (on the
+    cloud pages) skips the lazy load select() runs for that tab, which is how a tab
+    reached any way but its own button used to open empty."""
+    failures = []
+    for rel, src, slugs in _state_pages():
+        code = "\n".join(line for line in src.splitlines()
+                         if not line.strip().startswith("//"))
+        for m in re.finditer(r"activeTab\s*=\s*'([\w-]+)'", code):
+            failures.append(f"{rel}: sets activeTab = '{m.group(1)}' instead of select()")
+        if "location.hash.slice(1)" in code or "(window.location.hash || '').replace" in code:
+            failures.append(f"{rel}: picks its tab from the fragment instead of pickTab()")
+        named = set(_SELECT.findall(src)) | set(re.findall(r"activeTab === '([\w-]+)'", src))
+        for slug in sorted(named - slugs):
+            failures.append(f"{rel}: names tab '{slug}', which its tabState list does not have")
+    assert not failures, "\n  ".join([""] + failures)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

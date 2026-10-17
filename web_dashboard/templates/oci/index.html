@@ -56,22 +56,25 @@
 
   <!-- Tab bar -->
   <div class="border-b border-gray-200 mb-6">
-    <nav class="-mb-px flex gap-6 overflow-x-auto">
-      <button @click="activeTab = 'images'"
+    <nav class="-mb-px flex gap-6 overflow-x-auto" role="tablist" aria-label="OCI sections">
+      <button @click="select('images')" role="tab" type="button"
+              :aria-selected="activeTab === 'images' ? 'true' : 'false'"
               :class="activeTab === 'images' ? 'border-red-600 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
               class="py-3 border-b-2 text-sm font-medium transition-colors whitespace-nowrap shrink-0">
         Images
         <span x-show="filteredImages().length" class="ml-1.5 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full"
               x-text="filteredImages().length"></span>
       </button>
-      <button @click="switchToInstances()"
+      <button @click="select('instances')" role="tab" type="button"
+              :aria-selected="activeTab === 'instances' ? 'true' : 'false'"
               :class="activeTab === 'instances' ? 'border-red-600 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
               class="py-3 border-b-2 text-sm font-medium transition-colors whitespace-nowrap shrink-0">
         Compute Instances
         <span x-show="instances.length" class="ml-1.5 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full"
               x-text="instances.length"></span>
       </button>
-      <button @click="activeTab = 'build'"
+      <button @click="select('build')" role="tab" type="button"
+              :aria-selected="activeTab === 'build' ? 'true' : 'false'"
               :class="activeTab === 'build' ? 'border-red-600 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
               class="py-3 border-b-2 text-sm font-medium transition-colors whitespace-nowrap shrink-0">
         Build Image
@@ -830,7 +833,9 @@ function ociDashboard() {
       submitting: false, error: '',
       serverGateTripped: false, serverGateMessage: '',
     },
-    activeTab: 'images',
+    // The shared tab contract (static/js/app.js): select() ignores a tab this render
+    // does not have, clicks rewrite the fragment, pickTab() opens the one it names.
+    ...tabState(['images', 'instances', 'build']),
     region: '',
     imagesLoading: false,
     instancesLoading: false,
@@ -955,6 +960,9 @@ function ociDashboard() {
       this.loadChangeWindows();
       // One schedule state for the page: dialogs reset it on open, the Build tab on entry.
       this.$watch('activeTab', t => { if (t === 'build') this.scheduleReset(); });
+      // After the watch (so #build resets the schedule like a click does), before the
+      // loads (so the page never renders with no panel).
+      this.pickTab();
       API.get('/api/groups/workgroups')
         .then(r => { this.availableWorkgroups = r || []; })
         .catch(() => { this.availableWorkgroups = []; });
@@ -988,7 +996,6 @@ function ociDashboard() {
         this.ociPackerForm.shape = '';
         this.onPackerShapeChange();
       }
-      if (window.location.hash === '#build') this.activeTab = 'build';
     },
 
     // ── Power ──────────────────────────────────────────────────────────────
@@ -1203,7 +1210,12 @@ function ociDashboard() {
       }
     },
 
-    switchToInstances() { this.activeTab = 'instances'; if (!this.instances.length) this.loadInstances(); },
+    // Every way onto a tab -- a click, a deep link, a cross-link -- comes through here,
+    // so a lazily loaded tab loads however it was opened.
+    select(slug, push = true) {
+      if (!this.selectTab(slug, push)) return;
+      if (slug === 'instances' && !this.instances.length) this.loadInstances();
+    },
 
     async refreshAll() {
       // bust on all three: Refresh exists to escape a stale cache (most often one
@@ -1625,7 +1637,7 @@ function ociDashboard() {
         if (window.afterDeploy(r, { label: 'OCI bulk deploy',
                                     notify: (msg, t) => this.notify(msg, t) })) return;
         this.notify(`${r.count} instance(s) queued`);
-        this.activeTab = 'instances';
+        this.select('instances');
         setTimeout(() => this.loadInstances(true), 1500);
       } catch (e) {
         // Same server free-tier gate as the single form — reveal the acknowledgment.
@@ -1701,7 +1713,7 @@ function ociDashboard() {
         if (window.afterDeploy(r, { label: 'OCI deploy',
                                     notify: (m, t) => this.notify(m, t) })) return;
         this.notify('Deploy started (job ' + r.job_id + ').');
-        this.activeTab = 'instances';
+        this.select('instances');
         setTimeout(() => this.loadInstances(true), 1500);
       } catch (e) {
         // Surface the backend free-tier gate. app.js copies detail.code onto the
