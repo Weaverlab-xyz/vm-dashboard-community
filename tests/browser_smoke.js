@@ -54,7 +54,7 @@ function allowed(page, message) {
   }, TOKEN);
 
   const failures = [];
-  let visited = 0, tabs = 0, panels = 0;
+  let visited = 0, tabs = 0, panels = 0, contextRetries = 0;
   for (const pagePath of PAGES) {
     const p = await ctx.newPage();
     const seen = [];
@@ -138,14 +138,28 @@ function allowed(page, message) {
         for (const key of keys) {
           if (navigated) await recover();
           const before = seen.length;
-          await p.evaluate(async key => {
+          const open = () => p.evaluate(async key => {
             const el = [...document.querySelectorAll('[x-data]')].find(e => typeof Alpine.$data(e).openPanel === 'function');
             const d = Alpine.$data(el);
             await d.openPanel(d.integrations.find(i => i.key === key));
-          }, key).catch(async e => {
-            seen.push({ where: pagePath, message: 'openPanel(' + key + ') threw: ' + e.message.split('\n')[0] + (await diagnose()) });
-            navigated = true;  // whatever it was, start the next panel on a fresh page
-          });
+          }, key);
+          for (let attempt = 1; ; attempt++) {
+            try { await open(); break; } catch (e) {
+              const msg = e.message.split('\n')[0];
+              // On GitHub's runners Playwright occasionally loses the page's execution
+              // context mid-evaluate with the SAME document still loaded (no navigation, no
+              // page error): the page is fine, the handle to it is not. One retry for that;
+              // a new document, a second loss, or any other error is a failure.
+              const d = await docInfo();
+              if (attempt === 1 && /Execution context was destroyed/.test(msg) && d.origin === origin) {
+                contextRetries++;
+                continue;
+              }
+              seen.push({ where: pagePath, message: `openPanel(${key}) threw: ${msg}` + (await diagnose()) });
+              navigated = true;  // whatever it was, start the next panel on a fresh page
+              break;
+            }
+          }
           await p.waitForTimeout(500);
           for (const s of seen.slice(before)) s.where = `${pagePath} → ${key} panel`;
           panels++;
@@ -161,7 +175,7 @@ function allowed(page, message) {
   }
   await browser.close();
 
-  console.log(`[${LABEL}] ${visited}/${PAGES.length} pages, ${tabs} tab clicks, ${panels} Settings panels`);
+  console.log(`[${LABEL}] ${visited}/${PAGES.length} pages, ${tabs} tab clicks, ${panels} Settings panels` + (contextRetries ? `, ${contextRetries} retried after a lost execution context` : ''));
   if (failures.length) {
     console.log(`[${LABEL}] ${failures.length} failure(s):`);
     for (const f of [...new Set(failures)]) console.log('  FAIL ' + f);
