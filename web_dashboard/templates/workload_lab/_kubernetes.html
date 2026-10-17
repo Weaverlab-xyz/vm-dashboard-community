@@ -331,7 +331,10 @@
         only that the dashboard did.
       </p>
 
-      <div x-show="consumer" x-cloak class="space-y-2 text-sm">
+      {# x-if, not x-show: consumer is null until the consumer read returns, and x-show
+         would still evaluate every consumer.* binding inside against it. #}
+      <template x-if="consumer">
+      <div class="space-y-2 text-sm">
         <template x-for="f in consumerFields()" :key="f.label">
           <div class="flex items-start gap-2">
             <span class="text-xs text-gray-500 w-40 shrink-0 pt-1" x-text="f.label"></span>
@@ -351,6 +354,7 @@
 
         <p class="text-xs text-gray-600 pt-2" x-text="consumer.note"></p>
       </div>
+      </template>
 
       <div class="flex justify-end mt-5">
         <button @click="consumerOpen = false"

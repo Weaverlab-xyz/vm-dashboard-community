@@ -992,7 +992,7 @@
           update both fields in the unified Key Vault secret, and redeploy.
         </p>
         <p class="text-xs mt-1" x-show="sshKeyModal.data && sshKeyModal.data.keypair_check_error">
-          Decode error: <code x-text="sshKeyModal.data.keypair_check_error"></code>
+          Decode error: <code x-text="sshKeyModal.data?.keypair_check_error"></code>
         </p>
       </div>
       <div x-show="!sshKeyModal.loading && sshKeyModal.data && sshKeyModal.data.keypair_matches === true" x-cloak
@@ -1000,7 +1000,10 @@
         ✓ Keypair verified — this private key matches the public key on the VM.
       </div>
 
-      <div x-show="!sshKeyModal.loading && sshKeyModal.data" x-cloak class="space-y-3">
+      {# x-if, not x-show: data is null until the key read returns (and again on every
+         open), and x-show would still evaluate the data.* bindings inside. #}
+      <template x-if="!sshKeyModal.loading && sshKeyModal.data">
+      <div class="space-y-3">
         <div x-show="sshKeyModal.data.ssh_command">
           <label class="block text-xs font-semibold text-gray-600 mb-1">SSH command</label>
           <code class="block bg-gray-50 border border-gray-200 rounded px-3 py-2 text-xs font-mono"
@@ -1020,6 +1023,7 @@
           <span x-show="sshKeyModal.copied" x-cloak class="text-xs text-green-600">Copied.</span>
         </div>
       </div>
+      </template>
 
       <div class="mt-5 flex justify-end">
         <button @click="sshKeyModal.open = false"

@@ -235,8 +235,10 @@
     re-checks every guard on the click, so nothing here is load-bearing for safety —
     it is here so the decision is an informed one.
   -->
-  <div x-show="stateLock && stateLock.reported" x-cloak
-       class="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6">
+  {# x-if, not x-show: stateLock is null until the lock read returns, and x-show would
+     still evaluate the bindings inside against it. #}
+  <template x-if="stateLock && stateLock.reported">
+  <div class="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6">
     <div class="flex items-start justify-between gap-4">
       <div>
         <p class="text-sm font-semibold text-amber-800">Terraform state lock</p>
@@ -304,6 +306,7 @@
       </template>
     </div>
   </div>
+  </template>
 
   <!-- Live log output -->
   <div class="bg-white rounded-xl border border-gray-200 overflow-hidden mb-6">

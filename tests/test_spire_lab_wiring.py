@@ -9,6 +9,7 @@ No app imports, so it runs on a checkout without the requirements installed.
 Runs under pytest or standalone:  python tests/test_spire_lab_wiring.py
 """
 import os
+import re
 import sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -801,6 +802,19 @@ def test_a_failed_link_leaves_the_trust_domain_available():
     cols = {c.name for c in SpireLab.__table__.columns}
     assert {"k8s_status", "k8s_error_message"} <= cols, \
         "the link has no status of its own, so it cannot fail independently"
+
+
+def test_the_not_linked_block_reads_the_lab_only_through_optional_chaining():
+    """The block's x-if is `k8sLab?.k8s_status !== 'linked'`, which is TRUE while k8sLab is
+    still null -- the SPIRE tab renders it before any lab is opened. An x-show inside it
+    does not stop a child's x-text being evaluated, so one bare `k8sLab.` read threw on
+    every render (the failed-link message did, three times a page load)."""
+    spire = _read("web_dashboard", "templates", "workload_lab", "_spire.html")
+    opener = "<template x-if=\"k8sLab?.k8s_status !== 'linked'\">"
+    assert opener in spire, "the not-linked block's gate changed; re-check this test"
+    block = spire.split(opener, 1)[1].split("\n      </template>", 1)[0]
+    bare = sorted(set(re.findall(r"(?<![\w?.])k8sLab\.\w+", block)))
+    assert not bare, "read without ?. while k8sLab can be null: " + ", ".join(bare)
 
 
 def test_the_acl_opens_both_ports_to_the_node_alone():

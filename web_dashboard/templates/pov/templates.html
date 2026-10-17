@@ -403,7 +403,12 @@
       </div>
     </div>
 
-    <div x-show="cloudForm" x-cloak class="px-5 py-4 border-t border-gray-200 bg-gray-50">
+    {# x-if, not x-show: cloudForm is null until New template or Edit sets it, and x-show
+       would still evaluate every cloudForm.* binding inside against null. Cancel nulls
+       it again, so the form is rebuilt each time it opens; its state lives in
+       cloudForm, not the DOM. #}
+    <template x-if="cloudForm">
+    <div class="px-5 py-4 border-t border-gray-200 bg-gray-50">
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
@@ -516,6 +521,7 @@
         </button>
       </div>
     </div>
+    </template>
   </section>
 
   </div>
