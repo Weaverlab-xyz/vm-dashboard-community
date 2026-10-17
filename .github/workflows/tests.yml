@@ -52,6 +52,44 @@ jobs:
       - name: Run test suite
         run: scripts/ci/run_tests.sh
 
+  # ── Browser smoke ───────────────────────────────────────────────────────────
+  #
+  # Every page, in Chromium, with every tab clicked and every Settings panel opened; any
+  # uncaught JavaScript error fails the job (tests/browser_smoke_allow.json lists the
+  # deliberate exceptions, with reasons). The text-level suite above cannot see this
+  # class -- a binding reading a null object, a name the component never defines -- and
+  # every one found in October 2026 was found by opening the page. With the network open
+  # here it also proves the pinned Tailwind CDN URL still loads (REQUIRE_TAILWIND).
+  browser-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"  # matches the Dockerfile base image
+          cache: pip
+          cache-dependency-path: web_dashboard/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r web_dashboard/requirements.txt
+
+      # Node comes with the runner image (Playwright 1.56 needs 18+). Pinned, like
+      # ruff: a new Playwright can change what a click or a wait means.
+      - name: Install Playwright and Chromium
+        run: |
+          npm install --no-save --no-package-lock playwright@1.56.1
+          npx playwright install --with-deps chromium
+
+      - name: Run browser smoke test
+        env:
+          REQUIRE_TAILWIND: "1"
+        run: scripts/ci/browser_smoke.sh
+
   # ── Python bug lint ─────────────────────────────────────────────────────────
   #
   # Bug rules only (ruff.toml says which and why): an undefined name, a dict key written

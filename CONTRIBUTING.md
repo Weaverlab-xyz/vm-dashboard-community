@@ -183,6 +183,7 @@ Each has a script, or a single command, that runs the same way locally:
 | Check | What it catches | Run it locally |
 |---|---|---|
 | Skip guard (in `run_tests.sh`) | A test file that passed only because its tests printed `SKIP`, from a missing stub or dependency | `scripts/ci/run_tests.sh` |
+| `browser-smoke` | A page that throws a JavaScript error in a real browser: a binding that reads a still-null object, a name the component never defines. Every page is loaded, every tab clicked, every Settings panel opened | `scripts/ci/browser_smoke.sh` (needs `npm install playwright@1.56.1` and `npx playwright install chromium`) |
 | `ruff` | Bug rules only: undefined names, a dict key written twice, a closure over a loop variable, a mutable default (`ruff.toml`) | `ruff check` |
 | `ansible-syntax` | A playbook Ansible cannot load: an unknown module, a malformed task | `scripts/ci/ansible_syntax.sh` (needs `pip install ansible`) |
 | `terraform` | Unformatted HCL, or a module that fails `terraform validate` | `scripts/ci/terraform_validate.sh` |
@@ -197,7 +198,11 @@ upgrades that clear them. A finding that does not apply goes in that tool's exce
 file with the reason, never silently: `.pip-audit-ignore`, `.trivyignore.yaml`
 (scoped by path) or `.gitleaksignore` (reviewed fingerprints, never a real secret). A
 binary a Dockerfile downloads is pinned to a version and to its vendor's SHA256, and a
-version bump updates both.
+version bump updates both. Front-end libraries are pinned too: Alpine.js is vendored
+under the static `js/vendor` folder (the npm package's `dist/cdn.min.js`, named for its
+version), and every CDN script or stylesheet names an exact version, which
+`tests/test_static_assets.py` enforces. A page error the smoke test should tolerate goes
+in `tests/browser_smoke_allow.json` with the reason.
 
 When a skip is expected in the `tests` job, because another job runs the file with what
 `tests` lacks (a real OPA binary, a PostgreSQL server), add the file to

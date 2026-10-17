@@ -78,3 +78,6 @@ sa-key.json
 corp-ca/*
 !corp-ca/.gitkeep
 !corp-ca/README.md
+
+# Playwright for scripts/ci/browser_smoke.sh (npm install, never committed)
+node_modules/
