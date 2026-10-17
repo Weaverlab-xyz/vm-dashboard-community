@@ -65,6 +65,15 @@ def _window(db, start="00:00", minutes=24 * 60 - 1, days="1111111", enabled=True
     return w
 
 
+def _tomorrow_midday():
+    """Midday of the occurrence after the armed one, whatever the time now. A fixed step
+    (utcnow() + 1d1h) lands in the window's closed minute, 23:59-00:00, when run between
+    22:59 and 23:00 UTC. The extra minute: inside that closed minute the armed occurrence
+    is already tomorrow's."""
+    return (datetime.utcnow() + timedelta(days=1, minutes=1)).replace(
+        hour=12, minute=0, second=0, microsecond=0)
+
+
 def _job(db, job_type="ansible_local", meta=None, created_by="alice"):
     j = Job(job_type=job_type, status="completed", created_by=created_by,
             workgroup="ansible", created_at=datetime.utcnow())
@@ -225,7 +234,7 @@ def test_the_next_occurrence_is_due():
         db, job=_job(db), name="Weekly patch", change_window_id=_window(db).id,
         created_by="alice")
     # Step past the armed occurrence into the next day's.
-    later = datetime.utcnow() + timedelta(days=1, hours=1)
+    later = _tomorrow_midday()
     assert [r[0].id for r in schedule_service.due(db, later)] == [row.id]
 
 
@@ -237,7 +246,7 @@ def test_materialising_twice_in_one_window_creates_one_job():
     schedule_service.create_from_job(
         db, job=_job(db), name="Weekly patch", change_window_id=_window(db).id,
         created_by="alice")
-    later = datetime.utcnow() + timedelta(days=1, hours=1)
+    later = _tomorrow_midday()
 
     for row, _w, start, end in schedule_service.due(db, later):
         schedule_service.materialise(db, row, start=start, end=end)
@@ -260,7 +269,7 @@ def test_the_occurrence_job_is_booked_into_the_window():
     schedule_service.create_from_job(
         db, job=_job(db), name="Weekly patch", change_window_id=_window(db).id,
         created_by="alice")
-    later = datetime.utcnow() + timedelta(days=1, hours=1)
+    later = _tomorrow_midday()
     row, _w, start, end = schedule_service.due(db, later)[0]
     job = schedule_service.materialise(db, row, start=start, end=end)
     db.commit()
@@ -280,7 +289,7 @@ def test_a_disabled_schedule_is_never_due():
         created_by="alice")
     row.enabled = False
     db.commit()
-    later = datetime.utcnow() + timedelta(days=1, hours=1)
+    later = _tomorrow_midday()
     assert schedule_service.due(db, later) == []
 
 
@@ -310,7 +319,7 @@ def test_a_schedule_whose_owner_is_gone_disables_itself():
     db.query(User).filter(User.username == "alice").delete()
     db.commit()
 
-    later = datetime.utcnow() + timedelta(days=1, hours=1)
+    later = _tomorrow_midday()
     row, _w, start, end = schedule_service.due(db, later)[0]
     job = schedule_service.materialise(db, row, start=start, end=end)
     db.commit()
@@ -327,7 +336,7 @@ def test_a_deactivated_owner_also_disables_it():
     schedule_service.create_from_job(
         db, job=_job(db), name="Weekly patch", change_window_id=_window(db).id,
         created_by="alice")
-    later = datetime.utcnow() + timedelta(days=1, hours=1)
+    later = _tomorrow_midday()
     row, _w, start, end = schedule_service.due(db, later)[0]
     assert schedule_service.materialise(db, row, start=start, end=end) is None
     # Commit before refreshing: `materialise` leaves the disable pending in the session
