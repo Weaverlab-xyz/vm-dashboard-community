@@ -64,3 +64,6 @@ scripts/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Playwright for the browser smoke test; not part of the image
+node_modules/

@@ -2527,6 +2527,11 @@
             if (!this.deployForm.subnet_id && o.default_subnet_id) this.deployForm.subnet_id = o.default_subnet_id;
             if (this.deployForm.security_group_ids.length === 0 && o.default_security_group_id) this.deployForm.security_group_ids = [o.default_security_group_id];
           }
+        } catch (e) {
+          // Caught here, like loadAmis: with no AWS credentials every caller -- the OT
+          // tab's region change, the deploy modal -- would otherwise throw an unhandled
+          // rejection and skip its own preselects. The pickers stay empty; the toast says why.
+          toast(e.message || 'Failed to load AWS network options', 'error');
         } finally {
           this.loadingNetworkOpts = false;
         }
