@@ -10803,17 +10803,29 @@ function settingsPage() {
   };
 }
 
+// The bundle targets, in the order the cards render. Must match
+// entitle_persona_bundles.TARGETS (tests/test_entitle_persona_bundles.py pins it).
+const ENTITLE_TARGETS = ['aws', 'azure', 'gcp', 'oci', 'ad'];
+
+// One empty pin per target, the shape cloud_settings() returns. Every card binds
+// clouds[c].integration_id and clouds[c].resource, so a target missing from `clouds`
+// -- before load() returns, or after it fails -- would throw on every render.
+function blankEntitleClouds() {
+  return Object.fromEntries(ENTITLE_TARGETS.map(c => [c, { integration_id: '', resource: '' }]));
+}
+
 function entitleBundles() {
   return {
     loaded: false, configured: false, busy: false, error: '',
-    catalog: [], byKey: {}, accesses: [], clouds: {}, cands: {}, sets: [], picked: [], preview: {},
+    catalog: [], byKey: {}, accesses: [], clouds: blankEntitleClouds(), cands: {}, sets: [], picked: [], preview: {},
     adDirs: [], showDeleg: '', grp: { directory_id: '', ou: '', include_cloud: false, queued: '', job_id: '' },
-    cloudKeys: ['aws', 'azure', 'gcp', 'oci', 'ad'],
+    cloudKeys: ENTITLE_TARGETS,
     cloudLabel: { aws: 'AWS', azure: 'Azure', gcp: 'GCP', oci: 'OCI', ad: 'On-prem AD' },
     async load() {
       try {
         const r = await API.get('/api/entitle/persona-bundles');
-        this.configured = r.configured; this.catalog = r.catalog || []; this.clouds = r.clouds || {};
+        this.configured = r.configured; this.catalog = r.catalog || [];
+        this.clouds = { ...blankEntitleClouds(), ...(r.clouds || {}) };
         this.sets = r.sets || [];
         this.adDirs = r.ad_directories || [];
         if (!this.grp.directory_id && this.adDirs.length) this.grp.directory_id = this.adDirs[0].id;
@@ -10834,7 +10846,7 @@ function entitleBundles() {
       try { const r = await API.put('/api/entitle/persona-bundles/clouds',
                                     { cloud: c, integration_id: this.clouds[c].integration_id || '',
                                       resource: this.clouds[c].resource || '' });
-            this.clouds = r.clouds; this.preview = {}; }
+            this.clouds = { ...blankEntitleClouds(), ...(r.clouds || {}) }; this.preview = {}; }
       catch (e) { this.error = e.message; }
     },
     readyCount() { return this.picked.filter(k => this.preview[k]?.ready).length; },

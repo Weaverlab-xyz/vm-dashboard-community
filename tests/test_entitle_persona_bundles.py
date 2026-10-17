@@ -495,6 +495,28 @@ def test_job_stores_bundle_ids():
         db.close()
 
 
+
+def test_the_settings_cards_start_with_every_target_bound():
+    """The Settings bundles section renders one card per target and every card binds
+    clouds[c].integration_id and .resource. Started as `clouds: {}`, each of the five
+    cards threw three times on every open, before load() had returned; so the page seeds
+    one blank pin per target and merges the server's answer over it. Its target list
+    has to be this module's, or a target added here would render a card that throws."""
+    import re
+    path = os.path.join(_ROOT, "web_dashboard", "templates", "settings.html")
+    with open(path, encoding="utf-8") as fh:
+        src = fh.read()
+    m = re.search(r"const ENTITLE_TARGETS = \[([^\]]*)\];", src)
+    assert m, "settings.html no longer declares ENTITLE_TARGETS"
+    page = re.findall(r"'([a-z]+)'", m.group(1))
+    assert page == list(bundles.TARGETS), (page, bundles.TARGETS)
+    factory = src.split("function entitleBundles() {", 1)[1].split("\n}\n", 1)[0]
+    assert "clouds: blankEntitleClouds()" in factory, "clouds starts empty again"
+    assert "cloudKeys: ENTITLE_TARGETS" in factory
+    # Both places that replace `clouds` keep every target present.
+    assert factory.count("{ ...blankEntitleClouds(), ...(r.clouds || {}) }") == 2
+    assert "this.clouds = r.clouds" not in factory
+
 if __name__ == "__main__":
     import traceback
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
