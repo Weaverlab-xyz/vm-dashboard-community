@@ -67,19 +67,31 @@ function allowed(page, message) {
         seen.push({ where: pagePath, message: `401 from ${r.request().method()} ${new URL(r.url()).pathname} (logs the session out)` });
       }
     });
-    // Only while the script is driving the page: a page that redirects on load (/login,
-    // for a session that is already signed in) is doing its job.
-    let watchNav = false;
-    p.on('framenavigated', fr => {
-      if (watchNav && fr === p.mainFrame() && new URL(fr.url()).pathname !== pagePath) {
-        seen.push({ where: pagePath, message: `navigated away to ${new URL(fr.url()).pathname}` });
+    // Only once the page has loaded: a page that redirects on load (/login, for a session
+    // that is already signed in) is doing its job. After that, nothing the script does
+    // should navigate the page, so any navigation request is reported with its method and
+    // full URL (a reload or a form post keeps the same path, so the path alone hides it).
+    let watchNav = false, navigated = false;
+    p.on('request', r => {
+      if (watchNav && r.isNavigationRequest() && r.frame() === p.mainFrame()) {
+        navigated = true;
+        const u = new URL(r.url());
+        seen.push({ where: pagePath, message: `navigated: ${r.method()} ${u.pathname}${u.search}` });
       }
     });
+    const recover = async () => {  // reload, so one navigation does not fail every later step
+      watchNav = false;
+      await p.goto(BASE + pagePath, { waitUntil: 'load' });
+      await p.waitForTimeout(1200);
+      navigated = false;
+      watchNav = true;
+    };
     let status = 0;
     try {
       const resp = await p.goto(BASE + pagePath, { waitUntil: 'load' });
       status = resp ? resp.status() : 0;
       await p.waitForTimeout(1200);
+      watchNav = true;
       visited++;
       if (status >= 500) failures.push(`${pagePath}: HTTP ${status}`);
       if (process.env.REQUIRE_TAILWIND && !(await p.evaluate(() => !!window.tailwind))) {
@@ -94,17 +106,21 @@ function allowed(page, message) {
       for (let i = 0; i < tabCount; i++) {
         const tab = p.locator('[role=tab]:visible').nth(i);
         if (!(await tab.count())) break;
+        const before = seen.length;
+        const label = ((await tab.textContent().catch(() => '')) || '').trim().slice(0, 40);
         await tab.click({ timeout: 2000 }).catch(() => {});
         await p.waitForTimeout(250);
+        for (const s of seen.slice(before)) s.where = `${pagePath} → tab "${label}"`;
         tabs++;
       }
       if (pagePath === '/settings') {
+        if (navigated) await recover();
         const keys = await p.evaluate(() => {
           const el = [...document.querySelectorAll('[x-data]')].find(e => window.Alpine && typeof Alpine.$data(e).openPanel === 'function');
           return el ? (Alpine.$data(el).integrations || []).filter(i => i.hasConfig !== false).map(i => i.key) : [];
         });
-        watchNav = true;
         for (const key of keys) {
+          if (navigated) await recover();
           const before = seen.length;
           await p.evaluate(async key => {
             const el = [...document.querySelectorAll('[x-data]')].find(e => typeof Alpine.$data(e).openPanel === 'function');
@@ -114,12 +130,6 @@ function allowed(page, message) {
           await p.waitForTimeout(500);
           for (const s of seen.slice(before)) s.where = `${pagePath} → ${key} panel`;
           panels++;
-          if (new URL(p.url()).pathname !== pagePath) {  // logged out or sent elsewhere: recover
-            watchNav = false;
-            await p.goto(BASE + pagePath, { waitUntil: 'load' });
-            await p.waitForTimeout(1200);
-            watchNav = true;
-          }
         }
       }
     } catch (e) {
