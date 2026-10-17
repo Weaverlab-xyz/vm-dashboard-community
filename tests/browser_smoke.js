@@ -59,6 +59,22 @@ function allowed(page, message) {
     const p = await ctx.newPage();
     const seen = [];
     p.on('pageerror', e => seen.push({ where: pagePath, message: String(e.message || e) }));
+    // A 401 makes the API layer log the session out and send the browser to /login, which
+    // would otherwise surface only as "Execution context was destroyed" in whatever runs
+    // next. Recorded with the request that caused it, so the failure names its own cause.
+    p.on('response', r => {
+      if (r.status() === 401 && new URL(r.url()).pathname.startsWith('/api/')) {
+        seen.push({ where: pagePath, message: `401 from ${r.request().method()} ${new URL(r.url()).pathname} (logs the session out)` });
+      }
+    });
+    // Only while the script is driving the page: a page that redirects on load (/login,
+    // for a session that is already signed in) is doing its job.
+    let watchNav = false;
+    p.on('framenavigated', fr => {
+      if (watchNav && fr === p.mainFrame() && new URL(fr.url()).pathname !== pagePath) {
+        seen.push({ where: pagePath, message: `navigated away to ${new URL(fr.url()).pathname}` });
+      }
+    });
     let status = 0;
     try {
       const resp = await p.goto(BASE + pagePath, { waitUntil: 'load' });
@@ -87,6 +103,7 @@ function allowed(page, message) {
           const el = [...document.querySelectorAll('[x-data]')].find(e => window.Alpine && typeof Alpine.$data(e).openPanel === 'function');
           return el ? (Alpine.$data(el).integrations || []).filter(i => i.hasConfig !== false).map(i => i.key) : [];
         });
+        watchNav = true;
         for (const key of keys) {
           const before = seen.length;
           await p.evaluate(async key => {
@@ -97,6 +114,12 @@ function allowed(page, message) {
           await p.waitForTimeout(500);
           for (const s of seen.slice(before)) s.where = `${pagePath} → ${key} panel`;
           panels++;
+          if (new URL(p.url()).pathname !== pagePath) {  // logged out or sent elsewhere: recover
+            watchNav = false;
+            await p.goto(BASE + pagePath, { waitUntil: 'load' });
+            await p.waitForTimeout(1200);
+            watchNav = true;
+          }
         }
       }
     } catch (e) {
