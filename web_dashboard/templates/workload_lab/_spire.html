@@ -478,12 +478,15 @@
       </template>
 
       <!-- Not linked yet: pick the second host. -->
+      {# TRUE while k8sLab is still null (no lab opened yet), so every read of k8sLab in
+         this block is optional-chained: an x-show does not stop its children's x-text
+         from being evaluated. #}
       <template x-if="k8sLab?.k8s_status !== 'linked'">
         <div>
           <div x-show="k8sLab?.k8s_status === 'failed'" x-cloak
                class="border border-red-200 bg-red-50 rounded-lg px-3 py-2 text-xs text-red-700 mb-4">
             <p class="font-medium mb-0.5">The last attempt failed</p>
-            <p x-text="k8sLab.k8s_error_message"></p>
+            <p x-text="k8sLab?.k8s_error_message"></p>
             <p class="mt-1">The trust domain itself is unaffected &mdash; it is still
               <strong>available</strong> and still governs everything it did before.</p>
           </div>
@@ -610,7 +613,7 @@
               <li>
                 <span class="font-mono" x-text="st.asset"></span>
                 <span x-text="st.host === 'k8s' ? ' — k3s node' : ' — SPIRE host'"></span>
-                <span x-show="(k8sLab.k8s_stages_done || []).includes(st.key)"
+                <span x-show="(k8sLab?.k8s_stages_done || []).includes(st.key)"
                       x-cloak class="text-green-600">✓</span>
               </li>
             </template>
