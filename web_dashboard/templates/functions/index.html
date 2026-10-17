@@ -243,7 +243,10 @@
       </template>
       <textarea x-model="invokeBody" rows="6" x-show="invokeMethod === 'POST'"
                 class="w-full border border-gray-300 rounded px-2 py-1.5 text-xs font-mono mb-3"></textarea>
-      <div x-show="invokeResult" x-cloak class="mb-3">
+      {# x-if, not x-show: invokeResult is null until an invoke returns, and x-show would
+         still evaluate the bindings inside against it. #}
+      <template x-if="invokeResult">
+      <div class="mb-3">
         <div class="text-xs font-medium text-gray-600 mb-1">
           Response <span x-text="'(HTTP ' + invokeResult.status + ')'"></span>
           <span x-show="invokeResult.url" class="font-normal text-gray-400 font-mono"
@@ -252,6 +255,7 @@
         <pre class="bg-gray-900 text-gray-100 text-xs rounded p-3 overflow-x-auto max-h-72"
              x-text="JSON.stringify(invokeResult.body, null, 2)"></pre>
       </div>
+      </template>
       <div class="flex justify-end gap-2">
         <button @click="invokeOpen = false" class="px-3 py-1.5 text-sm text-gray-600">Close</button>
         <button @click="runInvoke()" :disabled="invoking"

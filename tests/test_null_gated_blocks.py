@@ -26,8 +26,11 @@ import sys
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TEMPLATES = os.path.join(_ROOT, "web_dashboard", "templates")
 
-_NULL_INIT = re.compile(r"^\s+(\w+):\s*null,", re.M)
-_GATE = re.compile(r'<(\w+)\b[^>]*\bx-show="(\w+)"')
+# A key initialised to null anywhere in the file, top-level (`cloudForm: null,`) or inside
+# an object literal (`sshKeyModal: { ..., data: null, ... }`).
+_NULL_INIT = re.compile(r"\b(\w+):\s*null\b")
+_GATE = re.compile(r'<(\w+)\b[^>]*\bx-show="([^"]*)"')
+_PATH = re.compile(r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*")
 # An Alpine binding: x-text="..", x-model="..", x-for="..", :class="..", x-show="..".
 # Event handlers (@click, x-on:) are left out on purpose -- see the docstring.
 _BINDING = re.compile(r'\s((?:x-(?!on:)[\w.-]+)|:[\w.-]+)="([^"]*)"')
@@ -52,6 +55,19 @@ def _guarded(expr: str, var: str) -> bool:
     return bool(re.search(r"\b%s(\?\.\w+)*\s*(&&|\?(?!\.))" % v, expr))
 
 
+def _gated_paths(expr: str, nulls: set) -> list:
+    """The null-initialised paths an x-show requires to be truthy: each `&&`-joined part
+    that is a plain path (`cloudForm`, `sshKeyModal.data`) ending in a null key. A negated
+    or compared part (`!x`, `x === 1`) shows the element while x is null, so it gates
+    nothing."""
+    out = []
+    for part in expr.split("&&"):
+        part = part.strip()
+        if _PATH.fullmatch(part) and part.rsplit(".", 1)[-1] in nulls:
+            out.append(part)
+    return out
+
+
 def _violations():
     for root, _dirs, files in os.walk(_TEMPLATES):
         for f in files:
@@ -63,16 +79,16 @@ def _violations():
                 src = fh.read()
             nulls = set(_NULL_INIT.findall(src))
             for gate in _GATE.finditer(src):
-                tag, var = gate.group(1), gate.group(2)
-                if var not in nulls:
-                    continue
-                block = _element(src, gate.start(), tag)
-                bare = re.compile(r"(?<![\w?.])%s\.\w" % re.escape(var))
-                for b in _BINDING.finditer(block):
-                    expr = b.group(2)
-                    if bare.search(expr) and not _guarded(expr, var):
-                        line = src.count("\n", 0, gate.start() + b.start()) + 1
-                        yield f"{rel}:{line} {b.group(1)}=\"{expr[:70]}\" (gated by x-show=\"{var}\")"
+                tag = gate.group(1)
+                for var in _gated_paths(gate.group(2), nulls):
+                    block = _element(src, gate.start(), tag)
+                    bare = re.compile(r"(?<![\w?.])%s\.\w" % re.escape(var))
+                    for b in _BINDING.finditer(block):
+                        expr = b.group(2)
+                        if bare.search(expr) and not _guarded(expr, var):
+                            line = src.count("\n", 0, gate.start() + b.start()) + 1
+                            yield (f"{rel}:{line} {b.group(1)}=\"{expr[:70]}\" "
+                                   f"(gated by x-show on {var})")
 
 
 def test_no_binding_dereferences_a_null_object_behind_an_x_show():
@@ -93,6 +109,15 @@ def test_the_check_still_sees_the_pattern():
     exprs = [b.group(2) for b in _BINDING.finditer(block)]
     flagged = [e for e in exprs if "form." in e and not _guarded(e, "form")]
     assert flagged == ["form.name", "form.w || ''"], flagged
+
+    # A nested object behind a compound gate: `modal: { ..., data: null }` shown on
+    # `!modal.loading && modal.data` (the Azure SSH-key panel's shape). `!modal.loading`
+    # gates nothing, since it is true while data is still null.
+    nulls = set(_NULL_INIT.findall("modal: { loading: false, data: null, copied: false },"))
+    assert nulls == {"data"}, nulls
+    assert _gated_paths("!modal.loading && modal.data", nulls) == ["modal.data"]
+    assert _gated_paths("!modal.data", nulls) == []
+    assert _gated_paths("modal.data === 1", nulls) == []
 
 
 if __name__ == "__main__":
