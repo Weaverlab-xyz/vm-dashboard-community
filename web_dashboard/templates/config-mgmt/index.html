@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/tab_bar.html" import tab_bar %}
 {% from "partials/schedule_picker.html" import schedule_picker %}
 
 {% block title %}Configuration{% endblock %}
@@ -57,16 +58,7 @@
   <template x-if="!loading && hasAnyTarget">
     <div>
 
-      <div class="border-b border-gray-200 mb-6 flex flex-wrap gap-1" role="tablist" aria-label="Configuration sections">
-        {% for tab in tabs %}
-        <button @click="select('{{ tab.slug }}')" role="tab" type="button"
-                :aria-selected="activeTab === '{{ tab.slug }}' ? 'true' : 'false'"
-                :class="activeTab === '{{ tab.slug }}'
-                          ? 'border-blue-600 text-blue-700'
-                          : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
-                class="px-3 py-2 -mb-px border-b-2 text-sm font-medium">{{ tab.label }}</button>
-        {% endfor %}
-      </div>
+      {{ tab_bar(tabs, "Configuration sections") }}
 
       <!-- Run: the run form -->
       <div x-show="activeTab === 'run'" x-cloak role="tabpanel" class="max-w-3xl">
@@ -844,8 +836,8 @@
 <script>
 function configMgmt(tabSlugs) {
   return {
-    tabSlugs: tabSlugs,
-    activeTab: '',
+    // The shared tab contract: select(), pickTab(), tabSlugs, activeTab (static/js/app.js).
+    ...tabState(tabSlugs),
     loading: true,
     targets: [],
     // A selection handed over from /inventory: {ids, kind, names}. IDS ONLY —
@@ -1342,24 +1334,14 @@ function configMgmt(tabSlugs) {
       })[id] || id;
     },
 
-    // ── Tabs ──────────────────────────────────────────────────────────────
-    // Same contract as remoteAgentsPage.select (agents/index.html): a slug this
-    // page does not have is ignored, and the fragment is rewritten with
-    // replaceState so Back leaves the page rather than walking the tabs.
-    select(slug, push = true) {
-      if (!this.tabSlugs.includes(slug)) return;
-      this.activeTab = slug;
-      if (push) window.history.replaceState(null, '', '#' + slug);
-    },
-
     async init() {
       requireAuth();
       this.readBulkHandOff();
       // Pick the tab before the loads so the page never renders with no panel. A bulk
       // hand-off from /inventory always lands on Run, whatever the fragment says: the
       // selection it carries is only visible there.
-      const want = (window.location.hash || '').replace(/^#/, '');
-      this.select(this.bulk ? 'run' : (this.tabSlugs.includes(want) ? want : this.tabSlugs[0]), false);
+      if (this.bulk) this.select('run', false);
+      else this.pickTab();
       // Auto-open the secrets section whenever something in it takes a value — typed,
       // or pre-selected by a managed-account lookup — so a credential the run will use
       // is never hidden behind a closed header.

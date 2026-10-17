@@ -181,8 +181,12 @@ def test_an_unknown_tab_slug_is_ignored():
     slug this render does not have. Without the guard, clicking through to a disabled tab
     sets activeTab to a slug with no panel and the page shows its header and nothing
     else — which reads as broken rather than as a feature being off."""
+    # The guard itself is the shared one (window.tabState in static/js/app.js), whose
+    # refusal is exercised in tests/template_helpers_check.js; this pins that the page uses it.
     shell = _read("web_dashboard", "templates", "workload_lab", "index.html")
-    assert "if (!this.slugs.includes(slug)) return;" in shell, (
+    app = _read("web_dashboard", "static", "js", "app.js")
+    assert "...tabState(slugs)" in shell, "the Workload Lab page no longer uses tabState"
+    assert "if (!this.tabSlugs.includes(slug)) return false;" in app, (
         "select() does not guard an unknown slug")
 
 

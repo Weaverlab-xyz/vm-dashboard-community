@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/tab_bar.html" import tab_bar %}
 {% block title %}POV Templates{% endblock %}
 
 {#
@@ -93,17 +94,7 @@
     <p class="text-sm text-red-800" x-text="error"></p>
   </div>
 
-  <div class="border-b border-gray-200 mb-6 flex flex-wrap gap-1" role="tablist" aria-label="POV template sections">
-    {% for tab in tabs %}
-    <button @click="select('{{ tab.slug }}')" role="tab" type="button"
-            x-show="{{ tab.show or 'true' }}"
-            :aria-selected="activeTab === '{{ tab.slug }}' ? 'true' : 'false'"
-            :class="activeTab === '{{ tab.slug }}'
-                      ? 'border-blue-600 text-blue-700'
-                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
-            class="px-3 py-2 -mb-px border-b-2 text-sm font-medium">{{ tab.label }}</button>
-    {% endfor %}
-  </div>
+  {{ tab_bar(tabs, "POV template sections") }}
 
   <div x-show="activeTab === 'build'" x-cloak role="tabpanel" class="space-y-6">
 
@@ -728,8 +719,8 @@
 <script>
 function templatesPage(tabSlugs) {
   return {
-    tabSlugs: tabSlugs,
-    activeTab: '',
+    // The shared tab contract: select(), pickTab(), tabSlugs, activeTab (static/js/app.js).
+    ...tabState(tabSlugs),
     platform: '',
     platforms: [],
     templates: [],
@@ -861,20 +852,9 @@ function templatesPage(tabSlugs) {
       return JSON.stringify(detail);
     },
 
-    // ── Tabs ──────────────────────────────────────────────────────────────
-    // Same contract as remoteAgentsPage.select (agents/index.html): a slug this
-    // page does not have is ignored, and the fragment is rewritten with
-    // replaceState so Back leaves the page rather than walking the tabs.
-    select(slug, push = true) {
-      if (!this.tabSlugs.includes(slug)) return;
-      this.activeTab = slug;
-      if (push) window.history.replaceState(null, '', '#' + slug);
-    },
-
     async init() {
       // Pick the tab before the loads so the page never renders with no panel.
-      const want = (window.location.hash || '').replace(/^#/, '');
-      this.select(this.tabSlugs.includes(want) ? want : this.tabSlugs[0], false);
+      this.pickTab();
       this.bp = this.blankBlueprint();
       try {
         const body = await this.apiJson('/api/pov/platforms');
