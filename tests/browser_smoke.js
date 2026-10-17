@@ -79,11 +79,26 @@ function allowed(page, message) {
         seen.push({ where: pagePath, message: `navigated: ${r.method()} ${u.pathname}${u.search}` });
       }
     });
+    // Diagnostics for an execution context that is destroyed with no navigation request
+    // seen (CI only, so far): what the page is now, against what it was after load.
+    const recent = [];
+    p.on('request', r => { recent.push(`${r.method()} ${new URL(r.url()).pathname}`); if (recent.length > 6) recent.shift(); });
+    p.on('framenavigated', fr => { recent.push(`${fr === p.mainFrame() ? 'main' : 'child'} frame → ${fr.url()}`); if (recent.length > 6) recent.shift(); });
+    p.on('crash', () => seen.push({ where: pagePath, message: 'renderer crashed' }));
+    let origin = 0;
+    const docInfo = () => p.evaluate(() => ({ origin: performance.timeOrigin,
+      nav: (performance.getEntriesByType('navigation')[0] || {}).type })).catch(e => ({ error: e.message.split('\n')[0] }));
+    const diagnose = async () => {
+      await p.waitForTimeout(500);
+      const d = await docInfo();
+      return ` [now ${p.url()}; ${d.error ? d.error : (d.origin === origin ? 'same document' : `NEW document, nav type ${d.nav}`)}; last events: ${recent.join(', ')}]`;
+    };
     const recover = async () => {  // reload, so one navigation does not fail every later step
       watchNav = false;
       await p.goto(BASE + pagePath, { waitUntil: 'load' });
       await p.waitForTimeout(1200);
       navigated = false;
+      origin = (await docInfo()).origin;
       watchNav = true;
     };
     let status = 0;
@@ -91,6 +106,7 @@ function allowed(page, message) {
       const resp = await p.goto(BASE + pagePath, { waitUntil: 'load' });
       status = resp ? resp.status() : 0;
       await p.waitForTimeout(1200);
+      origin = (await docInfo()).origin;
       watchNav = true;
       visited++;
       if (status >= 500) failures.push(`${pagePath}: HTTP ${status}`);
@@ -126,7 +142,10 @@ function allowed(page, message) {
             const el = [...document.querySelectorAll('[x-data]')].find(e => typeof Alpine.$data(e).openPanel === 'function');
             const d = Alpine.$data(el);
             await d.openPanel(d.integrations.find(i => i.key === key));
-          }, key).catch(e => seen.push({ where: pagePath, message: 'openPanel(' + key + ') threw: ' + e.message }));
+          }, key).catch(async e => {
+            seen.push({ where: pagePath, message: 'openPanel(' + key + ') threw: ' + e.message.split('\n')[0] + (await diagnose()) });
+            navigated = true;  // whatever it was, start the next panel on a fresh page
+          });
           await p.waitForTimeout(500);
           for (const s of seen.slice(before)) s.where = `${pagePath} → ${key} panel`;
           panels++;
@@ -136,7 +155,7 @@ function allowed(page, message) {
       failures.push(`${pagePath}: ${e.message.split('\n')[0]}`);
     }
     for (const s of seen) {
-      if (!allowed(pagePath, s.message)) failures.push(`${s.where}: ${s.message.slice(0, 200)}`);
+      if (!allowed(pagePath, s.message)) failures.push(`${s.where}: ${s.message.slice(0, 600)}`);
     }
     await p.close();
   }
