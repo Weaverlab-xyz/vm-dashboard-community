@@ -235,7 +235,7 @@
           <p x-show="selectedCloud()?.dashboard_secret" x-cloak
              class="text-xs text-gray-500 mt-1">
             The dashboard uses
-            <code x-text="selectedCloud().dashboard_secret"></code>
+            <code x-text="selectedCloud()?.dashboard_secret"></code>
             for its own cloud calls. A lab identity is usually a
             <em>different</em> secret with a narrower scope.
           </p>
@@ -307,7 +307,10 @@
         log rather than this page.
       </p>
 
-      <div x-show="lease" x-cloak class="space-y-2 text-sm">
+      {# x-if, not x-show: lease is null until the lease read returns, and x-show would still
+         evaluate every lease.* binding inside against it. #}
+      <template x-if="lease">
+      <div class="space-y-2 text-sm">
         <div class="flex items-start gap-2">
           <span class="text-xs text-gray-500 w-32 shrink-0 pt-1">Lease id</span>
           <code class="flex-1 text-xs bg-gray-50 border border-gray-200 rounded px-2 py-1 break-all"
@@ -334,6 +337,7 @@
                x-text="JSON.stringify(lease.provider, null, 2)"></pre>
         </div>
       </div>
+      </template>
 
       <div class="flex justify-end mt-5">
         <button @click="leaseOpen = false"
