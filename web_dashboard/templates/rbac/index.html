@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/tab_bar.html" import tab_bar %}
 
 {# Role-based access control. Three tabs over the halves of one job:
 
@@ -93,17 +94,7 @@
     <a href="/docs/access/permissions" target="_blank" class="text-blue-600 hover:underline">Feature guide</a>.
   </p>
 
-  <div class="border-b border-gray-200 mb-6 flex flex-wrap gap-1" role="tablist" aria-label="RBAC sections">
-    {% for tab in tabs %}
-    <button @click="select('{{ tab.slug }}')" role="tab" type="button"
-            {% if tab.admin %}x-show="$store.auth.isAdmin"{% endif %}
-            :aria-selected="activeTab === '{{ tab.slug }}' ? 'true' : 'false'"
-            :class="activeTab === '{{ tab.slug }}'
-                      ? 'border-blue-600 text-blue-700'
-                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
-            class="px-3 py-2 -mb-px border-b-2 text-sm font-medium">{{ tab.label }}</button>
-    {% endfor %}
-  </div>
+  {{ tab_bar(tabs, "RBAC sections") }}
 
   {% if 'users' in tab_slugs %}
   <div x-show="activeTab === 'users'" x-cloak role="tabpanel">
@@ -139,10 +130,10 @@
 // other's data.
 function rbacPage(slugs, initial, adminSlugs) {
   return {
-    activeTab: '',
-    // The tabs this VIEWER has, narrowed from the rendered list by init() -- so select()
-    // refuses an admin-only tab for a non-admin as well as one this render lacks.
-    slugs: slugs,
+    // The shared tab contract (static/js/app.js). tabSlugs is the tabs this VIEWER has,
+    // narrowed from the rendered list by init() -- so select() refuses an admin-only tab
+    // for a non-admin as well as one this render lacks.
+    ...tabState(slugs),
 
     init() {
       // THE GATE, and it is per-TAB rather than per-page. Each of these used to be its own
@@ -161,8 +152,8 @@ function rbacPage(slugs, initial, adminSlugs) {
       // ever this is a CONVENIENCE: the real control is the dependency on each route.
       requireAuth();
       const isAdmin = Alpine.store('auth').isAdmin;
-      this.slugs = isAdmin ? slugs : slugs.filter(s => !adminSlugs.includes(s));
-      if (!this.slugs.length) {
+      this.tabSlugs = isAdmin ? slugs : slugs.filter(s => !adminSlugs.includes(s));
+      if (!this.tabSlugs.length) {
         window.location.href = '/';
         return;
       }
@@ -171,18 +162,8 @@ function rbacPage(slugs, initial, adminSlugs) {
       // cross-link carries; `initial` is what the ROUTE decided, which is how /groups opens
       // on its own tab without a fragment it never had; then the first tab that exists. A
       // slug this render does not have -- including an admin-only one a non-admin asked for
-      // -- falls through to that last case rather than showing a page with no panel.
-      const want = (window.location.hash || '').replace(/^#/, '') || initial || '';
-      this.select(this.slugs.includes(want) ? want : this.slugs[0], false);
-    },
-
-    select(slug, push = true) {
-      if (!this.slugs.includes(slug)) return;
-      this.activeTab = slug;
-      // replaceState, not pushState: the back button should leave the page rather than walk
-      // the tabs the visitor clicked through. Deliberately NOT done on the initial select,
-      // so arriving at /users?x=1 does not rewrite the URL out from under a query string.
-      if (push) window.history.replaceState(null, '', '#' + slug);
+      // -- falls through to the next case rather than showing a page with no panel.
+      this.pickTab(initial);
     },
   };
 }

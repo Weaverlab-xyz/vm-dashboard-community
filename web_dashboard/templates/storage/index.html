@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/tab_bar.html" import tab_bar %}
 
 {% block title %}Storage{% endblock %}
 
@@ -31,17 +32,7 @@
     is preserved so you can verify before deleting.
   </p>
 
-  <div class="border-b border-gray-200 mb-6 flex flex-wrap gap-1" role="tablist" aria-label="Storage sections">
-    {% for tab in tabs %}
-    <button @click="select('{{ tab.slug }}')" role="tab" type="button"
-            x-show="{{ tab.show or 'true' }}"
-            :aria-selected="activeTab === '{{ tab.slug }}' ? 'true' : 'false'"
-            :class="activeTab === '{{ tab.slug }}'
-                      ? 'border-blue-600 text-blue-700'
-                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
-            class="px-3 py-2 -mb-px border-b-2 text-sm font-medium">{{ tab.label }}</button>
-    {% endfor %}
-  </div>
+  {{ tab_bar(tabs, "Storage sections") }}
 
   <div x-show="activeTab === 'backend'" x-cloak role="tabpanel">
 
@@ -822,8 +813,8 @@
 <script>
 function storagePage(tabSlugs) {
   return {
-    tabSlugs: tabSlugs,
-    activeTab: '',
+    // The shared tab contract: select(), pickTab(), tabSlugs, activeTab (static/js/app.js).
+    ...tabState(tabSlugs),
     // Which backend's connection-fields section is expanded on the Backend tab ('' = none).
     openFields: '',
     backends: [],
@@ -866,16 +857,6 @@ function storagePage(tabSlugs) {
     epml: { enabled: false, loading: false, syncing: false, building: false,
             checked: false, packages: [], status: '', error: '' },
 
-    // ── Tabs ──────────────────────────────────────────────────────────────
-    // Same contract as remoteAgentsPage.select (agents/index.html): a slug this
-    // page does not have is ignored, and the fragment is rewritten with
-    // replaceState so Back leaves the page rather than walking the tabs.
-    select(slug, push = true) {
-      if (!this.tabSlugs.includes(slug)) return;
-      this.activeTab = slug;
-      if (push) window.history.replaceState(null, '', '#' + slug);
-    },
-
     toggleFields(id) {
       this.openFields = this.openFields === id ? '' : id;
     },
@@ -888,8 +869,7 @@ function storagePage(tabSlugs) {
     async init() {
       requireAuth();
       // Pick the tab before the loads so the page never renders with no panel.
-      const want = (window.location.hash || '').replace(/^#/, '');
-      this.select(this.tabSlugs.includes(want) ? want : this.tabSlugs[0], false);
+      this.pickTab();
       await Promise.all([this.loadBackends(), this.loadConfig(), this.loadAssets(),
                          this.loadFeatureFlags(), this.loadAgents()]);
       // Open the active backend's fields, and follow the radio from here on.

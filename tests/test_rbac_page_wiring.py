@@ -231,11 +231,13 @@ def test_the_gate_is_per_tab_so_a_non_admin_keeps_workgroups():
     assert "adminSlugs" in init, "rbacPage does not receive the admin-only tab list"
     assert "filter(" in init, (
         "rbacPage still redirects a non-admin instead of narrowing their tabs")
-    assert "if (!this.slugs.length)" in init, (
+    assert "if (!this.tabSlugs.length)" in init, (
         "a viewer with no reachable tab is not sent home")
 
-    # And the admin-only tab buttons and panels must hide for a non-admin.
-    assert hub.count('x-show="$store.auth.isAdmin"') >= 1, (
+    # And the admin-only tab buttons must hide for a non-admin. The bar is the shared
+    # tab_bar macro, which turns 'admin': true into that x-show.
+    bar = _read("web_dashboard", "templates", "partials", "tab_bar.html")
+    assert "tab_bar(tabs" in hub and "'$store.auth.isAdmin' if tab.admin" in bar, (
         "the admin-only tab buttons are always rendered")
 
 

@@ -280,6 +280,51 @@ window.secretPickerState = function () {
     };
 };
 
+// ── Tabbed pages ──────────────────────────────────────────────────────────────
+// Spread into a page component (`...tabState(slugs)`) and render the bar with the
+// `tab_bar` Jinja macro (templates/partials/tab_bar.html). One contract for every
+// tabbed page, so a fix to it lands once:
+//
+//   - A SLUG THIS PAGE DOES NOT HAVE IS IGNORED. Tabs render behind feature flags, so a
+//     cross-link or a bookmark can name one that is switched off here; setting
+//     activeTab to a slug with no panel shows the header and nothing else, which reads
+//     as a broken page rather than a feature being off.
+//   - replaceState, not pushState: Back leaves the page rather than walking the tabs.
+//   - The initial pick (pickTab) never rewrites the URL, so a query string the page is
+//     about to read (/connections?add=1) is left alone.
+//
+// `tabSlugs` is the list this VIEWER has; a page may narrow it in init() before calling
+// pickTab() (rbac drops the admin-only tabs for a non-admin).
+window.tabState = function (slugs) {
+    return {
+        tabSlugs: slugs,
+        activeTab: '',
+
+        // The contract itself. Returns whether the tab changed, so a page that overrides
+        // select() to do more on a switch calls this and acts only when it says true.
+        selectTab(slug, push = true) {
+            if (!this.tabSlugs.includes(slug)) return false;
+            this.activeTab = slug;
+            if (push) window.history.replaceState(null, '', '#' + slug);
+            return true;
+        },
+
+        // What the tab bar and cross-links call. Override it, not selectTab.
+        select(slug, push = true) {
+            return this.selectTab(slug, push);
+        },
+
+        // Precedence: the fragment (what a bookmark or cross-link carries), then
+        // `initial` (what the ROUTE decided, e.g. /groups opening on its own tab), then
+        // the first tab. Call it before any load so the page never renders with no panel.
+        pickTab(initial = '') {
+            const want = (window.location.hash || '').replace(/^#/, '');
+            const pick = [want, initial].find(s => s && this.tabSlugs.includes(s));
+            this.select(pick || this.tabSlugs[0], false);
+        },
+    };
+};
+
 // ── Deploy count / auto-numbered names ────────────────────────────────────────
 // Every cloud deploy form takes a Count; the server expands the base name into a
 // numbered series and returns the names it used. These helpers only PREVIEW that

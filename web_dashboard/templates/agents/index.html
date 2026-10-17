@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/tab_bar.html" import tab_bar %}
 
 {# Remote Agents. Three tabs over the halves of the same job:
 
@@ -115,16 +116,7 @@
 
   {# Suppressed at one tab: a bar holding a single pill reads like a rendering fault. #}
   {% if tabs | length > 1 %}
-  <div class="border-b border-gray-200 mb-6 flex flex-wrap gap-1" role="tablist" aria-label="Remote Agents sections">
-    {% for tab in tabs %}
-    <button @click="select('{{ tab.slug }}')" role="tab" type="button"
-            :aria-selected="activeTab === '{{ tab.slug }}' ? 'true' : 'false'"
-            :class="activeTab === '{{ tab.slug }}'
-                      ? 'border-blue-600 text-blue-700'
-                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
-            class="px-3 py-2 -mb-px border-b-2 text-sm font-medium">{{ tab.label }}</button>
-    {% endfor %}
-  </div>
+  {{ tab_bar(tabs, "Remote Agents sections") }}
   {% endif %}
 
   {% if 'agents' in tab_slugs %}
@@ -154,28 +146,17 @@
 // that tab's own component, so the two cannot reach each other's data.
 function remoteAgentsPage(slugs, initial) {
   return {
-    activeTab: '',
-    // The tabs this render actually has, kept so select() can refuse one it does not.
-    slugs: slugs,
+    // The contract (unknown slug ignored, replaceState, fragment > route's `initial` >
+    // first tab) is the shared one in static/js/app.js. `initial` is how /connections
+    // opens on its own tab without a fragment it never had.
+    ...tabState(slugs),
 
     init() {
-      // Three ways in, in precedence order. The fragment is what a bookmark or a
-      // cross-link carries; `initial` is what the ROUTE decided, which is how /connections
-      // opens on its own tab without a fragment it never had; then the first tab that
-      // exists. A slug this render does not have falls through to that last case rather
-      // than showing a page with no panel.
-      const want = (window.location.hash || '').replace(/^#/, '') || initial || '';
-      this.select(slugs.includes(want) ? want : slugs[0], false);
+      this.pickTab(initial);
     },
 
     select(slug, push = true) {
-      if (!this.slugs.includes(slug)) return;
-      this.activeTab = slug;
-      // replaceState, not pushState: the back button should leave the page rather than walk
-      // the tabs the visitor clicked through. Deliberately NOT done on the initial select,
-      // so arriving at /connections?add=1 does not rewrite the URL out from under the
-      // query string the Connections form is about to read.
-      if (push) window.history.replaceState(null, '', '#' + slug);
+      if (!this.selectTab(slug, push)) return;
       // Tell the panel being shown that it is visible again, so it can reload anything
       // that has gone stale while another tab was up. This container still owns only
       // which tab is showing — it names the slug and nothing about what any panel does

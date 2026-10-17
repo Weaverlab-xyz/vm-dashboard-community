@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/tab_bar.html" import tab_bar %}
 {% block title %}Workload Lab{% endblock %}
 
 {# Workload Lab (PREVIEW). One page over the two labs that govern NON-HUMAN identities:
@@ -136,16 +137,7 @@
   </p>
 
   {% if tabs | length > 1 %}
-  <div class="border-b border-gray-200 mb-6 flex flex-wrap gap-1" role="tablist" aria-label="Workload Lab sections">
-    {% for tab in tabs %}
-    <button @click="select('{{ tab.slug }}')" role="tab" type="button"
-            :aria-selected="activeTab === '{{ tab.slug }}' ? 'true' : 'false'"
-            :class="activeTab === '{{ tab.slug }}'
-                      ? 'border-blue-600 text-blue-700'
-                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
-            class="px-3 py-2 -mb-px border-b-2 text-sm font-medium">{{ tab.label }}</button>
-    {% endfor %}
-  </div>
+  {{ tab_bar(tabs, "Workload Lab sections") }}
   {% endif %}
 
   {% if cert_lab_enabled %}
@@ -187,29 +179,16 @@
 // that tab's own component, so the two labs cannot reach each other's data.
 function workloadLabPage(slugs) {
   return {
-    activeTab: '',
-    // The tabs this render actually has, kept so select() can refuse one it does not.
-    slugs: slugs,
+    // A SLUG THIS PAGE DOES NOT HAVE IS IGNORED (the shared contract in static/js/app.js),
+    // and that is what makes the cross-tab links safe: each tab renders behind its own
+    // flags, so the SPIRE tab's "use the Kubernetes tab" link exists on a page where that
+    // tab may be switched off.
+    ...tabState(slugs),
 
     init() {
       // Deep links land here -- Inventory rows, the persona use cases, and the 301s from
       // the old /cert-lab and /spire-lab URLs all carry the tab in the fragment.
-      const want = (window.location.hash || '').replace(/^#/, '');
-      this.select(slugs.includes(want) ? want : slugs[0], false);
-    },
-
-    // A SLUG THIS PAGE DOES NOT HAVE IS IGNORED, and that is what makes the cross-tab
-    // links safe. Each tab renders behind its own flags, so the SPIRE tab's "use the
-    // Kubernetes tab" link exists on a page where that tab may be switched off -- and
-    // setting activeTab to a slug with no panel would show the header and nothing else,
-    // which reads as a broken page rather than as a feature being off. Deep links from
-    // Inventory and the persona cards hit the same guard through init() above.
-    select(slug, push = true) {
-      if (!this.slugs.includes(slug)) return;
-      this.activeTab = slug;
-      // replaceState, not pushState: the back button should leave the page rather than walk
-      // the tabs the visitor clicked through.
-      if (push) window.history.replaceState(null, '', '#' + slug);
+      this.pickTab();
     },
   };
 }

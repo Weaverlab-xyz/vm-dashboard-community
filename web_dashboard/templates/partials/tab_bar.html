@@ -1,0 +1,29 @@
+{#
+  Reusable tab bar for a tabbed page.
+
+  Requires the page's Alpine component to spread window.tabState(slugs) and to call
+  pickTab() in init(). `tabs` is the page's `{% set tabs = [...] %}` list; each entry has
+  `slug` and `label`, plus optionally:
+    show   an Alpine expression; the button hides while it is false (a tab gated on
+           something only the browser knows, e.g. a runtime feature flag)
+    admin  true for an admin-only tab; shorthand for show="$store.auth.isAdmin"
+  Panels stay on the page: `<div x-show="activeTab === '<slug>'" x-cloak role="tabpanel">`.
+
+  Usage:
+    {% from "partials/tab_bar.html" import tab_bar %}
+    {{ tab_bar(tabs, "Storage sections") }}
+#}
+{% macro tab_bar(tabs, label, class="mb-6") %}
+<div class="border-b border-gray-200 {{ class }} flex flex-wrap gap-1" role="tablist" aria-label="{{ label }}">
+  {% for tab in tabs %}
+  {% set show = tab.show or ('$store.auth.isAdmin' if tab.admin else '') %}
+  <button @click="select('{{ tab.slug }}')" role="tab" type="button"
+          {% if show %}x-show="{{ show }}"{% endif %}
+          :aria-selected="activeTab === '{{ tab.slug }}' ? 'true' : 'false'"
+          :class="activeTab === '{{ tab.slug }}'
+                    ? 'border-blue-600 text-blue-700'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+          class="px-3 py-2 -mb-px border-b-2 text-sm font-medium">{{ tab.label }}</button>
+  {% endfor %}
+</div>
+{% endmacro %}

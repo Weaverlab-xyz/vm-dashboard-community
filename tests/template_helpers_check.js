@@ -1632,6 +1632,44 @@ async function portainerFirewallChecks() {
        && !u.onDashboardWorkloadPath('spiffe://dash.example/workload/ci'));
 }
 
+// ── the shared tab contract (window.tabState) ────────────────────────────────
+// Every tabbed page spreads it, so these are the page-wide rules for all of them at once:
+// an unknown slug is refused, a click rewrites the fragment with replaceState and the
+// initial pick does not, and the pick runs fragment > route's initial > first tab.
+{
+  const realWindow = global.window;
+  const tabs = (hash, slugs = ['run', 'targets', 'runs']) => {
+    const log = [];
+    global.window = {location: {hash}, history: {replaceState: (s, t, url) => log.push(url)}};
+    const t = extractWindowAssigned(APPJS, 'tabState')(slugs);
+    t.log = log;
+    return t;
+  };
+  let t = tabs('');
+  t.pickTab();
+  ok('tabs: no fragment opens the first tab, and the URL is left alone',
+     t.activeTab === 'run' && t.log.length === 0);
+  t = tabs('#runs');
+  t.pickTab('targets');
+  ok('tabs: the fragment beats the route\'s initial tab', t.activeTab === 'runs');
+  t = tabs('#bogus');
+  t.pickTab('targets');
+  ok('tabs: an unknown fragment falls through to the initial tab', t.activeTab === 'targets');
+  t = tabs('#bogus');
+  t.pickTab('also-bogus');
+  ok('tabs: an unknown fragment and initial fall through to the first tab', t.activeTab === 'run');
+  t = tabs('');
+  t.pickTab();
+  ok('tabs: a click switches and rewrites the fragment',
+     t.select('runs') === true && t.activeTab === 'runs' && t.log.join() === '#runs');
+  ok('tabs: a slug this page lacks is refused and changes nothing',
+     t.select('kubernetes') === false && t.activeTab === 'runs' && t.log.length === 1);
+  t.tabSlugs = ['run'];
+  ok('tabs: a narrowed tabSlugs (rbac\'s non-admin view) is what select() checks',
+     t.select('runs') === false && t.select('run') === true);
+  global.window = realWindow;
+}
+
 Promise.all([ociPlacementChecks(), portainerFirewallChecks(), bulkPowerClickChecks()])
   .then(() => process.exit(fail ? 1 : 0),
         (e) => { console.log('FAIL a deferred check threw: ' + e);
