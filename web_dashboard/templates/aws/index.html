@@ -56,15 +56,17 @@
   </div>
 
   <!-- Tab navigation -->
-  <div class="flex flex-wrap gap-1 mb-6 bg-gray-100 p-1 rounded-xl w-fit">
-    <button @click="activeTab = 'community'"
+  <div class="flex flex-wrap gap-1 mb-6 bg-gray-100 p-1 rounded-xl w-fit" role="tablist" aria-label="AWS sections">
+    <button @click="select('community')" role="tab" type="button"
+            :aria-selected="activeTab === 'community' ? 'true' : 'false'"
             :class="activeTab === 'community'
               ? 'bg-white shadow text-gray-900 font-semibold'
               : 'text-gray-500 hover:text-gray-700'"
             class="px-4 py-2 rounded-lg text-sm transition">
       Community Images
     </button>
-    <button @click="switchToPrivateAmis()"
+    <button @click="select('amis')" role="tab" type="button"
+            :aria-selected="activeTab === 'amis' ? 'true' : 'false'"
             :class="activeTab === 'amis'
               ? 'bg-white shadow text-gray-900 font-semibold'
               : 'text-gray-500 hover:text-gray-700'"
@@ -73,7 +75,8 @@
       <span x-show="amis.length > 0" class="ml-1.5 text-xs bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded-full font-normal"
             x-text="amis.length"></span>
     </button>
-    <button @click="activeTab = 'instances'"
+    <button @click="select('instances')" role="tab" type="button"
+            :aria-selected="activeTab === 'instances' ? 'true' : 'false'"
             :class="activeTab === 'instances'
               ? 'bg-white shadow text-gray-900 font-semibold'
               : 'text-gray-500 hover:text-gray-700'"
@@ -82,7 +85,8 @@
       <span x-show="instances.length > 0" class="ml-1.5 text-xs bg-green-100 text-green-700 px-1.5 py-0.5 rounded-full font-normal"
             x-text="instances.length"></span>
     </button>
-    <button @click="activeTab = 'build'"
+    <button @click="select('build')" role="tab" type="button"
+            :aria-selected="activeTab === 'build' ? 'true' : 'false'"
             :class="activeTab === 'build'
               ? 'bg-white shadow text-gray-900 font-semibold'
               : 'text-gray-500 hover:text-gray-700'"
@@ -90,7 +94,8 @@
       Build Image
     </button>
     {% if pra_enabled %}
-    <button @click="switchToOT()"
+    <button @click="select('ot')" role="tab" type="button"
+            :aria-selected="activeTab === 'ot' ? 'true' : 'false'"
             :class="activeTab === 'ot'
               ? 'bg-white shadow text-gray-900 font-semibold'
               : 'text-gray-500 hover:text-gray-700'"
@@ -2151,7 +2156,9 @@
       // the schedulePayload() spread in submitDeploy() is what makes it do anything.
       ...scheduleState(),
       region: 'us-east-2',
-      activeTab: 'community',
+      // The shared tab contract (static/js/app.js): select() ignores a tab this render
+      // does not have, clicks rewrite the fragment, pickTab() opens the one it names.
+      ...tabState(['community', 'amis', 'instances', 'build'{% if pra_enabled %}, 'ot'{% endif %}]),
 
       // Private AMIs
       amis: [],
@@ -2348,15 +2355,7 @@
         this.$watch('activeTab', t => { if (t === 'build') this.scheduleReset(); });
         this.loadSecretBackends();
         this.loadDefaultRegion();
-        const hash = window.location.hash.slice(1);
-        {% if pra_enabled %}
-        if (hash === 'ot') {
-          this.switchToOT();
-        } else
-        {% endif %}
-        if (['community', 'amis', 'instances', 'build'].includes(hash)) {
-          this.activeTab = hash;
-        }
+        this.pickTab();
         API.get('/api/groups/workgroups')
           .then(r => { this.availableWorkgroups = r || []; })
           .catch(() => { this.availableWorkgroups = []; });
@@ -2365,7 +2364,6 @@
         this.loadStoredScripts();
         // Load community images on start (default tab), instances in background
         const tasks = [this.loadCommunityAmis(), this.loadInstances()];
-        if (hash === 'amis') tasks.push(this.loadAmis());
         await Promise.all(tasks);
         setInterval(() => this.loadInstances(), 30000);
       },
@@ -2422,11 +2420,12 @@
         this.loading = false;
       },
 
-      async switchToPrivateAmis() {
-        this.activeTab = 'amis';
-        if (this.amis.length === 0 && !this.loadingAmis) {
-          await this.loadAmis();
-        }
+      // Every way onto a tab -- a click, a deep link, a cross-link -- comes through here,
+      // so a lazily loaded tab loads however it was opened.
+      select(slug, push = true) {
+        if (!this.selectTab(slug, push)) return;
+        if (slug === 'amis' && !this.amis.length && !this.loadingAmis) this.loadAmis();
+        if (slug === 'ot' && !this.otLoaded) this.loadOTData();
       },
 
       // AMIs are per-region — an id only resolves in the region that owns it — so the
@@ -2628,11 +2627,6 @@
       },
 
       // ── OT demo cell (mirrors the GCP page's tab; docs/profiles/demo/ot-demo-cell.md) ────────
-      switchToOT() {
-        this.activeTab = 'ot';
-        if (!this.otLoaded) this.loadOTData();
-      },
-
       async loadOTData() {
         this.otLoaded = true;
         if (!this.otForm.region) this.otForm.region = this.region || '';
