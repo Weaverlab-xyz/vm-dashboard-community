@@ -1,0 +1,56 @@
+{#
+  Reusable collapsible section: a header button and the body it shows or hides.
+
+  The page keeps its own wrapper (card, border, spacing) around the call; this renders
+  only the two parts that every collapsible on the dashboard repeats. `open` is an Alpine
+  expression that is truthy while expanded; `toggle` is what a click runs (default: flip
+  `open`, which needs it to be assignable).
+
+  THE BODY IS x-show, NEVER x-if. Collapsed inputs stay in the DOM and stay bound, so a
+  form whose section is closed still submits every field in it -- the Configuration run's
+  secrets section depends on exactly that. tests/test_collapsible_contract.py pins it.
+
+  Parameters:
+    title         the header text
+    hint          optional grey text after the title, e.g. "(you never see the value)"
+    badges        list of {show, label, tone}: a small pill shown while `show` is truthy,
+                  or always when `show` is omitted (a fixed note such as "via agent");
+                  tone is one of emerald, blue, amber, red, gray, indigo, sky
+    button_class  layout/text classes for the header row (padding, hover, font)
+    title_class   classes for the title span; leave blank to inherit the button's text
+    body_class    classes for the body
+
+  Usage:
+    {% from "partials/collapsible.html" import collapsible %}
+    {% call collapsible("openFields === 's3'", "AWS S3", toggle="toggleFields('s3')",
+                        badges=[{'show': "backendMeta('s3').active", 'label': 'active', 'tone': 'blue'}],
+                        body_class="grid grid-cols-1 sm:grid-cols-3 gap-4 px-4 pb-4") %}
+      ...fields...
+    {% endcall %}
+#}
+{% set _badge_tones = {
+  'emerald': 'text-emerald-700 bg-emerald-50 border-emerald-200',
+  'blue':    'text-blue-700 bg-blue-50 border-blue-200',
+  'amber':   'text-amber-700 bg-amber-50 border-amber-200',
+  'red':     'text-red-700 bg-red-50 border-red-200',
+  'gray':    'text-gray-500 bg-gray-50 border-gray-200',
+  'indigo':  'text-indigo-700 bg-indigo-50 border-indigo-200',
+  'sky':     'text-sky-700 bg-sky-50 border-sky-200',
+} %}
+{% macro collapsible(open, title, toggle=none, hint='', badges=[], button_class='', title_class='', body_class='') %}
+<button type="button" @click="{{ toggle or (open ~ ' = !' ~ open) }}"
+        :aria-expanded="({{ open }}) ? 'true' : 'false'"
+        class="w-full flex items-center gap-2 text-left {{ button_class }}">
+  <span{% if title_class %} class="{{ title_class }}"{% endif %}>{{ title }}{% if hint %} <span class="text-gray-400 font-normal">{{ hint }}</span>{% endif %}</span>
+  {% for b in badges %}
+  <span{% if b.show %} x-show="{{ b.show }}" x-cloak{% endif %} class="text-[10px] uppercase font-semibold border px-1.5 py-0.5 rounded {{ _badge_tones[b.tone or 'gray'] }}">{{ b.label }}</span>
+  {% endfor %}
+  <svg class="ml-auto h-4 w-4 flex-shrink-0 text-gray-400 transition-transform" :class="({{ open }}) && 'rotate-180'"
+       fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+  </svg>
+</button>
+<div x-show="{{ open }}" x-cloak{% if body_class %} class="{{ body_class }}"{% endif %}>
+  {{ caller() }}
+</div>
+{% endmacro %}

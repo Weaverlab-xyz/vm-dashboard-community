@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/collapsible.html" import collapsible %}
 
 {% block title %}Settings{% endblock %}
 
@@ -2386,12 +2387,9 @@
 
               <!-- Azure (Run Command plugins) -->
               <div class="border-t border-gray-100 pt-3 mt-1 space-y-3">
-                <button type="button" @click="panelOpen.psDbAzure = !panelOpen.psDbAzure" :aria-expanded="panelOpen.psDbAzure ? 'true' : 'false'"
-                        class="w-full flex items-center justify-between text-left text-xs font-medium text-gray-500 uppercase tracking-wide hover:text-gray-700">
-                  <span>Azure (Run Command plugins)</span>
-                  <svg class="w-4 h-4 transition-transform" :class="panelOpen.psDbAzure ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
-                </button>
-                <div x-show="panelOpen.psDbAzure" x-cloak class="space-y-3">
+                {% call collapsible("panelOpen.psDbAzure", "Azure (Run Command plugins)",
+                                    button_class="text-xs font-medium text-gray-500 uppercase tracking-wide hover:text-gray-700",
+                                    body_class="space-y-3") %}
                 <p class="text-xs text-gray-400">
                   For Azure databases the DB is onboarded onto the <code class="bg-gray-100 px-1 rounded">{engine} Azure Run Command Plugin</code>,
                   whose plugin reaches the private DB by running the DB client on the shared <code class="bg-gray-100 px-1 rounded">clouddb-jumpoint</code> VM
@@ -2508,16 +2506,13 @@
                            placeholder="••••••••">
                   </div>
                 </div>
-                </div>
+                {% endcall %}
               </div>
               <!-- GCP (Cloud SQL plugins) -->
               <div class="border-t border-gray-100 pt-3 mt-1 space-y-3">
-                <button type="button" @click="panelOpen.psDbGcp = !panelOpen.psDbGcp" :aria-expanded="panelOpen.psDbGcp ? 'true' : 'false'"
-                        class="w-full flex items-center justify-between text-left text-xs font-medium text-gray-500 uppercase tracking-wide hover:text-gray-700">
-                  <span>GCP (Cloud SQL plugins)</span>
-                  <svg class="w-4 h-4 transition-transform" :class="panelOpen.psDbGcp ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
-                </button>
-                <div x-show="panelOpen.psDbGcp" x-cloak class="space-y-3">
+                {% call collapsible("panelOpen.psDbGcp", "GCP (Cloud SQL plugins)",
+                                    button_class="text-xs font-medium text-gray-500 uppercase tracking-wide hover:text-gray-700",
+                                    body_class="space-y-3") %}
                 <p class="text-xs text-gray-400">
                   For GCP databases the DB is onboarded onto the <code class="bg-gray-100 px-1 rounded">GCP Cloud SQL {engine}</code> plugin.
                   <strong>PostgreSQL and MySQL</strong> use the <strong>Data API</strong> channel, which reaches a private-IP instance through
@@ -2806,7 +2801,7 @@
                     <span class="text-sm text-gray-700">Require TLS from the Cloud Run service to the database</span>
                   </label>
                 </div>
-                </div>
+                {% endcall %}
               </div>
             </div>
           </div>
@@ -4094,12 +4089,9 @@
 
             <!-- AWS — ECS Fargate (image-promote target) -->
             <div class="rounded-lg border border-gray-200 p-3 space-y-3">
-              <button type="button" @click="panelOpen.promoteAws = !panelOpen.promoteAws" :aria-expanded="panelOpen.promoteAws ? 'true' : 'false'"
-                      class="w-full flex items-center justify-between text-left text-sm font-semibold text-gray-700 hover:text-gray-900">
-                <span>AWS — ECS Fargate</span>
-                <svg class="w-4 h-4 flex-shrink-0 text-gray-400 transition-transform" :class="panelOpen.promoteAws ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
-              </button>
-              <div x-show="panelOpen.promoteAws" x-cloak class="space-y-3">
+              {% call collapsible("panelOpen.promoteAws", "AWS — ECS Fargate",
+                                  button_class="text-sm font-semibold text-gray-700 hover:text-gray-900",
+                                  body_class="space-y-3") %}
               <p class="text-xs text-gray-400 -mt-1">The task role is required and has no fallback — the Ansible runner's role can't write the S3 staging object. The rest falls back to the ECS Ansible-runner plumbing (cluster, subnet, SGs, execution role) and your S3 storage backend.</p>
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Task role ARN <span class="text-gray-400 font-normal">(s3:PutObject on the staging bucket — required, no fallback)</span></label>
@@ -4174,17 +4166,14 @@
                   <p class="text-xs text-gray-400 mt-1">Must hold the source disk plus ~2 GiB for the offline image edit. Fargate's implicit default is 20 GiB.</p>
                 </div>
               </div>
-              </div>
+              {% endcall %}
             </div>
 
             <!-- Azure — Container Instances (image-promote target) -->
             <div class="rounded-lg border border-gray-200 p-3 space-y-3">
-              <button type="button" @click="panelOpen.promoteAzure = !panelOpen.promoteAzure" :aria-expanded="panelOpen.promoteAzure ? 'true' : 'false'"
-                      class="w-full flex items-center justify-between text-left text-sm font-semibold text-gray-700 hover:text-gray-900">
-                <span>Azure — Container Instances</span>
-                <svg class="w-4 h-4 flex-shrink-0 text-gray-400 transition-transform" :class="panelOpen.promoteAzure ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
-              </button>
-              <div x-show="panelOpen.promoteAzure" x-cloak class="space-y-3">
+              {% call collapsible("panelOpen.promoteAzure", "Azure — Container Instances",
+                                  button_class="text-sm font-semibold text-gray-700 hover:text-gray-900",
+                                  body_class="space-y-3") %}
               <p class="text-xs text-gray-400 -mt-1">The runner writes the staged VHD with the dashboard's own Azure service principal, so no extra IAM plumbing is needed — only the resource group and staging account matter, and both fall back to your Azure configuration.</p>
               <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
@@ -4250,17 +4239,14 @@
                          placeholder="4">
                 </div>
               </div>
-              </div>
+              {% endcall %}
             </div>
 
             <!-- GCP — Cloud Run Jobs (image-promote target) -->
             <div class="rounded-lg border border-gray-200 p-3 space-y-3">
-              <button type="button" @click="panelOpen.promoteGcp = !panelOpen.promoteGcp" :aria-expanded="panelOpen.promoteGcp ? 'true' : 'false'"
-                      class="w-full flex items-center justify-between text-left text-sm font-semibold text-gray-700 hover:text-gray-900">
-                <span>GCP — Cloud Run Jobs</span>
-                <svg class="w-4 h-4 flex-shrink-0 text-gray-400 transition-transform" :class="panelOpen.promoteGcp ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
-              </button>
-              <div x-show="panelOpen.promoteGcp" x-cloak class="space-y-3">
+              {% call collapsible("panelOpen.promoteGcp", "GCP — Cloud Run Jobs",
+                                  button_class="text-sm font-semibold text-gray-700 hover:text-gray-900",
+                                  body_class="space-y-3") %}
               <p class="text-xs text-gray-400 -mt-1">The project comes from gcp_project_id. The runner needs roles/storage.objectAdmin on the staging bucket — either via the service account below or the dashboard's own SA.</p>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
@@ -4315,7 +4301,7 @@
                 </div>
               </div>
               <p class="text-xs text-gray-400">Cloud Run's /tmp is memory-backed and the GCP path materialises the VHD, a full raw disk, and the tar.gz there, so the default is 4 CPU / 16Gi — multi-GB images OOM at 4Gi. Jobs take whole vCPU only (1, 2, 4, 6, 8), and memory is capped by the CPU count, so raise both together: 2 CPU tops out at 8Gi, 4 at 16Gi, 6 at 24Gi, 8 at 32Gi.</p>
-              </div>
+              {% endcall %}
             </div>
 
             <!-- OCI — Container Instances (image-promote target). OCI has no
@@ -4323,12 +4309,9 @@
                  Shown unconditionally like the others (the OCI region catalog is
                  static, so it can't gate on "OCI configured"). -->
             <div class="rounded-lg border border-gray-200 p-3 space-y-3">
-              <button type="button" @click="panelOpen.promoteOci = !panelOpen.promoteOci" :aria-expanded="panelOpen.promoteOci ? 'true' : 'false'"
-                      class="w-full flex items-center justify-between text-left text-sm font-semibold text-gray-700 hover:text-gray-900">
-                <span>OCI — Container Instances</span>
-                <svg class="w-4 h-4 flex-shrink-0 text-gray-400 transition-transform" :class="panelOpen.promoteOci ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
-              </button>
-              <div x-show="panelOpen.promoteOci" x-cloak class="space-y-3">
+              {% call collapsible("panelOpen.promoteOci", "OCI — Container Instances",
+                                  button_class="text-sm font-semibold text-gray-700 hover:text-gray-900",
+                                  body_class="space-y-3") %}
               <p class="text-xs text-gray-400 -mt-1">OCI's only remote-worker task is the image-promote runner. The staging bucket is required; the rest fall back to your OCI configuration.</p>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
@@ -4376,7 +4359,7 @@
                          placeholder="16">
                 </div>
               </div>
-              </div>
+              {% endcall %}
             </div>
           </div>
 
@@ -4865,12 +4848,9 @@
 
           <!-- ── Persona × cloud access bundles ───────────────────────────── -->
           <div class="mt-6 pt-5 border-t border-gray-200" x-data="entitleBundles()" x-init="load()">
-            <button type="button" @click="panelOpen.entBundles = !panelOpen.entBundles" :aria-expanded="panelOpen.entBundles ? 'true' : 'false'"
-                    class="w-full flex items-center justify-between text-left text-sm font-semibold text-gray-800 mb-1 hover:text-gray-900">
-              <span>Persona access bundles</span>
-              <svg class="w-4 h-4 flex-shrink-0 text-gray-400 transition-transform" :class="panelOpen.entBundles ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
-            </button>
-            <div x-show="panelOpen.entBundles" x-cloak class="space-y-3">
+            {% call collapsible("panelOpen.entBundles", "Persona access bundles",
+                                button_class="text-sm font-semibold text-gray-800 mb-1 hover:text-gray-900",
+                                body_class="space-y-3") %}
             <p class="text-xs text-gray-500 mb-3">
               One Entitle bundle per job function and cloud — or on-prem AD for the IT, OT and hypervisor
               roles: the virtual-app role over the <code>ent-&lt;target&gt;-&lt;persona&gt;</code> group, the
@@ -4992,17 +4972,14 @@
                 </div>
               </template>
             </div>
-            </div>
+            {% endcall %}
           </div>
 
           <!-- ── Machine identity (cloud-side JIT) — Phase 3 ─────────────── -->
           <div class="mt-6 pt-5 border-t border-gray-200">
-            <button type="button" @click="panelOpen.entMachine = !panelOpen.entMachine" :aria-expanded="panelOpen.entMachine ? 'true' : 'false'"
-                    class="w-full flex items-center justify-between text-left text-sm font-semibold text-gray-800 mb-1 hover:text-gray-900">
-              <span>Machine identity (cloud-side JIT)</span>
-              <svg class="w-4 h-4 flex-shrink-0 text-gray-400 transition-transform" :class="panelOpen.entMachine ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
-            </button>
-            <div x-show="panelOpen.entMachine" x-cloak class="space-y-3">
+            {% call collapsible("panelOpen.entMachine", "Machine identity (cloud-side JIT)",
+                                button_class="text-sm font-semibold text-gray-800 mb-1 hover:text-gray-900",
+                                body_class="space-y-3") %}
             <p class="text-xs text-gray-500 mb-4">
               Routes cloud SDK writes (EC2 deploy / Azure VM / GCP compute) through
               Entitle-issued short-lived grants instead of baseline credentials.
@@ -5068,17 +5045,14 @@
                 <span x-show="ciMatrix.saving" x-cloak>Saving&hellip;</span>
               </button>
             </div>
-            </div>
+            {% endcall %}
           </div>
 
           <!-- ── User JIT — Phase 4 UI affordances ─────────────────────────── -->
           <div class="mt-6 pt-5 border-t border-gray-200">
-            <button type="button" @click="panelOpen.entUserJit = !panelOpen.entUserJit" :aria-expanded="panelOpen.entUserJit ? 'true' : 'false'"
-                    class="w-full flex items-center justify-between text-left text-sm font-semibold text-gray-800 mb-1 hover:text-gray-900">
-              <span>User JIT (dashboard access)</span>
-              <svg class="w-4 h-4 flex-shrink-0 text-gray-400 transition-transform" :class="panelOpen.entUserJit ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
-            </button>
-            <div x-show="panelOpen.entUserJit" x-cloak class="space-y-3">
+            {% call collapsible("panelOpen.entUserJit", "User JIT (dashboard access)",
+                                button_class="text-sm font-semibold text-gray-800 mb-1 hover:text-gray-900",
+                                body_class="space-y-3") %}
             <p class="text-xs text-gray-500 mb-4">
               Surfaces a <strong>Request access</strong> link in the nav and deep-links from
               the dashboard's 403 page to the matching Entitle resource so users can
@@ -5143,7 +5117,7 @@
                 <span x-show="userJit.saving" x-cloak>Saving&hellip;</span>
               </button>
             </div>
-            </div>
+            {% endcall %}
           </div>
         </div>
       </template>

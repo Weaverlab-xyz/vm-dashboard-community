@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "partials/tab_bar.html" import tab_bar %}
+{% from "partials/collapsible.html" import collapsible %}
 {% from "partials/schedule_picker.html" import schedule_picker %}
 
 {% block title %}Configuration{% endblock %}
@@ -331,19 +332,13 @@
                (DB or vault ref) at run time; the value is never shown, stored, or logged. -->
           <div x-show="canUseSecrets" x-cloak class="border border-gray-100 rounded-lg">
             <!-- Collapsible, like the Storage backend sections: closed by default, opened
-                 for a bulk run or as soon as any field below holds a value. The body is
-                 x-show, never x-if, so collapsed inputs stay bound and still submit. -->
-            <button type="button" @click="secretsOpen = !secretsOpen"
-                    :aria-expanded="secretsOpen ? 'true' : 'false'"
-                    class="w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-gray-50 rounded-lg">
-              <span class="text-sm font-medium text-gray-700">Use a secret <span class="text-gray-400 font-normal">(you never see the value)</span></span>
-              <span x-show="secretsInUse" x-cloak class="text-[10px] uppercase font-semibold text-blue-700 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded">in use</span>
-              <svg class="ml-auto h-4 w-4 text-gray-400 transition-transform" :class="secretsOpen && 'rotate-180'"
-                   fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
-              </svg>
-            </button>
-            <div x-show="secretsOpen" x-cloak class="px-3 pb-3 space-y-3">
+                 for a bulk run or as soon as any field below holds a value. The macro's
+                 body is x-show, never x-if, so collapsed inputs stay bound and still submit. -->
+            {% call collapsible("secretsOpen", "Use a secret", hint="(you never see the value)",
+                                badges=[{'show': 'secretsInUse', 'label': 'in use', 'tone': 'blue'}],
+                                button_class="px-3 py-2.5 hover:bg-gray-50 rounded-lg",
+                                title_class="text-sm font-medium text-gray-700",
+                                body_class="px-3 pb-3 space-y-3") %}
 
               <!-- As named variables (local + cloud runners) -->
               <template x-for="(row, i) in secretRows" :key="i">
@@ -628,7 +623,7 @@
                   Works on the <strong>local</strong> and <strong>Azure (ACI)</strong> runners<template x-if="managedEphemeralEnabled"><span>, and on <strong>ECS / Cloud Run</strong> via a short-lived RBAC-locked store copy</template><template x-if="!managedEphemeralEnabled"><span>; not on ECS / Cloud Run</span></template>.
                 </p>
               </div>
-            </div>
+            {% endcall %}
           </div>
 
           <!-- Error / status -->
