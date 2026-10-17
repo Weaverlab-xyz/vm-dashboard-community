@@ -7,8 +7,15 @@
   {# Profile-tinted mark. Fully percent-encoded in ui_theme -- a literal '#' in a hex
      colour would start a URI fragment and truncate the SVG. #}
   <link rel="icon" href="{{ theme.favicon }}">
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  {# Pinned, never floating. Tailwind is the play CDN at an exact version; Alpine is
+     vendored -- the npm package's dist/cdn.min.js, renamed for its version and kept in
+     the js/vendor folder of the static tree -- so no upstream release reaches an instance
+     unreviewed and a CDN outage cannot take every page's interactivity down. To bump
+     Alpine, replace that file (npm pack alpinejs@<version>) and the version here and in
+     the other pages that own their <head>. tests/test_static_assets.py fails a floating
+     CDN version anywhere. #}
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script defer src="{{ static_url('js/vendor/alpine-3.17.4.min.js') }}"></script>
   {# Versioned, never bare. Written as a literal path with no version, this let Chrome
      keep serving a broken app.js for hours after the fix was deployed. static_url()
      puts a hash of the file's bytes in the query, so a deploy that changes the file
