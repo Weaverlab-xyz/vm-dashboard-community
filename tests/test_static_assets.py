@@ -73,8 +73,8 @@ def test_every_script_and_link_in_a_template_is_versioned_or_remote():
     `href` actually resolves to, so a future asset served from some other local prefix
     is caught as well as one under the mount.
 
-    Remote URLs are exempt -- Tailwind and Alpine come off a CDN, and their caching is
-    not ours to set."""
+    Remote URLs are exempt -- Tailwind, Mermaid and Swagger UI come off a CDN, and their
+    caching is not ours to set. Their VERSIONS are, and the next test pins those."""
     attr = re.compile(r'\b(?:src|href)\s*=\s*"([^"]*)"')
     offenders = []
     for rel, text in _templates():
@@ -106,6 +106,44 @@ def test_the_asset_that_caused_this_is_versioned():
     digest = url.split("=", 1)[1]
     assert re.fullmatch(r"[0-9a-f]{12}", digest), f"not a short sha256 digest: {digest!r}"
 
+
+# A CDN URL that names no exact version: `pkg@3.x.x`, `pkg@10`, `pkg@5.1`, or the
+# Tailwind play CDN with no version path. Each serves whatever upstream published last.
+_FLOATING = re.compile(
+    r"@\d+(?:\.(?:\d+|x))?(?:\.x)?/"              # pkg@10/ pkg@5.1/ pkg@3.x/ pkg@3.x.x/
+    r"|@\d+\.x\.x/"
+    r"|cdn\.tailwindcss\.com/?\"")
+
+
+def test_no_cdn_asset_floats_on_a_version():
+    """Every page's Alpine came from `alpinejs@3.x.x`: any 3.x release reached every
+    instance unreviewed, on its next page load. Mermaid and Swagger UI floated on a
+    major. A remote script or stylesheet must name an exact version."""
+    attr = re.compile(r'\b(?:src|href)\s*=\s*"(https?://[^"]*)"')
+    offenders = []
+    for rel, text in _templates():
+        for n, line in enumerate(text.splitlines(), 1):
+            for url in attr.findall(line):
+                if _FLOATING.search(url + '"'):
+                    offenders.append(f"{rel}:{n}: {url}")
+    assert not offenders, (
+        "CDN asset(s) without an exact version:\n  " + "\n  ".join(offenders))
+
+
+def test_alpine_is_the_vendored_copy_on_every_page_that_owns_its_head():
+    """Alpine is vendored, not fetched: a CDN outage would otherwise leave every page's
+    tabs, forms and panels dead at once. The pages that write their own <head> are the
+    ones that would be left behind, so each is checked by name."""
+    vendored = sorted((TEMPLATES.parent / "static" / "js" / "vendor").glob("alpine-*.min.js"))
+    assert len(vendored) == 1, f"expected one vendored Alpine, found {vendored}"
+    name = vendored[0].name
+    for rel in ("base.html", "login.html", "setup.html", "pov/access.html"):
+        text = (TEMPLATES / rel).read_text(encoding="utf-8")
+        assert f"static_url('js/vendor/{name}')" in text, f"{rel} does not load {name}"
+        assert not re.search(r'src="https?://[^"]*alpinejs', text), (
+            f"{rel} still loads Alpine from a CDN")
+    assert static_assets.url(f"js/vendor/{name}").count("=") == 1, (
+        "the vendored Alpine is not versioned by static_url -- is the file missing?")
 
 def test_the_version_follows_the_bytes():
     """Two files differing only in content must get different versions, and the same
