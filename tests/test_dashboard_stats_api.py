@@ -68,10 +68,11 @@ class _User:
         self.is_effective_admin = is_admin if effective is None else effective
         self.workgroups_list = list(workgroups)
         # The two the POV tiles read. `pov_env_ids_list` is the per-instance grant and
-        # `effective_permissions_dict` the feature-area one; an empty dict means
-        # unrestricted, which is the pre-OIDC compatibility clause has_permission keeps.
+        # `effective_permissions_dict` the feature-area one. Omitted means Full access; an
+        # empty dict grants nothing.
+        from web_dashboard.api.auth import full_access_map
         self.pov_env_ids_list = list(pov_env_ids or [])
-        self.effective_permissions_dict = permissions or {}
+        self.effective_permissions_dict = full_access_map() if permissions is None else permissions
 
 
 def _reset():
@@ -482,12 +483,13 @@ def test_without_pov_read_every_pov_tile_is_forbidden_rather_than_a_number():
         assert tiles[key]["value"] == api.UNAVAILABLE
 
 
-def test_an_empty_permission_map_is_still_unrestricted():
-    """The pre-OIDC compatibility clause in has_permission. Being stricter here than the
-    rest of the app would hide POVs from users who can already open them."""
+def test_an_empty_permission_map_grants_no_pov_tiles():
+    """An empty map grants nothing, so it must not count POVs either -- the tile follows
+    has_permission, not a rule of its own."""
     _pov_reset()
     _pov_env("env-a", "alpha")
-    assert _pov_tiles(_User(permissions={}))["pov_active"]["value"] == 1
+    tile = _pov_tiles(_User(permissions={}))["pov_active"]
+    assert tile["status"] == "forbidden" and tile["value"] == api.UNAVAILABLE, tile
 
 
 def test_an_instance_that_runs_no_povs_reports_unavailable_never_zero():

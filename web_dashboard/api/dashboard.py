@@ -282,10 +282,10 @@ def _db_tiles(db: Session, user: User) -> dict:
         # Same filters and workgroup scoping as GET /api/ot/cells, summed over the
         # clouds this caller may read; secondary counts fully wired cells.
         from ..services import ot_service
-        perms = user.effective_permissions_dict
+        perms = user.effective_permissions_dict or {}
         readable = [
             job_type for cloud, job_type in ot_service.CELL_CHILD_JOB_TYPE.items()
-            if user.is_effective_admin or not perms or "read" in perms.get(cloud, [])
+            if user.is_effective_admin or "read" in perms.get(cloud, [])
         ]
         if not readable:
             return _forbidden()
@@ -342,8 +342,8 @@ def _db_tiles(db: Session, user: User) -> dict:
         # to wire beyond what the deploy itself does, so "wired" would either always
         # equal the total or restate the job status.
         from ..services import netcell_service
-        perms = user.effective_permissions_dict
-        if not (user.is_effective_admin or not perms or "read" in perms.get("gcp", [])):
+        perms = user.effective_permissions_dict or {}
+        if not (user.is_effective_admin or "read" in perms.get("gcp", [])):
             return _forbidden()
         accessible = _accessible_for("gcp", user)
         total = 0

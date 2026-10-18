@@ -211,8 +211,8 @@ def test_a_broken_link_builder_is_logged_and_never_breaks_the_403():
     assert "vms" in warnings[0].getMessage() and "write" in warnings[0].getMessage()
 
 
-def test_admins_and_unrestricted_users_are_untouched():
-    """Guard the two short-circuits above the deep-link code."""
+def test_admins_and_full_access_users_are_untouched():
+    """Guard the two ways past the deep-link code: the admin flag, and a granted level."""
     saved_get_bool = config_service.get_bool
     config_service.get_bool = lambda key, default=False: True
     try:
@@ -227,12 +227,12 @@ def test_admins_and_unrestricted_users_are_untouched():
             is_effective_admin = True
             effective_permissions_dict = {}
 
-        class _Unrestricted:
+        class _FullAccess:
             username = "legacy"
             is_effective_admin = False
-            effective_permissions_dict = {}  # NULL permissions = full access
+            effective_permissions_dict = auth_api.full_access_map()
 
-        for principal in (_Admin, _Unrestricted):
+        for principal in (_Admin, _FullAccess):
             app.dependency_overrides[auth_api.get_current_user] = lambda p=principal: p()
             resp = TestClient(app).get("/guarded")
             assert resp.status_code == 200, f"{principal.__name__} got {resp.status_code}"

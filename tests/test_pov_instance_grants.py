@@ -274,8 +274,10 @@ def test_the_general_levels_are_unchanged():
     for level in ("write", "delete"):
         assert _may(_user(perms={"pov": ["read", level]}), "env-theirs", level)
         assert _may(_user(admin=True), "env-theirs", level)
-        # A legacy NULL-permission user passes the permissive general branch, as before.
-        assert _may(_user(), "env-theirs", level)
+        # A Full-access map passes the general branch, as the empty map it replaced did.
+        assert _may(_user(perms=auth_mod.full_access_map()), "env-theirs", level)
+        # An empty map grants nothing.
+        assert not _may(_user(perms={}), "env-theirs", level)
 
 
 def test_platform_wide_operations_stay_on_general_write():
@@ -562,14 +564,14 @@ def test_the_page_skips_the_write_only_pickers_without_write():
 
 def test_a_narrowing_outlives_the_permission_map_and_stays_visible():
     """``pov_env_ids`` is its own column and ``pov_env_scope`` reads it without consulting
-    the permission map — so a user ticked back to "unrestricted", or stripped of their POV
+    the permission map — so a user ticked back to "Full access", or stripped of their POV
     row, is STILL confined to the environments named there. The grid must therefore keep
     showing the picker whenever the list is non-empty, or that narrowing is invisible on
     the only page that edits it and cannot be cleared."""
-    u = _user(perms={}, env_ids=["env-theirs"])
-    assert auth_mod.has_permission(u, "pov", "write"), "empty map should read as unrestricted"
+    u = _user(perms=auth_mod.full_access_map(), env_ids=["env-theirs"])
+    assert auth_mod.has_permission(u, "pov", "write"), "Full access should grant pov:write"
     assert auth_mod.pov_env_scope(u) == {"env-theirs"}, (
-        "an unrestricted user with pov_env_ids is still narrowed — that is the point")
+        "a Full-access user with pov_env_ids is still narrowed — that is the point")
 
     with open(os.path.join(_ROOT, "web_dashboard", "templates", "rbac", "_users.html"),
               encoding="utf-8") as fh:

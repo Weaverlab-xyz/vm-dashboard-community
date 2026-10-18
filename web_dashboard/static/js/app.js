@@ -1396,9 +1396,8 @@ function permissionGridState() {
         //                           a strict per-scope allowlist and denies what is absent.
         //
         // Materialising every key is what makes "restricted, nothing granted" expressible
-        // at all. The obvious payload for it -- {} -- is falsy, and both api/users.py and
-        // api/groups.py turn a falsy map into NULL, i.e. UNRESTRICTED. That is how a newly
-        // created user ended up holding every permission in the dashboard. Do not
+        // at all. The obvious payload for it -- {} -- is what "Full access" sends, and both
+        // api/users.py and api/groups.py write a falsy map out as the full map. Do not
         // "optimise" this back down to only the ticked scopes.
         buildPermissionsPayload() {
             if (this.form.permissionsUnrestricted) return {};

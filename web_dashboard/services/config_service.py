@@ -46,7 +46,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
 logger = logging.getLogger(__name__)
 
@@ -78,22 +78,117 @@ _EXT_PREFIXES: dict[str, str] = {
 
 # ── Encryption ────────────────────────────────────────────────────────────────
 
-def _fernet() -> Fernet:
+def _derive(secret: str) -> Fernet:
+    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest()))
+
+
+def _fernet() -> MultiFernet:
+    """Encrypt with the primary key; decrypt with any key still in service.
+
+    Primary is ``config_encryption_key`` when set, else the key derived from
+    ``jwt_secret_key`` -- the only key there was before, which is why it stays in the list:
+    rows written under it read until ``reencrypt_stored_secrets`` has moved them.
+    """
     from ..config import settings
-    raw = settings.jwt_secret_key.encode()
-    derived = base64.urlsafe_b64encode(hashlib.sha256(raw).digest())
-    return Fernet(derived)
+    legacy = _derive(settings.jwt_secret_key)
+    if settings.config_encryption_key:
+        return MultiFernet([_derive(settings.config_encryption_key), legacy])
+    return MultiFernet([legacy])
 
 
 def _encrypt(value: str) -> str:
     return _fernet().encrypt(value.encode()).decode()
 
 
+def _looks_encrypted(token: str) -> bool:
+    """True if ``token`` is shaped like a Fernet token: version byte 0x80, then a timestamp,
+    IV, ciphertext and HMAC (57 bytes at least), urlsafe-base64 encoded."""
+    if not token.startswith("gAAAAA") or len(token) < 76:
+        return False
+    try:
+        raw = base64.urlsafe_b64decode(token.encode())
+    except Exception:
+        return False
+    return len(raw) >= 57 and raw[0] == 0x80
+
+
+_undecryptable_logged = False
+
+
 def _decrypt(token: str) -> str:
+    """The plaintext of ``token``, or ``token`` itself when it was never encrypted.
+
+    A plain-text legacy row (from before encryption) reads as itself. A value that IS a
+    Fernet token and will not decrypt -- the key changed -- reads as "" and is logged:
+    returning the ciphertext, as this once did, handed it to callers as if it were the
+    password, and they used it, displayed it, or wrote it back encrypted a second time.
+    """
+    global _undecryptable_logged
     try:
         return _fernet().decrypt(token.encode()).decode()
-    except (InvalidToken, Exception):
-        return token  # fallback: return raw (handles plain-text legacy rows)
+    except InvalidToken:
+        if not _looks_encrypted(token):
+            return token
+        if not _undecryptable_logged:
+            _undecryptable_logged = True
+            logger.error(
+                "A stored secret is encrypted with a key this process does not have; it "
+                "reads as empty. JWT_SECRET_KEY (or CONFIG_ENCRYPTION_KEY) differs from the "
+                "one that wrote it. Restore the original key, or re-enter the secret.")
+        return ""
+    except Exception:
+        return token
+
+
+# Tables whose secrets live as long as the thing they configure, and so are moved to the
+# primary key at boot. The short-lived ones (upload-session handles, credential leases,
+# relay output) are left to expire under the legacy key.
+_REENCRYPT_COLUMNS = (
+    ("AppConfig", "value"),
+    ("HypervisorConnection", "secret_enc"),
+    ("BeyondTrustTenant", "secret_enc"),
+    ("NotificationEndpoint", "url"),
+    ("NotificationEndpoint", "secret"),
+    ("RunnerCredentialGrant", "values_enc"),
+)
+
+
+def reencrypt_stored_secrets(db) -> int:
+    """Re-encrypt every long-lived stored secret that only the legacy key can read.
+
+    A no-op until ``config_encryption_key`` is set. Then each value the new key cannot
+    read, but the JWT-derived one can, is rewritten under the new key; a value neither can
+    read is left as it is (``_decrypt`` reports it). Returns the number of values moved.
+    """
+    from ..config import settings
+    if not settings.config_encryption_key:
+        return 0
+    from .. import database
+    primary = _derive(settings.config_encryption_key)
+    both = _fernet()
+    moved = 0
+    for model_name, column in _REENCRYPT_COLUMNS:
+        model = getattr(database, model_name)
+        for row in db.query(model).all():
+            value = getattr(row, column)
+            if not value or not _looks_encrypted(value):
+                continue
+            try:
+                primary.decrypt(value.encode())
+                continue  # already under the new key
+            except InvalidToken:
+                pass
+            try:
+                setattr(row, column, both.rotate(value.encode()).decode())
+                moved += 1
+            except InvalidToken:
+                continue
+    if moved:
+        db.commit()
+        global _cache_loaded
+        _cache_loaded = False
+        logger.info("Re-encrypted %d stored secret(s) under CONFIG_ENCRYPTION_KEY.", moved)
+    return moved
 
 
 def encrypt_value(value: str) -> str:

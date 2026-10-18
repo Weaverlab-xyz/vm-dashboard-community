@@ -1,6 +1,6 @@
 # Permissions
 
-> **Audience:** operator · **Profile:** `both` · **Read this when:** you are deciding what a user may see or do — and especially before you tick "Full access (unrestricted)" or hand a POV to a customer stakeholder.
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you are deciding what a user may see or do — and especially before you tick "Full access" or hand a POV to a customer stakeholder.
 
 Part of [Identity and access](../access.md).
 
@@ -23,39 +23,39 @@ A scope is a feature area — roughly one per section in the navigation. A level
 
 ---
 
-## The rule that surprises people
+## An empty permission map grants nothing
 
-**An empty permission map means unrestricted, not "nothing".**
+A user with no permissions from **any** source can sign in and see nothing. A user's
+effective permissions are the union of four maps (see
+[below](#where-a-users-permissions-actually-come-from)), and a scope absent from all of them
+is denied.
 
-A user with no permissions from **any** source can do everything except the things that
-need the Admin flag. "Any source" matters: a user's effective permissions are the union of
-four maps (see [below](#where-a-users-permissions-actually-come-from)), and only when all
-four are empty is the result unrestricted. This is deliberate backward compatibility: the permission columns were added
-long after the first users were, and treating "unset" as "denied" would have locked those
-accounts out of work they were already doing.
+**This changed.** Until this release an empty map meant *unrestricted*: every section except
+the Admin-only ones. That was backward compatibility for accounts that predate permissions,
+and it is how an SSO group mapping saved with no permissions handed every member the
+storage, inventory and credential routes. On upgrade, a one-time migration wrote an
+explicit **Full access** map onto every user and group mapping that relied on the old rule,
+so nobody's access changed. The migration records what it converted in `schema_markers`
+(`rbac_empty_means_nothing_v1`). Users holding that map show every box ticked in the grid,
+so tighten them there.
 
-The consequence is that the grid has two very different empty states:
+**"Full access"** in the grid is no longer stored as an empty map. It is written out as
+every section and level, except the authorities that only an administrator could grant
+before: `agents`, `audit`, `change_windows`, `connections`, `costs`, `directories`,
+`notifications`, `pov_own`, the `write` and `delete` levels of `pov_templates`, and
+`jobs:read` (seeing everyone's jobs, not just your own). An empty map never granted those
+either. A scope added in a later release is **not** included in a map written earlier:
+grant it when it arrives.
 
-- **"Full access (unrestricted)" ticked** — the user's own map is NULL. If nothing else
-  grants them anything, every scope is allowed, now and for every scope added in future.
-  **But if they also hold a role, a group mapping's permissions or an Entitle grant, they
-  get exactly that union and nothing more** — the ticked box contributes nothing, it does
-  not widen them to everything. To give such a user full access, use the Admin flag or
-  the Administrator role.
-- **Unticked with nothing checked** — the map lists every section with nothing granted
-  against any of them. Every scope is denied.
+So the grid's states are:
 
-So the way to restrict somebody is to untick "Full access" and then grant what they need.
-Leaving it ticked and unchecking boxes underneath does nothing, because the boxes are not
-being read.
+- **"Full access" ticked:** the user gets the full map above.
+- **Some sections ticked:** the user gets exactly those.
+- **Nothing ticked:** the map lists every section with nothing granted, so every scope is
+  denied.
 
-The second state used to be unreachable, and that is worth knowing if you are reading an
-older map. The obvious payload for "restricted, nothing granted" is an empty object, an
-empty object is stored as NULL, and NULL is the *first* state — so asking for nothing got
-you everything. The grid now writes out every section explicitly, each with its own list of
-granted levels, so the map is never empty unless you asked for full access. A section
-absent from a map is still a denial, which is what makes an older, shorter map keep
-behaving exactly as it did.
+A role, a group mapping's permissions and an Entitle grant all add to the user's own map.
+None of them can take anything away from it.
 
 ## New users start restricted
 
@@ -64,9 +64,8 @@ granted. The grid is on the create panel for that reason: grant what they need b
 save, or they will be able to sign in and see nothing. The panel says so when you are about
 to create one that way.
 
-Before this, the create form had no grid at all and saved no map, which left the account in
-the NULL state above — every section, every level, for anyone the admin added. Tick
-"Full access (unrestricted)" if that is genuinely what you want.
+An account created through the API without a `permissions` field also starts with nothing
+granted. Send `{}` for Full access, or a map.
 
 **Passwords can be at most 72 bytes.** bcrypt, which hashes them, reads no further, so a
 longer one is refused when it is set (here, on edit, in the setup wizard and on a headless
@@ -74,18 +73,17 @@ import) rather than accepted with its end ignored. Bytes, not characters: an acc
 is 2, an emoji 4. A longer password set before this limit still signs in: it was always
 checked on its first 72 bytes, and still is.
 
-**Service accounts are the exception to the NULL rule.** A [service account](service-accounts.md)
-— a workload principal that authenticates with an OAuth client — reads an empty map as
-**nothing**, not everything, and the "Full access" option is not offered for one. It can
-never be an administrator either. An OAuth access token may carry a `scope` that narrows
-the account's permissions further for that one token.
+**Service accounts** are granted with a map or a role, never "Full access". A
+[service account](service-accounts.md) is a workload principal that authenticates with an
+OAuth client. It can never be an administrator either. An OAuth access token may carry a
+`scope` that narrows the account's permissions further for that one token.
 
 ## Removing admin leaves nothing granted
 
 Unticking **Admin** on a user, or moving them off the **Administrator** role, leaves them
 with **no permissions** until you grant some, either by assigning a role or by ticking
-boxes in the grid. The grid resets to nothing ticked, with "Full access (unrestricted)"
-unticked, and the panel warns that the user will see nothing. Grant what they need in the
+boxes in the grid. The grid resets to nothing ticked, with "Full access" unticked, and
+the panel warns that the user will see nothing. Grant what they need in the
 same save, or later.
 
 Two things behind it are worth knowing:
@@ -97,15 +95,17 @@ Two things behind it are worth knowing:
   there before the user became an admin has gone unseen since. Demotion clears it rather
   than silently restoring it.
 
-An administrator is also created with nothing granted underneath the flag. Before this,
-an admin was stored with no permissions at all, which the server reads as unrestricted,
-so unticking Admin left the user with every section.
+An administrator is also created with nothing granted underneath the flag, so unticking
+Admin later leaves them with nothing.
 
-**Group mappings are the opposite.** A new mapping on RBAC → Groups starts with "Full
-access (unrestricted)" ticked, and the panel says auto-provisioned users will have
-unrestricted access. An OIDC user whose only source is such a mapping (no role on the
-mapping, nothing granted on their own row) is unrestricted. Untick it, or give the mapping
-a role, before members sign in.
+**Group mappings start with nothing granted.** A new mapping on RBAC → Groups grants its
+members nothing unless you give it a role, tick sections, or tick "Full access". A member
+who matches several mappings gets the union of what they grant. A mapping that the upgrade
+converted from "no permissions" keeps its old behaviour exactly: it grants Full access only
+to a member whom no other matched mapping grants anything. Saving the mapping from the grid
+turns it into an ordinary map. Groups listed in the `.env` `AZURE_OAUTH_GROUP_MAP` (used
+only when no mappings exist on the Groups page) still grant Full access, because that file
+cannot express permissions.
 
 ## Levels
 
@@ -307,10 +307,9 @@ layered on top of their role, not a replacement for it — so the usual shape is
 Operator, plus `storage:delete` because they look after the share". If you want someone to
 have exactly their role and nothing more, leave the grid untouched.
 
-**There is no "unrestricted" role**, and that is deliberate. Unrestricted is stored as an
-empty permission map, and an empty map on a *person* means full access — so an unrestricted
-role would hand everyone who holds it every permission in the dashboard, including every
-section added in future. Use the Administrator role, or the Admin flag on the user, both of
+**There is no "Full access" role**, and that is deliberate. A role holding every section
+would hand everyone assigned to it every permission in the dashboard, and that is hard to
+see from the role's name. Use the Administrator role, or the Admin flag on the user, both of
 which are visible for what they are.
 
 **Who holds this role?** Click the count in the *Assigned to* column. That question used to
@@ -375,15 +374,13 @@ you created, and that is not configurable.
 
 ## If a user reports a 403
 
-1. Is **"Full access (unrestricted)"** ticked? If the user has **no** role, group mapping
-   or Entitle grant, the grid is not being read, and the refusal is coming from the Admin
-   flag or a workgroup, not from a scope. If they do have one of those, they are not
-   unrestricted at all: they hold exactly what those sources grant. Check the role and
-   group mappings.
+1. Does the user hold **anything**? An empty map grants nothing (see
+   [above](#an-empty-permission-map-grants-nothing)). Check their own grid, their role, their
+   group mappings and any Entitle grant.
 2. Does the message name a scope and level (*"Requires 'storage:write' permission"*)? Grant
-   that pair. If the message says *"or administrator"*, the grant must be explicit — an
-   unrestricted map will **not** satisfy it, because that route used to require the Admin
-   flag and widening it to every legacy account would have been a security change.
+   that pair. If the message says *"or administrator"*, the grant must be named:
+   "Full access" does **not** include it, because that route used to require the Admin
+   flag.
 3. For a POV answering *"No such POV environment"* on a POV you know exists: check the POV
    access picker on that user. An id they were not granted is indistinguishable from one
    that does not exist, on purpose.

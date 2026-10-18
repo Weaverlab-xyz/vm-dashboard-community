@@ -56,6 +56,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Startup / shutdown logic."""
     logger.info("Infrastructure Management Dashboard starting up...")
+    settings.require_jwt_secret_key()
     init_db()
     logger.info("Database initialised.")
 

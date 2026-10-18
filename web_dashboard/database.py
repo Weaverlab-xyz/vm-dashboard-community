@@ -429,9 +429,9 @@ class User(Base):
         (bool) is OR'd separately in is_effective_admin; everything else is
         treated as a list of levels per scope and union-merged.
 
-        Empty dict means "no explicit permissions" → require_permission
-        treats this as unrestricted (existing pre-OIDC users keep working
-        the same way they did pre-Phase-0).
+        Empty dict grants nothing. It used to mean unrestricted; the one-time
+        ``_materialise_empty_permission_maps`` wrote an explicit map for everyone
+        who relied on that, so the rule could change without anyone losing access.
 
         FOUR sources now. An assigned access role (`role_permissions`) is unioned in
         alongside the other three, which is what makes a role an assignment PLUS an
@@ -4519,8 +4519,8 @@ _BACKFILL_V1_MARKER = "rbac_scope_backfill_v1"
 def _backfill_new_permission_scopes(db) -> int:
     """Grant the v1 new scopes to everyone who already has an explicit permission map.
 
-    Why this is mandatory rather than tidy: ``api/auth.has_permission`` treats an empty map
-    as UNRESTRICTED but a non-empty map as a strict per-scope allowlist. So the instant a
+    Why this is mandatory rather than tidy: ``api/auth.has_permission`` treated an empty map
+    as UNRESTRICTED (until ``_materialise_empty_permission_maps``) but a non-empty map as a strict per-scope allowlist. So the instant a
     route is gated on a new scope, every user with an explicit map loses that route —
     silently, with no error and no log line. These features were previously ungated, which
     means all four levels were reachable; granting each new scope its full level set
@@ -4596,6 +4596,75 @@ def _backfill_new_permission_scopes(db) -> int:
     ))
     db.commit()
     return changed
+
+
+_EMPTY_MEANS_NOTHING_MARKER = "rbac_empty_means_nothing_v1"
+
+
+def _materialise_empty_permission_maps(db) -> int:
+    """Write an explicit full-access map wherever an empty one was granting it.
+
+    An empty permission map used to mean UNRESTRICTED in ``api/auth.has_permission``; it now
+    grants nothing. This runs once, before anyone is asked the new question, so nobody's
+    access changes on upgrade -- an administrator tightens afterwards, seeing the rows.
+
+    Users: a person with no baseline, no group-derived and no role map, who is not an
+    administrator, a POV accessor or a service account (the last two never read the empty
+    map as unrestricted: see ``effective_permissions_dict``). An SSO user is left alone when
+    group mappings decide their access, because the next login rebuilds
+    ``session_permissions`` from the mappings below -- a baseline written here would pin
+    their access past the day they leave the group. With no mappings at all (DB or
+    ``.env``) nothing rebuilds it, so they are treated like a local user.
+
+    Group mappings with neither ``default_permissions`` nor a role get the full map, tagged
+    ``LEGACY_FULL_ACCESS_KEY`` so the login merge still applies it only when no other
+    matched mapping grants anything -- the old rule, exactly. Malformed JSON is left as it
+    is: login skips it, as it always has.
+
+    ``jit_permissions`` is not consulted: Entitle owns it, and when a grant ends the user
+    falls back to what this writes. Returns the number of rows changed. Idempotent via
+    ``schema_markers``.
+    """
+    if db.query(SchemaMarker).filter(SchemaMarker.key == _EMPTY_MEANS_NOTHING_MARKER).first():
+        return 0
+    from .api.auth import LEGACY_FULL_ACCESS_KEY, full_access_map
+
+    mappings = db.query(OAuthGroupMapping).all()
+    groups_decide = bool(mappings) or bool(getattr(settings, "azure_oauth_group_map", None))
+    users = mappings_changed = 0
+
+    for user in db.query(User).all():
+        if user.is_admin or user.accessor_env_id or user.is_service_account or user.role_id:
+            continue
+        if user.permissions_dict or user.session_permissions_dict or user.role_permissions_dict:
+            continue
+        if groups_decide and (user.auth_provider or "local") != "local":
+            continue
+        user.permissions_dict = full_access_map()
+        users += 1
+
+    for mapping in mappings:
+        if mapping.role_id:
+            continue
+        raw = mapping.default_permissions
+        if raw:
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(parsed, dict) or parsed:
+                continue
+        mapping.default_permissions = json.dumps({LEGACY_FULL_ACCESS_KEY: True,
+                                                  **full_access_map()})
+        mappings_changed += 1
+
+    db.add(SchemaMarker(
+        key=_EMPTY_MEANS_NOTHING_MARKER,
+        detail=(f"wrote the full-access map onto {users} user(s) and "
+                f"{mappings_changed} group mapping(s) that held an empty one"),
+    ))
+    db.commit()
+    return users + mappings_changed
 
 
 _RETIRE_LEVELS_MARKER = "rbac_retire_unenforced_levels_v1"
@@ -5499,6 +5568,28 @@ def init_db():
             import logging as _logging
             _logging.getLogger(__name__).warning(
                 "permission scope backfill skipped", exc_info=True)
+        # After the scope backfill, so the maps it writes already carry the new scopes. A
+        # failure here is logged loudly and retried at the next boot (no marker is written):
+        # until it succeeds, users who relied on an empty map are denied, not widened.
+        try:
+            _materialise_empty_permission_maps(_seed_db)
+        except Exception:  # noqa: BLE001 — a backfill must never stop the app booting
+            _seed_db.rollback()
+            import logging as _logging
+            _logging.getLogger(__name__).error(
+                "empty-permission migration failed; users with no permission map are "
+                "denied until it succeeds", exc_info=True)
+        # Move stored secrets onto CONFIG_ENCRYPTION_KEY when one is set (a no-op otherwise).
+        # Idempotent, so two processes booting together at worst both write a valid token.
+        try:
+            from .services import config_service as _cs
+            _cs.reencrypt_stored_secrets(_seed_db)
+        except Exception:  # noqa: BLE001 — a backfill must never stop the app booting
+            _seed_db.rollback()
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "stored-secret re-encryption skipped; the legacy key still reads them",
+                exc_info=True)
         # Copy the legacy singleton hypervisor config into hypervisor_connections.
         # Here and not in the migration block above on purpose: this is a data seed,
         # not DDL, and it must stay OUTSIDE the advisory-locked transaction — a

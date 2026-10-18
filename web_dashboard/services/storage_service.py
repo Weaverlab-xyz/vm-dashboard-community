@@ -456,9 +456,26 @@ def _local_normalise(path: str) -> str:
 
 
 def _local_path_for(name: str) -> str:
+    """The full path of asset ``name`` under the configured base -- never outside it.
+
+    ``name`` reaches here from a URL path segment, so it is checked twice: by
+    :func:`_check_asset_name` in ``_run_op`` (no separators at all for this backend, whose
+    listing is flat), and here, by resolving the real path and requiring it to stay under
+    the real base, which is what also stops a symlink inside the base from pointing out of
+    it. A UNC path cannot be resolved locally, so for SMB the name check is the guard.
+    """
+    import os
     base = _local_normalise(_cfg("storage_local_path"))
-    sep = "\\" if _is_unc(base) else "/"
-    return f"{base}{sep}{name}"
+    if not base:
+        raise StorageError("storage_local_path is not set.")
+    _check_asset_name("local", name)
+    if _is_unc(base):
+        return f"{base}\\{name}"
+    root = os.path.realpath(base)
+    target = os.path.realpath(os.path.join(root, name))
+    if os.path.dirname(target) != root:
+        raise StorageError(f"Asset name {name!r} resolves outside the storage path.")
+    return target
 
 
 def _local_list_sync() -> list[dict]:
@@ -692,6 +709,24 @@ _BACKEND_OPS = {
 }
 
 
+def _check_asset_name(backend: str, name) -> None:
+    """Refuse an asset name that could address anything but an asset in this backend.
+
+    Every name arrives from a request (``/api/storage/fetch/{backend}/{name:path}`` and its
+    siblings), so this is the boundary. Object stores list recursively under their prefix,
+    so ``sub/play.yml`` is a real key there and a ``/`` is allowed; what never is: an empty
+    or absolute name, a backslash, a NUL, or an empty, ``.`` or ``..`` segment. The local
+    backend lists one directory, so it allows no separator at all, and
+    :func:`_local_path_for` re-checks the resolved path on top of that.
+    """
+    if not isinstance(name, str) or not name or "\x00" in name or "\\" in name:
+        raise StorageError(f"Invalid asset name {name!r}.")
+    if name.startswith("/") or any(seg in ("", ".", "..") for seg in name.split("/")):
+        raise StorageError(f"Invalid asset name {name!r}.")
+    if backend == "local" and "/" in name:
+        raise StorageError(f"Invalid asset name {name!r}: local storage has no subfolders.")
+
+
 async def _run_op(backend: str, op: str, *args):
     """Dispatch one backend operation, whether it blocks or awaits.
 
@@ -706,6 +741,8 @@ async def _run_op(backend: str, op: str, *args):
     a result and store, list or upload.
     """
     import inspect
+    if op != "list":
+        _check_asset_name(backend, args[0] if args else None)
     fn = _BACKEND_OPS[backend][op]
     if inspect.iscoroutinefunction(fn):
         return await fn(*args)
@@ -1640,8 +1677,30 @@ def _oci_presigned_url_sync(key: str, expiry_seconds: int, method: str) -> str:
     return f"https://objectstorage.{region}.oraclecloud.com{par.access_uri}"
 
 
+def _local_image_path(key: str) -> str:
+    """The full path of image ``key`` under the local base, never outside it.
+
+    Image keys are built here (``image_key``: ``images/<name>-<ts>.<ext>``), not taken from
+    a URL, but the name part comes from a build request, so the key is held to the same
+    containment rule as an asset name -- with subfolders allowed, which images use.
+    """
+    import os
+    base = _local_normalise(_cfg("storage_local_path"))
+    if not base:
+        raise StorageError("storage_local_path is not set.")
+    # Any backend name but "local" applies the object-store rule: "/" allowed, no "..".
+    _check_asset_name("image", key)
+    if _is_unc(base):
+        return base + "/" + key
+    root = os.path.realpath(base)
+    target = os.path.realpath(os.path.join(root, key))
+    if os.path.commonpath([root, target]) != root:
+        raise StorageError(f"Image key {key!r} resolves outside the storage path.")
+    return target
+
+
 def _local_upload_image_sync(key: str, fileobj) -> None:
-    target = _cfg("storage_local_path").rstrip("/").rstrip("\\") + "/" + key.lstrip("/")
+    target = _local_image_path(key)
     if _is_unc(target):
         import smbclient
         _local_smb_register()
@@ -1663,7 +1722,7 @@ def _local_upload_image_sync(key: str, fileobj) -> None:
 
 
 def _local_download_image_sync(key: str, fileobj) -> None:
-    target = _cfg("storage_local_path").rstrip("/").rstrip("\\") + "/" + key.lstrip("/")
+    target = _local_image_path(key)
     if _is_unc(target):
         import smbclient
         _local_smb_register()
@@ -1683,7 +1742,7 @@ def _local_download_image_sync(key: str, fileobj) -> None:
 
 
 def _local_delete_image_sync(key: str) -> None:
-    target = _cfg("storage_local_path").rstrip("/").rstrip("\\") + "/" + key.lstrip("/")
+    target = _local_image_path(key)
     if _is_unc(target):
         import smbclient
         _local_smb_register()
@@ -1700,7 +1759,7 @@ def _local_delete_image_sync(key: str) -> None:
 
 
 def _local_head_image_sync(key: str) -> Optional[dict]:
-    target = _cfg("storage_local_path").rstrip("/").rstrip("\\") + "/" + key.lstrip("/")
+    target = _local_image_path(key)
     if _is_unc(target):
         import smbclient
         _local_smb_register()

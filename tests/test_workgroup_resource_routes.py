@@ -49,6 +49,7 @@ from web_dashboard.api import k8s as k8sapi  # noqa: E402
 from web_dashboard.api.auth import get_current_user  # noqa: E402
 from web_dashboard.database import (Base, CloudDatabase, K8sCluster,  # noqa: E402
                                     SessionLocal, Workgroup, engine, get_db)
+from web_dashboard.api.auth import full_access_map  # noqa: E402
 
 Base.metadata.create_all(bind=engine)
 
@@ -56,7 +57,8 @@ Base.metadata.create_all(bind=engine)
 class _User:
     is_admin = False
     is_effective_admin = False
-    effective_permissions_dict: dict = {}      # empty == unrestricted (legacy compat)
+    # Every scope, so the workgroup rule is the only thing these tests exercise.
+    effective_permissions_dict: dict = full_access_map()
     # require_admin refuses a POV accessor outright before it even looks at the admin
     # flag, so the stub has to carry this attribute or every admin route 500s on an
     # AttributeError that looks nothing like an authorization failure.

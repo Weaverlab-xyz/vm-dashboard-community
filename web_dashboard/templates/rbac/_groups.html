@@ -94,7 +94,7 @@
               </td>
               {% endif %}
               <td class="py-2.5 pr-4 text-xs text-gray-500">
-                <span x-show="!m.default_permissions" class="text-gray-400">Full access</span>
+                <span x-show="!m.default_permissions" class="text-gray-400">Nothing granted</span>
                 <span x-show="m.default_permissions">
                   <template x-for="[scope, levels] in Object.entries(m.default_permissions || {})" :key="scope">
                     <span x-show="levels.length > 0" class="inline-block mr-1">
@@ -215,7 +215,7 @@
            names, and every future improvement would have had to be made twice. -->
       {{ permission_matrix(
            "Default Permissions for new users",
-           "Auto-provisioned users will have unrestricted access (same as admins without the admin flag).") }}
+           "Members get every section except the ones an administrator must grant by name (same as admins without the admin flag).") }}
 
       <div class="flex items-center gap-3 pt-1">
         <button type="submit" :disabled="saving"
@@ -287,7 +287,7 @@ function groupsPage() {
     toast: '',
     toastType: 'success',
     form: { display_name: '', entra_group_id: '', workgroup: '', persona: '', persona_priority: null,
-            role_id: '', permissions: {}, permissionsUnrestricted: true },
+            role_id: '', permissions: {}, permissionsUnrestricted: false },
 
     roleName(id) {
       const r = (this.availableRoles || []).find(x => x.id === id);
@@ -320,11 +320,10 @@ function groupsPage() {
           display_name: this.form.display_name,
           entra_group_id: this.form.entra_group_id,
           workgroup: this.form.workgroup,
-          // null = unrestricted. Otherwise EVERY scope with its granted levels: a map
-          // holding only the ticked scopes would be {} when nothing is ticked, and
-          // api/groups.py turns a falsy map into NULL, i.e. unrestricted -- the exact
-          // inversion of what the admin asked for. See buildPermissionsPayload.
-          default_permissions: this.form.permissionsUnrestricted ? null : this.buildPermissionsPayload(),
+          // {} = Full access, which api/groups.py writes out as the explicit map.
+          // Otherwise EVERY scope with its granted levels, so "nothing ticked" can never
+          // be mistaken for {}. See buildPermissionsPayload.
+          default_permissions: this.form.permissionsUnrestricted ? {} : this.buildPermissionsPayload(),
           // Blank sent as null: on create there is no "no change" state to tell apart, and
           // the API reads a blank as no role.
           role_id: this.form.role_id || null,
@@ -365,7 +364,7 @@ function groupsPage() {
     resetForm() {
       this.permFilter = '';
       this.form = { display_name: '', entra_group_id: '', workgroup: '', persona: '', role_id: '', persona_priority: null,
-                    permissions: {}, permissionsUnrestricted: true };
+                    permissions: {}, permissionsUnrestricted: false };
     },
 
     showToast(msg, type = 'success') {

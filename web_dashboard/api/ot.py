@@ -73,8 +73,8 @@ router = APIRouter(prefix="/api/ot", tags=["ot"],
 
 def _require_cloud(user: User, cloud: str, level: str) -> str:
     """Validate ``cloud`` and enforce ``<cloud>:<level>`` the way
-    require_permission would — admins and NULL-permission (legacy unrestricted)
-    users pass, everyone else needs the level in their effective permissions.
+    require_permission would — admins pass, everyone else needs the level in their
+    effective permissions (an empty map grants nothing).
     Returns the normalised cloud name."""
     cloud = (cloud or "gcp").strip().lower()
     if cloud not in ot_service.CELL_CHILD_JOB_TYPE:
@@ -82,8 +82,8 @@ def _require_cloud(user: User, cloud: str, level: str) -> str:
                             "one of gcp, aws, azure")
     if user.is_effective_admin:
         return cloud
-    perms = user.effective_permissions_dict
-    if perms and level not in perms.get(cloud, []):
+    perms = user.effective_permissions_dict or {}
+    if level not in perms.get(cloud, []):
         raise HTTPException(status_code=403,
                             detail=f"Requires '{cloud}:{level}' permission.")
     return cloud

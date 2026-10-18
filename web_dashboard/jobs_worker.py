@@ -1413,6 +1413,8 @@ def main() -> None:
         level=logging.INFO,
         format=LOG_FORMAT,
     )
+    from .config import settings
+    settings.require_jwt_secret_key()
     # depends_on only waits for the DB to be healthy, not for the app's migrations;
     # if the runner wins the boot race the new JobLog table must still exist.
     # BEFORE init_db, and that ordering is the point: init_db can block indefinitely on

@@ -391,6 +391,51 @@ def is_retired(scope: str, level: str) -> bool:
 PERMISSION_SCOPES = list(PERMISSION_SCOPE_LEVELS)
 
 
+# What "Full access" means now that an empty map grants nothing. It used to be stored as an
+# empty map, which `has_permission` read as unrestricted -- but `has_explicit_permission`
+# never did, so those users never held the pairs below. A full-access map is therefore the
+# catalog MINUS these, which is exactly what an empty map granted. The one-time migration
+# (`database._materialise_empty_permission_maps`) writes it onto every user and group
+# mapping that relied on the old rule.
+#
+# Every `require_explicit_permission` / `has_explicit_permission` pair must be listed here:
+# tests/test_empty_permissions_deny.py scans the code and fails on one that is not, because
+# "Full access" would otherwise hand out an authority that used to need an administrator.
+EXPLICIT_ONLY_LEVELS = {
+    "agents": ("read", "write", "delete"),
+    "audit": ("read",),
+    "change_windows": ("write", "use"),
+    "connections": ("read", "write", "delete"),
+    "costs": ("read", "write"),
+    "directories": ("read", "write", "delete"),
+    # `can_audit_jobs` -- everyone's jobs, not just your own -- never read an empty map as
+    # unrestricted either. The MCP job tools also gate on it, and those an empty map did
+    # pass, so this is the one pair where the two rules met; seeing other people's jobs is
+    # the authority that matters, so it stays out.
+    "jobs": ("read",),
+    "notifications": ("read", "write"),
+    "pov_own": ("read", "write", "delete"),
+    "pov_templates": ("write", "delete"),
+}
+
+
+def full_access_map() -> dict:
+    """Every scope and level a user with an empty map could reach before empty meant nothing."""
+    out = {}
+    for scope, levels in PERMISSION_SCOPE_LEVELS.items():
+        skip = EXPLICIT_ONLY_LEVELS.get(scope, ())
+        out[scope] = [lv for lv in levels if lv not in skip]
+    return out
+
+
+# Marks a group mapping the migration converted from "no permissions" (which meant full
+# access). Such a mapping grants `full_access_map()` only when nothing ELSE the user matched
+# grants anything -- the old rule exactly: a user in a NULL mapping and a restricted one got
+# the restricted one's map. Saving the mapping from the grid drops the key, and from then on
+# its map is an ordinary one.
+LEGACY_FULL_ACCESS_KEY = "__legacy_full_access__"
+
+
 # How the grid LAYS OUT those scopes. Presentation only: `PERMISSION_SCOPES` above stays
 # the single flat catalog every other consumer iterates, and its order is unchanged.
 #
@@ -507,9 +552,11 @@ def has_permission(user: User, scope: str, level: str) -> bool:
     (the MCP tools, the suspend-schedule API) share ONE implementation. Two copies of a
     permission rule drift, and the drift is invisible in both directions.
 
-    Includes the backward-compatibility clause deliberately: an empty
-    ``effective_permissions_dict`` means unrestricted, for pre-OIDC users who never had one
-    set. Being stricter here than the UI would lock them out of things they can already do.
+    An empty ``effective_permissions_dict`` grants NOTHING. It used to mean unrestricted,
+    for pre-OIDC users who never had a map set; `database._materialise_empty_permission_maps`
+    gave every such user and group mapping an explicit ``full_access_map()`` once, so the
+    rule could change without anyone losing access. Now this and
+    ``has_explicit_permission`` answer the same question.
 
     **Adding a scope is a silent revocation.** A non-empty dict is a strict per-scope
     allowlist, so a scope absent from it is a deny. The moment a new key lands in
@@ -522,8 +569,6 @@ def has_permission(user: User, scope: str, level: str) -> bool:
     if getattr(user, "is_effective_admin", False):
         return True
     perms = user.effective_permissions_dict or {}
-    if not perms:
-        return True
     return level in perms.get(scope, [])
 
 
@@ -547,7 +592,11 @@ def _tag(fn, scope: str, level: str, *, explicit: bool):
 
 
 def has_explicit_permission(user: User, scope: str, level: str) -> bool:
-    """Like ``has_permission``, but WITHOUT the empty-map-means-unrestricted clause.
+    """Like ``has_permission``, which since empty maps stopped meaning unrestricted is the
+    same rule. Kept as its own name because ``EXPLICIT_ONLY_LEVELS`` is built from its call
+    sites: these are the pairs "Full access" does not include.
+
+    What it was for, and why those pairs stay out of "Full access":
 
     For routes that used to require the admin flag. Making such a route grantable with
     ``require_permission`` would quietly widen it to every legacy NULL-permission user,
@@ -579,9 +628,8 @@ def require_explicit_permission(scope: str, level: str):
 def require_permission(scope: str, level: str):
     """
     Returns a FastAPI dependency that checks the user has the specified
-    permission (scope:level).  Admins always pass.  Users whose effective
-    permissions are empty are treated as having full access (backward
-    compatible — pre-OIDC + pre-admin-set users).
+    permission (scope:level).  Admins always pass.  An empty effective map
+    grants nothing (see ``has_permission``).
 
     Consults ``effective_permissions_dict`` so an Entitle JIT grant via
     OIDC group membership counts. See docs/design/entitle-user-jit.md.
@@ -1007,8 +1055,11 @@ def _complete_oauth_login(db, *, subject, email, display_name, groups, provider)
     if db_mappings:
         group_map = {m.entra_group_id: (m.workgroup, m.default_permissions) for m in db_mappings}
     else:
-        # .env fallback: no default_permissions support in this path
-        group_map = {gid: (wg, None) for gid, wg in settings.azure_oauth_group_map.items()}
+        # .env fallback: no default_permissions support in this path. A matched group has
+        # always meant full access here, and still does: there is no row to migrate, and
+        # an operator who wants less moves the mapping to the Groups page.
+        _legacy = _json.dumps({LEGACY_FULL_ACCESS_KEY: True, **full_access_map()})
+        group_map = {gid: (wg, _legacy) for gid, wg in settings.azure_oauth_group_map.items()}
 
     if group_map:
         user_group_ids = set(groups or [])
@@ -1052,14 +1103,19 @@ def _complete_oauth_login(db, *, subject, email, display_name, groups, provider)
                           db.query(AccessRole)
                           .filter(AccessRole.id.in_(_matched_role_ids)).all()]
 
-        _grid_maps = []
+        _grid_maps, _legacy_maps = [], []
         for _, dp in matched:
             if not dp:
                 continue
             try:
-                _grid_maps.append(_json.loads(dp))
+                _parsed = _json.loads(dp)
             except Exception:
                 logger.warning("Skipping malformed default_permissions JSON in oauth_group_mapping: %r", dp[:80])
+                continue
+            if isinstance(_parsed, dict) and _parsed.pop(LEGACY_FULL_ACCESS_KEY, False):
+                _legacy_maps.append(_parsed)
+            else:
+                _grid_maps.append(_parsed)
 
         # Roles first, then each mapping's own grid, so a mapping's explicit permissions read
         # as an addition ON TOP OF the role it confers -- the same relationship a user's grid
@@ -1068,10 +1124,23 @@ def _complete_oauth_login(db, *, subject, email, display_name, groups, provider)
         # union above would have been a third.
         session_perms = merge_permission_maps(*(_role_maps + _grid_maps))
         matched_session_permissions = session_perms if session_perms else None
+        # A converted "no permissions" mapping (LEGACY_FULL_ACCESS_KEY) grants Full access
+        # only where the old empty-map rule did: nothing else matched grants anything, and
+        # the user holds no map or role of their own -- see _session_grant below.
+        legacy_full = (merge_permission_maps(*_legacy_maps)
+                       if _legacy_maps and not session_perms else None)
     else:
         matched_workgroups = None  # no mappings configured — legacy path
         matched_session_permissions = None
         matched_persona = ""
+        legacy_full = None
+
+    def _session_grant(u) -> dict:
+        if matched_session_permissions:
+            return matched_session_permissions
+        if legacy_full and not u.permissions_dict and not u.role_id:
+            return legacy_full
+        return {}
 
     # ── Find or auto-create user ──────────────────────────────────────────────
     # Look up by stable subject first, then fall back to email
@@ -1107,7 +1176,7 @@ def _complete_oauth_login(db, *, subject, email, display_name, groups, provider)
         # permissions on their next login. The admin-set baseline
         # (user.permissions) is untouched, so admin-granted permissions
         # survive even when no group claims them.
-        user.session_permissions_dict = matched_session_permissions or {}
+        user.session_permissions_dict = _session_grant(user)
         # Unconditional, like the line above and for the same reason: this column is the
         # GROUP's opinion, so a user removed from a persona-granting group must lose it at
         # their next login. `user.persona` -- an admin's deliberate assignment -- is
@@ -1140,7 +1209,7 @@ def _complete_oauth_login(db, *, subject, email, display_name, groups, provider)
         # something orthogonal to the group-derived set. effective_permissions
         # = union(empty admin baseline, group-derived session_permissions)
         # gives the same effective set as before for an auto-created user.
-        user.session_permissions_dict = matched_session_permissions or {}
+        user.session_permissions_dict = _session_grant(user)
         # Unconditional, like the line above and for the same reason: this column is the
         # GROUP's opinion, so a user removed from a persona-granting group must lose it at
         # their next login. `user.persona` -- an admin's deliberate assignment -- is

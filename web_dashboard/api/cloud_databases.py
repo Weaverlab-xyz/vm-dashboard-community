@@ -543,13 +543,12 @@ def _require_function_write(user: User) -> None:
     same thing ``POST /api/functions`` does, and that route requires this scope. Without
     this check a holder of ``cloud_database:write`` alone would have a way around it.
 
-    Same shape and same reasoning as :func:`_require_secrets_use` below: admin and
-    unrestricted (NULL-permission) users pass.
+    Same shape and same reasoning as :func:`_require_secrets_use` below: admins pass.
     """
     if getattr(user, "is_effective_admin", False):
         return
-    perms = user.effective_permissions_dict   # {} / NULL → unrestricted (legacy)
-    if perms and "write" not in perms.get("cloud_function", []):
+    perms = user.effective_permissions_dict or {}   # an empty map grants nothing
+    if "write" not in perms.get("cloud_function", []):
         raise HTTPException(
             status_code=403,
             detail="The 'cloud_function:write' permission is required — the adapter is "

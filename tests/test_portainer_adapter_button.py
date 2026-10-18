@@ -83,12 +83,13 @@ def test_deploying_the_adapter_needs_the_cloud_function_scope():
         assert "_require_function_write(current_user)" in _route(decorator), decorator
 
 
-def test_admins_and_unrestricted_users_pass_the_scope_check():
-    """{} / NULL permissions mean unrestricted in this app (legacy installs), so the
-    check must not turn into a lockout."""
+def test_admins_pass_and_an_empty_map_does_not():
+    """Admins pass; an empty permission map grants nothing, so it must not short-circuit
+    the scope check the way it did when empty meant unrestricted."""
     body = _read(_API).split("def _require_function_write(")[1][:900]
     assert "is_effective_admin" in body
-    assert "if perms and" in body
+    assert "if perms and" not in body
+    assert '"write" not in perms.get("cloud_function", [])' in body
 
 
 # ── Nothing is queued before the pre-flights run ─────────────────────────────
