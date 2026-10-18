@@ -183,7 +183,7 @@ Each has a script, or a single command, that runs the same way locally:
 | Check | What it catches | Run it locally |
 |---|---|---|
 | Skip guard (in `run_tests.sh`) | A test file that passed only because its tests printed `SKIP`, from a missing stub or dependency | `scripts/ci/run_tests.sh` |
-| `browser-smoke` | A page that throws a JavaScript error in a real browser: a binding that reads a still-null object, a name the component never defines. Also a failure the page catches and hides: a `console.error`, or an `/api/` call answering a 5xx other than 503 (503 is the deliberate "provider unavailable" answer). Every page is loaded, every tab clicked, every Settings panel opened | `scripts/ci/browser_smoke.sh` (needs `npm install playwright@1.56.1` and `npx playwright install chromium`) |
+| `browser-smoke` | A page that throws a JavaScript error in a real browser: a binding that reads a still-null object, a name the component never defines. Also a failure the page catches and hides: a `console.error`, or an `/api/` call answering a 5xx other than 503 (503 is the deliberate "provider unavailable" answer). Every page is loaded, every tab clicked, every Settings panel opened. Then: the built Tailwind CSS is fresh, and every class a page carried has a rule | `scripts/ci/browser_smoke.sh` (needs `npm install playwright@1.56.1` and `npx playwright install chromium`) |
 | `ruff` | Bug rules only: undefined names, a dict key written twice, a closure over a loop variable, a mutable default (`ruff.toml`) | `ruff check` |
 | `ansible-syntax` | A playbook Ansible cannot load: an unknown module, a malformed task | `scripts/ci/ansible_syntax.sh` (needs `pip install ansible`) |
 | `terraform` | Unformatted HCL, or a module that fails `terraform validate` | `scripts/ci/terraform_validate.sh` |
@@ -201,7 +201,13 @@ binary a Dockerfile downloads is pinned to a version and to its vendor's SHA256,
 version bump updates both. Front-end libraries are pinned too: Alpine.js is vendored
 under the static `js/vendor` folder (the npm package's `dist/cdn.min.js`, named for its
 version), and every CDN script or stylesheet names an exact version, which
-`tests/test_static_assets.py` enforces. A page error, `console.error` or 5xx the smoke test
+`tests/test_static_assets.py` enforces. Tailwind is not loaded from a CDN at all:
+`web_dashboard/static/css/tailwind.css` is built by `scripts/build_css.sh` (a pinned
+tailwindcss scanning every template, script and Python file that `tailwind.config.js`
+lists) and committed. After adding a class name that appears nowhere else, run
+`scripts/build_css.sh` and commit the result; CI fails a stale file. Write class names out
+in full -- `'bg-' + colour` gets no rule, and `scripts/ci/css_coverage.sh` fails the smoke
+test when a page carries one. A page error, `console.error` or 5xx the smoke test
 should tolerate goes in `tests/browser_smoke_allow.json`, scoped to its page, with the
 reason.
 

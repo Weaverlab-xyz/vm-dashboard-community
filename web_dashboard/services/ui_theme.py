@@ -12,8 +12,9 @@ The palette lives here rather than in Jinja ternaries for two reasons: both prof
 legible side by side, and it is unit-testable -- ``tests/test_profile_theme.py`` pins the
 demo strings so a re-skin of POV can never quietly recolour the demo instance.
 
-Every value in the shipped palettes is a literal Tailwind class string (the app is on the
-Tailwind Play CDN, which scans the DOM, so composed class names are not an option) except
+Every value in the shipped palettes is a literal Tailwind class string (the stylesheet is
+built by scanning source -- scripts/build_css.sh -- so a composed class name would get no
+rule) except
 ``hex``, which carries raw colours for the two consumers that do not speak Tailwind: the
 docs browser (``api/docs_pages``, which writes plain CSS) and the favicon data URI.
 
@@ -302,9 +303,10 @@ _POV = {
 #
 #   1. Each palette is hand-checked for contrast. A free hex lets an operator pick something
 #      that renders the nav unreadable, and the nav is how you leave the page you broke.
-#   2. These are Tailwind class names on the Play CDN today. The CDN scans the DOM, so an
-#      f-string would in fact work right now -- but a build step would purge by scanning
-#      SOURCE, and every composed name would vanish silently. Literals survive that move.
+#   2. These are Tailwind class names, and the stylesheet is built by scanning SOURCE
+#      (scripts/build_css.sh): a composed name gets no rule and renders unstyled with no
+#      error. scripts/ci/css_coverage.sh catches one on a page the smoke test opens;
+#      literals never need catching.
 #      (The banner below is free-hex precisely because it is an inline style, not a class.)
 #
 # `rail` is cleared on every accent: the rail slot in base.html is where the environment
@@ -565,8 +567,8 @@ def accent_choices() -> list[dict]:
 # Every selector in the partial is written `.brand-custom .brand-nav`, and `brand_scope`
 # below is what puts `brand-custom` on <html>. That is not decoration. A bare `.brand-nav`
 # is specificity (0,1,0) -- a TIE with any Tailwind utility on the same element setting the
-# same property, broken by source order, which for a CDN that injects its sheet at runtime
-# is script timing. base.html:114 carries a hardcoded `text-white` next to `theme.nav_bg`,
+# same property, broken by source order -- an accident of where each sheet happens to
+# sit, not something this file controls. base.html:114 carries a hardcoded `text-white` next to `theme.nav_bg`,
 # and login.html has two more. The descendant selector makes it (0,2,0), which wins
 # deterministically. _checklist_styles.html's header states the same rule for the same
 # reason.

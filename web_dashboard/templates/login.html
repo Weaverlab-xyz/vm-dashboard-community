@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{{ theme.title_prefix }}Sign in</title>
   <link rel="icon" href="{{ theme.favicon }}">
-  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
   <script defer src="{{ static_url('js/vendor/alpine-3.17.4.min.js') }}"></script>
   {# Versioned via static_url for the reason base.html gives. This page owns its own
      head, so it is the one that silently keeps a bare reference when the other is
@@ -14,6 +13,8 @@
   {# This page owns its own head and inherits nothing from base.html, so the brand CSS has
      to be included again here -- the same reason the environment banner is repeated below. #}
   {% include '_brand_css.html' %}
+  {# Last in <head>: same cascade order as base.html. #}
+  <link rel="stylesheet" href="{{ static_url('css/tailwind.css') }}">
 </head>
 <body class="{{ theme.login_bg }} min-h-screen flex items-center justify-center">
 

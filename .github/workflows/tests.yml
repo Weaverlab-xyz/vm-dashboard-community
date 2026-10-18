@@ -58,8 +58,9 @@ jobs:
   # uncaught JavaScript error fails the job (tests/browser_smoke_allow.json lists the
   # deliberate exceptions, with reasons). The text-level suite above cannot see this
   # class -- a binding reading a null object, a name the component never defines -- and
-  # every one found in October 2026 was found by opening the page. With the network open
-  # here it also proves the pinned Tailwind CDN URL still loads (REQUIRE_TAILWIND).
+  # every one found in October 2026 was found by opening the page. It also checks the
+  # committed Tailwind build: that it is fresh (scripts/build_css.sh --check) and that
+  # every class a page actually carried has a rule (scripts/ci/css_coverage.sh).
   browser-smoke:
     runs-on: ubuntu-latest
     steps:
@@ -85,9 +86,12 @@ jobs:
           npm install --no-save --no-package-lock playwright@1.56.1
           npx playwright install --with-deps chromium
 
+      - name: Check the built Tailwind CSS is fresh
+        run: scripts/build_css.sh --check
+
       - name: Run browser smoke test
         env:
-          REQUIRE_TAILWIND: "1"
+          ONLINE: "1"
         run: scripts/ci/browser_smoke.sh
 
   # ── Python bug lint ─────────────────────────────────────────────────────────

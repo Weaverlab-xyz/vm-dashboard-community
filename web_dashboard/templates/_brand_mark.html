@@ -20,8 +20,8 @@
    hamburger off the right edge, and -- now that the bar no longer clips -- makes the whole
    DOCUMENT scroll sideways on a phone. Pass mark_max at every call site.
 
-   The classes cannot be derived from mark_size by string surgery: composed class names do
-   not survive on the Tailwind Play CDN, which is the same constraint recorded over
+   The classes cannot be derived from mark_size by string surgery: composed class names get
+   no rule in the built stylesheet (scripts/build_css.sh scans source), the same constraint recorded over
    ui_theme._ACCENTS. Pass them literally.
 
    SECURITY: the logo is ALWAYS an img element and is NEVER inlined, and it must stay that
