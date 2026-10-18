@@ -1044,7 +1044,35 @@ def webauthn_login_begin(
 # callbacks funnel through here. Extracted verbatim from the original Entra
 # callback — behaviour for existing installs is unchanged.
 
-def _complete_oauth_login(db, *, subject, email, display_name, groups, provider):
+# An admin's opt-in for one existing account: "this person signs in with SSO from now on".
+# Set from the Users tab; the account's next SSO login with a verified email matching it
+# links the IdP subject and replaces this with the provider's name. Password login already
+# refuses any account whose auth_provider is not "local", so the opt-in takes effect at once.
+SSO_PENDING = "sso_pending"
+
+
+def _email_link_refusal(user, subject: str, email_verified: bool) -> str:
+    """Why an SSO login may NOT take over ``user`` by email, or "" when it may.
+
+    The IdP's subject is the identity; an email is only a claim, and on most providers a
+    user can set their own. So an email match links only when all of these hold:
+      * the provider says the email is verified;
+      * the account is not already linked to a different subject;
+      * the account is not a local password account, unless an administrator opted it in
+        (SSO_PENDING). Linking one silently would hand it, admin rights included, to
+        whoever can put that address on an IdP profile.
+    """
+    if user.oauth_subject and user.oauth_subject != subject:
+        return "linked to a different SSO identity"
+    if not email_verified:
+        return "the identity provider did not verify the email"
+    if (user.auth_provider or "local") == "local":
+        return "it is a local account and no administrator enabled SSO sign-in for it"
+    return ""
+
+
+def _complete_oauth_login(db, *, subject, email, display_name, groups, provider,
+                          email_verified: bool = False):
     """Map groups → workgroups, find-or-create the user, and return a redirect
     carrying a freshly minted access token (or an error redirect)."""
     # ── Group-to-workgroup mapping check ─────────────────────────────────────
@@ -1143,12 +1171,22 @@ def _complete_oauth_login(db, *, subject, email, display_name, groups, provider)
         return {}
 
     # ── Find or auto-create user ──────────────────────────────────────────────
-    # Look up by stable subject first, then fall back to email
-    user = None
-    if subject:
-        user = db.query(User).filter(User.oauth_subject == subject).first()
+    # By the IdP's stable subject. An email match is only a candidate, linked under the
+    # rules in _email_link_refusal; anything else is refused rather than auto-created,
+    # because a second account with the same email would be just as confusing.
+    if not subject:
+        logger.warning("SSO login for %r carried no subject claim; refused", email)
+        return RedirectResponse(url="/login?error=sso_link_refused", status_code=302)
+    user = db.query(User).filter(User.oauth_subject == subject).first()
     if not user:
-        user = db.query(User).filter(User.email == email).first()
+        candidate = db.query(User).filter(User.email == email).first()
+        if candidate is not None:
+            why = _email_link_refusal(candidate, subject, email_verified)
+            if why:
+                logger.warning("SSO login for %r not linked to existing user %r: %s",
+                               email, candidate.username, why)
+                return RedirectResponse(url="/login?error=sso_link_refused", status_code=302)
+            user = candidate
 
     if user and user.is_service_account:
         # An IdP identity must never land on a workload principal -- an email an admin
@@ -1160,9 +1198,14 @@ def _complete_oauth_login(db, *, subject, email, display_name, groups, provider)
     if user:
         if not user.is_active:
             return RedirectResponse(url="/login?error=account_disabled", status_code=302)
-        # Sync fields from Entra ID
-        if subject and not user.oauth_subject:
+        # Sync fields from the provider. Linking happens here, once: the subject is
+        # stored and from then on is the only way this account is found.
+        if not user.oauth_subject:
             user.oauth_subject = subject
+            from ..services import job_service
+            job_service.log_audit(db, user.username, "sso_account_linked",
+                                  details={"provider": provider,
+                                           "was": user.auth_provider or "local"})
         user.auth_provider = provider
         if display_name and not user.full_name:
             user.full_name = display_name
@@ -1349,6 +1392,11 @@ def oauth_azure_callback(
     if not email:
         return RedirectResponse(url="/login?error=no_email", status_code=302)
 
+    # Entra puts no email_verified claim in its tokens. Signing in through one specific
+    # tenant (not common / organizations / consumers) means MSAL only accepted a token that
+    # tenant issued, so the address is one its own directory holds: verified enough to link
+    # an account an administrator opted in. Multi-tenant sign-in links by subject only.
+    _multi = (oauth_tenant_id or "").strip().lower() in ("", "common", "organizations", "consumers")
     return _complete_oauth_login(
         db,
         subject=oid,
@@ -1356,6 +1404,7 @@ def oauth_azure_callback(
         display_name=display_name,
         groups=id_token_claims.get("groups", []),
         provider="azure_ad",
+        email_verified=not _multi,
     )
 
 
@@ -1435,6 +1484,7 @@ def oauth_oidc_callback(
     return _complete_oauth_login(
         db, subject=subject, email=email, display_name=display_name,
         groups=groups, provider="oidc",
+        email_verified=oidc_service.email_is_verified(claims, email),
     )
 
 

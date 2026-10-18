@@ -76,7 +76,7 @@ def _accessible_workgroups(user: User) -> Optional[List[str]]:
     return [w.lower() for w in user.workgroups_list]
 
 
-def _assert_can_act(user: User, workgroup, what: str) -> None:
+def _assert_can_act(user: User, workgroup, what: str, action: str = "destroy it") -> None:
     """Refuse acting on something this user cannot see.
 
     Guards both teardown and power: the question is ownership, which does not
@@ -98,7 +98,7 @@ def _assert_can_act(user: User, workgroup, what: str) -> None:
         raise HTTPException(
             status_code=403,
             detail=(f"{what} is not assigned to a workstream, so only an admin can "
-                    "destroy it."))
+                    f"{action}."))
     if wg not in accessible:
         raise HTTPException(
             status_code=403, detail=f"Access denied to workstream '{wg}'")
@@ -1415,7 +1415,14 @@ def create_image_from_instance(
     By default the instance is NOT rebooted (no_reboot=True), so the image
     may have filesystem inconsistencies — suitable for most Linux workloads.
     The image creation runs as a background job; AWS typically takes 5–20 minutes.
+
+    Ownership first, as destroy and power check it: an image is a full copy of the disk,
+    so imaging another workstream's instance hands you its data. Not deployed here means
+    admin-only.
     """
+    deploy_job = _find_deploy_job(db, "ec2_deploy", "instance_id", instance_id)
+    _assert_can_act(current_user, deploy_job.workgroup if deploy_job else None,
+                    f"Instance {instance_id}", "image it")
     # `{}` for an immediate run, so the create_job below is unchanged when nobody
     # books a window. Resolved before it, so a bad time is a 400 rather than an
     # image job that quietly never starts.
@@ -1465,15 +1472,18 @@ async def get_instance_admin_password(
     import asyncio
     from ..services import windows_admin_secret
 
-    meta = None
+    meta = owner = None
     for job in db.query(Job).filter(Job.job_type == "ec2_deploy").all():
         m = job.metadata_dict
         if m.get("instance_id") == instance_id and not m.get("destroyed"):
-            meta = m
+            meta, owner = m, job
             break
     if meta is None:
         raise HTTPException(status_code=404,
                             detail=f"No active deployment record for instance {instance_id}.")
+    # A working administrator credential for the instance: only for its workstream.
+    _assert_can_act(current_user, owner.workgroup, f"Instance {instance_id}",
+                    "read its credentials")
     if meta.get("admin_password_custody") == "passwordsafe_managed":
         raise HTTPException(
             status_code=409,
@@ -1527,11 +1537,11 @@ async def get_instance_ssh_key(
         .filter(Job.job_type == "ec2_deploy", Job.status == "completed")
         .all()
     )
-    key_name = None
+    key_name = owner = None
     for job in deploy_jobs:
         meta = job.metadata_dict
         if meta.get("instance_id") == instance_id and not meta.get("destroyed"):
-            key_name = meta.get("key_name")
+            key_name, owner = meta.get("key_name"), job
             break
 
     if not key_name:
@@ -1539,6 +1549,9 @@ async def get_instance_ssh_key(
             status_code=404,
             detail="No active deployment record found for this instance, or key name is unknown.",
         )
+    # The private key is a login to the instance, so the same rule as its other credentials.
+    _assert_can_act(current_user, owner.workgroup, f"Instance {instance_id}",
+                    "read its credentials")
 
     try:
         private_key = await aws_service.get_keypair_private_key(_aws_region(), key_name)
@@ -1553,6 +1566,8 @@ async def get_instance_ssh_key(
 
     secret_name = f"ec2/keypairs/{key_name}"
     ssh_command = f"ssh -i <key-file> ec2-user@{ip}" if ip else None
+    job_service.log_audit(db, current_user.username, "aws_instance_ssh_key_read",
+                          details={"instance_id": instance_id, "key_name": key_name})
 
     return {
         "instance_id": instance_id,

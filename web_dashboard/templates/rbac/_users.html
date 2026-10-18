@@ -60,8 +60,8 @@
               </div>
             </td>
             <td class="px-4 py-3">
-              <span x-text="u.is_service_account ? 'Service' : (u.auth_provider === 'azure_ad' ? 'Azure AD' : 'Local')"
-                    :class="u.is_service_account ? 'bg-teal-100 text-teal-700' : (u.auth_provider === 'azure_ad' ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-600')"
+              <span x-text="u.is_service_account ? 'Service' : ({azure_ad: 'Azure AD', oidc: 'SSO', sso_pending: 'SSO (pending)'}[u.auth_provider] || 'Local')"
+                    :class="u.is_service_account ? 'bg-teal-100 text-teal-700' : ((u.auth_provider || 'local') !== 'local' ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-600')"
                     class="text-xs px-2 py-0.5 rounded-full"></span>
             </td>
             <td class="px-4 py-3">
@@ -222,7 +222,15 @@
             <input type="checkbox" x-model="form.is_active" class="rounded border-gray-300 text-green-500">
             <span>Active</span>
           </label>
+          <label x-show="ssoSwitchVisible()" class="flex items-center gap-2 text-sm cursor-pointer">
+            <input type="checkbox" x-model="form.sso_sign_in" class="rounded border-gray-300 text-purple-600">
+            <span>Sign in with SSO</span>
+          </label>
         </div>
+        <p x-show="ssoSwitchVisible() && form.sso_sign_in" class="text-xs text-purple-700 -mt-2">
+          Password sign-in stops when you save. This account is linked to the first single
+          sign-on login whose verified email matches it; until then, untick this to undo.
+        </p>
         <p x-show="form.is_admin" class="text-xs text-amber-600 -mt-2">
           Admin bypasses the permission grid entirely — every section, every level, plus
           the admin-only pages. The grid below is not consulted for this user.
@@ -912,6 +920,7 @@ function usersPage() {
         permissions: hasPerms ? JSON.parse(JSON.stringify(u.permissions)) : {},
         permissionsUnrestricted: false,
         is_service_account: !!u.is_service_account,
+        sso_sign_in: u.auth_provider === 'sso_pending',
         // Which POVs this user is narrowed to. Empty = every POV their `pov` scope
         // allows, which is what every existing user has.
         povEnvIds: [...(u.pov_env_ids || [])],
@@ -927,6 +936,15 @@ function usersPage() {
       this.permFilter = '';
       this.showUserModal = true;
       this.loadPovEnvironments();
+    },
+
+    // The "Sign in with SSO" switch: a person's local account, not yet linked, and not
+    // your own (api/users._set_sso_sign_in refuses that, as it would end your password
+    // sign-in). An SSO login never claims a local account without it.
+    ssoSwitchVisible() {
+      const u = this.editingUser;
+      return !!u && !u.is_service_account && u.id !== this.currentUserId
+        && ['local', 'sso_pending'].includes(u.auth_provider || 'local');
     },
 
     toggleWorkgroup(wg, checked) {
@@ -1012,6 +1030,8 @@ function usersPage() {
             role_id: this.form.role_id || '',
           };
           if (this.form.password) body.password = this.form.password;
+          // Only for an account single sign-on has not claimed yet: see ssoSwitchVisible.
+          if (this.ssoSwitchVisible()) body.sso_sign_in = !!this.form.sso_sign_in;
           // Admin bypasses the map entirely, so sending one would store a restriction
           // nothing reads and that reappears the day the flag comes off. See
           // buildPermissionsPayload for what the two empty states mean.

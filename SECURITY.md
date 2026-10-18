@@ -153,6 +153,20 @@ the life of the worker.
 
 These rows are opaque, single-use and short-lived; they hold no credential and no token.
 
+### Security headers
+
+Every response carries a Content-Security-Policy, `X-Frame-Options: DENY`,
+`X-Content-Type-Options: nosniff` and a referrer policy, plus HSTS when the request
+arrived over HTTPS (`main.py`, `_SECURITY_HEADERS`). The CSP forbids framing, plugins,
+a foreign `<base>` or form target, and fetch/XHR/WebSocket to any origin but the
+dashboard's own.
+
+It does **not** stop an injected script from running. Alpine evaluates expressions with
+`new Function`, and the pages carry inline scripts, so `script-src` allows
+`'unsafe-inline'` and `'unsafe-eval'`. Escaping is the defence: a value from the URL
+reaches an Alpine expression only through `|tojson` in a single-quoted attribute
+(`tests/test_page_ids_are_escaped_and_headers_sent.py` scans for the unsafe form).
+
 ### Reverse proxies, forwarded headers, and the public URL
 
 `TRUSTED_PROXY_HOSTS` decides which peers may set `X-Forwarded-For` and

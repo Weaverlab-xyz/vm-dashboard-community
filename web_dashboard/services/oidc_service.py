@@ -231,6 +231,18 @@ def claim_identity(claims: dict) -> tuple:
     return subject, email, display_name, [str(g) for g in raw_groups]
 
 
+def email_is_verified(claims: dict, email: str) -> bool:
+    """True only if the provider vouches for ``email``: its ``email_verified`` claim is the
+    boolean True and the address came from the ``email`` claim itself.
+
+    The fallbacks claim_identity uses (``preferred_username``, ``upn``, ``unique_name``)
+    are names, not verified addresses, and on Keycloak, Authentik or Okta a user can often
+    set them. An unverified address may still sign in an account already linked by subject;
+    it just never links a new one (api/auth._email_link_refusal).
+    """
+    return bool(email) and claims.get("email_verified") is True and claims.get("email") == email
+
+
 def clear_cache() -> None:
     """Drop cached discovery/JWKS — called when the config changes so an operator
     doesn't have to wait out the TTL after fixing an issuer."""

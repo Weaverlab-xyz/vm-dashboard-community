@@ -156,8 +156,35 @@ On every SSO login the dashboard:
    of the mapped groups.
 
 > If you configure **no** group mappings at all, the dashboard falls back to legacy
-> behavior: the user must already exist as a local account, and SSO simply
-> authenticates them.
+> behavior: the user must already exist, and SSO authenticates them. An existing
+> *local* account needs **Sign in with SSO** turned on first (below).
+
+### How an SSO identity finds its account
+
+An SSO login is matched to an account by the identity provider's **subject** (`sub`; for
+Entra, the object id `oid`), never by email alone. The first time a subject signs in:
+
+- **No account has its email** → a new account is created (if a group mapping matched).
+- **An account has its email** → it is linked only if all of these hold, and refused
+  otherwise (`/login?error=sso_link_refused`, with the reason in the log):
+  - the provider **verified** the email. For OIDC that means `email_verified: true` on the
+    `email` claim itself; `preferred_username`, `upn` and `unique_name` never count,
+    because on many providers the user can set them. For Entra it means signing in
+    through one specific tenant: multi-tenant (`common`, `organizations`) sign-in links
+    by subject only;
+  - the account is not already linked to a different subject;
+  - it is not a **local** (password) account, unless an administrator has turned on
+    **Sign in with SSO** for it on **RBAC → Users → Edit**. That switch ends password
+    sign-in for the account at once, and the next SSO login with a matching verified
+    email links it. Untick it to undo before that happens. Your own account cannot be
+    switched; ask another administrator.
+
+Once linked, the subject alone signs the account in; a later change of email at the
+provider does not matter. Every link is written to the audit log
+(`sso_account_linked`).
+
+Before this, any SSO login was matched by email to any existing account, administrators
+included, which let anyone able to put that address on an IdP profile sign in as it.
 
 For the permission model and how group-derived permissions combine with
 admin-granted ones, see the [Entitle user-JIT design doc](design/entitle-user-jit.md).

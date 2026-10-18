@@ -908,6 +908,52 @@ async def request_correlation(request: Request, call_next):
     return response
 
 
+# Sent on every response that has not set its own (the uploaded-logo route sets a stricter
+# one). What the CSP can and cannot do here, so nobody leans on it for the wrong thing:
+#   * script-src needs 'unsafe-inline' (about 24,000 lines of inline <script>) and
+#     'unsafe-eval' (Alpine evaluates every x-data/@click expression with new Function).
+#     So it does NOT stop an injected script; escaping does -- see jobs/detail.html.
+#   * It DOES stop: this page being framed (clickjacking), plugins, a <base> or <form>
+#     pointing somewhere else, and fetch/XHR/WebSocket to any origin but this one, which
+#     is what an injected script would use to send a stolen token away.
+# cdn.jsdelivr.net serves Swagger UI and Mermaid (pinned, CONTRIBUTING.md); images may be
+# any https: URL because operators upload and link logos.
+CONTENT_SECURITY_POLICY = "; ".join((
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net",
+    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+    "img-src 'self' data: blob: https:",
+    "font-src 'self' data:",
+    "connect-src 'self'",
+    "frame-ancestors 'none'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+))
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": CONTENT_SECURITY_POLICY,
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+}
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    """The headers in _SECURITY_HEADERS, plus HSTS when the request arrived over HTTPS.
+
+    HSTS only on HTTPS, judged after ProxyHeadersMiddleware has applied a trusted proxy's
+    X-Forwarded-Proto: sent over plain HTTP it is ignored by browsers anyway, and an
+    instance reached by IP over HTTP must stay reachable.
+    """
+    response = await call_next(request)
+    for name, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    if request.url.scheme == "https":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    return response
+
+
 # ── Static files & templates ──────────────────────────────────────────────────
 
 _base_dir = os.path.dirname(__file__)
