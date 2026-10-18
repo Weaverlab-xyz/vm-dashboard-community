@@ -13,9 +13,8 @@ noticing -- two of the three files are never open at the same time.
     `.item`, `.section`, `.name`, `.note`, `.progress` and `.count`. Inside a Tailwind app
     those are one collision away from a layout nobody can explain, and base.html already
     owns `.progress-bar-fill` one hyphen from `.progress`.
-  * **No checklist element also carries a Tailwind utility.** The Play CDN injects its
-    sheet at runtime, so which of two single-class rules wins is a question about script
-    timing rather than about the stylesheet. The way to never ask it is to not overlap.
+  * **No checklist element also carries a Tailwind utility.** Which of two single-class
+    rules wins is then a question about sheet order rather than about the stylesheet. The way to never ask it is to not overlap.
   * **Only the surfaces that WRITE carry a checkbox.** /use-cases performs no writes, so a
     checkbox there would be a control that looks live and records nothing.
 

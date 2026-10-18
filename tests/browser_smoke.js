@@ -12,8 +12,10 @@
 //   BASE      the app's URL               TOKEN  a bearer token for an admin
 //   PAGES     a JSON list of paths         ALLOW  path of the allowlist (JSON)
 //   LABEL     a name for this pass, for the report
-//   REQUIRE_TAILWIND=1  also fail if the pinned Tailwind CDN script did not load (CI,
-//                       where the network is open; a local sandbox may block it)
+//   ONLINE=1  leave external hosts reachable (CI, so the CDN-loaded Mermaid and Swagger
+//             UI run too); otherwise every request off the box is aborted
+//   CLASSES_OUT  write every class name the DOM carried to this file (JSON), for
+//                scripts/ci/css_coverage.sh
 //
 // For each page it: loads it; clicks every visible role="tab" button in turn; and, on
 // /settings, opens every integration panel. A failure is any of these not matched by an
@@ -45,8 +47,9 @@ function allowed(page, message) {
 (async () => {
   const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
   const ctx = await browser.newContext();
-  if (!process.env.REQUIRE_TAILWIND) {
-    // Offline mode: nothing leaves the box. Alpine is vendored, so pages still run.
+  if (!process.env.ONLINE) {
+    // Offline mode: nothing leaves the box. Alpine and Tailwind ship with the app, so
+    // pages still run and are styled.
     await ctx.route(/^https?:\/\/(?!127\.0\.0\.1|localhost)/, r => r.abort());
   }
   await ctx.addInitScript(t => {
@@ -56,6 +59,16 @@ function allowed(page, message) {
   }, TOKEN);
 
   const failures = [];
+  // Every class name the DOM actually carried, for scripts/ci/css_coverage.sh: the built
+  // stylesheet is generated from SOURCE, so a class composed at runtime or arriving in
+  // data would have no rule, and only a real page can show one.
+  const classes = new Set();
+  const collect = async p => {
+    for (const c of await p.evaluate(() =>
+      [...new Set([...document.querySelectorAll('*')].flatMap(e => [...e.classList]))]).catch(() => [])) {
+      classes.add(c);
+    }
+  };
   let visited = 0, tabs = 0, panels = 0, contextRetries = 0;
   for (const pagePath of PAGES) {
     const p = await ctx.newPage();
@@ -128,8 +141,9 @@ function allowed(page, message) {
       watchNav = true;
       visited++;
       if (status >= 500) failures.push(`${pagePath}: HTTP ${status}`);
-      if (process.env.REQUIRE_TAILWIND && !(await p.evaluate(() => !!window.tailwind))) {
-        failures.push(`${pagePath}: the pinned Tailwind CDN script did not load`);
+      if (!(await p.evaluate(() => [...document.styleSheets].some(
+        s => /\/static\/css\/tailwind\.css/.test(s.href || '') && s.cssRules.length > 0)))) {
+        failures.push(`${pagePath}: the built Tailwind stylesheet did not load`);
       }
       if (!(await p.evaluate(() => !!window.Alpine))) {
         failures.push(`${pagePath}: Alpine did not load`);
@@ -146,6 +160,7 @@ function allowed(page, message) {
         await p.waitForTimeout(250);
         for (const s of seen.slice(before)) s.where = `${pagePath} → tab "${label}"`;
         tabs++;
+        await collect(p);
       }
       if (pagePath === '/settings') {
         if (navigated) await recover();
@@ -181,6 +196,7 @@ function allowed(page, message) {
           await p.waitForTimeout(500);
           for (const s of seen.slice(before)) s.where = `${pagePath} → ${key} panel`;
           panels++;
+          await collect(p);
         }
       }
     } catch (e) {
@@ -189,9 +205,13 @@ function allowed(page, message) {
     for (const s of seen) {
       if (!allowed(pagePath, s.message)) failures.push(`${s.where}: ${s.message.slice(0, 600)}`);
     }
+    await collect(p);
     await p.close();
   }
   await browser.close();
+  if (process.env.CLASSES_OUT) {
+    fs.writeFileSync(process.env.CLASSES_OUT, JSON.stringify([...classes].sort()));
+  }
 
   console.log(`[${LABEL}] ${visited}/${PAGES.length} pages, ${tabs} tab clicks, ${panels} Settings panels` + (contextRetries ? `, ${contextRetries} retried after a lost execution context` : ''));
   if (failures.length) {

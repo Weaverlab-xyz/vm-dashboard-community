@@ -73,8 +73,8 @@ def test_every_script_and_link_in_a_template_is_versioned_or_remote():
     `href` actually resolves to, so a future asset served from some other local prefix
     is caught as well as one under the mount.
 
-    Remote URLs are exempt -- Tailwind, Mermaid and Swagger UI come off a CDN, and their
-    caching is not ours to set. Their VERSIONS are, and the next test pins those."""
+    Remote URLs are exempt -- Mermaid and Swagger UI come off a CDN, and their caching is
+    not ours to set. Their VERSIONS are, and the next test pins those."""
     attr = re.compile(r'\b(?:src|href)\s*=\s*"([^"]*)"')
     offenders = []
     for rel, text in _templates():
@@ -108,7 +108,8 @@ def test_the_asset_that_caused_this_is_versioned():
 
 
 # A CDN URL that names no exact version: `pkg@3.x.x`, `pkg@10`, `pkg@5.1`, or the
-# Tailwind play CDN with no version path. Each serves whatever upstream published last.
+# Tailwind play CDN with no version path (which no page should load at all -- see
+# test_tailwind_is_the_built_stylesheet_on_every_page_that_owns_its_head). Each serves whatever upstream published last.
 _FLOATING = re.compile(
     r"@\d+(?:\.(?:\d+|x))?(?:\.x)?/"              # pkg@10/ pkg@5.1/ pkg@3.x/ pkg@3.x.x/
     r"|@\d+\.x\.x/"
@@ -144,6 +145,24 @@ def test_alpine_is_the_vendored_copy_on_every_page_that_owns_its_head():
             f"{rel} still loads Alpine from a CDN")
     assert static_assets.url(f"js/vendor/{name}").count("=") == 1, (
         "the vendored Alpine is not versioned by static_url -- is the file missing?")
+
+
+def test_tailwind_is_the_built_stylesheet_on_every_page_that_owns_its_head():
+    """Tailwind is built ahead of time (scripts/build_css.sh), not run in the browser from
+    the play CDN. And the stylesheet is the LAST thing in <head>: the CDN appended its
+    sheet there at runtime, so a utility won a specificity tie against a hand-written
+    <style> rule, and the hand-written CSS in this app was written against that order."""
+    link = "<link rel=\"stylesheet\" href=\"{{ static_url('css/tailwind.css') }}\">"
+    for rel in ("base.html", "login.html", "setup.html", "pov/access.html"):
+        text = (TEMPLATES / rel).read_text(encoding="utf-8")
+        assert "cdn.tailwindcss.com" not in text, f"{rel} still loads the Tailwind play CDN"
+        head = text.split("</head>", 1)[0]
+        assert head.count(link) == 1, f"{rel} does not link the built Tailwind stylesheet"
+        after = head.split(link, 1)[1]
+        assert not re.search(r"<style|<link|{%\s*(?:block|include)", after), (
+            f"{rel}: something follows the Tailwind stylesheet in <head>; it must be last")
+    assert static_assets.url("css/tailwind.css").count("=") == 1, (
+        "css/tailwind.css is not versioned by static_url -- is the file missing?")
 
 def test_the_version_follows_the_bytes():
     """Two files differing only in content must get different versions, and the same
