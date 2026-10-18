@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from .. import core
+from ....utils.clock import utcnow
 
 # A rotation a day late is a scheduler that has not got to it; a week late is a
 # rotation that is not happening.
@@ -57,7 +58,7 @@ def _accounts(db) -> list:
 def account_checks(state: dict, *, now: Optional[datetime] = None) -> list:
     """Checks for one account's state. ``{}`` means Password Safe has no such account.
     Pure."""
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     if not state:
         return [core.check("exists", "In Password Safe", core.FAIL,
                            "The managed account no longer exists in Password Safe, so "
@@ -86,7 +87,7 @@ async def collect(db) -> list:
     if not accounts:
         return []
     states = await ps_api_service.get_managed_account_states([a[4] for a in accounts])
-    now = datetime.utcnow()
+    now = utcnow()
     return [core.Item(object_id=oid, name=name, kind=kind, href=href,
                       checks=account_checks(states.get(aid) or {}, now=now))
             for oid, name, kind, href, aid in accounts]

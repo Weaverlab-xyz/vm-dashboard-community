@@ -28,6 +28,7 @@ from typing import Optional
 
 from .. import core
 from . import cloud_status
+from ....utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -307,7 +308,7 @@ async def _k8s_live(rows: list) -> dict:
 async def collect(db) -> list:
     from ... import inventory_service, spend_sweeper
     from ....database import CloudDatabase, Job, K8sCluster
-    now = datetime.utcnow()
+    now = utcnow()
     inventory = [i for i in inventory_service.collect(db) if i.get("kind") != "directory"]
 
     job_ids = [i["id"].split(":", 1)[1] for i in inventory if i["id"].startswith("job:")]

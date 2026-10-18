@@ -35,6 +35,7 @@ import boto3  # noqa: E402
 
 from web_dashboard.database import (Base, Job, ManagedDirectory, RemoteAgent,  # noqa: E402
                                     SessionLocal, engine)
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.services import aws_service, btapi_service  # noqa: E402
 from web_dashboard.services import directory_service as ds  # noqa: E402
 
@@ -90,7 +91,7 @@ def _unpatch(saved):
 
 def _onprem(db):
     a = RemoteAgent(id=str(uuid.uuid4()), name=f"agent-{uuid.uuid4().hex[:6]}",
-                    agent_version="2.8.0", is_active=True, created_at=datetime.utcnow())
+                    agent_version="2.8.0", is_active=True, created_at=utcnow())
     db.add(a)
     db.commit()
     return ds.register_onprem(

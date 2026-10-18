@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from ..database import ChangeWindow
 from . import change_window
 from .suspend_schedule import ScheduleError
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ DEFAULT_GRACE_MINUTES = 60
 
 
 def _utcnow() -> datetime:
-    return datetime.utcnow()
+    return utcnow()
 
 
 def grace_minutes() -> int:

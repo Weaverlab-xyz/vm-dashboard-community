@@ -40,6 +40,7 @@ from datetime import datetime
 from typing import Optional
 
 from . import entitle_tiers
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -811,7 +812,7 @@ async def run_job(db, *, job_id: str, meta: dict) -> None:
             if bset.tf_state_json:
                 await reg.deregister(bset.tf_state_json)
             bset.status, bset.tf_state_json = "deleted", None
-            bset.updated_at = datetime.utcnow()
+            bset.updated_at = utcnow()
             db.commit()
             job_service.set_completed(db, job_id, {"action": "delete", "set_id": bset.id})
             return
@@ -824,14 +825,14 @@ async def run_job(db, *, job_id: str, meta: dict) -> None:
         bset.bundles_json = json.dumps(rows)
         bset.tf_state_json = result.get("tf_state_json")
         bset.status, bset.error = "active", None
-        bset.updated_at = datetime.utcnow()
+        bset.updated_at = utcnow()
         db.commit()
         job_service.set_completed(db, job_id, {"action": "apply", "set_id": bset.id,
                                                "bundles": len(rows)})
     except Exception as exc:  # noqa: BLE001 — every failure is recorded on the row
         logger.exception("entitle persona bundles job failed set=%s", bset.id)
         bset.status, bset.error = "failed", str(exc)[:4000]
-        bset.updated_at = datetime.utcnow()
+        bset.updated_at = utcnow()
         db.commit()
         job_service.set_failed(db, job_id, str(exc))
 

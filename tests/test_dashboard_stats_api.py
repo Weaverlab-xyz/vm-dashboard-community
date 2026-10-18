@@ -31,7 +31,7 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -89,7 +89,7 @@ def _write(tile_key, payload, *, provider="aws", scope="", fetched_at=None):
         row = DashboardStatCache(
             tile_key=tile_key, scope=scope, provider=provider,
             payload=json.dumps(payload), payload_version=store.PAYLOAD_VERSION,
-            fetched_at=fetched_at or datetime.utcnow(), stale=False,
+            fetched_at=fetched_at or datetime.now(timezone.utc).replace(tzinfo=None), stale=False,
             consecutive_failures=0)
         db.add(row)
         db.commit()
@@ -229,8 +229,8 @@ def test_a_stale_payload_version_reads_as_uncollected():
 
 def test_as_of_is_the_oldest_contributor_and_never_now():
     _reset()
-    old = datetime.utcnow() - timedelta(hours=3)
-    new = datetime.utcnow() - timedelta(minutes=1)
+    old = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=3)
+    new = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=1)
     _write("hyperv_vms", _rows(("hydra", "running", "")), provider="hyperv",
            scope="conn-a", fetched_at=old)
     _write("hyperv_vms", _rows(("hydra", "running", "")), provider="hyperv",
@@ -402,7 +402,7 @@ def _pov_env(env_id, name, *, status="active", vms=()):
     db = SessionLocal()
     try:
         db.add(PovEnvironment(id=env_id, platform="skytap", name=name, status=status,
-                              created_by="alice", created_at=datetime.utcnow()))
+                              created_by="alice", created_at=datetime.now(timezone.utc).replace(tzinfo=None)))
         for vm_name, jump in vms:
             db.add(PovEnvironmentVM(environment_id=env_id, platform_vm_id=vm_name,
                                     name=vm_name, pra_jump_id=jump or ""))

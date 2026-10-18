@@ -58,6 +58,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from ..database import WorkloadCloudCredential
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +183,7 @@ def lease_state(row: WorkloadCloudCredential,
     """
     if not row.lease_id or not row.lease_expires_at:
         return "none"
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     return "live" if row.lease_expires_at > now else "expired"
 
 
@@ -349,7 +350,7 @@ async def run(db: Session, *, row_id: str, job_id: str, action: str = "issue") -
         # gives at length).
         row.error_message = str(exc)[:2000]
         row.status = "failed"
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         logger.error("workload-cloud: %s failed for %s: %s", action, row_id, exc)
         job_service.set_failed(db, job_id, str(exc))
@@ -396,11 +397,11 @@ async def _run_issue(db: Session, row: WorkloadCloudCredential, job_id: str) -> 
     # role-chained credential at an hour and the provider clamps besides, so a page showing
     # the ask would tell an operator the credential lives longer than it does.
     row.lease_expires_at = result.get("expires_at")
-    row.lease_issued_at = datetime.utcnow()
+    row.lease_issued_at = utcnow()
     row.issue_count = int(row.issue_count or 0) + 1
     row.status = "issued"
     row.error_message = None
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
 
     if not row.lease_id:
@@ -451,7 +452,7 @@ async def _run_revoke(db: Session, row: WorkloadCloudCredential, job_id: str) ->
     row.lease_id = None
     row.lease_expires_at = None
     row.status = "registered"
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
     return {"id": row.id, "revoked": True,
             "note": ("the credential stopped working immediately. The identity can still "
@@ -495,7 +496,7 @@ async def _run_retire(db: Session, row: WorkloadCloudCredential, job_id: str) ->
     row.lease_id = None
     row.lease_expires_at = None
     row.status = "deleted"
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
     notes.append(f"identity retired after {row.issue_count or 0} issuance(s) — it can no "
                  f"longer mint")

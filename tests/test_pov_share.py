@@ -35,6 +35,7 @@ sys.path.insert(0, _ROOT)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-pov-share")
 
 from web_dashboard import database as d  # noqa: E402
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 
 d.Base.metadata.create_all(bind=d.engine)
 
@@ -176,7 +177,7 @@ def test_the_povs_own_expiry_wins_over_the_default():
     """A live URL to an environment that was already reaped is a support call that starts
     with 'the link is broken' and ends nowhere near the truth."""
     db = d.SessionLocal()
-    reap = datetime.utcnow() + timedelta(days=3)
+    reap = utcnow() + timedelta(days=3)
     env = _env(db, expires_at=reap)
     fake = _FakePlatform()
     original = _install(fake)
@@ -191,27 +192,27 @@ def test_the_povs_own_expiry_wins_over_the_default():
 def test_a_past_expiry_on_the_pov_falls_back_to_the_default():
     """An already-reaped date would otherwise publish a link that is dead on arrival."""
     db = d.SessionLocal()
-    env = _env(db, expires_at=datetime.utcnow() - timedelta(days=1))
+    env = _env(db, expires_at=utcnow() - timedelta(days=1))
     fake = _FakePlatform()
     original = _install(fake)
     try:
         asyncio.run(sh.create(db, env))
     finally:
         _restore(original)
-    assert env.share_expires_at > datetime.utcnow()
+    assert env.share_expires_at > utcnow()
     db.close()
 
 
 def test_an_explicit_request_wins_over_both():
     db = d.SessionLocal()
-    env = _env(db, expires_at=datetime.utcnow() + timedelta(days=30))
+    env = _env(db, expires_at=utcnow() + timedelta(days=30))
     fake = _FakePlatform()
     original = _install(fake)
     try:
         asyncio.run(sh.create(db, env, days=2))
     finally:
         _restore(original)
-    delta = env.share_expires_at - datetime.utcnow()
+    delta = env.share_expires_at - utcnow()
     assert timedelta(days=1, hours=23) < delta < timedelta(days=2, minutes=1)
     db.close()
 
@@ -235,7 +236,7 @@ def test_an_expired_link_is_reported_rather_than_cleared():
     row would delete the evidence that a link was ever shared."""
     db = d.SessionLocal()
     env = _env(db, share_url="https://cloud.example/d/1", share_id="ps-1",
-               share_expires_at=datetime.utcnow() - timedelta(hours=1))
+               share_expires_at=utcnow() - timedelta(hours=1))
     assert sh.is_expired(env) is True
     described = sh.describe(db, env)
     assert described["share_expired"] is True and described["share_url"]

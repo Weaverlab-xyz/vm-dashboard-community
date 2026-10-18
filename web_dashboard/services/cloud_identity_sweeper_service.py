@@ -57,6 +57,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from ..database import EntitleActivation
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +171,7 @@ def sweep_azure(db: Session) -> dict:
 def _sweep_one_cloud(db: Session, *, cloud: str) -> dict:
     """Shared per-cloud reconciliation. Phase 4b/4c plug into this
     by calling it with ``cloud='azure'`` or ``cloud='gcp'``."""
-    cutoff = datetime.utcnow() - timedelta(hours=_SWEEP_LOOKBACK_HOURS)
+    cutoff = utcnow() - timedelta(hours=_SWEEP_LOOKBACK_HOURS)
     rows = (
         db.query(EntitleActivation)
         .filter(
@@ -215,7 +216,7 @@ def _sweep_one_cloud(db: Session, *, cloud: str) -> dict:
             reconciled_failed += 1
             continue
 
-        now = datetime.utcnow()
+        now = utcnow()
         # First: check the local expires_at — Entitle's TTL self-expiry
         # might not have flipped status to revoked yet, but the local
         # clock can tell us the elevation is mathematically past its

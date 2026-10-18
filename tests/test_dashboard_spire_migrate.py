@@ -56,6 +56,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from jose import jwk, jwt  # noqa: E402
 from web_dashboard.database import (Base, RemoteAgent, SessionLocal,  # noqa: E402
                                     SpiffeTrustDomain, engine, get_db)
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.api import agent as agent_api  # noqa: E402
 from web_dashboard.services import (agent_service, agent_signing, config_service,  # noqa: E402
                                     dashboard_spire)
@@ -314,10 +315,10 @@ def test_sync_if_due_respects_its_cadence_and_never_raises():
     db = SessionLocal()
     try:
         rec = db.query(SpiffeTrustDomain).filter(SpiffeTrustDomain.trust_domain == TD).first()
-        rec.bundle_captured_at = datetime.utcnow()
+        rec.bundle_captured_at = utcnow()
         db.commit()
         assert dashboard_spire.sync_if_due(db) is False, "re-synced a fresh bundle"
-        later = datetime.utcnow() + timedelta(hours=25)
+        later = utcnow() + timedelta(hours=25)
         assert dashboard_spire.sync_if_due(db, now=later) is True
         config_service.set("spire_attest_enabled", "0")
         assert dashboard_spire.sync_if_due(db, now=later + timedelta(days=2)) is True, (

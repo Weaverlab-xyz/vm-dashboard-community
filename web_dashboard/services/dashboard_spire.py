@@ -40,6 +40,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from . import config_service
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -251,7 +252,7 @@ def sync_trust_domain(db: Session, td: Optional[str] = None) -> dict:
             f"the trust domain {td} is already registered "
             f"({'by a SPIRE lab' if rec.spire_lab_id else 'by hand'}); not overwriting its "
             f"keys. Remove that registration, or give this SPIRE server another name.")
-    now = datetime.utcnow()
+    now = utcnow()
     if rec is None:
         rec = SpiffeTrustDomain(trust_domain=td, created_by=OWNER)
         db.add(rec)
@@ -285,7 +286,7 @@ def sync_if_due(db: Session, now: Optional[datetime] = None) -> bool:
     to it verify against those keys whichever switches are on. Never raises: this runs from
     the background refresh loop, and a SPIRE server that is down today must not take the
     loop with it."""
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     try:
         rec = registered(db)
         if rec is None and not server_in_use():

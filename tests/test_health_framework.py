@@ -38,6 +38,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-health-tests")
 
 from web_dashboard.database import (Base, BeyondTrustTenant, HealthArea,  # noqa: E402
                                     HealthCheck, SessionLocal, engine)
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.services import feature_flags  # noqa: E402
 from web_dashboard.services.health import core, registry, runner  # noqa: E402
 from web_dashboard.services.health.collectors import (agents, bt_tenants,  # noqa: E402
@@ -144,7 +145,7 @@ def test_only_enabled_and_due_areas_run():
             asyncio.run(runner.run_due(db))
             asyncio.run(runner.run_due(db))          # not due again yet
             assert calls == ["on_area"], calls
-            db.get(HealthArea, "on_area").last_run_at = datetime.utcnow() - timedelta(minutes=11)
+            db.get(HealthArea, "on_area").last_run_at = utcnow() - timedelta(minutes=11)
             db.commit()
             asyncio.run(runner.run_due(db))
             assert calls == ["on_area", "on_area"], calls
@@ -159,7 +160,7 @@ def test_only_enabled_and_due_areas_run():
 def test_run_now_is_throttled():
     db = SessionLocal()
     _clear(db)
-    db.add(HealthArea(area="remote_agents", last_run_at=datetime.utcnow()))
+    db.add(HealthArea(area="remote_agents", last_run_at=utcnow()))
     db.commit()
     result = asyncio.run(runner.run_now(db, "remote_agents"))
     assert result.get("throttled") is True

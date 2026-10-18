@@ -53,6 +53,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from web_dashboard.database import (  # noqa: E402
     AgentCell, Base, SessionLocal, engine, get_db)
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.api import agentcell as agentcell_api  # noqa: E402
 from web_dashboard.api.auth import get_current_user  # noqa: E402
 
@@ -216,7 +217,7 @@ def test_the_tiles_secondary_counts_authorization_not_installation():
     from datetime import datetime, timedelta
     from web_dashboard.services import agentcell_service as A
 
-    now = datetime.utcnow()
+    now = utcnow()
 
     class _Row:
         def __init__(self, **kw):

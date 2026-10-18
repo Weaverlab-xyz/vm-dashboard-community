@@ -22,7 +22,12 @@ import os
 import sys
 import tempfile
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+
+def _utcnow():
+    """Naive UTC now: what the deprecated datetime.utcnow() returned."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -80,7 +85,7 @@ def test_the_agent_sync_scenario():
     config_service.set("remote_agents_enabled", "true")
 
     agent = RemoteAgent(name=f"site-{os.getpid()}", public_key="k", is_active=True,
-                        last_seen_at=datetime.utcnow(), enrolled_at=datetime.utcnow())
+                        last_seen_at=_utcnow(), enrolled_at=_utcnow())
     db.add(agent)
     db.commit()
     db.refresh(agent)
@@ -221,7 +226,7 @@ def test_the_agent_sync_scenario():
 
     # An offline agent is skipped with a visible reason rather than queued: a job that
     # waits three days is worse than a refusal an operator can see.
-    agent.last_seen_at = datetime.utcnow() - timedelta(hours=2)
+    agent.last_seen_at = _utcnow() - timedelta(hours=2)
     row = db.query(HypervisorConnection).filter(HypervisorConnection.id == cid).one()
     row.last_sync_at = None
     db.commit()
@@ -238,7 +243,7 @@ def test_the_agent_sync_scenario():
     assert job is None and "not online" in reason
     _ok("a manual sync refuses an offline agent, with the reason the button shows")
 
-    agent.last_seen_at = datetime.utcnow()
+    agent.last_seen_at = _utcnow()
     db.commit()
     job, reason = hss.sync_now(db, row)
     assert job is not None and reason == ""
@@ -252,7 +257,7 @@ def test_the_agent_sync_scenario():
     deep = "C:/VMs/" + ("d" * 200) + "/vm.vmx"
     hss._upsert(db, cid, [{"vm_id": "OS01", "name": "labelled",
                            "guest_os": "windows9-64", "scope": deep}],
-                datetime.utcnow())
+                _utcnow())
     stored = [v for v in hss.list_vms(db, cid) if v["vm_id"] == "OS01"][0]
     assert stored["guest_os"] == "windows9-64"
     assert stored["scope"] == deep, "a deep VMX path must survive the round trip"
@@ -265,17 +270,17 @@ def test_the_agent_sync_scenario():
         return [v for v in hss.list_vms(db, cid) if v["vm_id"] == "OS01"][0]["ip_addresses"]
 
     hss._upsert(db, cid, [{"vm_id": "OS01", "name": "labelled", "power_state": "on",
-                           "ip_addresses": ["192.168.68.10"]}], datetime.utcnow())
+                           "ip_addresses": ["192.168.68.10"]}], _utcnow())
     hss._upsert(db, cid, [{"vm_id": "OS01", "name": "labelled", "power_state": "off"}],
-                datetime.utcnow())
+                _utcnow())
     assert _ips() == ["192.168.68.10"], "a stopped VM's page erased its last-known address"
     hss._upsert(db, cid, [{"vm_id": "OS01", "name": "labelled", "ip_addresses": []}],
-                datetime.utcnow())
+                _utcnow())
     assert _ips() == ["192.168.68.10"], "an empty address list is not a new address"
     _ok("a page with no addresses keeps the last-known ones")
 
     hss._upsert(db, cid, [{"vm_id": "OS01", "name": "labelled",
-                           "ip_addresses": ["192.168.68.44"]}], datetime.utcnow())
+                           "ip_addresses": ["192.168.68.44"]}], _utcnow())
     assert _ips() == ["192.168.68.44"], "a re-addressed guest kept its old address"
     _ok("a page that does carry addresses replaces them whole")
 

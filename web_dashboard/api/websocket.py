@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from ..database import SessionLocal, User
 from ..services import job_service
 from .auth import can_audit_jobs, resolve_bearer
+from ..utils.clock import utcnow
 
 router = APIRouter(tags=["websocket"])
 logger = logging.getLogger(__name__)
@@ -127,7 +128,7 @@ async def broadcast_progress(job_id: str, pct: int, message: str, log_line: str 
         "type": "progress",
         "progress_pct": pct,
         "progress_message": message,
-        "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "timestamp": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     if log_line:
         payload["log_line"] = log_line
@@ -184,7 +185,7 @@ async def job_progress_websocket(websocket: WebSocket, job_id: str):
             "progress_pct": job.progress_pct,
             "progress_message": job.progress_message,
             "log_line": line,
-            "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "timestamp": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
     try:
@@ -201,7 +202,7 @@ async def job_progress_websocket(websocket: WebSocket, job_id: str):
             "status": job.status,
             "progress_pct": job.progress_pct,
             "progress_message": job.progress_message,
-            "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "timestamp": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         })
 
         # Replay persisted Live Output BEFORE any terminal close, so a client that
@@ -235,7 +236,7 @@ async def job_progress_websocket(websocket: WebSocket, job_id: str):
                 "status": job.status,
                 "progress_pct": job.progress_pct,
                 "progress_message": job.progress_message,
-                "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "timestamp": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
             })
 
             # Tail any new Live Output lines persisted since the last poll.

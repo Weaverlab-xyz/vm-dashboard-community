@@ -30,6 +30,7 @@ from . import (job_service, lab_platforms, pov_accessor_entitle, pov_accessor_se
                pov_broker, pov_credentials, pov_entitle_agent, pov_gateway,
                pov_resource_broker, pov_share, pov_use_cases, pov_vendor_access,
                pov_wireup)
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ _ACTIONABLE = frozenset((STATUS_ACTIVE, STATUS_FAILED))
 
 
 def _now() -> datetime:
-    return datetime.utcnow()
+    return utcnow()
 
 
 def get(db: Session, env_id: str) -> PovEnvironment | None:

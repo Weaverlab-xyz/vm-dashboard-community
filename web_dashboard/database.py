@@ -12,6 +12,7 @@ from sqlalchemy.pool import NullPool, QueuePool
 import bcrypt as _bcrypt
 
 from .config import settings
+from .utils.clock import utcnow
 
 # Create database engine.
 #
@@ -174,7 +175,7 @@ class User(Base):
     email = Column(String(200))
     workgroups = Column(Text)  # JSON array: ["Hydra", "Weaverlab"]
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     # Auth provider fields
     auth_provider = Column(String(20), default="local", nullable=False)  # 'local' | 'azure_ad'
     oauth_subject = Column(String(255), nullable=True, unique=True)  # Azure AD oid claim
@@ -491,7 +492,7 @@ class Fido2Credential(Base):
     sign_count = Column(Integer, default=0, nullable=False)
     aaguid = Column(String(36))  # authenticator device type GUID (informational)
     device_name = Column(String(100))  # user-provided label e.g. "YubiKey 5C"
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     last_used_at = Column(DateTime)
     is_active = Column(Boolean, default=True)
 
@@ -506,7 +507,7 @@ class PersonalAccessToken(Base):
     user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     name = Column(String(100), nullable=False)           # e.g. "github-actions-prod"
     token_hash = Column(String(64), nullable=False, unique=True, index=True)  # SHA-256 hex of raw token
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     expires_at = Column(DateTime, nullable=True)         # None = never expires
     last_used_at = Column(DateTime, nullable=True)
     is_active = Column(Boolean, default=True)
@@ -547,7 +548,7 @@ class OAuthClient(Base):
     previous_secret_hash = Column(String(64), nullable=True)
     previous_expires_at = Column(DateTime, nullable=True)
     token_ttl_seconds = Column(Integer, nullable=False, default=900)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     created_by = Column(String(100), nullable=True)
     last_used_at = Column(DateTime, nullable=True)
     is_active = Column(Boolean, default=True)
@@ -585,7 +586,7 @@ class ExternalWorkloadIdentity(Base):
     # If set, the token's azp / appid / client_id / cid must equal it as well.
     expected_client = Column(String(255), nullable=True)
     name = Column(String(100), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     created_by = Column(String(100), nullable=True)
     last_used_at = Column(DateTime, nullable=True)
     is_active = Column(Boolean, default=True)
@@ -612,7 +613,7 @@ class RunnerCredentialGrant(Base):
     values_enc = Column(Text, nullable=False)            # config_service._encrypt(JSON)
     expires_at = Column(DateTime, nullable=False)
     redeemed_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class SpiffeTrustDomain(Base):
@@ -645,7 +646,7 @@ class SpiffeTrustDomain(Base):
     bundle_json = Column(Text, nullable=True)
     bundle_captured_at = Column(DateTime, nullable=True)
     spire_lab_id = Column(String(36), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     created_by = Column(String(100), nullable=True)
     updated_at = Column(DateTime, nullable=True)
 
@@ -680,7 +681,7 @@ class SpireAdminCall(Base):
     stderr_enc = Column(Text, nullable=True)
     requested_by = Column(String(255), nullable=True)
     served_by = Column(String(255), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False, index=True)
     claimed_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
 
@@ -697,7 +698,7 @@ class SpireAdminRelay(Base):
     # host:pid — one row per serving process.
     id = Column(String(255), primary_key=True)
     transport = Column(String(16), nullable=False)
-    seen_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    seen_at = Column(DateTime, default=utcnow, nullable=False, index=True)
 
 
 class LoginAttempt(Base):
@@ -720,7 +721,7 @@ class LoginAttempt(Base):
     username = Column(String(150), nullable=False, index=True)
     ip = Column(String(45), nullable=False, default="", index=True)
     # Indexed because every query is a range scan on it, in both the check and the sweep.
-    attempted_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    attempted_at = Column(DateTime, default=utcnow, nullable=False, index=True)
 
 
 class EphemeralState(Base):
@@ -812,7 +813,7 @@ class RemoteAgent(Base):
     last_seen_at = Column(DateTime, nullable=True, index=True)
     last_seen_ip = Column(String(45))              # 45 = max INET6_ADDRSTRLEN
     is_active = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     created_by = Column(String(100))
 
     # SPIRE attestation (docs/design/agent-and-human-identity.md). `spiffe_id` is the
@@ -886,7 +887,7 @@ class AgentNonce(Base):
     agent_id = Column(String(36), nullable=False, index=True)
     nonce = Column(String(64), nullable=False)
     # Indexed because the sweeper's only query is a range delete on this column.
-    seen_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    seen_at = Column(DateTime, default=utcnow, nullable=False, index=True)
 
     # The uniqueness IS the guard: the second insert of a nonce raises IntegrityError,
     # and that is what rejects the replay. Scoped per agent so two agents cannot
@@ -915,7 +916,7 @@ class AgentEnrollAttempt(Base):
     # address must still be recorded, or it would be the one free lane.
     ip = Column(String(45), nullable=False, default="", index=True)
     # Indexed because every query is a range scan on it, in both the check and the sweep.
-    attempted_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    attempted_at = Column(DateTime, default=utcnow, nullable=False, index=True)
 
 
 class HypervisorConnection(Base):
@@ -986,9 +987,9 @@ class HypervisorConnection(Base):
     last_ok_at = Column(DateTime)
     last_error = Column(Text)
     last_sync_at = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     created_by = Column(String(100))
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=utcnow)
 
     # Unique on (kind, name), NOT on name alone: "dc1" is a reasonable label for both a
     # vSphere and a Proxmox connection. Deliberately NOT unique on (kind, host, port)
@@ -1043,7 +1044,7 @@ class HypervisorVMCache(Base):
     # agent is upgraded separately and lags: a label baked into the agent would freeze at
     # whatever build the host last pulled.
     guest_os = Column(String(64))
-    synced_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    synced_at = Column(DateTime, default=utcnow, nullable=False, index=True)
 
 
 class ConfigMgmtRoute(Base):
@@ -1091,9 +1092,9 @@ class ConfigMgmtRoute(Base):
     cidr = Column(String(64), nullable=False)
     label = Column(String(64))      # "vmnet1 host-only" — display only
     is_active = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     created_by = Column(String(100))
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=utcnow)
 
     # Unique on the normalised cidr, and this IS the tiebreak. Two agents claiming one
     # range is the single ambiguity longest-prefix matching cannot resolve, so it is
@@ -1251,7 +1252,7 @@ class Job(Base):
     status = Column(String(20), nullable=False, default="pending", index=True)  # pending, running, completed, failed, cancelled
     progress_pct = Column(Integer, default=0)
     progress_message = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False, index=True)
     started_at = Column(DateTime)
     completed_at = Column(DateTime)
     # Heartbeat — bumped on every status/progress write (incl. streamed terraform
@@ -1283,7 +1284,7 @@ class Job(Base):
         if self.started_at and self.completed_at:
             return int((self.completed_at - self.started_at).total_seconds())
         elif self.started_at:
-            return int((datetime.utcnow() - self.started_at).total_seconds())
+            return int((utcnow() - self.started_at).total_seconds())
         return None
 
 
@@ -1298,7 +1299,7 @@ class JobLog(Base):
     job_id = Column(String(36), index=True, nullable=False)
     seq = Column(Integer, nullable=False)
     line = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
     __table_args__ = (UniqueConstraint("job_id", "seq", name="uq_job_log_seq"),)
 
@@ -1344,7 +1345,7 @@ class ChangeWindow(Base):
     # retired without rewriting history.
     enabled = Column(Boolean, nullable=True, default=True)
     created_by = Column(String(100))
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class JobSchedule(Base):
@@ -1395,7 +1396,7 @@ class JobSchedule(Base):
     # created it is a real risk; schedule_service refuses to materialise for a user who
     # is gone or deactivated, rather than quietly running as nobody.
     created_by = Column(String(100), index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     # NULL/True = active. Real column, not a payload key: the sweep filters on it every
     # pass, and database.py's own note on `batch_id` explains why anything queried must
     # not live inside a JSON Text column.
@@ -1455,7 +1456,7 @@ class NotificationEndpoint(Base):
     # is what almost every endpoint wants — the per-endpoint filter exists so one noisy
     # sink can be narrowed without narrowing everyone.
     event_types = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     created_by = Column(String(100))
     last_success_at = Column(DateTime)
     # The verbatim transport error from the most recent failure. Kept on the endpoint
@@ -1483,7 +1484,7 @@ class NotificationDelivery(Base):
     __tablename__ = "notification_deliveries"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False, index=True)
 
     # ── the event (denormalised: fan-out is a handful of rows, so a join buys nothing) ──
     event_type = Column(String(64), nullable=False, index=True)   # "resource.expiring"
@@ -1546,7 +1547,7 @@ class AuditLog(Base):
     __tablename__ = "audit_log"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    timestamp = Column(DateTime, default=utcnow, nullable=False, index=True)
     username = Column(String(100), index=True)
     action = Column(String(100), nullable=False, index=True)  # 'vm_start', 'vm_stop', 'user_login', etc.
     target_vm = Column(Text)
@@ -1588,7 +1589,7 @@ class ConfigApplyState(Base):
     playbook_ref = Column(String(255), nullable=False)
     content_hash = Column(String(64), nullable=False)   # sha256 of the applied asset bytes
     inputs_hash = Column(String(64))                    # sha256 of resolved extra_vars (one-way)
-    applied_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    applied_at = Column(DateTime, default=utcnow, nullable=False)
     job_id = Column(String(36))
 
     __table_args__ = (UniqueConstraint("target", "playbook_ref", name="uq_apply_target_playbook"),)
@@ -1625,7 +1626,7 @@ class OAuthGroupMapping(Base):
     # one is not in the cycle, but an assignment that is constrained on one table and not
     # the other is a distinction no reader would guess and no test could hold.
     role_id = Column(String(36), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class AccessRole(Base):
@@ -1659,8 +1660,8 @@ class AccessRole(Base):
     description = Column(Text, nullable=True)
     permissions = Column(Text, nullable=True)
     is_builtin = Column(Boolean, default=False, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
     created_by_user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"),
                                 nullable=True)
 
@@ -1701,7 +1702,7 @@ class Workgroup(Base):
     description = Column(Text, nullable=True)
     local_vm_path = Column(Text, nullable=True)  # UNC path for VMware local VMs; null in community
     is_default = Column(Boolean, default=False, nullable=False, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     created_by_user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     # ── Required change window (services/admission_service._enforce_change_window) ──
     # "Nothing in this workgroup may be changed outside Prod Weekend." Unlike the
@@ -1746,8 +1747,8 @@ class VMWorkgroupOverride(Base):
     vm_id = Column(String(128), nullable=False)
     workgroup = Column(String(64), ForeignKey("workgroups.name", ondelete="CASCADE"), nullable=False, index=True)
     created_by = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
     __table_args__ = (UniqueConstraint("provider", "vm_id", name="uq_vm_workgroup_override"),)
 
@@ -1768,7 +1769,7 @@ class Approval(Base):
     payload_hash = Column(String(64), nullable=False)
     # status values: pending | approved | denied | expired | consumed
     status = Column(String(20), nullable=False, default="pending", index=True)
-    requested_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    requested_at = Column(DateTime, default=utcnow, nullable=False)
     approved_at = Column(DateTime, nullable=True)
     expires_at = Column(DateTime, nullable=False)
     consumed_at = Column(DateTime, nullable=True)
@@ -1817,7 +1818,7 @@ class EntitleActivation(Base):
     # into the constructor unconditionally, so its absence made every elevation
     # raise TypeError the moment cloud_identity_gate_enabled was turned on.
     tenant_id = Column(String(64), nullable=True, index=True)
-    requested_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    requested_at = Column(DateTime, default=utcnow, nullable=False)
     granted_at = Column(DateTime, nullable=True)
     expires_at = Column(DateTime, nullable=True)
     revoked_at = Column(DateTime, nullable=True)
@@ -1841,7 +1842,7 @@ class AppConfig(Base):
     key = Column(String(128), primary_key=True)
     value = Column(Text, nullable=True)         # Fernet-encrypted
     workgroup = Column(String(64), nullable=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class BrandAsset(Base):
@@ -1887,7 +1888,7 @@ class BrandAsset(Base):
     height = Column(Integer, nullable=True)
     filename = Column(String(255), nullable=True)      # display only, in the settings card
     uploaded_by = Column(String(128), nullable=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class SchemaMarker(Base):
@@ -1907,7 +1908,7 @@ class SchemaMarker(Base):
     __tablename__ = "schema_markers"
 
     key = Column(String(128), primary_key=True)
-    applied_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    applied_at = Column(DateTime, default=utcnow, nullable=False)
     detail = Column(Text, nullable=True)        # free-text: what it did, for support
 
 
@@ -1931,7 +1932,7 @@ class SecretVault(Base):
     credentials_ref = Column(Text, nullable=True)          # optional reference to creds (e.g. distinct SP per vault)
     workgroup = Column(String(64), nullable=True)          # if set, only this workgroup resolves here
     is_default = Column(Boolean, nullable=False, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     created_by_user_id = Column(String(36), nullable=True)
 
 
@@ -1950,7 +1951,7 @@ class ContainerStateCache(Base):
     endpoint_name = Column(String(200))
     workgroup = Column(String(50), index=True)
     created_ts = Column(Integer)                      # unix epoch from Docker
-    last_updated = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    last_updated = Column(DateTime, default=utcnow, nullable=False, index=True)
 
 
 class CloudCostCache(Base):
@@ -2007,7 +2008,7 @@ class CloudCostCache(Base):
     # subscription, so this cloud's summary and breakdown queries must not overlap.
     next_query_allowed_at = Column(DateTime, nullable=True)
 
-    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class WorkloadCredentialLease(Base):
@@ -2078,7 +2079,7 @@ class WorkloadCredentialLease(Base):
     claim_until = Column(DateTime, nullable=True)
     claim_owner = Column(String(64), nullable=True)    # "host:pid" — diagnostics only
 
-    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class DashboardStatCache(Base):
@@ -2148,7 +2149,7 @@ class DashboardStatCache(Base):
     # CloudProviderBusy.
     next_query_allowed_at = Column(DateTime, nullable=True)
 
-    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class PovPlatformCache(Base):
@@ -2216,7 +2217,7 @@ class PovPlatformCache(Base):
     lease_owner = Column(String(64), nullable=True)   # "host:pid" — diagnostics only
     next_query_allowed_at = Column(DateTime, nullable=True)
 
-    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class RegisteredImage(Base):
@@ -2253,7 +2254,7 @@ class RegisteredImage(Base):
     #     "gcp":   {"self_link": "...", "status": ...} }
     promotions = Column(Text, nullable=True)                 # JSON
 
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     created_by = Column(String(100), nullable=False)
 
     @property
@@ -2310,7 +2311,7 @@ class VirtualDesktop(Base):
     # values are redacted before storage; never returned by the API.
     pra_tunnel_state = Column(Text, nullable=True)
     created_by = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class CloudDatabase(Base):
@@ -2398,7 +2399,7 @@ class CloudDatabase(Base):
     # column changed nobody's access -- a row becomes shared only when someone tags it.
     workgroup = Column(String(100), nullable=True, index=True)
     created_by = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     # Auto-delete timer — NULL = never (see Job.expires_at). Only ever stamped on a
     # `provisioned` row: "deleting" a registered database merely deregisters it, and a
     # timer that silently forgets somebody's registered production database is worse
@@ -2507,8 +2508,8 @@ class CertLab(Base):
 
     workgroup = Column(String(100), nullable=True, index=True)
     created_by = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, nullable=True)
     # Auto-delete timer — NULL = never, never "inherit the default" (see Job.expires_at).
     # Only ever stamped on a PROVISIONED pool: a CA someone else built is inventory, not
     # something this dashboard may reap.
@@ -2620,8 +2621,8 @@ class ManagedDirectory(Base):
 
     workgroup = Column(String(100), nullable=True, index=True)
     created_by = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, nullable=True)
     # NULL by default: a directory is long-lived infrastructure that joined servers
     # depend on. An operator may set one through /api/expiry/set.
     expires_at = Column(DateTime, nullable=True, index=True)
@@ -2733,8 +2734,8 @@ class EntitleVirtualApp(Base):
     tf_state_json = Column(Text, nullable=True)
     error = Column(Text, nullable=True)
     created_by = Column(String(255), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
 
 class EntitleBundleSet(Base):
@@ -2753,8 +2754,8 @@ class EntitleBundleSet(Base):
     tf_state_json = Column(Text, nullable=True)
     error = Column(Text, nullable=True)
     created_by = Column(String(255), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
 
 class SpireLab(Base):
@@ -2984,8 +2985,8 @@ class SpireLab(Base):
     deploy_job_id = Column(String(36), nullable=True)
     workgroup = Column(String(100), nullable=True, index=True)
     created_by = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, nullable=True)
     # Auto-delete timer — NULL = never, never "inherit the default" (see Job.expires_at).
     expires_at = Column(DateTime, nullable=True, index=True)
     expiry_warned_at = Column(DateTime, nullable=True)
@@ -3019,7 +3020,7 @@ class AgentCell(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name = Column(String(120), nullable=False)
     status = Column(String(32), nullable=False, default="provisioning", index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     created_by = Column(String(100), nullable=True)
     workgroup = Column(String(100), nullable=True)
 
@@ -3232,8 +3233,8 @@ class WorkloadK8sToken(Base):
 
     workgroup = Column(String(100), nullable=True, index=True)
     created_by = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, nullable=True)
     # Auto-delete timer — NULL = never, never "inherit the default" (see Job.expires_at).
     expires_at = Column(DateTime, nullable=True, index=True)
     expiry_warned_at = Column(DateTime, nullable=True)
@@ -3319,8 +3320,8 @@ class WorkloadCloudCredential(Base):
 
     workgroup = Column(String(100), nullable=True, index=True)
     created_by = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, nullable=True)
     # Auto-delete timer — NULL = never, never "inherit the default" (see Job.expires_at).
     expires_at = Column(DateTime, nullable=True, index=True)
     expiry_warned_at = Column(DateTime, nullable=True)
@@ -3378,8 +3379,8 @@ class CloudFunction(Base):
     entitle_integration_id = Column(String(64), nullable=True)  # Phase 2
 
     created_by = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, nullable=True)
 
 
 class K8sCluster(Base):
@@ -3438,7 +3439,7 @@ class K8sCluster(Base):
     # this row is cluster-admin, so tagging one is a real grant, not a label.
     workgroup = Column(String(100), nullable=True, index=True)
     created_by = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     # Auto-delete timer — NULL = never (see Job.expires_at). Only ever stamped on a
     # `provisioned` row, for the same reason as CloudDatabase.expires_at: deleting a
     # registered cluster only drops the dashboard's record of it.
@@ -3492,7 +3493,7 @@ class Gateway(Base):
     error = Column(Text, nullable=True)
 
     created_by = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 # ========== DATABASE UTILITIES ==========
@@ -3578,9 +3579,9 @@ class BeyondTrustTenant(Base):
     last_ok_at = Column(DateTime)
     last_error = Column(Text)
 
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     created_by = Column(String(100))
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=utcnow)
 
     @property
     def options_dict(self) -> dict:
@@ -3633,7 +3634,7 @@ class PovEnvironment(Base):
 
     workgroup = Column(String(100), nullable=True, index=True)
     created_by = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
     # The provision job, so the UI can link to its Live Output.
     provision_job_id = Column(String(36), nullable=True, index=True)
@@ -3972,7 +3973,7 @@ class PovEnvironmentVM(Base):
         return ((self.os_family_override or "").strip().lower()
                 or (self.os_family or "").strip().lower())
 
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class PovUseCaseProgress(Base):
@@ -4023,7 +4024,7 @@ class PovUseCaseProgress(Base):
     # se | accessor. The prospect's own ticks must be distinguishable from the SE's, or the
     # evidence a POV produces is just a list of boxes with no author.
     checked_by_kind = Column(String(16), nullable=False, default="se")
-    checked_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    checked_at = Column(DateTime, default=utcnow, nullable=False)
 
     __table_args__ = (UniqueConstraint("environment_id", "card_id",
                                        name="uq_pov_use_case_progress_env_card"),)
@@ -4069,7 +4070,7 @@ class PovAccessor(Base):
     # credential behind forever. Clamped so an accessor can never outlive its POV.
     expires_at = Column(DateTime, index=True, nullable=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     created_by = Column(String(100), nullable=True)
     revoked_at = Column(DateTime, nullable=True)
     revoke_reason = Column(String(255), nullable=True)
@@ -4108,7 +4109,7 @@ class PovVendorUser(Base):
     full_name = Column(String(200), nullable=True)
 
     expires_at = Column(DateTime, index=True, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
     created_by = Column(String(100), nullable=True)
     revoked_at = Column(DateTime, nullable=True)
     revoke_reason = Column(String(255), nullable=True)
@@ -4182,7 +4183,7 @@ class PovTemplateBuild(Base):
 
     workgroup = Column(String(100), nullable=True, index=True)
     created_by = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
     @property
     def contract_list(self) -> list:
@@ -4286,8 +4287,8 @@ class PovBlueprint(Base):
 
     workgroup = Column(String(100), nullable=True, index=True)
     created_by = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow,
                         nullable=False)
 
 
@@ -4344,8 +4345,8 @@ class PovCloudTemplate(Base):
 
     workgroup = Column(String(100), nullable=True, index=True)
     created_by = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow,
                         nullable=False)
 
 
@@ -4394,7 +4395,7 @@ class PovCloudTemplateVM(Base):
     disk_gb = Column(Integer, nullable=True)
     # Render and build order. The broker's position is decided by `role`, not by this.
     sort_order = Column(Integer, nullable=False, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 # What to grant so that newly-gating a route revokes nothing.

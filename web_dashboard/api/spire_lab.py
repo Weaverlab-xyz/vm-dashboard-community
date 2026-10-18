@@ -44,6 +44,7 @@ from .auth import require_permission
 # established, and api/config_mgmt imports nothing from here, so there is no cycle.
 from .config_mgmt import (ManagedAccountRef, _can_use_secrets,
                           _validate_cloud_secret_stores)
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/spire-lab", tags=["spire-lab"])
@@ -709,7 +710,7 @@ async def reapply_acl(lab_id: str, db: Session = Depends(get_db),
             json.loads(row.vm_resource_id or "{}"), [row.bind_port], cidrs)
         row.source_cidrs = ",".join(cidrs)
         row.firewall_name = res.get("name") or row.firewall_name
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         return {"id": row.id, "opened": bool(res.get("opened")),
                 "source_cidrs": cidrs, "firewall_name": row.firewall_name,

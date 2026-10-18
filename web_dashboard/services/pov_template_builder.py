@@ -49,6 +49,7 @@ from sqlalchemy.orm import Session
 
 from ..database import PovTemplateBuild, SessionLocal
 from . import job_service, lab_platforms, pov_broker, pov_credentials
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -1342,7 +1343,7 @@ def serialize(build: PovTemplateBuild) -> dict:
         "keep_build_environment": bool(build.keep_build_environment),
         "workgroup": build.workgroup or "",
         "created_by": build.created_by or "",
-        "created_at": (build.created_at or datetime.utcnow()).isoformat(),
+        "created_at": (build.created_at or utcnow()).isoformat(),
     }
 
 

@@ -11,7 +11,12 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _utcnow():
+    """Naive UTC now: what the deprecated datetime.utcnow() returned."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -45,11 +50,11 @@ def _agent(db, name, *, active=True, granted=True, version="2.5.0"):
         id=f"agent-{name}", name=name, is_active=active, agent_version=version,
         # An enrolled agent always has one, and status_of reads "enrolling" without it.
         public_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI" + name,
-        last_seen_at=datetime.utcnow(),
+        last_seen_at=_utcnow(),
         # None means "every type the dashboard supports", which includes agent_ansible.
         # A narrowed list is how a test takes the grant away.
         allowed_job_types=None if granted else json.dumps(["agent_hypervisor"]),
-        created_at=datetime.utcnow())
+        created_at=_utcnow())
     db.add(row)
     db.commit()
     return row
@@ -59,7 +64,7 @@ def _conn(db, agent_id, name="ws"):
     row = HypervisorConnection(id=f"conn-{name}", kind="workstation", name=name,
                                host="", port=8697, agent_id=agent_id,
                                agent_connection_name=name, is_active=True,
-                               created_at=datetime.utcnow())
+                               created_at=_utcnow())
     db.add(row)
     db.commit()
     return row
@@ -69,7 +74,7 @@ def _vm(db, conn_id, vm_id, ip):
     db.add(HypervisorVMCache(connection_id=conn_id, vm_id=vm_id, name=vm_id,
                              power_state="poweredOn",
                              ip_addresses=json.dumps([ip] if ip else []),
-                             synced_at=datetime.utcnow()))
+                             synced_at=_utcnow()))
     db.commit()
 
 

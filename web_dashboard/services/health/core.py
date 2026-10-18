@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
+from ...utils.clock import utcnow
 
 OK, WARN, FAIL, UNKNOWN = "ok", "warn", "fail", "unknown"
 STATUSES = (OK, WARN, FAIL, UNKNOWN)
@@ -58,7 +59,7 @@ def parse_when(value) -> Optional[datetime]:
 def ago(when: Optional[datetime], now: Optional[datetime] = None) -> str:
     if not when:
         return "never"
-    secs = int(((now or datetime.utcnow()) - when).total_seconds())
+    secs = int(((now or utcnow()) - when).total_seconds())
     if secs < 0:
         return "just now"
     if secs < 5400:

@@ -59,6 +59,7 @@ from ..database import (
     User,
 )
 from ..services import config_service
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -282,7 +283,7 @@ async def dashboard_summary() -> dict:
         failed_today = _scoped(
             db.query(Job).filter(
                 Job.status == "failed",
-                Job.created_at >= datetime.utcnow().replace(
+                Job.created_at >= utcnow().replace(
                     hour=0, minute=0, second=0, microsecond=0
                 ),
             )

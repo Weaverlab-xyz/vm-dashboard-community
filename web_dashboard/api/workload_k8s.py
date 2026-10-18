@@ -37,6 +37,7 @@ from ..database import User, get_db
 from ..services import config_service, workload_k8s_service
 from ..services.workload_k8s_service import WorkloadK8sError
 from .auth import require_permission
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/workload-k8s", tags=["workload-k8s"])
@@ -272,7 +273,7 @@ def onboard_identity(req: OnboardRequest, db: Session = Depends(get_db),
     _require_enabled()
     expires_at = None
     if req.expires_in_hours and req.expires_in_hours > 0:
-        expires_at = datetime.utcnow() + timedelta(hours=int(req.expires_in_hours))
+        expires_at = utcnow() + timedelta(hours=int(req.expires_in_hours))
     try:
         return workload_k8s_service.onboard(
             db, name=req.name, cluster_id=req.cluster_id, profile=req.profile,

@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 from ..database import EntitleVirtualApp, ManagedDirectory
 from . import entitle_public_api as api
 from . import entitle_tiers
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -306,7 +307,7 @@ async def run_job(db: Session, *, job_id: str, meta: dict) -> None:
             await broadcast_progress(job_id, 20, f"Removing {app.name} from Entitle…")
             if app.tf_state_json:
                 await reg.deregister(app.tf_state_json)
-            app.status, app.tf_state_json, app.updated_at = "deleted", None, datetime.utcnow()
+            app.status, app.tf_state_json, app.updated_at = "deleted", None, utcnow()
             db.commit()
             job_service.set_completed(db, job_id, {"action": "delete", "app_id": app.id})
             return
@@ -327,7 +328,7 @@ async def run_job(db: Session, *, job_id: str, meta: dict) -> None:
         app.roles_json = json.dumps(roles)
         app.integration_id = result.get("integration_id")
         app.tf_state_json = result.get("tf_state_json")
-        app.status, app.error, app.updated_at = "active", None, datetime.utcnow()
+        app.status, app.error, app.updated_at = "active", None, utcnow()
         db.commit()
         job_service.set_completed(db, job_id, {
             "action": "create", "app_id": app.id, "integration_id": app.integration_id,
@@ -336,7 +337,7 @@ async def run_job(db: Session, *, job_id: str, meta: dict) -> None:
         logger.exception("entitle virtual app job failed app=%s action=%s", app.id, action)
         app.status = "failed"
         app.error = str(exc)[:4000]
-        app.updated_at = datetime.utcnow()
+        app.updated_at = utcnow()
         db.commit()
         job_service.set_failed(db, job_id, str(exc))
 

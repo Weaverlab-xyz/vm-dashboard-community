@@ -36,6 +36,7 @@ from ..database import ChangeWindow, User, get_db
 from ..services import change_window, change_window_service, job_service
 from ..services.suspend_schedule import ScheduleError
 from .auth import get_current_user, require_explicit_permission
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +245,7 @@ def approve_change(
             detail=("you raised this change, so you cannot approve it. Ask someone "
                     "with the change-approval permission to review it."))
 
-    job.approved_at = datetime.utcnow()
+    job.approved_at = utcnow()
     job.approved_by = current_user.username
     db.commit()
     job_service.log_audit(db, current_user.username, "change_approved",

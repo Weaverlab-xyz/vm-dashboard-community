@@ -52,6 +52,7 @@ from sqlalchemy.orm import Session
 from ..database import PovEnvironment, PovEnvironmentVM, PovVendorUser
 from . import config_service, job_service, pov_gateway, pra_vendor_api
 from .pra_tenant_api import PRATenantError
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,7 @@ DELETE_AFTER_EXPIRY_DAYS = 7
 
 
 def _now() -> datetime:
-    return datetime.utcnow()
+    return utcnow()
 
 
 def _ttl_days() -> int:

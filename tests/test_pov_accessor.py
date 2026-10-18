@@ -37,7 +37,12 @@ import re
 import sys
 import tempfile
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+
+def _utcnow():
+    """Naive UTC now: what the deprecated datetime.utcnow() returned."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -437,7 +442,7 @@ def test_an_accessor_cannot_outlive_its_pov():
     db = SessionLocal()
     env = PovEnvironment(id=str(uuid.uuid4()), platform="skytap", name="short-pov",
                          status="active",
-                         expires_at=datetime.utcnow() + timedelta(days=3))
+                         expires_at=_utcnow() + timedelta(days=3))
     db.add(env)
     db.commit()
     row, _pw = pov_accessor_service.mint(db, env, email="a@b.c", days=60)
@@ -476,7 +481,7 @@ def test_the_sweep_reaps_expired_accessors_and_orphaned_ones():
     orphan, _ = pov_accessor_service.mint(db, dead, email="orphan@x.y")
     keep, _ = pov_accessor_service.mint(db, live, email="keep@x.y")
 
-    stale.expires_at = datetime.utcnow() - timedelta(minutes=1)
+    stale.expires_at = _utcnow() - timedelta(minutes=1)
     dead.status = "destroyed"
     db.commit()
 

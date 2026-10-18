@@ -40,6 +40,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-dc-health-tests")
 
 from web_dashboard.database import (Base, DirectoryHealth, Job, ManagedDirectory,  # noqa: E402
                                     RemoteAgent, SessionLocal, engine)
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.services import directory_health_service as H  # noqa: E402
 from web_dashboard.services import job_service  # noqa: E402
 
@@ -54,7 +55,7 @@ _EXAMPLE = os.path.join(_ROOT, "examples", "playbooks", "directory", "ad-dc-heal
 def _agent(db, *, job_types=None):
     a = RemoteAgent(id=str(uuid.uuid4()), name=f"agent-{uuid.uuid4().hex[:6]}",
                     agent_version="2.8.0", is_active=True, public_key="pk",
-                    last_seen_at=datetime.utcnow(),
+                    last_seen_at=utcnow(),
                     allowed_job_types=json.dumps(job_types) if job_types else None)
     db.add(a)
     db.commit()
@@ -263,7 +264,7 @@ def test_it_runs_again_after_the_interval():
     asyncio.run(H.check(db, row))
     health = db.get(DirectoryHealth, row.id)
     health.deep_job_id = None
-    health.deep_queued_at = datetime.utcnow() - timedelta(hours=H.DEFAULT_DEEP_INTERVAL_HOURS,
+    health.deep_queued_at = utcnow() - timedelta(hours=H.DEFAULT_DEEP_INTERVAL_HOURS,
                                                           minutes=1)
     db.commit()
     asyncio.run(H.check(db, row))
@@ -298,7 +299,7 @@ def test_the_result_is_folded_in_when_the_agent_completes():
     job = _deep_jobs(db, row)[0]
     # apply_deep judges replication against the real clock, so the link must be recent
     # now, not at NOW.
-    recent = (datetime.utcnow() - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    recent = (utcnow() - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
     report = _report(replication=[dict(_report()["replication"][0], last_success=recent)])
     for line in _lines(report, size=60):
         job_service.append_job_log(db, job.id, line)

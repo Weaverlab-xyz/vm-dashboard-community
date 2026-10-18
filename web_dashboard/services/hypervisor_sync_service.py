@@ -42,6 +42,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import HypervisorConnection, HypervisorVMCache, Job
 from . import agent_hypervisor_meta, agent_service, config_service, job_service
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +96,7 @@ def enqueue_due_syncs(db: Session) -> int:
     if not rows:
         return 0
 
-    now = datetime.utcnow()
+    now = utcnow()
     queued = 0
     for conn in rows:
         interval = _interval_minutes(conn)
@@ -258,7 +259,7 @@ def _queue(db: Session, conn: HypervisorConnection, *, cursor: str, batch_id,
     meta["description"] = (f"Inventory sync: {conn.name} (page {page})"
                            + (f" — {trigger}" if trigger else ""))
     meta["sync_page"] = page
-    meta["sync_started_at"] = (started or datetime.utcnow()).isoformat()
+    meta["sync_started_at"] = (started or utcnow()).isoformat()
     meta["sync_trigger"] = trigger
     job = job_service.create_job(
         db, job_type="agent_hypervisor", created_by=created_by or "system:sync",
@@ -325,7 +326,7 @@ def _sync_started_at(db: Session, job: Job, meta: dict) -> datetime:
             return datetime.fromisoformat(str(raw))
         except ValueError:
             pass
-    return job.created_at or datetime.utcnow()
+    return job.created_at or utcnow()
 
 
 def _upsert(db: Session, connection_id: str, vms: list, started: datetime) -> None:
@@ -357,7 +358,7 @@ def _upsert(db: Session, connection_id: str, vms: list, started: datetime) -> No
         row.vm_type = vm.get("vm_type")
         row.tags = json.dumps(vm.get("tags") or [])
         row.guest_os = vm.get("guest_os")
-        row.synced_at = max(started, datetime.utcnow())
+        row.synced_at = max(started, utcnow())
     db.commit()
 
 

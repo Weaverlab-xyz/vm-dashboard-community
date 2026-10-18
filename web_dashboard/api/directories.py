@@ -65,6 +65,7 @@ from ..services import directory_service, job_service
 from ..services.directory_service import DirectoryError
 from .auth import (get_current_user, has_explicit_permission, has_permission,
                    require_explicit_permission)
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/directories", tags=["directories"])
@@ -178,7 +179,7 @@ async def check_directory_health(
                                    f"on-prem directory is as healthy as that directory.")
     health = db.get(DirectoryHealth, row.id)
     if health and health.checked_at and \
-            (datetime.utcnow() - health.checked_at).total_seconds() < _CHECK_NOW_MIN_SECONDS:
+            (utcnow() - health.checked_at).total_seconds() < _CHECK_NOW_MIN_SECONDS:
         return directory_health_service.to_dict(row, health)
     # The domain controller check checks out the directory's Password Safe credential,
     # so only someone who may change the directory can start one on demand.
@@ -923,7 +924,7 @@ async def pin_entitle_integration(directory_id: str, req: EntitleLinkRequest,
         name = found["name"]
     row.entitle_integration_id = wanted or None
     row.entitle_integration_name = name or None
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
     db.refresh(row)
     job_service.log_audit(db, user.username, "directory_entitle_pin", details={

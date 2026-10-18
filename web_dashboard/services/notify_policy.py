@@ -26,6 +26,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -382,4 +383,4 @@ def dedupe_key(event: NotificationEvent, endpoint_id: str) -> str:
 
 def day_bucket(now: Optional[datetime] = None) -> str:
     """``dedupe_bucket`` value for a condition that should re-notify once per day."""
-    return (now or datetime.utcnow()).strftime("%Y-%m-%d")
+    return (now or utcnow()).strftime("%Y-%m-%d")

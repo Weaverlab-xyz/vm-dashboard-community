@@ -38,6 +38,7 @@ import json
 import logging
 import socket
 from datetime import datetime
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +225,7 @@ def publish_runtime_status(*, configured: dict, effective: dict, clamp_reason: s
         "pool_capacity": pool_capacity,
         "in_flight": in_flight,
         "hostname": socket.gethostname(),
-        "published_at": datetime.utcnow().isoformat() + "Z",
+        "published_at": utcnow().isoformat() + "Z",
     }
     try:
         _cs().set(_RUNTIME_STATUS_KEY, json.dumps(payload, sort_keys=True, default=str))

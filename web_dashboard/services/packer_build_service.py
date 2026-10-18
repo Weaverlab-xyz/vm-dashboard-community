@@ -32,6 +32,7 @@ from . import (
 from .oci_service import OCIError
 from .packer_service import PackerError, PackerCancelled
 from .epml_service import EpmlError
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -395,7 +396,7 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
             gallery_rg = req.gallery_resource_group or _cfg("azure_gallery_resource_group") or resource_group
             gallery_name = req.gallery_name or _cfg("azure_shared_image_gallery") or "vmDashboardGallery"
             img_def_name = req.gallery_image_name or packer_service._safe_azure_name(req.image_name)
-            _now = datetime.utcnow()
+            _now = utcnow()
             # Version components must be integers < 2^31 — YYMMDD.HHMMSS fits and is monotonic.
             img_version = req.gallery_image_version or f"1.{int(_now.strftime('%y%m%d'))}.{int(_now.strftime('%H%M%S'))}"
             job_service.update_progress(
@@ -832,7 +833,7 @@ def _write_ps_provisioner(build_dir: Path, script: str) -> None:
 
 def _versioned_blob_name(image_name: str, ext: str = "vhd") -> str:
     from datetime import datetime
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    ts = utcnow().strftime("%Y%m%dT%H%M%SZ")
     return f"images/{image_name}-{ts}.{ext}"
 
 

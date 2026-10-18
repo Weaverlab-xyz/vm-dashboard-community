@@ -17,7 +17,12 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _utcnow():
+    """Naive UTC now: what the deprecated datetime.utcnow() returned."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -71,20 +76,20 @@ def _seed(db, *, vms: int, routes: int = 1):
         db.add(RemoteAgent(id=f"agent-{name}", name=name, is_active=True,
                            agent_version="2.5.0",
                            public_key="ssh-ed25519 AAAA" + name,
-                           last_seen_at=datetime.utcnow(), created_at=datetime.utcnow()))
+                           last_seen_at=_utcnow(), created_at=_utcnow()))
     # Two kinds, so the per-kind override lookup runs more than once and the route load
     # is visibly independent of it.
     for kind, cid in (("workstation", "conn-ws"), ("vsphere", "conn-vs")):
         db.add(HypervisorConnection(id=cid, kind=kind, name=cid, host="", port=443,
                                     agent_id="agent-host", agent_connection_name=cid,
-                                    is_active=True, created_at=datetime.utcnow()))
+                                    is_active=True, created_at=_utcnow()))
     db.commit()
     for i in range(vms):
         cid = "conn-ws" if i % 2 == 0 else "conn-vs"
         db.add(HypervisorVMCache(
             connection_id=cid, vm_id=f"vm-{i}", name=f"vm-{i}", power_state="poweredOn",
             ip_addresses=json.dumps([f"192.168.235.{i % 200 + 1}"]),
-            synced_at=datetime.utcnow()))
+            synced_at=_utcnow()))
     db.commit()
     for r in range(routes):
         cmr.create(db, agent_id="agent-lab", cidr=f"10.{r}.0.0/16", created_by="admin")

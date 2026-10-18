@@ -32,7 +32,12 @@ who owns it" is storage behaviour. Under pytest, or standalone:
 import os
 import sys
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+
+def _utcnow():
+    """Naive UTC now: what the deprecated datetime.utcnow() returned."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -98,7 +103,7 @@ def test_the_power_resync_scenario():
     config_service.set("remote_agents_enabled", "true")
 
     agent = RemoteAgent(name=f"desk-{os.getpid()}", public_key="k", is_active=True,
-                        last_seen_at=datetime.utcnow(), enrolled_at=datetime.utcnow())
+                        last_seen_at=_utcnow(), enrolled_at=_utcnow())
     db.add(agent)
     db.commit()
     db.refresh(agent)
@@ -246,7 +251,7 @@ def test_the_power_resync_scenario():
     fourth = agent_power_job(db, conn, op="start", target_id="7", created_by="alice",
                              description="start bench-vm")
     job_service.set_completed(db, fourth.id, {})
-    agent.last_seen_at = datetime.utcnow() - timedelta(hours=2)
+    agent.last_seen_at = _utcnow() - timedelta(hours=2)
     db.commit()
     none_now, reason = hss.sync_after_power(db, fourth)
     assert none_now is None and "not online" in reason
@@ -254,7 +259,7 @@ def test_the_power_resync_scenario():
 
     # A connection deactivated between the power op and its completion is a no-op, not a
     # crash on a finished job's response path.
-    agent.last_seen_at = datetime.utcnow()
+    agent.last_seen_at = _utcnow()
     row = db.query(HypervisorConnection).filter(HypervisorConnection.id == cid).one()
     row.is_active = False
     db.commit()

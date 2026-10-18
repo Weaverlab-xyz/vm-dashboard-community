@@ -44,6 +44,7 @@ from ..database import CloudDatabase, Job
 from . import (cloud_db_adapter_service, config_service, job_service, terraform,
                terraform_provider_env)
 from .region_config import resolve_region
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -835,7 +836,7 @@ def provision(
         port=_DEFAULT_PORTS.get(engine),
         status="provisioning",
         created_by=created_by,
-        created_at=datetime.utcnow(),
+        created_at=utcnow(),
         jump_group=(jump_group or "").strip() or None,
         jumpoint_name=(jumpoint_name or "").strip() or None,
         pra_credential_ref=(pra_credential_ref or "").strip() or None,
@@ -5061,7 +5062,7 @@ def register_database(db: Session, *, engine: str, cloud: str, host: str,
         private_host=host, port=port or _DEFAULT_PORTS.get(engine),
         db_name=(db_name or "").strip() or None,
         status="available",
-        created_at=datetime.utcnow(),
+        created_at=utcnow(),
         credentials_ref=_MANAGED_REF_PREFIX + json.dumps({
             "system_id": managed_account["system_id"],
             "account_id": managed_account["account_id"],

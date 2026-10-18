@@ -29,6 +29,7 @@ from ..services.fido2_service import (
     fetch_fido2_challenge,
     creation_options_to_dict,
 )
+from ..utils.clock import utcnow
 
 router = APIRouter(prefix="/api/mfa", tags=["mfa"])
 
@@ -116,7 +117,7 @@ def register_complete(
         sign_count=initial_sign_count,
         aaguid=aaguid_str,
         device_name=body.device_name or "Security Key",
-        created_at=datetime.utcnow(),
+        created_at=utcnow(),
     )
     db.add(credential)
 

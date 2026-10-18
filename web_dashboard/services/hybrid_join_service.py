@@ -28,6 +28,7 @@ import re
 from typing import Optional
 
 from sqlalchemy.orm import Session
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ def set_settings(db: Session, row, *, entra_hybrid: bool, hybrid_ou: str = ""):
     opts["entra_hybrid"] = bool(entra_hybrid)
     opts["hybrid_ou"] = (hybrid_ou or "").strip()
     row.options = json.dumps(opts, sort_keys=True)
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
     db.refresh(row)
     return row

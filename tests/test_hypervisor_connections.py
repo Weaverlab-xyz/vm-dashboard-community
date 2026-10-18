@@ -316,7 +316,7 @@ def test_the_list_shows_when_the_agent_last_fetched_its_credential():
     """`agent.connection_secret` is written only once a credential was sealed for a running
     job, so it is the dashboard's one piece of evidence that the agent's connections.yaml
     opted in. A row the agent never fetched for must read as not fetched, not as fine."""
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
     from web_dashboard.database import AuditLog
     from web_dashboard.services import job_service
     db = _fresh()
@@ -335,7 +335,7 @@ def test_the_list_shows_when_the_agent_last_fetched_its_credential():
                           details={"job_id": "j1", "connection_id": used["id"],
                                    "connection_ref": "pc-hyperv", "source": "secret_ref:bt_safe"})
     old = AuditLog(action="agent.connection_secret", username="agent:pc",
-                   timestamp=datetime.utcnow() - timedelta(days=hcs._FETCH_LOOKBACK_DAYS + 5),
+                   timestamp=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=hcs._FETCH_LOOKBACK_DAYS + 5),
                    details='{"connection_id": "%s"}' % stale["id"])
     db.add(old)
     db.commit()

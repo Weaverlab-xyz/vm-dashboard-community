@@ -34,6 +34,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -380,7 +381,7 @@ def update(db, route_id: str, **fields) -> dict:
         row.label = str(fields["label"]).strip() or None
     if fields.get("is_active") is not None:
         row.is_active = bool(fields["is_active"])
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
     db.refresh(row)
     return serialize(row)

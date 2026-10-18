@@ -51,6 +51,7 @@ from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, RemoteAgent
 from . import agent_service, config_service, job_service, lab_platforms, public_url
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -943,7 +944,7 @@ def render_bootstrap(*, env_name: str, dashboard_url: str, enroll_code: str,
     from . import pov_template_builder
     runtime = pov_template_builder.render_docker_install(require_enabled_at_boot=False)
 
-    stamp = (now or datetime.utcnow()).strftime("%Y-%m-%d %H:%M:%SZ")
+    stamp = (now or utcnow()).strftime("%Y-%m-%d %H:%M:%SZ")
     # The name reaches a shell comment. `api/pov` already constrains it to a slug, but a
     # newline here would end the comment and put whatever followed on its own line, so it
     # is flattened at the point of use rather than trusted from two callers away.

@@ -46,6 +46,7 @@ from ..models.agentcell import (
 from ..services import agentcell_service
 from .auth import get_current_user, require_permission
 from .tokens import _generate_raw, hash_pat
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/agentcell", tags=["agentcell"])
@@ -677,7 +678,7 @@ def link_agent(
 
     row.linked_mechanism = mechanism
     row.linked_credential_id = wl_row.id
-    row.linked_at = datetime.utcnow()
+    row.linked_at = utcnow()
     db.commit()
     db.refresh(row)
 
@@ -737,7 +738,7 @@ def request_cluster_access(
 
     minutes = agentcell_service.episode_duration_problem(payload.duration_minutes)
     row.episode_state = "requested"
-    row.episode_started_at = datetime.utcnow()
+    row.episode_started_at = utcnow()
     row.episode_released_at = None
     db.commit()
     db.refresh(row)
@@ -780,7 +781,7 @@ def release_cluster_access(
     if not was or was in agentcell_service.EPISODE_CLOSED:
         return {"id": row.id, "released": "", "message": "No episode was open."}
     row.episode_state = "released"
-    row.episode_released_at = datetime.utcnow()
+    row.episode_released_at = utcnow()
     db.commit()
     logger.info("agent cell %s cluster-access episode closed from %s by %s",
                 row.id, was, current_user.username)
@@ -857,7 +858,7 @@ def revoke_agent(
         if pat and pat.is_active:
             pat.is_active = False
             revoked = True
-    row.pat_revoked_at = datetime.utcnow()
+    row.pat_revoked_at = utcnow()
     row.status = "revoked"
     db.commit()
 

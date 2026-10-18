@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 from ..database import AuditLog, User, get_db
 from ..services import job_service
 from .auth import require_explicit_permission
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/audit", tags=["audit"])
@@ -165,7 +166,7 @@ def export_audit(
             .order_by(AuditLog.seq.asc())
             .limit(MAX_EXPORT_ROWS)
             .yield_per(1000))
-    stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    stamp = utcnow().strftime("%Y%m%d-%H%M%S")
 
     if fmt == "json":
         def _json():

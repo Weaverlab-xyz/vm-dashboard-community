@@ -55,6 +55,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 
 from . import config_service, cost_service
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +150,7 @@ def warm_interval_seconds() -> int:
 def _utcnow() -> datetime:
     """Naive UTC, matching every DateTime column in database.py. Mixing an aware value
     into a comparison here would let the session TimeZone decide a cooldown."""
-    return datetime.utcnow()
+    return utcnow()
 
 
 def _period(now: datetime = None) -> str:

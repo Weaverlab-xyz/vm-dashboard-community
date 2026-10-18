@@ -21,6 +21,7 @@ from ...database import HealthArea, HealthCheck
 from .. import feature_flags
 from . import core
 from .registry import COLLECTORS, get
+from ...utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ def _area_row(db: Session, area: str) -> HealthArea:
 
 def store(db: Session, area: str, items: list, *, now: Optional[datetime] = None) -> int:
     """Replace ``area``'s rows with ``items``. Returns how many were stored."""
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     seen = set()
     for item in items:
         oid = core.text(item.object_id, 160)
@@ -73,14 +74,14 @@ async def run_area(db: Session, collector: core.Collector) -> dict:
     """Run one collector now and store the result. Never raises."""
     started = time.monotonic()
     area = _area_row(db, collector.area)
-    area.last_run_at = datetime.utcnow()
+    area.last_run_at = utcnow()
     try:
         items = await collector.collect(db)
     except Exception as exc:  # noqa: BLE001 - a collector failing is a result, not a crash
         logger.warning("health: %s collector failed", collector.area, exc_info=True)
         db.rollback()
         area = _area_row(db, collector.area)
-        area.last_run_at = datetime.utcnow()
+        area.last_run_at = utcnow()
         # The type only: an exception's text can carry a URL, a path or a chained cause
         # from somewhere unrelated, and this is shown on a page. Collectors that know
         # what went wrong return a failing Item with a written message instead.
@@ -105,7 +106,7 @@ def _due(db: Session, collector: core.Collector, now: datetime) -> bool:
 
 
 async def run_due(db: Session) -> int:
-    now = datetime.utcnow()
+    now = utcnow()
     ran = 0
     for collector in COLLECTORS:
         if enabled(collector) and _due(db, collector, now):
@@ -121,7 +122,7 @@ async def run_now(db: Session, area: str) -> dict:
         raise KeyError(area)
     row = db.get(HealthArea, area)
     if row and row.last_run_at and \
-            (datetime.utcnow() - row.last_run_at).total_seconds() < RUN_NOW_MIN_SECONDS:
+            (utcnow() - row.last_run_at).total_seconds() < RUN_NOW_MIN_SECONDS:
         return {"area": area, "ok": row.last_error is None, "throttled": True}
     return await run_area(db, collector)
 

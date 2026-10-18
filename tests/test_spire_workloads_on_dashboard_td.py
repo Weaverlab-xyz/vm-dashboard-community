@@ -63,6 +63,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from jose import jwk  # noqa: E402
 from web_dashboard.database import (AgentCell, AuditLog, Base, OAuthClient,  # noqa: E402
                                     SessionLocal, SpiffeTrustDomain, engine)
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.api import agentcell as agentcell_api  # noqa: E402
 from web_dashboard.api import users as users_api  # noqa: E402
 from web_dashboard.services import (agent_service, config_service,  # noqa: E402
@@ -441,7 +442,7 @@ def test_a_registered_trust_domain_stays_current_with_every_switch_off():
         db.commit()
         assert dashboard_spire.sync_if_due(db) is False, "nothing registered, nothing on"
         dashboard_spire.sync_trust_domain(db, TD)
-        later = datetime.utcnow() + timedelta(days=2)
+        later = utcnow() + timedelta(days=2)
         assert dashboard_spire.sync_if_due(db, now=later) is True
     finally:
         db.close()

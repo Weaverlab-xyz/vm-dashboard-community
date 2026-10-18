@@ -50,6 +50,7 @@ from sqlalchemy.orm import Session
 
 from ..database import Job, SpireLab
 from . import expiry_policy, job_service
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -920,7 +921,7 @@ async def run_provision(db: Session, *, lab_id: str, job_id: str) -> None:
         row.spire_version = target_release(row)
         row.status = "available"
         row.error_message = None
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         job_service.set_completed(db, job_id, result={
             "lab_id": row.id, "trust_domain": row.trust_domain,
@@ -934,7 +935,7 @@ async def run_provision(db: Session, *, lab_id: str, job_id: str) -> None:
     except Exception as exc:
         row.status = "failed"
         row.error_message = str(exc)[:2000]
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         logger.error("spire-lab: provision failed for %s: %s", lab_id, exc)
         job_service.set_failed(db, job_id, str(exc))
@@ -969,7 +970,7 @@ def read_public_artifacts(db: Session, row: SpireLab) -> dict:
             if parsed:
                 row.admin_svid_expires_at = parsed
                 out["expires_at"] = parsed.isoformat()
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
     except Exception as exc:  # noqa: BLE001
         logger.warning("spire-lab: could not read back the public artifacts for %s: %s",
@@ -1015,7 +1016,7 @@ def start_decommission(db: Session, *, lab_id: str, created_by: str,
     # Cleared in the same transaction that starts the teardown: at-most-once, and it stops
     # the next sweep pass from enqueueing a second teardown for the same row.
     row.expires_at = None
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     job = job_service.create_job(
         db, DECOMMISSION_JOB_TYPE, created_by, workgroup=row.workgroup,
         metadata={"lab_id": row.id, "name": row.name, "cloud": row.cloud,
@@ -1134,7 +1135,7 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str,
         row.source_cidrs = ""
         row.status = "deleted"
         row.error_message = None
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         await broadcast_progress(
             job_id, 95,
@@ -1152,7 +1153,7 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str,
         # the sweep retry a teardown that already failed once, on a loop, silently.
         row.status = "failed"
         row.error_message = str(exc)[:2000]
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         logger.error("spire-lab: teardown failed for %s: %s", lab_id, exc)
         job_service.set_failed(db, job_id, str(exc))
@@ -1465,7 +1466,7 @@ def start_k8s_link(db: Session, *, lab_id: str, created_by: str, host: str,
                                        if managed_account else None)
     row.k8s_ansible_managed_become_self = bool(managed_become_self) or None
     row.k8s_login_user = login_user or None
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     if managed_account or secret_ssh_key_source:
         # Audit the USE, not the credential. Same action name as Config Management's, so one
         # audit query still answers "who used a credential in a run" whichever page it was.
@@ -1550,7 +1551,7 @@ async def run_k8s_link(db: Session, *, lab_id: str, job_id: str) -> None:
 
         row.k8s_status = "linked"
         row.k8s_error_message = None
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         job_service.set_completed(db, job_id, result={
             "lab_id": row.id,
@@ -1571,7 +1572,7 @@ async def run_k8s_link(db: Session, *, lab_id: str, job_id: str) -> None:
         if row:
             row.k8s_status = "failed"
             row.k8s_error_message = str(exc)[:2000]
-            row.updated_at = datetime.utcnow()
+            row.updated_at = utcnow()
             db.commit()
         logger.error("spire-lab: k8s link failed for %s: %s", lab_id, exc)
         job_service.set_failed(db, job_id, str(exc))
@@ -1748,7 +1749,7 @@ async def run_ps_register(db: Session, *, lab_id: str, job_id: str,
             # a row still naming a managed system an operator removed by hand is a worse
             # record than one naming none.
             row.ps_system_id = row.ps_tf_state = None
-            row.updated_at = datetime.utcnow()
+            row.updated_at = utcnow()
             db.commit()
             job_service.set_completed(db, job_id, result={
                 "lab_id": row.id, "deregistered": True})
@@ -1789,7 +1790,7 @@ async def run_ps_register(db: Session, *, lab_id: str, job_id: str,
             managed_account_name=row.admin_spiffe_id, method="spiffesvid")
         row.ps_system_id = str(reg.get("managed_system_id") or "")
         row.ps_tf_state = reg.get("tf_state_json")
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
 
         gaps = onboarding_gaps(row)
@@ -1810,7 +1811,7 @@ async def run_ps_register(db: Session, *, lab_id: str, job_id: str,
         # through the row (CodeQL py/stack-trace-exposure, and the reason ansible_run_gate
         # gives at length).
         row.error_message = str(exc)[:2000]
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         logger.error("spire-lab: Password Safe %s failed for %s: %s", action, lab_id, exc)
         job_service.set_failed(db, job_id, str(exc))
@@ -1870,7 +1871,7 @@ def attr_probe(row) -> dict:
 
 def _save_attr_probe(db: Session, row: SpireLab, data: dict) -> None:
     row.attr_probe = json.dumps(data, sort_keys=True)
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
 
 
@@ -1921,7 +1922,7 @@ async def run_attr_probe(db: Session, *, lab_id: str, job_id: str) -> None:
     job_service.set_running(db, job_id)
     job = db.query(Job).filter(Job.id == job_id).first()
     data = attr_probe(row)
-    data.update(prepared_at=datetime.utcnow().isoformat(),
+    data.update(prepared_at=utcnow().isoformat(),
                 prepared_by=(job.created_by if job else None) or "system")
     try:
         if not ps_api_service.configured():
@@ -1996,7 +1997,7 @@ def record_attr_probe_answer(db: Session, *, lab_id: str, outcome: str, line: st
     data["answer"] = {"outcome": outcome, "line": line,
                       **{k: side.get(k, "not_tried") for k in ATTR_PROBE_SIDE},
                       "answered_by": answered_by,
-                      "answered_at": datetime.utcnow().isoformat()}
+                      "answered_at": utcnow().isoformat()}
     _save_attr_probe(db, row, data)
     logger.info("spire-lab: attribute probe answer for %r recorded: %s", row.name, outcome)
     return {"lab_id": row.id, **attr_probe_view(row)}
@@ -2089,9 +2090,9 @@ def store_jwt_bundle(db: Session, row: SpireLab, bundle_json: str) -> dict:
         rec = SpiffeTrustDomain(trust_domain=td, created_by=row.created_by or "system")
         db.add(rec)
     rec.bundle_json = bundle_json.strip()
-    rec.bundle_captured_at = datetime.utcnow()
+    rec.bundle_captured_at = utcnow()
     rec.spire_lab_id = row.id
-    rec.updated_at = datetime.utcnow()
+    rec.updated_at = utcnow()
     db.commit()
     spiffe_assertion.clear_state()
     return {"trust_domain": td, "jwt_keys": [k.get("kid") for k in keys]}
@@ -2190,7 +2191,7 @@ def refresh_due(db: Session, row: SpireLab, now: Optional[datetime] = None) -> b
     from ..database import SpiffeTrustDomain
     if row.status != "available" or not oidc_published(row):
         return False
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     rec = db.query(SpiffeTrustDomain).filter(
         SpiffeTrustDomain.trust_domain == (row.trust_domain or "").lower(),
         SpiffeTrustDomain.spire_lab_id == row.id).first()
@@ -2213,7 +2214,7 @@ def _refresh_blocked(db: Session, lab_id: str, now: datetime) -> bool:
 
 def enqueue_refresh_if_due(db: Session, now: Optional[datetime] = None) -> list:
     """Enqueue a key refresh for every lab that needs one. Returns the job ids."""
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     out = []
     for row in db.query(SpireLab).filter(SpireLab.status == "available").all():
         try:
@@ -2267,7 +2268,7 @@ def register_trust_domain(db: Session, row: SpireLab) -> dict:
         rec.ca_pem = row.trust_bundle_pem.strip()
         rec.tls_server_name = oidc_domain_for(row)
         rec.spire_lab_id = row.id
-        rec.updated_at = datetime.utcnow()
+        rec.updated_at = utcnow()
         db.commit()
         spiffe_assertion.clear_state()
         return {"trust_domain": td, "jwks_url": url}
@@ -2536,7 +2537,7 @@ async def run_upgrade(db: Session, *, lab_id: str, job_id: str) -> None:
         previous = row.spire_version or ""
         row.spire_version = to
         row.error_message = None
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         job_service.set_completed(db, job_id, result={
             "lab_id": row.id, "from_release": previous, "to_release": to, "stages": ran})
@@ -2548,7 +2549,7 @@ async def run_upgrade(db: Session, *, lab_id: str, job_id: str) -> None:
         # left the new binary in place -- which is why the message names the stages that
         # completed and the job holding the failed one's Ansible output.
         row.error_message = f"upgrade to {to} failed: {exc}"[:2000]
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         logger.error("spire-lab: upgrade failed for %s: %s", lab_id, exc)
         job_service.set_failed(db, job_id, str(exc))
@@ -2810,7 +2811,7 @@ async def run_federation(db: Session, *, lab_id: str, job_id: str,
             _captured_bundle(db, row))
         row.federation_status = "federated"
         row.federation_error = None
-        row.federated_at = datetime.utcnow()
+        row.federated_at = utcnow()
         db.commit()
 
         # The workloads. Cells on the dashboard's trust domain gain the lab in their

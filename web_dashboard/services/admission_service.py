@@ -33,6 +33,7 @@ from typing import Optional
 from fastapi import HTTPException
 
 from . import _opa, config_service
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -277,7 +278,7 @@ def _enforce_change_window(action: str, request: dict, actor, db, now,
             raise HTTPException(status_code=403,
                                 detail={"error": "change_window", "reasons": reasons})
 
-        at = now or datetime.utcnow()
+        at = now or utcnow()
         # Already booked into this window -- accepting the offer this gate itself
         # made. Checked BEFORE "are we inside it now", because the whole point of a
         # booking is that we are not.
@@ -350,7 +351,7 @@ def enforce(action: str, *, request: dict, actor=None, db=None, now=None,
         "request": dict(request or {}),
         "limits": _limits(),
         # Date math done here so the Rego stays timezone-free (input.now.weekday).
-        "now": _now_doc(now or datetime.utcnow()),
+        "now": _now_doc(now or utcnow()),
     }
 
     try:

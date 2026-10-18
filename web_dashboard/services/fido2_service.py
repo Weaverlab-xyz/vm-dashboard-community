@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import EphemeralState
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,7 @@ def _store_set(db: Session, key: str, ttl: int, value: str, label: str) -> None:
         db.add(EphemeralState(
             key=key,
             value=value,
-            expires_at=datetime.utcnow() + timedelta(seconds=ttl),
+            expires_at=utcnow() + timedelta(seconds=ttl),
         ))
         db.commit()
         _sweep(db)
@@ -106,7 +107,7 @@ def _store_getdel(db: Session, key: str, label: str) -> Optional[str]:
         db.commit()
         if not claimed:
             return None          # a concurrent consumer won the race
-        if row.expires_at is None or datetime.utcnow() > row.expires_at:
+        if row.expires_at is None or utcnow() > row.expires_at:
             return None          # consumed either way — expiry is not a retry
         return row.value
     except Exception:  # noqa: BLE001
@@ -129,7 +130,7 @@ def _sweep(db: Session, now: Optional[datetime] = None) -> int:
     """
     try:
         deleted = db.query(EphemeralState).filter(
-            EphemeralState.expires_at < (now or datetime.utcnow())
+            EphemeralState.expires_at < (now or utcnow())
         ).delete(synchronize_session=False)
         db.commit()
         return deleted

@@ -37,6 +37,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-directory-health-tests"
 
 from web_dashboard.database import (Base, DirectoryHealth, Job, ManagedDirectory,  # noqa: E402
                                     RemoteAgent, SessionLocal, engine)
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.services import directory_health_service as H  # noqa: E402
 
 Base.metadata.create_all(bind=engine)
@@ -47,7 +48,7 @@ _SRC = os.path.join(_ROOT, "web_dashboard", "services", "directory_health_servic
 def _agent(db, *, version="2.8.0", seen=True):
     a = RemoteAgent(id=str(uuid.uuid4()), name=f"agent-{uuid.uuid4().hex[:6]}",
                     agent_version=version, is_active=True, public_key="pk",
-                    last_seen_at=datetime.utcnow() if seen else None)
+                    last_seen_at=utcnow() if seen else None)
     db.add(a)
     db.commit()
     return a
@@ -221,7 +222,7 @@ def test_the_probe_result_is_folded_in_when_the_agent_completes():
 
     # An hour on, it probes again.
     health = db.get(DirectoryHealth, row.id)
-    health.probe_queued_at = datetime.utcnow() - timedelta(minutes=61)
+    health.probe_queued_at = utcnow() - timedelta(minutes=61)
     db.commit()
     asyncio.run(H.check(db, row))
     assert len(_probe_jobs(db, row)) == 2
@@ -292,9 +293,9 @@ def test_the_snapshot_lists_worst_first():
     db = SessionLocal()
     a, b = _onprem(db, _agent(db), name="a.example.com"), _onprem(db, _agent(db), name="b.example.com")
     db.add(DirectoryHealth(directory_id=a.id, status="ok", checks="[]",
-                           checked_at=datetime.utcnow()))
+                           checked_at=utcnow()))
     db.add(DirectoryHealth(directory_id=b.id, status="fail", checks="[]",
-                           checked_at=datetime.utcnow()))
+                           checked_at=utcnow()))
     db.commit()
     snap = H.snapshot(db, [a, b])
     assert [d["name"] for d in snap["directories"]] == ["b.example.com", "a.example.com"]

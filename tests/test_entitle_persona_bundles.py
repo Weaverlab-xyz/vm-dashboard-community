@@ -43,6 +43,7 @@ import httpx  # noqa: E402
 from web_dashboard.database import (AuditLog, Base, EntitleBundleSet,  # noqa: E402
                                     EntitleVirtualApp, ManagedDirectory, SessionLocal,
                                     engine)
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.services import entitle_persona_bundles as bundles  # noqa: E402
 from web_dashboard.services import entitle_public_api as api  # noqa: E402
 from web_dashboard.services import entitle_registration_service as reg  # noqa: E402
@@ -313,7 +314,7 @@ def _agent(db, version="2.8.0"):
     a = RemoteAgent(id=str(uuid.uuid4()), name=f"agent-{uuid.uuid4().hex[:6]}",
                     agent_version=version, is_active=True,
                     public_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIent",
-                    last_seen_at=datetime.utcnow(), created_at=datetime.utcnow())
+                    last_seen_at=utcnow(), created_at=utcnow())
     db.add(a)
     db.commit()
     return a

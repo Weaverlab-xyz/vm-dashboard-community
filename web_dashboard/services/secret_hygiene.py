@@ -21,6 +21,7 @@ service may not import from ``..api``, where this gathering used to live.
 """
 from datetime import datetime
 from typing import Iterable, Optional
+from ..utils.clock import utcnow
 
 
 # ── Secret registry ──────────────────────────────────────────────────────────
@@ -106,7 +107,7 @@ def score(changed_at: Optional[datetime], max_age_days: int,
     ``max_age_days <= 0`` disables the staleness check (never stale). A secret
     with no ``changed_at`` has ``age_days = None`` and is not stale.
     """
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     if changed_at is None:
         return {"age_days": None, "stale": False}
     age_days = (now - changed_at).days
@@ -124,7 +125,7 @@ def summarize(items: Iterable[dict], max_age_days: int,
     items, stale_count, stale_keys}``; each returned item adds ``age_days`` and
     ``stale``. Items are sorted oldest-first so the UI leads with the worst.
     """
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     out = []
     for it in items:
         s = score(it.get("changed_at"), max_age_days, now=now)

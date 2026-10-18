@@ -16,6 +16,7 @@ from ..services import role_service
 from .auth import (PERMISSION_SCOPES, get_current_user, require_admin,
                    validate_permissions_payload)
 from .tokens import _generate_raw, hash_pat, TokenCreateResponse
+from ..utils.clock import utcnow
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -481,7 +482,7 @@ def create_user_token(
     from datetime import timedelta
     raw = _generate_raw()
     expires_at = (
-        datetime.utcnow() + timedelta(days=body.expires_days)
+        utcnow() + timedelta(days=body.expires_days)
         if body.expires_days
         else None
     )

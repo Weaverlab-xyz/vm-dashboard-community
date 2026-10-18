@@ -37,6 +37,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from web_dashboard.database import (Base, ManagedDirectory, RemoteAgent,  # noqa: E402
                                     SessionLocal, engine, get_db)
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.services import ps_directory_catalog as cat  # noqa: E402
 
 Base.metadata.create_all(bind=engine)
@@ -130,7 +131,7 @@ def _client(user=None):
 def _agent(version="2.8.0"):
     db = SessionLocal()
     a = RemoteAgent(id=str(uuid.uuid4()), name=f"agent-{uuid.uuid4().hex[:6]}",
-                    agent_version=version, is_active=True, created_at=datetime.utcnow())
+                    agent_version=version, is_active=True, created_at=utcnow())
     db.add(a)
     db.commit()
     aid = a.id

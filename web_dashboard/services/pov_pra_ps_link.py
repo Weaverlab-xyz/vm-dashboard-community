@@ -29,6 +29,7 @@ from ..database import PovEnvironment, PovEnvironmentVM
 from . import pov_gateway, pra_ps_vault_api
 from .pov_wireup import ps_system_name
 from .pra_tenant_api import PRATenantError
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,7 @@ def _record(db: Session, env: PovEnvironment, *, matched: int,
     env.pra_ps_matched_count = matched
     if linked is not None:
         env.pra_ps_linked_count = linked
-    env.pra_ps_checked_at = datetime.utcnow()
+    env.pra_ps_checked_at = utcnow()
     db.commit()
 
 

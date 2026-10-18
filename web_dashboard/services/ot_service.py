@@ -33,6 +33,7 @@ import logging
 import re
 from datetime import datetime
 from typing import Optional, Tuple
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -525,7 +526,7 @@ async def create_standalone_tunnel(*, name: str, hostname: str, protocol: str,
     config_service.set(meta_key, json.dumps({
         "name": name, "hostname": hostname, "protocol": (protocol or "").lower(),
         "local_port": lp, "remote_port": rp, "cloud": cloud,
-        "created_by": created_by, "created_at": datetime.utcnow().isoformat() + "Z",
+        "created_by": created_by, "created_at": utcnow().isoformat() + "Z",
     }))
     logger.info("OT tunnel '%s' provisioned (jump id %s, %s -> %s:%s)",
                 name, result.get("tunnel_jump_id"), lp, hostname, rp)
@@ -1127,7 +1128,7 @@ def resolve_entitle_destinations() -> Tuple[list, str]:
         addrs = set()
     if not addrs:
         return [], ""
-    stamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    stamp = utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     return sorted(f"{a}/32" for a in addrs), f"resolved {host} at {stamp}"
 
 

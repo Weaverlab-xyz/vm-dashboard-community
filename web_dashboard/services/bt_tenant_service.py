@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import BeyondTrustTenant, PovEnvironment
 from . import config_service
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -683,7 +684,7 @@ def update(db: Session, tenant_id: str, **fields) -> dict:
         row.last_ok_at = None
         row.last_error = None
 
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
     db.refresh(row)
     if fields.get("is_default"):
@@ -706,7 +707,7 @@ def set_default(db: Session, tenant_id: str) -> dict:
                                                synchronize_session=False)
     row.is_default = True
     row.is_active = True
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
     db.refresh(row)
     return serialize(db, row)
@@ -739,7 +740,7 @@ def record_result(db: Session, tenant_id: str, *, error: str = "") -> dict:
     "never worked" are different problems, and collapsing them loses the more useful one.
     """
     row = _get(db, tenant_id)
-    now = datetime.utcnow()
+    now = utcnow()
     row.last_checked_at = now
     if error:
         row.last_error = error[:2000]

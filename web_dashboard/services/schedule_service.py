@@ -33,6 +33,7 @@ from ..database import ChangeWindow, Job, JobSchedule, User
 from . import (agent_ansible_meta, ansible_run_meta, change_window,
                change_window_service, job_service)
 from .suspend_schedule import ScheduleError
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +125,7 @@ MAX_CONSECUTIVE_FAILURES = 3
 
 
 def _utcnow() -> datetime:
-    return datetime.utcnow()
+    return utcnow()
 
 
 def payload_for(job: Job) -> dict:

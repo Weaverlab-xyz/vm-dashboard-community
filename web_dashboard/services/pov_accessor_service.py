@@ -37,6 +37,7 @@ from sqlalchemy.orm import Session
 from ..database import (PovAccessor, PovEnvironment, PovEnvironmentVM, User,
                         get_password_hash)
 from . import config_service, job_service, pov_share, pov_use_cases
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,7 @@ MAX_DAYS = 90
 
 
 def _now() -> datetime:
-    return datetime.utcnow()
+    return utcnow()
 
 
 def _ttl_days() -> int:

@@ -40,6 +40,7 @@ from sqlalchemy.orm import Session
 
 from ..database import Job
 from . import job_service, spend_policy, suspend_sweeper, vm_suspend_policy
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,7 @@ _LAST_SWEEP_KEY = "vm_spend_last_sweep"
 
 
 def _utcnow() -> datetime:
-    return datetime.utcnow()
+    return utcnow()
 
 
 def enabled() -> bool:

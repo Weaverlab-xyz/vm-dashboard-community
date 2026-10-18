@@ -39,6 +39,11 @@ import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 
+
+def _utcnow():
+    """Naive UTC now: what the deprecated datetime.utcnow() returned."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
@@ -259,7 +264,7 @@ def _vm(job_id, job_type="ec2_deploy", meta=None, **schedule):
         db.query(Job).filter(Job.id == job_id).delete()
         job = Job(id=job_id, job_type=job_type, status="completed", created_by="alice",
                   workgroup="team-a", extra_data=json.dumps(meta or CLEAN_AWS),
-                  created_at=datetime.utcnow(), completed_at=datetime.utcnow())
+                  created_at=_utcnow(), completed_at=_utcnow())
         for k, v in schedule.items():
             setattr(job, k, v)
         db.add(job)

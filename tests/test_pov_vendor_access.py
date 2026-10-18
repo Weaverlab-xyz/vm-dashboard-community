@@ -37,6 +37,7 @@ sys.path.insert(0, _ROOT)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-pov-vendor")
 
 from web_dashboard import database as d  # noqa: E402
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 
 d.Base.metadata.create_all(bind=d.engine)
 
@@ -591,7 +592,7 @@ def test_the_expiry_is_clamped_to_the_povs_own():
     original = _install(fake)
     try:
         env = _env(db, tenant=_tenant(db),
-                   expires_at=datetime.utcnow() + timedelta(days=2))
+                   expires_at=utcnow() + timedelta(days=2))
         _wire(db, env)
         asyncio.run(pv.register(db, env, by="se", days=30))
         days = [c for c in fake.calls if c[0] == "create_vendor"][0][3]
@@ -609,7 +610,7 @@ def test_a_pov_that_already_expired_still_sends_a_legal_day_count():
     original = _install(fake)
     try:
         env = _env(db, tenant=_tenant(db),
-                   expires_at=datetime.utcnow() - timedelta(hours=1))
+                   expires_at=utcnow() - timedelta(hours=1))
         _wire(db, env)
         asyncio.run(pv.register(db, env, by="se", days=1))
         assert [c for c in fake.calls if c[0] == "create_vendor"][0][3] >= 1
@@ -939,13 +940,13 @@ def test_the_sweep_removes_an_expired_group_and_one_whose_pov_is_destroyed():
     try:
         stale = _env(db, tenant=_tenant(db), pra_vendor_group_id="77",
                      pra_vendor_policy_id="12",
-                     pra_vendor_expires_at=datetime.utcnow() - timedelta(days=1))
+                     pra_vendor_expires_at=utcnow() - timedelta(days=1))
         dead = _env(db, tenant=_tenant(db), pra_vendor_group_id="78",
                     pra_vendor_policy_id="13", status="destroyed",
-                    pra_vendor_expires_at=datetime.utcnow() + timedelta(days=5))
+                    pra_vendor_expires_at=utcnow() + timedelta(days=5))
         live = _env(db, tenant=_tenant(db), pra_vendor_group_id="79",
                     pra_vendor_policy_id="14",
-                    pra_vendor_expires_at=datetime.utcnow() + timedelta(days=5))
+                    pra_vendor_expires_at=utcnow() + timedelta(days=5))
         done = asyncio.run(pv.sweep(db))
         assert done >= 2
         assert stale.pra_vendor_group_id is None
@@ -962,7 +963,7 @@ def test_the_sweep_never_raises_when_one_appliance_is_unreachable():
     original = _install(fake)
     try:
         env = _env(db, tenant=_tenant(db), pra_vendor_group_id="77",
-                   pra_vendor_expires_at=datetime.utcnow() - timedelta(days=1))
+                   pra_vendor_expires_at=utcnow() - timedelta(days=1))
         assert asyncio.run(pv.sweep(db)) == 0
         assert env.pra_vendor_group_id == "77"
     finally:

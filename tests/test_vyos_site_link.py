@@ -38,6 +38,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-vyos-link-tests")
 
 from web_dashboard.database import (Base, Job, ManagedDirectory, RemoteAgent,  # noqa: E402
                                     SessionLocal, engine)
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.services import config_service  # noqa: E402
 from web_dashboard.services import directory_service as ds  # noqa: E402
 from web_dashboard.services import secrets_backend_service as sbs  # noqa: E402
@@ -75,7 +76,7 @@ def _read(*parts):
 def _onprem(db):
     a = RemoteAgent(id=str(uuid.uuid4()), name=f"agent-{uuid.uuid4().hex[:6]}",
                     agent_version="2.8.0", is_active=True, allowed_job_types=None,
-                    created_at=datetime.utcnow())
+                    created_at=utcnow())
     db.add(a)
     db.commit()
     return ds.register_onprem(

@@ -39,6 +39,7 @@ import hashlib
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
+from ..utils.clock import utcnow
 
 # 512 KB. A logo is a logo; this is generous for a PNG wordmark at 2x and still small
 # enough that the whole row fits comfortably in a single Postgres TOAST read.
@@ -275,7 +276,7 @@ def store(data: bytes, mime: str, *, filename: str = "", width: int | None = Non
         row.height = height
         row.filename = (filename or "")[:255] or None
         row.uploaded_by = (username or "")[:128] or None
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
     finally:
         db.close()

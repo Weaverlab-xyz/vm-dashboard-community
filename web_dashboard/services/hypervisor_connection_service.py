@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import HypervisorConnection
 from . import config_service
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -458,7 +459,7 @@ def _row_from(conn: Connection, *, created_by: str) -> HypervisorConnection:
         verify_ssl=conn.verify_ssl,
         options=json.dumps(conn.options) if conn.options else None,
         is_default=True, is_active=True,
-        created_at=datetime.utcnow(), created_by=created_by)
+        created_at=utcnow(), created_by=created_by)
 
 
 # ── CRUD ──────────────────────────────────────────────────────────────────────
@@ -540,7 +541,7 @@ def _last_dashboard_secret_fetch(db: Session) -> dict:
     """
     from datetime import timedelta
     from ..database import AuditLog
-    since = datetime.utcnow() - timedelta(days=_FETCH_LOOKBACK_DAYS)
+    since = utcnow() - timedelta(days=_FETCH_LOOKBACK_DAYS)
     try:
         rows = (db.query(AuditLog.timestamp, AuditLog.details)
                 .filter(AuditLog.action == "agent.connection_secret",
@@ -638,7 +639,7 @@ def create(db: Session, *, kind: str, name: str, created_by: str,
         agent_id=agent_id or None, agent_connection_name=agent_connection_name or None,
         site=(site or "").strip() or None,
         is_active=True, is_default=False,
-        created_at=datetime.utcnow(), created_by=created_by)
+        created_at=utcnow(), created_by=created_by)
     db.add(row)
     db.commit()
     db.refresh(row)
@@ -682,7 +683,7 @@ def update(db: Session, connection_id: str, **fields) -> dict:
     if fields.get("secret_ref"):
         row.secret_ref = str(fields["secret_ref"]).strip()
         row.secret_enc = None
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
     db.refresh(row)
     return serialize(row)
@@ -723,7 +724,7 @@ def record_result(db: Session, connection_id: str, *, error: str = "",
             HypervisorConnection.id == connection_id).first()
         if row is None:
             return
-        now = datetime.utcnow()
+        now = utcnow()
         if error:
             row.last_error = str(error)[:2000]
         else:

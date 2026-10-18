@@ -48,6 +48,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover — app deps missing
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from web_dashboard.api import agent as agent_api  # noqa: E402
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.api import storage as storage_api  # noqa: E402
 from web_dashboard.database import (AuditLog, Base, Job, RemoteAgent,  # noqa: E402
                                     SessionLocal, engine, get_db)
@@ -258,7 +259,7 @@ def _online(agent_id: str) -> None:
     db = SessionLocal()
     try:
         db.query(RemoteAgent).filter(RemoteAgent.id == agent_id).first().last_seen_at = \
-            datetime.utcnow()
+            utcnow()
         db.commit()
     finally:
         db.close()

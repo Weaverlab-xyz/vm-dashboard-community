@@ -53,6 +53,7 @@ from sqlalchemy.orm import Session
 
 from ..database import Job, PovEnvironment, SessionLocal
 from . import job_service, lab_platforms
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +78,7 @@ _OWNED_BY_A_JOB = ("provisioning", "destroying")
 
 
 def _utcnow() -> datetime:
-    return datetime.utcnow()
+    return utcnow()
 
 
 def interval_seconds() -> int:

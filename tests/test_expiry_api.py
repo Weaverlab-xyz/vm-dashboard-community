@@ -95,6 +95,7 @@ _install_stubs()
 # regression, and the `except Exception: skip` that used to sit around this line is what
 # let the file exit 0 having tested nothing.
 from web_dashboard.services import expiry_reaper, inventory_service  # noqa: E402
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 
 
 _API = os.path.join(_ROOT, "web_dashboard", "api", "expiry.py")
@@ -105,9 +106,9 @@ _API = os.path.join(_ROOT, "web_dashboard", "api", "expiry.py")
 class _FakeRow:
     """Stands in for a Job / CloudDatabase / K8sCluster row."""
     def __init__(self, created_at=None, expires_at=None):
-        self.created_at = created_at or (datetime.utcnow() - timedelta(hours=5))
+        self.created_at = created_at or (utcnow() - timedelta(hours=5))
         self.expires_at = expires_at
-        self.expiry_warned_at = datetime.utcnow()
+        self.expiry_warned_at = utcnow()
 
 
 class _FakeSession:
@@ -140,7 +141,7 @@ def _soon():
     """A current expiry an hour out. These tests exercise extend mechanics, so the row has
     a timer to extend: arming one on an untimed row is admin-only (see
     test_a_non_admin_cannot_arm_or_shorten below)."""
-    return datetime.utcnow() + timedelta(hours=1)
+    return utcnow() + timedelta(hours=1)
 
 
 def _patch_resolve(rows):
@@ -187,7 +188,7 @@ def test_an_ineligible_row_is_reported_not_raised():
     _silence_audit()
     good = _FakeRow()
     _patch_resolve({"job:a": (good, good.created_at, _soon()),
-                    "clouddb:b": (_FakeRow(), datetime.utcnow(), None)})
+                    "clouddb:b": (_FakeRow(), utcnow(), None)})
     db = _FakeSession()
     items = [_item(), _item(id="clouddb:b", kind="database", state="available",
                             source="registered", name="db-1")]
@@ -221,7 +222,7 @@ def test_a_clamped_extend_is_flagged():
     _silence_audit()
     CONF["resource_expiry_max_total_hours"] = "100"
     try:
-        row = _FakeRow(created_at=datetime.utcnow() - timedelta(hours=90))
+        row = _FakeRow(created_at=utcnow() - timedelta(hours=90))
         _patch_resolve({"job:a": (row, row.created_at, _soon())})
         out = expiry_reaper.set_expiry(_FakeSession(), [_item()],
                                        extend_hours=500, actor="alice")
@@ -234,7 +235,7 @@ def test_never_is_refused_for_a_non_admin():
     _silence_audit()
     CONF["resource_expiry_allow_never"] = "1"
     try:
-        row = _FakeRow(expires_at=datetime.utcnow() + timedelta(hours=5))
+        row = _FakeRow(expires_at=utcnow() + timedelta(hours=5))
         _patch_resolve({"job:a": (row, row.created_at, row.expires_at)})
         out = expiry_reaper.set_expiry(_FakeSession(), [_item()], never=True,
                                        is_admin=False, actor="alice")
@@ -249,7 +250,7 @@ def test_never_clears_the_timer_for_an_allowed_admin():
     _silence_audit()
     CONF["resource_expiry_allow_never"] = "1"
     try:
-        row = _FakeRow(expires_at=datetime.utcnow() + timedelta(hours=5))
+        row = _FakeRow(expires_at=utcnow() + timedelta(hours=5))
         _patch_resolve({"job:a": (row, row.created_at, row.expires_at)})
         out = expiry_reaper.set_expiry(_FakeSession(), [_item()], never=True,
                                        is_admin=True, actor="admin")
@@ -274,27 +275,27 @@ def test_a_non_admin_cannot_arm_or_shorten():
     """Visibility authorizes a change only while it is a delay. Arming a timer on an
     untimed row, or setting an earlier date, is reported per row and writes nothing."""
     _silence_audit()
-    untimed, timed = _FakeRow(), _FakeRow(expires_at=datetime.utcnow() + timedelta(hours=48))
+    untimed, timed = _FakeRow(), _FakeRow(expires_at=utcnow() + timedelta(hours=48))
     _patch_resolve({"job:a": (untimed, untimed.created_at, None),
                     "job:b": (timed, timed.created_at, timed.expires_at)})
     db = _FakeSession()
     out = expiry_reaper.set_expiry(
         db, [_item(), _item(id="job:b", name="vm-2")],
-        absolute=datetime.utcnow() + timedelta(hours=2), actor="alice")
+        absolute=utcnow() + timedelta(hours=2), actor="alice")
     assert out["updated"] == [] and len(out["failed"]) == 2, out
     assert all("administrator" in f["error"] for f in out["failed"])
-    assert untimed.expires_at is None and timed.expires_at > datetime.utcnow() + timedelta(hours=47)
+    assert untimed.expires_at is None and timed.expires_at > utcnow() + timedelta(hours=47)
     assert db.commits == 0
 
 
 def test_an_admin_may_arm_and_shorten():
     _silence_audit()
-    untimed, timed = _FakeRow(), _FakeRow(expires_at=datetime.utcnow() + timedelta(hours=48))
+    untimed, timed = _FakeRow(), _FakeRow(expires_at=utcnow() + timedelta(hours=48))
     _patch_resolve({"job:a": (untimed, untimed.created_at, None),
                     "job:b": (timed, timed.created_at, timed.expires_at)})
     out = expiry_reaper.set_expiry(
         _FakeSession(), [_item(), _item(id="job:b", name="vm-2")],
-        absolute=datetime.utcnow() + timedelta(hours=2), is_admin=True, actor="root")
+        absolute=utcnow() + timedelta(hours=2), is_admin=True, actor="root")
     assert len(out["updated"]) == 2 and out["failed"] == []
 
 

@@ -29,6 +29,7 @@ cost a playbook run and a demo.
 """
 import logging
 from datetime import datetime, timedelta
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +165,7 @@ def host_problem(host_ref: str) -> str:
 
 def pat_expires_at(hours: int = DEFAULT_PAT_HOURS, now=None) -> datetime:
     """When the agent's token dies. Always a datetime, never None."""
-    base = now or datetime.utcnow()
+    base = now or utcnow()
     return base + timedelta(hours=int(hours))
 
 
@@ -590,7 +591,7 @@ def token_live(row, now=None) -> bool:
         # never expires -- but a row that somehow has no expiry is not evidence of a
         # live one, and counting it as live is the generous reading of the two.
         return False
-    return expires > (now or datetime.utcnow())
+    return expires > (now or utcnow())
 
 
 def stages_done(row) -> list:

@@ -209,6 +209,7 @@ from fastapi import HTTPException  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 from .auth import require_admin  # noqa: E402
+from ..utils.clock import utcnow
 
 
 class TrustDomainRequest(BaseModel):
@@ -289,8 +290,8 @@ def upsert_trust_domain(body: TrustDomainRequest, admin: User = Depends(require_
     row.tls_server_name = (body.tls_server_name or "").strip().lower() or None
     if bundle:
         row.bundle_json = bundle
-        row.bundle_captured_at = datetime.utcnow()
-    row.updated_at = datetime.utcnow()
+        row.bundle_captured_at = utcnow()
+    row.updated_at = utcnow()
     db.commit()
     db.refresh(row)
     spiffe_assertion.clear_state()

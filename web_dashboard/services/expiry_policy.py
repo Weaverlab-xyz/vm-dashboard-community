@@ -24,6 +24,7 @@ infrastructure:
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -368,7 +369,7 @@ def exempt_workgroups() -> frozenset:
 # Mixing in an aware datetime would raise on subtraction.
 
 def _now() -> datetime:
-    return datetime.utcnow()
+    return utcnow()
 
 
 def parse_ts(value) -> Optional[float]:

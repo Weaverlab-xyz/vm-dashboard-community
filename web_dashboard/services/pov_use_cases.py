@@ -44,6 +44,7 @@ from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovUseCaseProgress
 from . import pov_cards, pov_cell_roles, pov_runbooks, pov_use_case_scope, pov_wireup
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ NOTE_MAX = 2000
 
 
 def _now() -> datetime:
-    return datetime.utcnow()
+    return utcnow()
 
 
 # ── this POV's product mix ───────────────────────────────────────────────────

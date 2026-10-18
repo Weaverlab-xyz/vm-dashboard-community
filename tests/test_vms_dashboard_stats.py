@@ -17,7 +17,12 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _utcnow():
+    """Naive UTC now: what the deprecated datetime.utcnow() returned."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -50,7 +55,7 @@ def _setup(db, vms=(("AB12", "win11-lab", "poweredOn"),
     db.commit()
 
     agent = RemoteAgent(name="desk-01", public_key="k", is_active=True,
-                        enrolled_at=datetime.utcnow(), last_seen_at=datetime.utcnow())
+                        enrolled_at=_utcnow(), last_seen_at=_utcnow())
     db.add(agent)
     db.commit()
     db.refresh(agent)
@@ -61,7 +66,7 @@ def _setup(db, vms=(("AB12", "win11-lab", "poweredOn"),
         db.add(HypervisorVMCache(
             connection_id=conn["id"], vm_id=vm_id, name=name, power_state=state,
             ip_addresses=json.dumps([]), scope="", vm_type="vm", tags="[]",
-            synced_at=datetime.utcnow()))
+            synced_at=_utcnow()))
     db.commit()
     return conn
 

@@ -45,6 +45,7 @@ from . import worker_health
 from .database import SessionLocal, Job, init_db, pool_capacity
 from .logging_context import LOG_FORMAT, correlation, install_log_correlation
 from .services import job_service, worker_policy
+from .utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -430,7 +431,7 @@ def _claim_one(db: Session, allowed: tuple = HANDLED_TYPES,
         )
         if job is None:
             return None
-        now = datetime.utcnow()
+        now = utcnow()
         claimed = (
             db.query(Job)
             .filter(Job.id == job.id, Job.status == "pending")
@@ -835,7 +836,7 @@ def _beat_once(job_id: str) -> None:
     db = SessionLocal()
     try:
         db.query(Job).filter(Job.id == job_id, Job.status == "running").update(
-            {Job.updated_at: datetime.utcnow()}, synchronize_session=False
+            {Job.updated_at: utcnow()}, synchronize_session=False
         )
         db.commit()
     finally:
@@ -1202,7 +1203,7 @@ def _expire_heartbeats(job_ids: list) -> None:
     SIBLING worker owns."""
     if not job_ids:
         return
-    stale = datetime.utcnow() - timedelta(minutes=STALE_AFTER_MINUTES + 1)
+    stale = utcnow() - timedelta(minutes=STALE_AFTER_MINUTES + 1)
     db = SessionLocal()
     try:
         db.query(Job).filter(Job.id.in_(job_ids), Job.status == "running").update(

@@ -53,6 +53,7 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from web_dashboard.database import Base, Job  # noqa: E402
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.services import job_service  # noqa: E402
 
 
@@ -72,7 +73,7 @@ def _add(db, **kw):
     """Insert a job row directly, bypassing create_job's expiry/notification machinery."""
     kw.setdefault("job_type", "ansible_local")
     kw.setdefault("status", "pending")
-    kw.setdefault("created_at", datetime.utcnow())
+    kw.setdefault("created_at", utcnow())
     kw.setdefault("created_by", "tester")
     job = Job(**kw)
     db.add(job)
@@ -100,13 +101,13 @@ def test_an_unscheduled_job_is_claimable():
 
 def test_a_job_scheduled_in_the_future_is_not_claimable():
     db = _session()
-    _add(db, scheduled_for=datetime.utcnow() + timedelta(hours=6))
+    _add(db, scheduled_for=utcnow() + timedelta(hours=6))
     assert _claimable(db) == [], "a job booked for later was claimable now"
 
 
 def test_a_job_whose_window_has_opened_is_claimable():
     db = _session()
-    job = _add(db, scheduled_for=datetime.utcnow() - timedelta(seconds=1))
+    job = _add(db, scheduled_for=utcnow() - timedelta(seconds=1))
     assert [j.id for j in _claimable(db)] == [job.id]
 
 
@@ -118,7 +119,7 @@ def test_an_unapproved_job_is_not_claimable():
 
 def test_an_approved_job_is_claimable():
     db = _session()
-    job = _add(db, approval_required=True, approved_at=datetime.utcnow(),
+    job = _add(db, approval_required=True, approved_at=utcnow(),
                approved_by="someone-else")
     assert [j.id for j in _claimable(db)] == [job.id]
 
@@ -139,7 +140,7 @@ def test_approval_required_null_passes():
 def test_a_backing_off_retry_is_not_claimable():
     """retry_after predates this work; the shared predicate must not have dropped it."""
     db = _session()
-    _add(db, retry_after=datetime.utcnow() + timedelta(minutes=5), attempts=1)
+    _add(db, retry_after=utcnow() + timedelta(minutes=5), attempts=1)
     assert _claimable(db) == []
 
 
@@ -147,8 +148,8 @@ def test_the_gates_are_independent():
     """A job can be held by more than one clause at once, and satisfying one is not
     enough. Approving a change does NOT make it run before its window."""
     db = _session()
-    _add(db, scheduled_for=datetime.utcnow() + timedelta(hours=2),
-         approval_required=True, approved_at=datetime.utcnow())
+    _add(db, scheduled_for=utcnow() + timedelta(hours=2),
+         approval_required=True, approved_at=utcnow())
     assert _claimable(db) == [], "approval released a job ahead of its window"
 
 
@@ -159,7 +160,7 @@ def test_the_local_runner_does_not_claim_a_scheduled_job():
     from web_dashboard import jobs_worker
     db = _session()
     _add(db, job_type="ansible_local",
-         scheduled_for=datetime.utcnow() + timedelta(hours=6))
+         scheduled_for=utcnow() + timedelta(hours=6))
     assert jobs_worker._claim_one(db, allowed=("ansible_local",)) is None
 
 
@@ -167,7 +168,7 @@ def test_the_local_runner_claims_it_once_the_window_opens():
     from web_dashboard import jobs_worker
     db = _session()
     job = _add(db, job_type="ansible_local",
-               scheduled_for=datetime.utcnow() - timedelta(seconds=1))
+               scheduled_for=utcnow() - timedelta(seconds=1))
     claimed = jobs_worker._claim_one(db, allowed=("ansible_local",))
     assert claimed is not None and claimed[0] == job.id
     db.refresh(job)
@@ -184,7 +185,7 @@ def test_the_agent_lease_does_not_claim_a_scheduled_job():
 
     db = _session()
     _add(db, job_type="agent_ansible", status="queued", agent_id="agent-1",
-         scheduled_for=datetime.utcnow() + timedelta(hours=6))
+         scheduled_for=utcnow() + timedelta(hours=6))
 
     real = agent_service.allowed_job_types
     agent_service.allowed_job_types = lambda agent: ("agent_ansible",)
@@ -202,7 +203,7 @@ def test_the_agent_lease_claims_it_once_the_window_opens():
 
     db = _session()
     job = _add(db, job_type="agent_ansible", status="queued", agent_id="agent-1",
-               scheduled_for=datetime.utcnow() - timedelta(seconds=1))
+               scheduled_for=utcnow() - timedelta(seconds=1))
 
     real = agent_service.allowed_job_types
     agent_service.allowed_job_types = lambda agent: ("agent_ansible",)
@@ -224,7 +225,7 @@ def test_the_queue_orders_by_intended_run_time_not_submission_time():
     """
     from web_dashboard import jobs_worker
     db = _session()
-    now = datetime.utcnow()
+    now = utcnow()
     late = _add(db, job_type="ansible_local", created_at=now - timedelta(days=21),
                 scheduled_for=now - timedelta(minutes=1))
     early = _add(db, job_type="ansible_local", created_at=now - timedelta(days=1),

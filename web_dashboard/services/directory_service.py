@@ -48,6 +48,7 @@ from sqlalchemy.orm import Session
 
 from ..database import Job, ManagedDirectory
 from . import job_service, terraform, terraform_provider_env
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -631,7 +632,7 @@ async def _run_connector_apply(db: Session, row: ManagedDirectory, job_id: str) 
         row.security_group_id = settings.get("SecurityGroupId") or row.security_group_id
         row.status = "available"
         row.error_message = None
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         job_service.set_completed(db, job_id, result={
             "directory_id": row.id, "name": row.name, "aws_directory_id": row.directory_id})
@@ -640,7 +641,7 @@ async def _run_connector_apply(db: Session, row: ManagedDirectory, job_id: str) 
         # recorded so Destroy can delete it.
         row.status = "failed"
         row.error_message = str(exc)[:2000]
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         logger.error("directory: AD Connector failed for %s: %s", row.id, exc)
         job_service.set_failed(db, job_id, str(exc)[:2000])
@@ -860,7 +861,7 @@ async def run_provision_apply(db: Session, *, directory_id: str, job_id: str) ->
         _read_outputs(row, outputs)
         row.status = "available"
         row.error_message = None
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         if row.provider == "dns_link":
             # No domain controllers and no administrator here: the domain is on-prem.
@@ -871,7 +872,7 @@ async def run_provision_apply(db: Session, *, directory_id: str, job_id: str) ->
     except Exception as exc:  # noqa: BLE001
         row.status = "failed"
         row.error_message = str(exc)[:2000]
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         logger.error("directory: provision failed for %s: %s", directory_id, exc)
         job_service.set_failed(db, job_id, str(exc)[:2000])
@@ -884,7 +885,7 @@ async def run_provision_apply(db: Session, *, directory_id: str, job_id: str) ->
     if row.cloud == "azure":
         notes = azure_build_notes(row)
         row.error_message = "; ".join(notes)[:2000]
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         job_service.set_completed(db, job_id, result={
             "directory_id": row.id, "name": row.name, "built": True,
@@ -909,7 +910,7 @@ async def run_provision_apply(db: Session, *, directory_id: str, job_id: str) ->
     password = ""
     if notes:
         row.error_message = "; ".join(notes)[:2000]
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
     job_service.set_completed(db, job_id, result={
         "directory_id": row.id, "name": row.name, "built": built,
@@ -940,7 +941,7 @@ def start_decommission(db: Session, *, directory_id: str, created_by: str) -> di
             f"domain) first — deleting the directory breaks every server joined to it.")
     row.status = "decommissioning"
     row.expires_at = None
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     job = job_service.create_job(
         db, DECOMMISSION_JOB_TYPE, created_by, workgroup=row.workgroup,
         metadata={"directory_id": row.id, "name": row.name, "cloud": row.cloud})
@@ -967,7 +968,7 @@ async def run_decommission(db: Session, *, directory_id: str, job_id: str) -> No
                 await asyncio.to_thread(_aws_delete_sync, row.region, row.directory_id)
             row.status = "deleted"
             row.error_message = None
-            row.updated_at = datetime.utcnow()
+            row.updated_at = utcnow()
             db.commit()
             job_service.set_completed(db, job_id, result={"directory_id": row.id,
                                                           "name": row.name})
@@ -998,14 +999,14 @@ async def run_decommission(db: Session, *, directory_id: str, job_id: str) -> No
         row.admin_password_backend = row.admin_password_ref = None
         row.status = "deleted"
         row.error_message = cleanup
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         job_service.set_completed(db, job_id, result={"directory_id": row.id,
                                                       "name": row.name})
     except Exception as exc:  # noqa: BLE001
         row.status = "failed"
         row.error_message = str(exc)[:2000]
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         job_service.set_failed(db, job_id, str(exc)[:2000])
 
@@ -1610,7 +1611,7 @@ def update_idp(db: Session, row: ManagedDirectory, *, name: Optional[str] = None
         row.name = name.strip()[:255]
     if writes_enabled is not None:
         row.writes_enabled = bool(writes_enabled)
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
     db.refresh(row)
     directory_idp.forget(row.id)
@@ -1833,7 +1834,7 @@ def set_join_account(db: Session, row: ManagedDirectory,
     else:
         row.credentials_ref = None
         row.admin_username = None
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
     db.refresh(row)
     return row
