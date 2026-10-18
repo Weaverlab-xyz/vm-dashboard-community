@@ -1,1 +1,7 @@
-[]
+[
+  {
+    "page": "/jobs/00000000-0000-0000-0000-000000000000",
+    "message": "^console\\.error: WebSocket connection to .*/api/ws/jobs/0{8}-0{4}-0{4}-0{4}-0{12}' failed: .*403",
+    "reason": "The smoke test opens the job page with a dummy id. api/websocket.py refuses the handshake for a job that does not exist (deliberately indistinguishable from one that is not yours), which Chromium reports as a 403."
+  }
+]

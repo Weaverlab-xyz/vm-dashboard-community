@@ -78,10 +78,12 @@ DEMO_FEATURES='{"remote_agents_enabled":true,"ansible_enabled":true,"proxmox_ena
   "vsphere_enabled":true,"hyperv_enabled":true,"nutanix_enabled":true,"xcpng_enabled":true,
   "password_safe_enabled":true,"pra_enabled":true,"epml_enabled":true,"portainer_enabled":true,
   "entitle_enabled":true,"cost_explorer_enabled":true,"cloud_database_enabled":true,
-  "k8s_management_enabled":true,"cloud_functions_enabled":true}'
+  "k8s_management_enabled":true,"cloud_functions_enabled":true,"vmware_enabled":true,
+  "vdesktops_enabled":true,"directories_enabled":true}'
 start demo 18731 demo "$(echo "$DEMO_FEATURES" | tr -d '\n ')" \
   CERT_LAB_ENABLED=true SPIRE_LAB_ENABLED=true WORKLOAD_CREDENTIALS_ENABLED=true \
-  K8S_MANAGEMENT_ENABLED=true PRA_ENABLED=true NETCELL_ENABLED=true
+  K8S_MANAGEMENT_ENABLED=true PRA_ENABLED=true NETCELL_ENABLED=true \
+  VMWARE_ENABLED=true VDESKTOPS_ENABLED=true DIRECTORIES_ENABLED=true
 start pov 18732 pov '{}' POV_ENVIRONMENTS_ENABLED=true
 
 fail=0
