@@ -207,7 +207,11 @@ tailwindcss scanning every template, script and Python file that `tailwind.confi
 lists) and committed. After adding a class name that appears nowhere else, run
 `scripts/build_css.sh` and commit the result; CI fails a stale file. Write class names out
 in full -- `'bg-' + colour` gets no rule, and `scripts/ci/css_coverage.sh` fails the smoke
-test when a page carries one. A page error, `console.error` or 5xx the smoke test
+test when a page carries one. `scripts/ci/frontend_pins.py` (the weekly **Front-end pins**
+workflow) reports every one of these pins that is behind a release on its own major; to
+bump Tailwind, change `VERSION` in `scripts/build_css.sh` and rebuild, and to bump Alpine,
+replace the vendored file and the `static_url` reference on the four pages that own their
+`<head>`. A page error, `console.error` or 5xx the smoke test
 should tolerate goes in `tests/browser_smoke_allow.json`, scoped to its page, with the
 reason.
 

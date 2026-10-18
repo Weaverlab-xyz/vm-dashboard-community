@@ -1,0 +1,31 @@
+name: Front-end pins
+
+# Is each pinned front-end package behind a release on its own major?
+#
+# Dependabot covers pip, Docker and Actions; nothing covered these, and they had already
+# drifted (Tailwind 3.4.19 and Playwright 1.64 shipped while the app sat on 3.4.17 and
+# 1.56). scripts/ci/frontend_pins.py reads each pin from where it lives -- the vendored
+# Alpine file, scripts/build_css.sh, the CDN URLs in templates, the Playwright install in
+# tests.yml -- and asks the npm registry. A newer patch or minor fails the run; a newer
+# major is reported and does not (that is a migration, not an oversight).
+#
+# Scheduled only, never on a pull request: an upstream release must not turn every open
+# PR red. A failed scheduled run notifies the repository's maintainers.
+
+on:
+  schedule:
+    - cron: "23 7 * * 1"   # Mondays
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend-pins:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Compare pins with the npm registry
+        run: python3 scripts/ci/frontend_pins.py
