@@ -61,10 +61,10 @@ def _prose_in_js(code):
 
 def _template_hits(src):
     """[(offset, text)] of visible text in a template that says workgroup."""
-    hidden = re.compile(r"\{\{.*?\}\}|\{%.*?%\}|\{#.*?#\}|<!--.*?-->|<code\b[^>]*>.*?</code>", re.S)
+    hidden = re.compile(r"\{\{.*?\}\}|\{%.*?%\}|\{#.*?#\}|<!--.*?--!?>|<code\b[^>]*>.*?</code>", re.S)
     src = hidden.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), src)
     hits = []
-    script = re.compile(r"(<script\b[^>]*>)(.*?)</script\s*>", re.S | re.I)
+    script = re.compile(r"(<script\b[^>]*>)(.*?)</script\b[^>]*>", re.S | re.I)
     tag = re.compile(r"<[a-zA-Z][^<>]*?>", re.S)
     attr = re.compile(r"""([:@\w.-]+)\s*=\s*("([^"]*)"|'([^']*)')""", re.S)
     scripts = [(m.start(2), m.end(2)) for m in script.finditer(src)]
