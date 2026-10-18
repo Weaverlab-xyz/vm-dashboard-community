@@ -19,7 +19,8 @@ from sqlalchemy.orm import Session
 
 from ..database import OAuthGroupMapping, get_db
 from ..services import role_service, workgroup_service
-from .auth import get_current_user, require_admin, validate_permissions_payload
+from .auth import (LEGACY_FULL_ACCESS_KEY, full_access_map, get_current_user, require_admin,
+                   validate_permissions_payload)
 
 router = APIRouter(prefix="/api/groups", tags=["groups"])
 
@@ -30,7 +31,9 @@ class GroupMappingCreate(BaseModel):
     entra_group_id: str
     display_name: str
     workgroup: str
-    default_permissions: Optional[dict] = None  # None = all access for auto-provisioned users
+    # None = nothing granted (members get only what `role_id` confers); {} = Full access,
+    # stored as the explicit `full_access_map()` because an empty map grants nothing.
+    default_permissions: Optional[dict] = None
     # The focus this group confers, and the tie-break when a user matches several
     # mappings. Both optional: a broad catch-all group can grant a workgroup without
     # dictating a focus, and that is the common case. NOT a permission -- see
@@ -114,6 +117,17 @@ def _resolve_role(db: Session, raw):
     return role
 
 
+def _stored_permissions(perms):
+    """The column value for a validated payload: NULL for None, the explicit full map for {}.
+
+    {} is what the grid's "Full access" box sends. It is written out in full because an
+    empty map grants nothing, so storing {} would turn "Full access" into "no access".
+    """
+    if perms is None:
+        return None
+    return _json.dumps(perms if perms else full_access_map())
+
+
 def _mapping_to_response(m: OAuthGroupMapping, db: Session = None) -> GroupMappingResponse:
     perms = None
     if m.default_permissions:
@@ -121,6 +135,9 @@ def _mapping_to_response(m: OAuthGroupMapping, db: Session = None) -> GroupMappi
             perms = _json.loads(m.default_permissions)
         except Exception:
             pass
+        if isinstance(perms, dict):
+            # Internal to the login merge, and not a scope the grid could render or save.
+            perms.pop(LEGACY_FULL_ACCESS_KEY, None)
     return GroupMappingResponse(
         id=m.id,
         entra_group_id=m.entra_group_id,
@@ -174,7 +191,7 @@ def create_group_mapping(payload: GroupMappingCreate, db: Session = Depends(get_
         entra_group_id=payload.entra_group_id.strip(),
         display_name=payload.display_name.strip(),
         workgroup=payload.workgroup,
-        default_permissions=_json.dumps(payload.default_permissions) if payload.default_permissions else None,
+        default_permissions=_stored_permissions(payload.default_permissions),
         persona=_valid_persona(payload.persona),
         persona_priority=payload.persona_priority,
         role_id=(_resolve_role(db, payload.role_id).id if payload.role_id else None),
@@ -224,8 +241,7 @@ def update_group_mapping(mapping_id: str, payload: GroupMappingUpdate,
         mapping.display_name = name
     if payload.default_permissions is not None:
         validate_permissions_payload(payload.default_permissions)
-        mapping.default_permissions = (_json.dumps(payload.default_permissions)
-                                       if payload.default_permissions else None)
+        mapping.default_permissions = _stored_permissions(payload.default_permissions)
     if payload.persona is not None:
         mapping.persona = _valid_persona(payload.persona)
     if payload.persona_priority is not None:

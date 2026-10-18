@@ -9,8 +9,8 @@
    TWO deliberate differences from the other two tabs' grids, both of which look like
    omissions and are not:
 
-     * NO "Full access (unrestricted)" checkbox. That escape hatch stores {} , and on a USER
-       an empty map means unrestricted. A role whose map were empty would therefore hand
+     * NO "Full access" checkbox. That escape hatch sends {} , and on a USER
+       that is written out as every section. A role whose map were empty would therefore hand
        every assignee every permission in the dashboard, now and for every scope added in
        future -- the exact opposite of what someone building a restricted role is doing. The
        server refuses it too (role_service.validate_role_permissions). "Everything" is

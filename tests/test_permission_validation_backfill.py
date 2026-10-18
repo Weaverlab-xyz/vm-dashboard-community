@@ -117,17 +117,16 @@ def test_both_write_paths_call_the_validator():
 
 # ── the two predicates ───────────────────────────────────────────────────────
 
-def test_an_empty_map_is_unrestricted_for_the_permissive_form():
-    """Load-bearing backward compatibility for pre-OIDC users. Changing it locks them
-    out of things they can already do."""
+def test_an_empty_map_grants_nothing_for_the_permissive_form():
+    """Empty used to mean unrestricted here. It grants nothing now: the users who relied on
+    it were given an explicit map by `_materialise_empty_permission_maps`."""
     u = User(username="legacy", hashed_password="x")
     assert u.effective_permissions_dict == {}
-    assert has_permission(u, "pov", "write")
+    assert not has_permission(u, "pov", "write")
 
 
 def test_an_empty_map_is_NOT_unrestricted_for_the_explicit_form():
-    """The whole reason require_explicit_permission exists. Converting an ex-admin route
-    with the permissive form would hand it to every legacy NULL-permission user."""
+    """The explicit form never read an empty map as unrestricted."""
     u = User(username="legacy", hashed_password="x")
     assert not has_explicit_permission(u, "audit", "read")
     assert not has_explicit_permission(u, "connections", "write")

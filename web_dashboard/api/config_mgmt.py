@@ -125,7 +125,9 @@ def get_inventory(db: Session = Depends(get_db),
     """
     return {
         "targets":   ansible_local_service.get_configured_targets(db),
-        "inventory": ansible_local_service.build_inventory(db),
+        # Redacted: hostvars carry each hypervisor's decrypted credential, and nothing a
+        # browser does needs it (the page reads `targets` only).
+        "inventory": ansible_local_service.redact_inventory(ansible_local_service.build_inventory(db)),
     }
 
 
@@ -600,13 +602,10 @@ def _secret_use_details(payload: "RunRequest", target: str) -> dict:
 
 def _can_use_secrets(user) -> bool:
     """True if the user may use a secret in a run (without ever seeing it): an
-    admin, an unrestricted (NULL-permission) legacy user, or one granted
-    ``secrets:use``."""
+    admin, or one granted ``secrets:use``. An empty map grants nothing."""
     if getattr(user, "is_effective_admin", False):
         return True
-    perms = user.effective_permissions_dict  # {} / NULL → unrestricted (legacy)
-    if not perms:
-        return True
+    perms = user.effective_permissions_dict or {}
     return "use" in perms.get("secrets", [])
 
 

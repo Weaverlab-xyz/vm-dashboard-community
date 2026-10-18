@@ -50,6 +50,8 @@ services:
     environment:
       - DATABASE_URL=postgresql://dashboardadmin:${POSTGRES_PASSWORD:-devpassword}@db:5432/vmclipov
       - JWT_SECRET_KEY_FILE=/run/secrets/jwt_key_pov
+      # Optional: a separate key for stored secrets (docs/operations/cloud-hosting.md).
+      # Give app and worker the same one, e.g. CONFIG_ENCRYPTION_KEY_FILE=/run/secrets/config_key
       # The gate. Everything else in this file follows from it.
       - INSTALL_PROFILE=pov
       # The POV feature itself, plus the three BeyondTrust products and the remote-agent
@@ -105,6 +107,8 @@ services:
     environment:
       - DATABASE_URL=postgresql://dashboardadmin:${POSTGRES_PASSWORD:-devpassword}@db:5432/vmclipov
       - JWT_SECRET_KEY_FILE=/run/secrets/jwt_key_pov
+      # Optional: a separate key for stored secrets (docs/operations/cloud-hosting.md).
+      # Give app and worker the same one, e.g. CONFIG_ENCRYPTION_KEY_FILE=/run/secrets/config_key
       - INSTALL_PROFILE=pov
       - POV_ENVIRONMENTS_ENABLED=true
       # The lab platform a POV runs on. Credentials go in Settings, not here.

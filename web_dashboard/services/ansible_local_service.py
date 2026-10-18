@@ -563,6 +563,44 @@ def build_inventory(db=None) -> dict:
     return inventory
 
 
+# A hostvar whose name contains one of these holds a credential. build_inventory puts the
+# decrypted connection secret in `ansible_password` (and Hyper-V's WinRM settings beside it).
+_SECRET_HOSTVAR_PARTS = ("password", "pass", "secret", "token", "private_key", "key_file")
+
+
+def redact_inventory(inventory: dict) -> dict:
+    """A copy of ``inventory`` with every credential hostvar replaced by ``"********"``.
+
+    For anything that leaves the run itself. ``GET /api/config-mgmt/inventory`` used to
+    return the decrypted root password of every hypervisor to anyone with
+    ``config_mgmt:read``; its one UI caller only ever read ``targets``.
+    """
+    out = json.loads(json.dumps(inventory))
+    for hv in out.get("_meta", {}).get("hostvars", {}).values():
+        for k in list(hv):
+            if any(part in k.lower() for part in _SECRET_HOSTVAR_PARTS) and hv[k]:
+                hv[k] = "********"
+    return out
+
+
+def inventory_for_target(inventory: dict, target: str) -> dict:
+    """Only what a run against ``target`` needs: that group's hosts, or that one host.
+
+    The run directory is mounted into the playbook's container, so whatever inventory is
+    written there is readable by the playbook (``lookup('file', '/ansible/inventory.json')``).
+    Writing the whole inventory handed every hypervisor's credentials to a playbook aimed
+    at one of them.
+    """
+    hostvars = inventory.get("_meta", {}).get("hostvars", {})
+    if target in inventory and target not in ("_meta", "on_premises"):
+        hosts = list(inventory[target].get("hosts", []))
+        return {"_meta": {"hostvars": {h: hostvars[h] for h in hosts if h in hostvars}},
+                target: {"hosts": hosts}}
+    if target in hostvars:
+        return {"_meta": {"hostvars": {target: hostvars[target]}}}
+    return {"_meta": {"hostvars": {}}}
+
+
 def get_configured_targets(db=None) -> list[dict]:
     """[{key, label, host, connection_id, connection_name}] per reachable connection."""
     return [
@@ -645,7 +683,7 @@ async def run_playbook(
         # ── write inventory ───────────────────────────────────────────────────
         inv_path = os.path.join(tmpdir, "inventory.json")
         with open(inv_path, "w") as f:
-            json.dump(inventory, f)
+            json.dump(inventory_for_target(inventory, target), f)
 
         inv_arg = "/ansible/inventory.json" if is_group else f"{target},"
 

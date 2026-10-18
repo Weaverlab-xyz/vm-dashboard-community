@@ -329,8 +329,9 @@ async def list_jobs(
     user = _caller()
     if user is None:
         return [_UNAUTHENTICATED]
-    if not _has_permission(user, "jobs", "read"):
-        return [_forbidden("jobs", "read")]
+    # No `jobs:read` gate: as in api/jobs.py, your own jobs need no permission and
+    # `jobs:read` is what widens the list to everyone's (can_audit_jobs below). The gate
+    # this replaced refused your own jobs unless you could see everybody's.
 
     # Twin: api/jobs.py — owner_filter = None if can_audit_jobs(user) else user.username.
     from .auth import can_audit_jobs
@@ -361,8 +362,7 @@ async def get_job(job_id: str) -> dict:
     user = _caller()
     if user is None:
         return _UNAUTHENTICATED
-    if not _has_permission(user, "jobs", "read"):
-        return _forbidden("jobs", "read")
+    # Your own job, or anyone's with `jobs:read` -- the api/jobs.py rule. See list_jobs.
 
     from .auth import can_audit_jobs
     owner = None if can_audit_jobs(user) else user.username

@@ -10,19 +10,19 @@
   and the escape hatch is `form.permissionsUnrestricted`.
 
   `offer_unrestricted` defaults True and is False for exactly one caller, the Roles tab.
-  "Unrestricted" is stored as an EMPTY map, and an empty map means unrestricted only on a
-  PRINCIPAL -- on a role it would hand every assignee every scope, present and future, which
-  is the opposite of what building a restricted role means. The server refuses it as well
+  "Full access" is SENT as an empty map, which api/users.py and api/groups.py write out as
+  `api/auth.full_access_map()` -- an empty map stored grants nothing. A role has no such
+  escape hatch: the server refuses an empty role map
   (services/role_service.validate_role_permissions), so this only keeps the UI from offering
   something that would 422; the rule does not live here.
 
   Usage:
     {% from "partials/permission_matrix.html" import permission_matrix %}
-    {{ permission_matrix("Permissions", "User has unrestricted access to all sections.") }}
+    {{ permission_matrix("Permissions", "User has every section except the admin-granted ones.") }}
 #}
 {#- `hide_unrestricted_when`: an Alpine expression that hides the escape hatch at runtime,
-    for a form that serves two kinds of principal. A service account reads an empty map as
-    NOTHING (User.effective_permissions_dict), so "Full access" would be a lie there. -#}
+    for a form that serves two kinds of principal. A service account is granted with a map or
+    a role, never "Full access". -#}
 {% macro permission_matrix(label, unrestricted_note, offer_unrestricted=True, hide_unrestricted_when="") %}
 <div>
   <div class="flex items-center justify-between mb-2 gap-3">
@@ -33,7 +33,7 @@
       <input type="checkbox" x-model="form.permissionsUnrestricted"
              @change="toggleUnrestricted()"
              class="rounded border-gray-300 text-blue-600">
-      Full access (unrestricted)
+      Full access
     </label>
     {% endif %}
   </div>

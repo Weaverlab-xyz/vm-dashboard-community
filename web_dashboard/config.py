@@ -4,7 +4,6 @@ Configuration management for Infrastructure Management Dashboard
 import json
 import os
 import re
-import secrets
 from typing import Any, List
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
@@ -347,24 +346,49 @@ class Settings(BaseSettings):
     # Security
     # jwt_secret_key is loaded from jwt_secret_key_file (Docker secret mount) when set,
     # or from /run/secrets/jwt_key if that path exists, then falls back to the env var.
+    # There is no generated default: one made up per process differed between the two
+    # gunicorn workers and across restarts, so a login from one worker failed on the other
+    # and every stored secret became unreadable on restart. `require_jwt_secret_key` refuses
+    # to start the app or the job worker without one (checked there, not at import, so
+    # scripts and tests that only import this module still work).
     jwt_secret_key_file: str = ""  # path written by the onboard script; set by Compose secrets
-    jwt_secret_key: str = secrets.token_hex(32)
+    jwt_secret_key: str = ""
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 480  # 8 hours
+    # The key that encrypts stored secrets (app_config values, connection and tenant
+    # secrets, notification endpoints). Optional: unset, they stay under the key derived
+    # from jwt_secret_key, as before. Set, it encrypts everything new, existing rows are
+    # re-encrypted under it at boot, and the JWT key stops being able to decrypt the
+    # database. Loaded like the JWT key: config_encryption_key_file, then
+    # /run/secrets/config_encryption_key, then the env var.
+    config_encryption_key_file: str = ""
+    config_encryption_key: str = ""
 
     @model_validator(mode="after")
     def _load_jwt_key_from_file(self) -> "Settings":
-        path = self.jwt_secret_key_file or ""
-        if not path and os.path.exists("/run/secrets/jwt_key"):
-            path = "/run/secrets/jwt_key"
-        if path:
-            try:
-                key = open(path).read().strip()  # noqa: WPS515
-                if key:
-                    object.__setattr__(self, "jwt_secret_key", key)
-            except OSError as exc:
-                raise ValueError(f"Cannot read JWT key from '{path}': {exc}") from exc
+        for attr, default_path in (("jwt_secret_key", "/run/secrets/jwt_key"),
+                                   ("config_encryption_key",
+                                    "/run/secrets/config_encryption_key")):
+            path = getattr(self, f"{attr}_file", "") or ""
+            if not path and os.path.exists(default_path):
+                path = default_path
+            if path:
+                try:
+                    key = open(path).read().strip()  # noqa: WPS515
+                    if key:
+                        object.__setattr__(self, attr, key)
+                except OSError as exc:
+                    raise ValueError(f"Cannot read {attr} from '{path}': {exc}") from exc
         return self
+
+    def require_jwt_secret_key(self) -> None:
+        """Refuse to run a server process without a configured JWT key."""
+        if not self.jwt_secret_key:
+            raise RuntimeError(
+                "No JWT signing key is configured. Set JWT_SECRET_KEY, or point "
+                "JWT_SECRET_KEY_FILE at a file holding one (the Compose files and "
+                "scripts/onboard.sh do this), or mount it at /run/secrets/jwt_key. "
+                "Generate one with: openssl rand -hex 32")
 
     # First-run admin bootstrap. If no users exist at startup AND
     # first_run_admin_password is set, an admin account is created with these

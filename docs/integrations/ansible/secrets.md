@@ -18,8 +18,8 @@ offers three bindings:
 | **Become / sudo password** | `ansible_become_password` (Ansible `no_log`s it) | local + cloud |
 | **SSH private key** | the connection key (replaces the configured key) | local + cloud |
 
-Using a secret requires the **`secrets:use`** permission (admins and legacy
-unrestricted users bypass). The use is audited — kinds + var names only, never the
+Using a secret requires the **`secrets:use`** permission (admins bypass; "Full access"
+includes it). The use is audited — kinds + var names only, never the
 source refs or values — and any resolved value is scrubbed from the job output.
 
 ### Cloud runners: hardened per provider (and the store requirement)

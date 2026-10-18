@@ -78,8 +78,10 @@ class _User:
         self.is_admin = is_admin
         self.is_effective_admin = is_admin if effective is None else effective
         self.workgroups_list = list(workgroups)
-        # {} means "unrestricted" in api/auth.require_permission — mirrored, not improved.
-        self.effective_permissions_dict = permissions if permissions is not None else {}
+        # Omitted = Full access; {} grants nothing, as in api/auth.has_permission.
+        from web_dashboard.api.auth import full_access_map
+        self.effective_permissions_dict = (permissions if permissions is not None
+                                           else full_access_map())
 
 
 ADMIN = _User("root", is_admin=True)
@@ -218,17 +220,19 @@ def test_get_job_is_not_an_existence_oracle():
         "does-not-exist", "X"), (denied, missing)
 
 
-def test_jobs_permission_is_enforced_but_empty_perms_stay_unrestricted():
+def test_jobs_read_widens_to_everyones_jobs_and_nothing_else_is_needed_for_your_own():
+    """The api/jobs.py rule: your own jobs need no permission, `jobs:read` is everyone's."""
     _reset()
     _job("j1", "ec2_deploy", "alice", "team-a")
+    _job("j2", "ec2_deploy", "carol", "team-a")
 
-    no_jobs_perm = _User("carol", permissions={"aws": ["read"]})
-    out = _as(no_jobs_perm, mcp.list_jobs)
-    assert "error" in out[0] and "jobs:read" in out[0]["error"], out
+    for perms in ({"aws": ["read"]}, {}):
+        carol = _User("carol", workgroups=["team-a"], permissions=perms)
+        assert [j["id"] for j in _as(carol, mcp.list_jobs)] == ["j2"], perms
+        assert "error" in _as(carol, mcp.get_job, "j1"), "someone else's job leaked"
 
-    # {} = NULL = unrestricted, exactly as api/auth.require_permission treats it.
-    legacy = _User("legacy", workgroups=["team-a"], permissions={})
-    assert isinstance(_as(legacy, mcp.list_jobs), list)
+    auditor = _User("dave", permissions={"jobs": ["read"]})
+    assert sorted(j["id"] for j in _as(auditor, mcp.list_jobs)) == ["j1", "j2"]
 
 
 # ── Redaction ─────────────────────────────────────────────────────────────────

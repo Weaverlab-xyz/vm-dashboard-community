@@ -118,21 +118,53 @@ def test_the_create_route_accepts_a_pov_narrowing():
 
 # ── backward compatibility, which is the risky half ───────────────────────────
 
-def test_omitting_permissions_still_means_unrestricted():
-    """An API caller written before the field existed must be unaffected. Only the admin
-    UI changed its default; the route's default did not."""
+def test_omitting_permissions_grants_nothing():
+    """An API caller written before the field existed now creates a user with no access,
+    not an unrestricted one: NULL grants nothing."""
     resp, user = _create()
     assert resp.status_code == 201, resp.text
     assert user.permissions is None
-    assert has_permission(user, "aws", "delete")
+    assert not has_permission(user, "aws", "delete")
 
 
-def test_an_empty_map_still_means_unrestricted():
-    """What "Full access (unrestricted)" sends. Kept falsy-means-NULL on purpose: every
-    legacy user is in this state and changing it would lock them out."""
+def test_an_empty_map_is_full_access_written_out():
+    """What the grid's "Full access" box sends. Stored as the explicit map, because an empty
+    one grants nothing -- and without the explicit-only authorities, which Full access
+    never included."""
+    from web_dashboard.api.auth import full_access_map, has_explicit_permission
     _resp, user = _create(permissions={})
-    assert user.permissions is None
+    assert user.permissions_dict == full_access_map()
     assert has_permission(user, "gateways", "delete")
+    assert not has_explicit_permission(user, "audit", "read")
+
+
+def test_an_edit_sending_an_empty_map_is_full_access_for_a_person_only():
+    """The Edit panel's "Full access" sends {} too. On a service account {} has always meant
+    nothing granted, and Full access is never offered for one."""
+    from web_dashboard.api.auth import full_access_map
+    _resp, person = _create()
+    assert _client().patch(f"/api/users/{person.id}", json={"permissions": {}}).status_code == 200
+    db = SessionLocal()
+    try:
+        person = db.query(User).filter(User.id == person.id).first()
+        assert person.permissions_dict == full_access_map()
+        robot = User(id=str(uuid.uuid4()), username="r" + uuid.uuid4().hex[:8],
+                     hashed_password="x", is_service_account=True)
+        robot.permissions_dict = {"aws": ["read"]}
+        db.add(robot)
+        db.commit()
+        rid = robot.id
+    finally:
+        db.close()
+    resp = _client().patch(f"/api/users/{rid}", json={"permissions": {}})
+    assert resp.status_code == 200, resp.text
+    db = SessionLocal()
+    try:
+        robot = db.query(User).filter(User.id == rid).first()
+        assert robot.permissions_dict == {}, "a service account was given Full access"
+        assert not has_permission(robot, "aws", "read")
+    finally:
+        db.close()
 
 
 # ── the validator runs on this path too ───────────────────────────────────────

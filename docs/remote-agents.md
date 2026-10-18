@@ -54,7 +54,7 @@ the clear on every poll.
 | Your file is the boundary | `Policy` in `runners/agent/agent.py`; the sha256 is reported and shown on the Agents page |
 | Fails closed | Missing/corrupt policy → the agent exits non-zero and runs nothing |
 | Nothing reusable on the wire | `X-Agent-Signature` over method + path + sha256(body) + audience + timestamp + nonce |
-| Least privilege | Agents never touch `require_permission` — its "empty permissions means unrestricted" rule is right for a pre-OIDC human, dangerous for a machine principal |
+| Least privilege | Agents never touch `require_permission` — its old "empty permissions means unrestricted" rule was dangerous for a machine principal, and agents authorize by job type instead |
 | Auditable | Every lease and completion is a hash-chained `audit_log` entry with actor `agent:{name}` |
 | Bounded, even when authenticated | `services/agent_guard.py` caps signed requests per *agent* and failed enrolments per address — the only throttle in the app, on the only surface that faces a hostile network |
 | Only a trusted caller pins the audience | `_resolve_audience(persist=…)`: an admin minting a code, or a valid enrolment. An unauthenticated poll cannot freeze a value of its choosing into the config |

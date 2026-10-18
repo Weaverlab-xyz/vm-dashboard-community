@@ -20,7 +20,7 @@ A Personal Access Token is a person's credential lent to a machine:
 | | PAT on a user | Service account + OAuth client |
 |---|---|---|
 | Principal | a `users` row that looks like a person: password, sign-in page, can be made admin | a workload: no password, cannot sign in, **never** admin |
-| Nothing granted means… | **everything** (an empty permission map is unrestricted, for legacy users) | **nothing** |
+| Nothing granted means… | **nothing** (an empty map was unrestricted before this release; see [permissions](permissions.md#an-empty-permission-map-grants-nothing)) | **nothing** |
 | What crosses the wire on every call | the long-lived secret itself | an access token that expires in 15 minutes by default |
 | Expiry | optional | required on the secret (max 365 days); token TTL 1–60 minutes |
 | Revocation | stops the PAT | stops the client **and every access token it already issued**, on their next use |

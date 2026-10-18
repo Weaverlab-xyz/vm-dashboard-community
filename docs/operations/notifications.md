@@ -190,10 +190,13 @@ use the corp-CA overlay, or `--corp-ca` at onboard time. There is deliberately n
 **A Teams post arrives blank.** The Flow isn't reading the Adaptive Card from the
 attachment. See the envelope note above.
 
-**Everything fails right after a `JWT_SECRET_KEY` rotation.** Endpoint URLs and secrets
-are encrypted with a key derived from it. After a rotation they can't be decrypted, and
-the delivery log will say so. Re-enter the URL and secret on each endpoint. (Every stored
-secret in the dashboard has this property — it isn't specific to notifications.)
+**Everything fails right after a `JWT_SECRET_KEY` rotation.** Unless `CONFIG_ENCRYPTION_KEY`
+is set, endpoint URLs and secrets are encrypted with a key derived from the JWT key. After a
+rotation they can't be decrypted: they read as empty, the app logs an error saying so, and
+the delivery log shows the failure. Re-enter the URL and secret on each endpoint. (Every
+stored secret in the dashboard has this property; it isn't specific to notifications.
+Setting `CONFIG_ENCRYPTION_KEY` removes it; see
+[cloud-hosting](cloud-hosting.md#environment-everywhere).)
 
 **A resource was deleted and never warned.** Check
 `/api/notifications/deliveries?status=failed`. `expiry_warned_at` is stamped only *after*

@@ -13,7 +13,7 @@ from ..database import (User, Fido2Credential, PersonalAccessToken, get_db, get_
                         password_length_error)
 from ..models.user import UserResponse
 from ..services import role_service
-from .auth import (PERMISSION_SCOPES, get_current_user, require_admin,
+from .auth import (PERMISSION_SCOPES, full_access_map, get_current_user, require_admin,
                    validate_permissions_payload)
 from .tokens import _generate_raw, hash_pat, TokenCreateResponse
 from ..utils.clock import utcnow
@@ -30,11 +30,8 @@ class UserCreateRequest(BaseModel):
     email: Optional[str] = None
     workgroups: List[str] = []
     is_admin: bool = False
-    # Same three-state meaning as the PATCH below, and the reason it is here at all:
-    # omitting it stored NULL, and NULL means UNRESTRICTED in `has_permission`. Every user
-    # the admin UI created therefore held every non-admin permission in the dashboard until
-    # somebody re-opened them in Edit. The UI now always sends this; None is kept as "no
-    # permissions given" for API callers that predate the field, so they are unchanged.
+    # Same three-state meaning as the PATCH below. Omitted stores NULL, which grants nothing
+    # (it meant UNRESTRICTED until empty maps stopped doing so); {} is "Full access".
     permissions: Optional[dict] = None
     # Which POVs the new user may reach. Same column, same meaning as on update -- [] or
     # omitted is every POV their `pov` scope allows.
@@ -51,7 +48,7 @@ class UserUpdateRequest(BaseModel):
     is_active: Optional[bool] = None
     is_admin: Optional[bool] = None
     password: Optional[str] = None   # supply to reset password
-    permissions: Optional[dict] = None  # None = no change; {} = clear (full access); dict = set specific perms
+    permissions: Optional[dict] = None  # None = no change; {} = full access; dict = set specific perms
     # Which POVs this user may reach. None = no change; [] = clear the narrowing (every
     # POV their `pov` scope allows); a list = exactly those. Separate from `permissions`
     # because it is an OBJECT list, not a level set -- the scope says what they may do,
@@ -96,9 +93,8 @@ _NOT_AN_ACCESSOR = User.accessor_env_id.is_(None)
 def _nothing_granted() -> dict:
     """Every scope, no levels: a restricted map that grants nothing.
 
-    NOT ``{}``. An empty map is stored as NULL, and NULL means UNRESTRICTED in
-    ``has_permission`` -- every section in the dashboard. This is the only way to write
-    "no access yet" that the server reads as no access.
+    An empty map grants nothing too, but it used to mean UNRESTRICTED, and a row that says
+    "no access" in full reads the same to every version and to the next person reading it.
     """
     return {scope: [] for scope in PERMISSION_SCOPES}
 
@@ -221,11 +217,10 @@ def create_user(
     if body.permissions is not None:
         # Validated, never stored raw -- the same treatment the PATCH path gives it, for
         # the same reason: an unknown scope persisted here is invisible to the grid and
-        # permanent. An empty map still means unrestricted; the UI expresses "restricted,
-        # nothing granted" as every scope present with an empty level list, which is a
-        # non-empty map and so a strict allowlist.
+        # permanent. {} is the grid's "Full access" box, written out as the explicit map
+        # because an empty map grants nothing.
         validate_permissions_payload(body.permissions)
-        user.permissions_dict = body.permissions if body.permissions else None
+        user.permissions_dict = body.permissions if body.permissions else full_access_map()
     elif body.is_admin:
         # The form sends no map for an administrator, because the flag bypasses it. Stored
         # as NULL that would mean UNRESTRICTED, silently, the day the flag came off -- so an
@@ -318,8 +313,12 @@ def update_user(
         # gated on that string. Note api/entitle_rest.py has validated its own input since
         # day one; it was only the human admin path that did not.
         validate_permissions_payload(body.permissions)
-        # Empty dict {} clears restrictions (full access); non-empty dict sets specific perms
-        user.permissions_dict = body.permissions if body.permissions else None
+        # {} is "Full access", written out because an empty map grants nothing. Not for a
+        # service account: there {} has always meant nothing granted, and still does.
+        if body.permissions or user.is_service_account:
+            user.permissions_dict = body.permissions or None
+        else:
+            user.permissions_dict = full_access_map()
     if body.role_id is not None:
         # Refuse an admin changing their OWN role, mirroring the is_admin guard above and
         # for a strictly stronger reason: a role can be what confers their admin, so

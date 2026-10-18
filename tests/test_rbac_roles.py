@@ -1,10 +1,10 @@
 """The access-role abstraction, and the one hazard that runs through all of it.
 
-``api/auth.has_permission`` treats an EMPTY effective permission map as **unrestricted** --
-backward compatibility for the pre-OIDC users who never had one. Every failure mode of a
-role feature therefore points the same way: a role that resolves to nothing does not deny,
-it grants everything. So these tests are mostly about the states in which a role's map is
-*absent* rather than the states in which it is set.
+``api/auth.has_permission`` treated an EMPTY effective permission map as **unrestricted**
+(it grants nothing now; see tests/test_empty_permissions_deny.py). While it did, every
+failure mode of a role feature pointed the same way: a role that resolves to nothing did not
+deny, it granted everything. So these tests are mostly about the states in which a role's map
+is *absent* rather than the states in which it is set, and they still guard the sentinel.
 
 The design decision this file exists to pin is that a user's role reaches
 ``effective_permissions_dict`` through a **materialised column** and never through a
@@ -74,7 +74,7 @@ def _user(db, name=None, **kw):
 # ── the empty-map hazard, in every combination ────────────────────────────────
 
 def test_the_full_truth_table_of_empty_maps():
-    """The one combination that may still read as unrestricted is "no role at all".
+    """No combination reads as unrestricted any more, "no role at all" included.
 
     Enumerated rather than spot-checked, because the interesting cases are the empty ones
     and there is more than one way to be empty.
@@ -82,11 +82,12 @@ def test_the_full_truth_table_of_empty_maps():
     db = _session()
     roles = _seeded(db)
 
-    # 1. No role, nothing set -> unrestricted. LEGACY BEHAVIOUR, must not change.
-    legacy = _user(db)
-    assert legacy.effective_permissions_dict == {}
-    assert has_permission(legacy, "aws", "write") is True, (
-        "a pre-roles user with no permissions lost their backward-compatible full access")
+    # 1. No role, nothing set -> nothing. (It meant unrestricted until the one-time
+    #    `_materialise_empty_permission_maps` gave those users an explicit map.)
+    empty = _user(db)
+    assert empty.effective_permissions_dict == {}
+    assert has_permission(empty, "aws", "write") is False, (
+        "an empty permission map still grants access")
 
     # 2. A role that grants something -> exactly that.
     ro = _user(db)

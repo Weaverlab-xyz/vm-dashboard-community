@@ -44,6 +44,8 @@ services:
     environment:
       - DATABASE_URL=postgresql://dashboardadmin:${POSTGRES_PASSWORD:-devpassword}@db:5432/vmclidashboard
       - JWT_SECRET_KEY_FILE=/run/secrets/jwt_key
+      # Optional: a separate key for stored secrets (docs/operations/cloud-hosting.md).
+      # Give app and worker the same one, e.g. CONFIG_ENCRYPTION_KEY_FILE=/run/secrets/config_key
       # Shared work dir for the transient kubectl/helm runner containers. The
       # runner is a sibling (launched over the host docker.sock), so it must read
       # the kubeconfig from a NAMED VOLUME shared by name — a bind of an
@@ -108,6 +110,8 @@ services:
     environment:
       - DATABASE_URL=postgresql://dashboardadmin:${POSTGRES_PASSWORD:-devpassword}@db:5432/vmclidashboard
       - JWT_SECRET_KEY_FILE=/run/secrets/jwt_key
+      # Optional: a separate key for stored secrets (docs/operations/cloud-hosting.md).
+      # Give app and worker the same one, e.g. CONFIG_ENCRYPTION_KEY_FILE=/run/secrets/config_key
       # Shared work dir for the transient kubectl/helm runner containers. The
       # runner is a sibling (launched over the host docker.sock), so it must read
       # the kubeconfig from a NAMED VOLUME shared by name — a bind of an

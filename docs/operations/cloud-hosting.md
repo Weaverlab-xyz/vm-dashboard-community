@@ -53,23 +53,34 @@ job, and everything vanishes on the next revision. Compose injects this variable
 for you, which is why it does not appear in `.env.example`; on a managed runtime
 nothing injects it. Set it explicitly, always.
 
-**2. `JWT_SECRET_KEY` unset does not fail either — it regenerates per process.**
-The default is `secrets.token_hex(32)` evaluated at import, so every process
-gets a different one. The app runs `gunicorn -w 2`, so even a single container
-holds two.
+**2. `JWT_SECRET_KEY` is required.** The app and the job worker refuse to start
+without it, and the error names the variables that supply it: `JWT_SECRET_KEY`,
+`JWT_SECRET_KEY_FILE`, or a file at `/run/secrets/jwt_key`. Before this release
+an unset key was generated per process, so the two gunicorn workers in one
+container disagreed and every restart made a new one.
 
-That is much worse than logged-out users. The Fernet key protecting every value
-in `app_config` is `sha256(JWT_SECRET_KEY)` — cloud credentials, registry
-passwords, API tokens, kubeconfigs. And `config_service._decrypt` catches
-`InvalidToken` and returns the raw string, so that plain-text legacy rows still
-read. A changed key therefore does not raise: every stored credential quietly
-resolves to a base64 blob, and you find out from an authentication error deep
-inside a cloud SDK.
+It signs logins. Unless you also set `CONFIG_ENCRYPTION_KEY` (below), a key
+derived from it also encrypts every stored secret: cloud credentials, registry
+passwords, API tokens, kubeconfigs, hypervisor and tenant secrets, notification
+endpoints. A stored secret that will not decrypt under the current key reads as
+**empty** and is logged at ERROR ("encrypted with a key this process does not
+have"). It used to read as the ciphertext.
 
 Supply it as a platform secret. Back it up somewhere you can find in a year —
 lose it and every credential must be re-entered by hand. See
 [secrets-management.md](../access/secrets-management.md#why-the-jwt-root-key-cannot-be-migrated)
 for why the community edition cannot bootstrap it from a vault.
+
+**`CONFIG_ENCRYPTION_KEY` (optional) separates the two jobs.** Set it, as an env var,
+via `CONFIG_ENCRYPTION_KEY_FILE`, or as a file at `/run/secrets/config_encryption_key`,
+and it encrypts every stored secret from then on. At the next boot every long-lived
+stored secret under the JWT-derived key is re-encrypted under it. After that, a
+leaked or rotated JWT key no longer exposes or breaks the database. Values the
+re-encryption has not reached yet (short-lived upload handles, credential leases)
+still read through the JWT-derived key until they expire. Generate it like the JWT
+key (`openssl rand -hex 32`), back it up the same way, and give the app and the
+worker the same value. Do not change it afterwards: there is no rotation for this
+key yet, and a changed one makes every stored secret read as empty.
 
 **3. Terraform state must live in a cloud bucket.** There is no persistent
 volume. With a storage backend configured, state goes to
@@ -152,7 +163,8 @@ optional `UI_ALLOWED_CIDR` to restrict the UI to your own egress addresses.
 | Variable | Value |
 |---|---|
 | `DATABASE_URL` | **secret.** `postgresql://user:pass@host:5432/db` |
-| `JWT_SECRET_KEY` | **secret.** 64 hex chars; generate once, never rotate casually |
+| `JWT_SECRET_KEY` | **secret, required.** 64 hex chars; generate once, never rotate casually |
+| `CONFIG_ENCRYPTION_KEY` | **secret, optional.** Encrypts stored secrets instead of a key derived from `JWT_SECRET_KEY`. Same value on app and worker |
 | `PUBLIC_BASE_URL` | `https://dash.example.com` — the origin users reach |
 | `WEBAUTHN_RP_ID` | `dash.example.com` — bare domain, no scheme, no port |
 | `WEBAUTHN_ORIGIN` | `https://dash.example.com` — must match exactly |

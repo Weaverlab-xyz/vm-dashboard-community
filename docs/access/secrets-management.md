@@ -421,7 +421,7 @@ the value):
 | Become / sudo password | `ansible_become_password` (`no_log`) | local + cloud |
 | SSH private key | the connection key | local + cloud |
 
-- **Permission:** requires **`secrets:use`** (admins / legacy-unrestricted bypass).
+- **Permission:** requires **`secrets:use`** (admins bypass).
   The value is never shown, stored on the job, or placed on a command line.
 - **Cloud runners are hardened per provider:** the value is delivered through
   ECS `valueFrom` / Cloud Run secret-env / ACI `secure_value`, not plaintext task

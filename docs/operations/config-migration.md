@@ -22,12 +22,12 @@ from `JWT_SECRET_KEY`. Two instances have different JWT keys — the onboard
 script generates one per deployment — so a `pg_dump` of that table restores as
 ciphertext the target cannot read.
 
-The part that makes this genuinely dangerous is the failure mode.
-`config_service._decrypt` catches `InvalidToken` and returns the raw string, so
-that it can keep reading plain-text legacy rows. A restored row therefore
-resolves to *the ciphertext itself*: no exception, no log line, and a Settings
-panel full of base64. You find out when a cloud provider rejects the
-credential.
+The failure mode is quiet. A restored row the target cannot decrypt reads as
+**empty**, with one ERROR line in the log ("encrypted with a key this process does
+not have"). There is no exception, and the Settings panel shows the field unset. You
+find out when something that needs the credential fails. (Before this release such
+a row read as the ciphertext itself.) The same applies to `CONFIG_ENCRYPTION_KEY`
+when it is set: rows are encrypted with it instead.
 
 So the migration moves **plaintext**, and lets the target re-encrypt with its
 own key. That is what `POST /api/setup/import` already does for the

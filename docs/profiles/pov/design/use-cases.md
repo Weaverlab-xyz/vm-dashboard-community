@@ -232,9 +232,9 @@ it, from where, and when it dies. The environment id is duplicated onto `User` d
 ### The trap, and why the guard is where it is
 
 `User.effective_permissions_dict` returns `{}` for a user none of the three permission
-columns says anything about, and `require_permission` reads `{}` as **unrestricted** —
-deliberate backward compatibility for the users that predate those columns. So an accessor
-created "with no permissions" holds every permission in the dashboard.
+columns says anything about, and `require_permission` read `{}` as **unrestricted** until
+empty maps stopped granting anything. When this was written, an accessor created "with no
+permissions" held every permission in the dashboard.
 
 So the confinement is a **path allowlist** in `api/auth.get_current_user`, the one
 dependency every authenticated route resolves through — the same one-reader shape as

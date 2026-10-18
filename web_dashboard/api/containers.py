@@ -1419,13 +1419,13 @@ def _require_function_write(user: User) -> None:
     The pairing writes a ``cloud_functions`` row and runs a real Terraform apply — the
     same thing ``POST /api/functions`` does, and that route requires this scope.
     Without this check a holder of ``containers:write`` alone would have a way around
-    it. Same shape and reasoning as ``cloud_databases._require_function_write``: admin
-    and unrestricted (NULL-permission) users pass.
+    it. Same shape and reasoning as ``cloud_databases._require_function_write``: admins
+    pass.
     """
     if getattr(user, "is_effective_admin", False):
         return
-    perms = user.effective_permissions_dict   # {} / NULL → unrestricted (legacy)
-    if perms and "write" not in perms.get("cloud_function", []):
+    perms = user.effective_permissions_dict or {}   # an empty map grants nothing
+    if "write" not in perms.get("cloud_function", []):
         raise HTTPException(
             status_code=403,
             detail="The 'cloud_function:write' permission is required — the adapter is "

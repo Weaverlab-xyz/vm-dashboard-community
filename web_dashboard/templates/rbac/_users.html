@@ -255,7 +255,7 @@
         <div x-show="!form.is_admin">
           {{ permission_matrix(
                "Permissions",
-               "User has unrestricted access to all sections (stored as NULL permissions).",
+               "User has every section except the ones an administrator must grant by name.",
                hide_unrestricted_when="form.is_service_account") }}
 
           <p x-show="form.is_service_account && permGrantedCount() === 0 && !form.role_id"
@@ -266,7 +266,7 @@
           <p x-show="!form.is_service_account && !form.permissionsUnrestricted && permGrantedCount() === 0"
              class="text-xs text-amber-600 mt-1">
             This user will be able to sign in and see nothing. Grant at least one section,
-            or tick “Full access (unrestricted)”.
+            or tick “Full access”.
           </p>
 
           <!-- Per-POV narrowing. Shown once the POV row holds any level, because until
@@ -314,7 +314,7 @@
             </p>
             <p x-show="(form.povEnvIds || []).length && (form.permissionsUnrestricted || !povScopeHeld())"
                class="text-xs text-amber-600 mt-1">
-              This user still has no POV permission, or unrestricted access, yet is
+              This user still has no POV permission, or full access, yet is
               narrowed to the environments above — that narrowing applies either way.
               Remove the entries to give them every POV.
             </p>
@@ -900,7 +900,7 @@ function usersPage() {
 
     openEdit(u) {
       this.editingUser = u;
-      // permissions: null/undefined = unrestricted; {} = unrestricted; dict = restricted
+      // permissions: null/undefined/{} = nothing granted; dict = exactly that map
       const hasPerms = u.permissions && Object.keys(u.permissions).length > 0;
       this.form = {
         full_name: u.full_name || '',
@@ -910,7 +910,7 @@ function usersPage() {
         is_admin: u.is_admin,
         is_active: u.is_active,
         permissions: hasPerms ? JSON.parse(JSON.stringify(u.permissions)) : {},
-        permissionsUnrestricted: !hasPerms && !u.is_service_account,
+        permissionsUnrestricted: false,
         is_service_account: !!u.is_service_account,
         // Which POVs this user is narrowed to. Empty = every POV their `pov` scope
         // allows, which is what every existing user has.

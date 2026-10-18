@@ -185,9 +185,8 @@ To prove the Phase 1 → Phase 2 chain works:
 the new scope declared — not always three. The new resources now carry the
 `VM Dashboard` tag and their tier's workflow.
 
-> **Before you add one, read this.** `has_permission` treats an empty
-> permission map as *unrestricted* but a non-empty map as a strict
-> per-scope allowlist. So adding a scope and gating a route on it
+> **Before you add one, read this.** `has_permission` treats every
+> permission map as a strict per-scope allowlist. So adding a scope and gating a route on it
 > **revokes that route from every user who has an explicit permission
 > map** — with no error, no log line, and no row the administrator who
 > set those permissions ever saw. A new scope needs a backfill in
