@@ -53,7 +53,7 @@ def _agent(db, *, version="2.4.0", reported=("agent_discover", "agent_gateway"),
     row.agent_version = version
     row.reported_job_types = __import__("json").dumps(list(reported))
     if seen:
-        row.last_seen_at = __import__("datetime").datetime.utcnow()
+        row.last_seen_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).replace(tzinfo=None)
     db.commit()
     return row
 

@@ -37,8 +37,13 @@ these accessors return down to what that pool can actually serve.
 import json
 import logging
 import socket
-from datetime import datetime
-from ..utils.clock import utcnow
+from datetime import datetime, timezone
+
+
+def _utcnow() -> datetime:
+    """Naive UTC now (datetime.utcnow() is deprecated). Local rather than
+    utils.clock: this module is loaded on its own, without the package."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 logger = logging.getLogger(__name__)
 
@@ -225,7 +230,7 @@ def publish_runtime_status(*, configured: dict, effective: dict, clamp_reason: s
         "pool_capacity": pool_capacity,
         "in_flight": in_flight,
         "hostname": socket.gethostname(),
-        "published_at": utcnow().isoformat() + "Z",
+        "published_at": _utcnow().isoformat() + "Z",
     }
     try:
         _cs().set(_RUNTIME_STATUS_KEY, json.dumps(payload, sort_keys=True, default=str))

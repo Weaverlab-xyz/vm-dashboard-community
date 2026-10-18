@@ -382,7 +382,7 @@ def test_refresh_is_due_after_a_third_of_ca_ttl_and_never_twice_at_once():
     db, row = _save(_row(trust_domain="due.test"))
     try:
         svc.register_trust_domain(db, row)
-        now = _dt.datetime.utcnow()
+        now = _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
         assert not svc.refresh_due(db, row, now), "just registered, nothing is due"
         later = now + _dt.timedelta(hours=57)          # > 168h / 3
         assert svc.refresh_due(db, row, later)
@@ -414,7 +414,7 @@ def test_refresh_is_due_after_a_third_of_ca_ttl_and_never_twice_at_once():
 def test_a_lab_that_publishes_no_provider_is_never_refreshed():
     db, row = _save(_row(trust_domain="old.test", stages_done="install,ports,seed,identity"))
     try:
-        assert not svc.refresh_due(db, row, _dt.datetime.utcnow() + _dt.timedelta(days=30))
+        assert not svc.refresh_due(db, row, _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None) + _dt.timedelta(days=30))
     finally:
         db.close()
 
@@ -429,7 +429,7 @@ def test_the_jwks_fetch_verifies_the_lab_name_while_connecting_by_address():
     from web_dashboard.services import spiffe_assertion as sa
 
     d = tempfile.mkdtemp(prefix="sni-")
-    now = _dt.datetime.utcnow()
+    now = _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
     cak = ec.generate_private_key(ec.SECP256R1())
     can = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "lab CA")])
     ca = (x509.CertificateBuilder().subject_name(can).issuer_name(can)

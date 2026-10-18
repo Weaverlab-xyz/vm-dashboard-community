@@ -1054,7 +1054,6 @@ async def test_backend(backend: str) -> dict:
 # Backends name the state object slightly differently (gcs uses <prefix>/<workspace>.
 # tfstate), so migration normalises per-backend rather than raw-copying keys.
 import os as _os  # noqa: E402
-from ..utils.clock import utcnow
 
 _TF_STATE_PREFIX = "terraform-state"
 _LOCAL_STATE_ROOT = _os.path.normpath(
@@ -1235,8 +1234,8 @@ def image_key(backend: str, image_name: str, ext: str = "vhd", ts: Optional[str]
     repeated builds of the same image name produce distinct keys.
     """
     if ts is None:
-        from datetime import datetime
-        ts = utcnow().strftime("%Y%m%dT%H%M%SZ")
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     blob = f"images/{image_name}-{ts}.{ext}"
     if backend == "s3":
         prefix = (_cfg("storage_s3_prefix") or "config-mgmt").rstrip("/")

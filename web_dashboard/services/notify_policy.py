@@ -24,9 +24,14 @@ Two properties matter here:
 import hashlib
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
-from ..utils.clock import utcnow
+
+
+def _utcnow() -> datetime:
+    """Naive UTC now (datetime.utcnow() is deprecated). Local rather than
+    utils.clock: this module is loaded on its own, without the package."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 logger = logging.getLogger(__name__)
 
@@ -383,4 +388,4 @@ def dedupe_key(event: NotificationEvent, endpoint_id: str) -> str:
 
 def day_bucket(now: Optional[datetime] = None) -> str:
     """``dedupe_bucket`` value for a condition that should re-notify once per day."""
-    return (now or utcnow()).strftime("%Y-%m-%d")
+    return (now or _utcnow()).strftime("%Y-%m-%d")
