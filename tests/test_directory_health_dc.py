@@ -297,10 +297,14 @@ def test_the_result_is_folded_in_when_the_agent_completes():
     row = _ad(db, _agent(db))
     asyncio.run(H.check(db, row))
     job = _deep_jobs(db, row)[0]
-    # apply_deep judges replication against the real clock, so the link must be recent
-    # now, not at NOW.
-    recent = (utcnow() - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    report = _report(replication=[dict(_report()["replication"][0], last_success=recent)])
+    # apply_deep judges against the real clock, not NOW: the replication link has to be
+    # recent and the LDAPS certificates in date as of today. The fixture's fixed
+    # 2027-06-01 expiry turns this into a failing DC from May 2027 on.
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    recent = (utcnow() - timedelta(minutes=10)).strftime(fmt)
+    valid = (utcnow() + timedelta(days=365)).strftime(fmt)
+    report = _report(replication=[dict(_report()["replication"][0], last_success=recent)],
+                     dcs=[dict(dc, ldaps_not_after=valid) for dc in _report()["dcs"]])
     for line in _lines(report, size=60):
         job_service.append_job_log(db, job.id, line)
     assert H.apply_deep(db, job, status="completed")

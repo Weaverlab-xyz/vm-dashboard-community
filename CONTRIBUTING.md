@@ -176,6 +176,14 @@ It installs no pytest, because CI has none: a test file whose imports fail print
 and exits 0 without pytest, but exits 1 with it, so an extra package would make a session
 disagree with CI.
 
+A test that reads the clock should pass at any time of day and on any date. Steer by a
+fixed `now=` where the code takes one; where it reads the real clock, build every
+timestamp the assertion depends on from `utcnow()`, never a literal date, and don't step
+a fixed number of hours into a window that closes. `scripts/ci/fake_clock.py --sweep
+tests/test_x.py` runs a file at the times that break such tests (midnight, the hour
+before it, month and year ends, a leap day, daylight-saving changes, dates years ahead)
+and names any time whose result differs from a real run.
+
 ### Other checks CI runs
 
 Each has a script, or a single command, that runs the same way locally:
@@ -207,7 +215,11 @@ tailwindcss scanning every template, script and Python file that `tailwind.confi
 lists) and committed. After adding a class name that appears nowhere else, run
 `scripts/build_css.sh` and commit the result; CI fails a stale file. Write class names out
 in full -- `'bg-' + colour` gets no rule, and `scripts/ci/css_coverage.sh` fails the smoke
-test when a page carries one. A page error, `console.error` or 5xx the smoke test
+test when a page carries one. `scripts/ci/frontend_pins.py` (the weekly **Front-end pins**
+workflow) reports every one of these pins that is behind a release on its own major; to
+bump Tailwind, change `VERSION` in `scripts/build_css.sh` and rebuild, and to bump Alpine,
+replace the vendored file and the `static_url` reference on the four pages that own their
+`<head>`. A page error, `console.error` or 5xx the smoke test
 should tolerate goes in `tests/browser_smoke_allow.json`, scoped to its page, with the
 reason.
 
