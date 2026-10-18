@@ -117,7 +117,9 @@ class Client:
     # ── setup / config ───────────────────────────────────────────────────────
 
     def setup_status(self) -> dict:
-        """``{"complete": bool, "configured_keys": [...]}``. Needs no auth."""
+        """``{"complete": bool, "configured_keys": []}``. Needs no auth; the server
+        lists ``configured_keys`` only to an administrator's bearer, which this
+        pre-login probe does not send."""
         return self._get("/api/setup/status", auth=False)
 
     def get_config(self) -> dict:

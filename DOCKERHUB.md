@@ -172,8 +172,11 @@ secrets:
 POSTGRES_PASSWORD='<a strong password>' docker compose up -d
 ```
 
-Then open **http://localhost:8001** and complete the setup wizard: create the admin
-account, then paste cloud credentials (access key / service principal / service-account
+Then open **http://localhost:8001** and complete the setup wizard. It first asks for a
+one-time setup token, so nobody else who reaches a fresh instance can claim it: set
+`SETUP_TOKEN` yourself, or read the one the app generated with
+`docker compose exec app cat /app/data/setup_token` (the startup log names the file).
+Then create the admin account, then paste cloud credentials (access key / service principal / service-account
 JSON) or skip a cloud and explore the UI. Credentials are encrypted with AES-256 and held
 in the database — nothing sensitive is written to disk.
 

@@ -22,30 +22,10 @@ router = APIRouter(prefix="/api/secrets", tags=["secrets"])
 # ── Admin guard ───────────────────────────────────────────────────────────────
 
 def _require_admin(request: Request) -> None:
-    from jose import JWTError, jwt
-    from ..config import settings
-    from ..database import SessionLocal, User
-
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Authentication required")
-    token = auth[7:]
-    try:
-        payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
-        username: str = payload.get("sub", "")
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.username == username, User.is_active == True).first()
-        # is_effective_admin, the rule require_admin applies: the flag, an Entitle JIT grant,
-        # or the Administrator role. The accessor refusal mirrors require_admin's too -- this
-        # check decodes its own token rather than resolving through get_current_user, so
-        # the path allowlist that normally confines a POV accessor never ran.
-        if not user or user.accessor_env_id or not user.is_effective_admin:
-            raise HTTPException(status_code=403, detail="Admin access required")
-    finally:
-        db.close()
+    """Raise 401/403 unless the request carries an administrator's credential; see
+    ``auth.admin_username_from_request``."""
+    from .auth import admin_username_from_request
+    admin_username_from_request(request)
 
 
 def _require_admin_dep(request: Request) -> None:

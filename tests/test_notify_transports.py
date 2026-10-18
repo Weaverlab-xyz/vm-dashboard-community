@@ -69,6 +69,9 @@ def _load():
         spec.loader.exec_module(mod)
         return mod
 
+    ou = _by_path("outbound_url")
+    # No DNS: every webhook host is a public address (outbound_url has its own tests).
+    ou._resolve = lambda host, port: [(2, 1, 6, "", ("93.184.215.14", port))]
     return _by_path("notify_policy"), _by_path("notify_transports")
 
 

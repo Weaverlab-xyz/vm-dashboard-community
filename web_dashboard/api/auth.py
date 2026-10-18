@@ -260,6 +260,32 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
+def admin_username_from_request(request: Request) -> str:
+    """``require_admin`` for code that takes the raw ``Request`` instead of a dependency
+    (``api/setup`` and ``api/secrets``, where the guard is called inside the handler).
+
+    Resolves through ``resolve_bearer`` like every other route, so it refuses exactly what
+    they refuse -- a ``pre_auth`` token, a login token naming a service account, a revoked
+    PAT -- and accepts an administrator's PAT the same way. It used to decode the JWT
+    itself and accept anything signed with the key that carried a ``sub``.
+    """
+    from ..database import SessionLocal
+
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    db = SessionLocal()
+    try:
+        user = resolve_bearer(header[7:].strip(), db)
+        # The accessor refusal mirrors require_admin's: get_current_user's path allowlist,
+        # which normally confines a POV accessor, never runs on this path.
+        if user.accessor_env_id or not user.is_effective_admin:
+            raise HTTPException(status_code=403, detail="Admin access required")
+        return user.username
+    finally:
+        db.close()
+
+
 # ── Permission constants ───────────────────────────────────────────────────────
 
 # "use" grants using a Secrets-Management secret inside an Ansible run without ever

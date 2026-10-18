@@ -15,6 +15,9 @@
 .PARAMETER AdminUser     Admin username to create/login (prompted if needed).
 .PARAMETER AdminPass     Admin password (prompted, hidden, if needed).
 .PARAMETER Token         Admin JWT for re-runs when setup is already complete.
+.PARAMETER SetupToken    One-time setup token for first-run setup (default: $env:SETUP_TOKEN;
+                        prompted if needed). It is SETUP_TOKEN in the dashboard's .env, or
+                        the /app/data/setup_token file in its container.
 .PARAMETER PushOnly      Skip provisioning; just push cached config.json files.
 .PARAMETER NoPush        Provision + write config.json, but don't call the API.
 
@@ -28,6 +31,7 @@ param(
     [string]$AdminUser = "",
     [string]$AdminPass = "",
     [string]$Token = "",
+    [string]$SetupToken = $env:SETUP_TOKEN,
     [switch]$PushOnly,
     [switch]$NoPush
 )
@@ -105,6 +109,9 @@ if ($status.complete) {
     if (-not $AdminUser) { $AdminUser = Read-Host "New admin username [admin]"; if (-not $AdminUser) { $AdminUser = 'admin' } }
     if (-not $AdminPass) { $AdminPass = [System.Net.NetworkCredential]::new('', (Read-Host "New admin password" -AsSecureString)).Password }
     if (-not $AdminPass) { Write-Die "Admin password is required for first-run setup." }
+    if (-not $SetupToken) { $SetupToken = [System.Net.NetworkCredential]::new('', (Read-Host "Setup token (SETUP_TOKEN in the dashboard's .env, or: docker compose exec app cat /app/data/setup_token)" -AsSecureString)).Password }
+    if (-not $SetupToken) { Write-Die "The setup token is required for first-run setup." }
+    $headers['X-Setup-Token'] = $SetupToken
     $body = @{ admin_username = $AdminUser; admin_password = $AdminPass; config = $merged } | ConvertTo-Json -Depth 10 -Compress
 }
 

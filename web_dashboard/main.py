@@ -78,6 +78,15 @@ async def lifespan(app: FastAPI):
 
     _bootstrap_first_run_admin()
 
+    # A fresh instance: make sure the one-time setup token exists and say where it is,
+    # before anyone can reach the wizard. Non-fatal -- /complete reports it if missing.
+    try:
+        if not config_service.is_setup_complete():
+            from .services import setup_token
+            setup_token.ensure()
+    except Exception as exc:
+        logger.warning("Could not prepare the setup token (non-fatal): %s", exc)
+
     warmers = [
         asyncio.create_task(_warm_aws_amis(),               name="warm_aws_amis"),
         asyncio.create_task(_warm_aws_network_opts(),       name="warm_aws_network_opts"),
@@ -2289,8 +2298,9 @@ async def persona_catalog():
 
 
 @app.get("/api/cache/status", tags=["health"])
-async def cache_status():
-    """Return metadata for all cached keys (debug / admin).
+async def cache_status(_admin=Depends(auth.require_admin)):
+    """Return metadata for all cached keys (debug / admin). Administrators only: the key
+    names alone map out which clouds, accounts and regions this install talks to.
 
     Three stores, deliberately: the in-memory one below is per-process and dies with the
     container, while `cost_cache` and `dashboard_stats` rows are shared across every worker

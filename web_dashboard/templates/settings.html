@@ -1314,6 +1314,20 @@
             </span>
           </label>
 
+          <label class="flex items-start gap-2">
+            <input type="checkbox" x-model="panelCfg.notifications_allow_private_targets"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            <span class="text-sm text-gray-700">
+              <span class="font-medium">Allow internal webhook targets</span>
+              <span class="block text-[11px] text-gray-400 mt-0.5">
+                Off by default: an endpoint whose host resolves to a private address
+                (10.x, 172.16–31.x, 192.168.x, 100.64.x, fd00::/8) is refused. Turn on to send
+                to an internal receiver. Loopback, link-local and cloud metadata addresses
+                are always refused.
+              </span>
+            </span>
+          </label>
+
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Dashboard URL</label>
             <input type="text" x-model="panelCfg.notify_base_url"

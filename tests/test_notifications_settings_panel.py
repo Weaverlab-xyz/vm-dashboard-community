@@ -192,7 +192,13 @@ def test_a_url_without_a_scheme_is_refused():
         except HTTPException:
             continue
         raise AssertionError(f"{bad!r} should have been refused")
-    notifications_api._validate("https://hooks.slack.com/services/x", "slack")
+    from web_dashboard.services import outbound_url
+    real = outbound_url._resolve
+    outbound_url._resolve = lambda host, port: [(2, 1, 6, "", ("93.184.215.14", port))]
+    try:
+        notifications_api._validate("https://hooks.slack.com/services/x", "slack")
+    finally:
+        outbound_url._resolve = real
 
 
 def test_an_unknown_format_is_refused():

@@ -14,6 +14,9 @@
 #   --admin-user NAME     admin username to create/login (prompted if needed)
 #   --admin-pass PASS     admin password                 (prompted, hidden, if needed)
 #   --token TOKEN         admin JWT for re-runs when setup is already complete
+#   --setup-token TOKEN   one-time setup token for first-run setup (default: $SETUP_TOKEN;
+#                         prompted if needed): SETUP_TOKEN in the dashboard's .env, or
+#                         the /app/data/setup_token file in its container
 #   --push-only           skip provisioning; just push cached config.json files
 #   --no-push             provision + write config.json, but don't call the API
 #   -h, --help            show this help
@@ -23,10 +26,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
 source "$SCRIPT_DIR/lib/common.sh"
 
-usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 DASHBOARD_URL="http://localhost:8001"
 CLOUDS="" ADMIN_USER="" ADMIN_PASS="" TOKEN="" PUSH_ONLY=0 NO_PUSH=0
+SETUP_TOKEN="${SETUP_TOKEN:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -35,6 +39,7 @@ while [[ $# -gt 0 ]]; do
     --admin-user)    ADMIN_USER="$2"; shift 2 ;;
     --admin-pass)    ADMIN_PASS="$2"; shift 2 ;;
     --token)         TOKEN="$2"; shift 2 ;;
+    --setup-token)   SETUP_TOKEN="$2"; shift 2 ;;
     --push-only)     PUSH_ONLY=1; shift ;;
     --no-push)       NO_PUSH=1; shift ;;
     -h|--help)       usage 0 ;;
@@ -85,10 +90,11 @@ status="$(curl -fsS "$DASHBOARD_URL/api/setup/status" 2>/dev/null || true)"
 [[ -n "$status" ]] || die "Cannot reach $DASHBOARD_URL/api/setup/status — is the dashboard running and reachable?"
 complete="$(jq -r '.complete // false' <<<"$status")"
 
-post_import() {  # $1 = JSON payload, $2 = optional bearer token
-  local payload="$1" tok="${2:-}" args
+post_import() {  # $1 = JSON payload, $2 = optional bearer token, $3 = optional setup token
+  local payload="$1" tok="${2:-}" stok="${3:-}" args
   args=(-fsS -X POST "$DASHBOARD_URL/api/setup/import" -H "Content-Type: application/json" --data-binary @-)
   [[ -n "$tok" ]] && args+=(-H "Authorization: Bearer $tok")
+  [[ -n "$stok" ]] && args+=(-H "X-Setup-Token: $stok")
   printf '%s' "$payload" | curl "${args[@]}"
 }
 
@@ -109,9 +115,11 @@ else
   [[ -n "$ADMIN_USER" ]] || { read -r -p "New admin username [admin]: " ADMIN_USER; ADMIN_USER="${ADMIN_USER:-admin}"; }
   [[ -n "$ADMIN_PASS" ]] || { read -rs -p "New admin password: " ADMIN_PASS; echo; }
   [[ -n "$ADMIN_PASS" ]] || die "Admin password is required for first-run setup."
+  [[ -n "$SETUP_TOKEN" ]] || { read -rs -p "Setup token (SETUP_TOKEN in the dashboard's .env, or: docker compose exec app cat /app/data/setup_token): " SETUP_TOKEN; echo; }
+  [[ -n "$SETUP_TOKEN" ]] || die "The setup token is required for first-run setup."
   payload="$(jq -n --argjson cfg "$CONFIG_JSON" --arg u "$ADMIN_USER" --arg p "$ADMIN_PASS" \
               '{admin_username:$u, admin_password:$p, config:$cfg}')"
-  resp="$(post_import "$payload")" || die "Import failed (already set up? re-run with --token)."
+  resp="$(post_import "$payload" "" "$SETUP_TOKEN")" || die "Import failed (wrong setup token? already set up? re-run with --token)."
 fi
 
 ok "Config imported ($(jq -r '.keys_written // "?"' <<<"$resp") keys written)."

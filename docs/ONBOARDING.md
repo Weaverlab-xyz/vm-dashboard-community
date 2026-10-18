@@ -204,6 +204,13 @@ The script:
 Your browser opens to the **setup wizard**. It appears automatically on
 first visit because no credentials are stored yet.
 
+The first field is the **setup token**. It proves you can see the server, so nobody else
+who reaches a fresh dashboard first can claim it. The onboard script prints it and keeps
+it in `.env` as `SETUP_TOKEN`. Without one set, the app writes a random token to
+`/app/data/setup_token` and names that file in its log:
+`docker compose exec app cat /app/data/setup_token`. It stops working once setup is
+complete.
+
 | Step | What to fill in |
 |------|-----------------|
 | **Admin account** | Username and password you'll use to log in. The password can be at most 72 bytes (bcrypt reads no further; an accented letter is 2 bytes, an emoji 4). Optionally expand **Single sign-on (OIDC)** to let people sign in through Okta, Entra ID, Keycloak or any OpenID Connect provider ([OIDC and single sign-on](oidc.md)) |

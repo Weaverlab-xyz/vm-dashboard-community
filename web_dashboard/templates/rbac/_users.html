@@ -378,7 +378,8 @@
           </div>
           <div class="w-32">
             <label class="block text-xs font-medium text-gray-600 mb-1">Expires (days)</label>
-            <input x-model="newTokenExpiry" type="number" min="1" placeholder="Never"
+            <input x-model="newTokenExpiry" type="number" min="0" placeholder="90"
+                   title="Blank = 90 days. The install caps this (pat_max_days, 365 by default); 0 = never expires, allowed only when the cap is off."
                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
           </div>
           <button type="submit"
@@ -1126,7 +1127,7 @@ function usersPage() {
     async createToken() {
       try {
         const body = { name: this.newTokenName };
-        if (this.newTokenExpiry) body.expires_days = parseInt(this.newTokenExpiry);
+        if (String(this.newTokenExpiry ?? '').trim() !== '') body.expires_days = parseInt(this.newTokenExpiry);
         const result = await API.post(`/api/users/${this.tokenUser.id}/tokens`, body);
         this.newTokenValue = result.token;
         this.newTokenName = '';

@@ -154,6 +154,11 @@ def get_cloud_targets(
     Destroyed instances are excluded (``metadata_dict['destroyed'] == True``
     after the destroy job runs).
 
+    Only machines in the caller's workstreams, the rule the cloud tabs' own lists apply
+    (``aws._accessible_workgroups``): an administrator sees every one, anybody else the
+    ones tagged into a workstream they belong to, and an untagged machine is admin-only.
+    This used to list every deployed VM's name and address to anyone signed in.
+
     Response shape:
         {
           "aws":   [{name, ip, instance_id}, ...],
@@ -174,7 +179,12 @@ def get_cloud_targets(
         .all()
     )
 
+    from .aws import _accessible_workgroups
+    accessible = _accessible_workgroups(current_user)
+
     for job in deploy_jobs:
+        if accessible is not None and (job.workgroup or "").strip().lower() not in accessible:
+            continue
         meta = job.metadata_dict
         if meta.get("destroyed"):
             continue

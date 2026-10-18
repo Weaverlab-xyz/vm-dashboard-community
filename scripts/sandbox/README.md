@@ -254,8 +254,9 @@ cloud SSO (the dashboard container never sees high-privilege credentials). Each
 (the same key=value pairs it prints, minus the human comments); the wrapper merges
 them and sends them to `POST /api/setup/import`, which accepts the **full** key set
 (including `bt_ecs_*`, `storage_*`, `promote_runner_*`) that the typed wizard form
-doesn't expose. On a fresh stack the call is unauthenticated (same as the wizard's
-first-run submit); once setup is complete it requires an admin token, so the
+doesn't expose. On a fresh stack the call needs the one-time setup token, like the
+wizard's first-run submit (`--setup-token` / `-SetupToken`, default `$SETUP_TOKEN`,
+prompted otherwise); once setup is complete it requires an admin token, so the
 wrapper logs in for you (or pass `--token`).
 
 > Multi-cloud note: the few keys every cloud sets (`storage_active_backend`,

@@ -71,6 +71,17 @@
         </p>
       </div>
       <div class="space-y-4">
+        <div x-show="!isReconfig">
+          <label class="block text-sm font-medium text-gray-700 mb-1">
+            Setup token <span class="text-red-500">*</span>
+          </label>
+          <input type="password" x-model="setupToken" autocomplete="off" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="From the server">
+          <p class="text-xs text-gray-500 mt-1">
+            Proves you can see the server, so nobody else who reaches this page first can claim it.
+            Read it with <code class="bg-gray-100 px-1 rounded">docker compose exec app cat /app/data/setup_token</code>
+            (the startup log names the file), or use the <code class="bg-gray-100 px-1 rounded">SETUP_TOKEN</code> you set.
+          </p>
+        </div>
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
           <input type="text" x-model="form.admin.username" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="admin">
@@ -1086,6 +1097,9 @@ function wizard() {
     showAzureSandbox: false,
     showGcpSandbox: false,
     authToken: localStorage.getItem('vm_cli_token') || '',
+    // First run only: the one-time token from the server (services/setup_token). Kept out
+    // of `form`, which is the request body.
+    setupToken: '',
 
     // Panels are addressed by step KEY, never by ordinal. When the OCI step was inserted,
     // every `x-show="step === N"` below it shifted by one and `submit()` kept landing on the
@@ -1583,6 +1597,7 @@ function wizard() {
       if (this.stepKey === 'admin') {
         if (!this.form.admin.username.trim()) { this.error = 'Username is required.'; return false; }
         if (!this.isReconfig) {
+          if (!this.setupToken.trim()) { this.error = 'The setup token is required.'; return false; }
           if (this.form.admin.password.length < 8) { this.error = 'Password must be at least 8 characters.'; return false; }
           if (this.form.admin.password !== this.form.admin.confirm) { this.error = 'Passwords do not match.'; return false; }
         }
@@ -1639,6 +1654,7 @@ function wizard() {
         if (this.isReconfig && this.authToken) {
           headers['Authorization'] = `Bearer ${this.authToken}`;
         }
+        if (!this.isReconfig) headers['X-Setup-Token'] = this.setupToken.trim();
 
         const res = await fetch(url, { method, headers, body: JSON.stringify(body) });
         if (!res.ok) {

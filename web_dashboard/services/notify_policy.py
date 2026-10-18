@@ -204,6 +204,15 @@ def dry_run() -> bool:
     return _flag("notify_dry_run", True)
 
 
+def allow_private_targets() -> bool:
+    """Let webhooks point at private (RFC 1918 / ULA / CGNAT) addresses. Defaults OFF.
+
+    Loopback, link-local and cloud metadata addresses stay refused either way; see
+    services/outbound_url.
+    """
+    return _flag("notifications_allow_private_targets", False)
+
+
 def base_url() -> str:
     """Absolute origin for deep links, e.g. ``https://dash.corp.example``.
 

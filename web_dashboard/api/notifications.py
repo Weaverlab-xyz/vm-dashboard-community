@@ -59,6 +59,30 @@ def _validate(url: str, fmt: str) -> None:
             status_code=400,
             detail=f"Unknown format {fmt!r}. Expected one of: "
                    f"{', '.join(notify_transports.FORMATS)}.")
+    # Where it points, not only how it is spelled: see services/outbound_url. Checked
+    # again at every send, so this is the early, friendly refusal rather than the guard.
+    from ..services import notify_policy, outbound_url
+    try:
+        outbound_url.check_webhook_url(url, allow_private=notify_policy.allow_private_targets())
+    except outbound_url.OutboundURLRefused as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _without_body(error: str) -> str:
+    """``HTTP 403: <body>`` -> ``HTTP 403``; Slack's rejection keeps only its first line."""
+    head, sep, _rest = (error or "").partition(": ")
+    if head.startswith("HTTP ") or head.startswith("Slack rejected") or head.startswith("rate limited"):
+        return head + (" (response body visible to administrators)" if sep else "")
+    return error
+
+
+def _public(ep, user) -> dict:
+    """``endpoint_public`` with ``last_error`` trimmed to its status line for non-admins
+    (the stored error carries the remote's reply body; see ``test_endpoint``)."""
+    out = notification_service.endpoint_public(ep)
+    if out.get("last_error") and not getattr(user, "is_effective_admin", False):
+        out["last_error"] = _without_body(out["last_error"])
+    return out
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -66,7 +90,7 @@ def _validate(url: str, fmt: str) -> None:
 @router.get("/endpoints")
 def list_endpoints(db: Session = Depends(get_db),
                          current_user: User = Depends(require_explicit_permission("notifications", "read"))):
-    return {"endpoints": [notification_service.endpoint_public(e)
+    return {"endpoints": [_public(e, current_user)
                           for e in notification_service.list_endpoints(db)],
             "formats": list(notify_transports.FORMATS),
             "known_events": sorted(notify_policy.EVENT_SEVERITY)}
@@ -88,7 +112,7 @@ def create_endpoint(payload: EndpointCreate,
     # its data somewhere. The URL is not recorded — only that one was set.
     _audit(db, current_user, "notification_endpoint_created",
            {"endpoint_id": ep.id, "name": ep.name, "fmt": ep.fmt})
-    return notification_service.endpoint_public(ep)
+    return _public(ep, current_user)
 
 
 @router.patch("/endpoints/{endpoint_id}")
@@ -105,7 +129,7 @@ def patch_endpoint(endpoint_id: str, payload: EndpointPatch,
         raise HTTPException(status_code=404, detail="No such notification endpoint.")
     _audit(db, current_user, "notification_endpoint_updated",
            {"endpoint_id": ep.id, "name": ep.name, "fields": sorted(fields)})
-    return notification_service.endpoint_public(ep)
+    return _public(ep, current_user)
 
 
 @router.delete("/endpoints/{endpoint_id}")
@@ -134,6 +158,11 @@ async def test_endpoint(endpoint_id: str,
                                                   actor=current_user.username)
     if result.get("error") == "no such endpoint":
         raise HTTPException(status_code=404, detail="No such notification endpoint.")
+    # The remote's reply body is for administrators only. A delegated holder of
+    # notifications:write chooses the URL, so echoing what came back would let them read
+    # internal responses through the dashboard. The status line still says what failed.
+    if result.get("error") and not getattr(current_user, "is_effective_admin", False):
+        result = {**result, "error": _without_body(result["error"])}
     _audit(db, current_user, "notification_test_sent",
            {"endpoint_id": endpoint_id, "ok": result.get("ok")})
     return result

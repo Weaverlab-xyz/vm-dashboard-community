@@ -105,7 +105,9 @@ from source** instead (for contributors, or to customize the build).
 
 Either way the script checks prerequisites, generates bootstrap secrets (JWT
 signing key + Postgres password), and brings up the Docker Compose stack. Your
-browser opens automatically to a **setup wizard**. Create your admin account, then either bring your own cloud
+browser opens automatically to a **setup wizard**. Enter the one-time setup token the script prints
+(`SETUP_TOKEN` in `.env`; it stops whoever reaches a fresh dashboard first from claiming it),
+create your admin account, then either bring your own cloud
 credentials (paste an access key / service principal / service-account JSON) or
 skip a cloud to just explore the UI. No creds handy? each cloud step has an
 optional panel to spin up a throwaway lab sandbox. Credentials are encrypted
