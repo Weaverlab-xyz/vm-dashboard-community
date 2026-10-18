@@ -57,6 +57,9 @@ class EC2InstanceInfo(BaseModel):
     # drift from the one the server warns with. It is a WARNING, never a refusal: the
     # per-VM Suspend button has always been allowed here.
     suspend_warning: Optional[str] = None
+    # The PRA Shell Jump on the deploy row, or None — decides whether the row offers
+    # "Add to PRA" or "Re-apply / Remove" (services/vm_pra_service).
+    pra_jump_id: Optional[str] = None
     # Tags as the page renders them, already classified and coloured by
     # services/tag_policy.normalise. The raw provider dict stays in the service
     # layer, where unmanaged-VM discovery and the workgroup lookup read it.

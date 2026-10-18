@@ -39,6 +39,7 @@ from ..models.oci import (
     OCINetworkOptions,
     OCISSHKeyDetail,
 )
+from ..models.vm_pra import VmPraRequest
 from ..models.schedule import SCHEDULE_FIELDS, ScheduleRequestMixin
 from ..services import (
     change_window_service,
@@ -347,6 +348,7 @@ async def _build_oci_instances(db, compartment: str) -> list:
             "deployed_by": job.created_by,
             "workgroup": (job.workgroup or meta.get("workgroup") or "").lower() or None,
             "suspend_warning": None if _ok else _why,
+            "pra_jump_id": meta.get("bt_shell_jump_id") or None,
         }
     instances = await oci_service.describe_instances(compartment, ocids)
     for inst in instances:
@@ -355,6 +357,7 @@ async def _build_oci_instances(db, compartment: str) -> list:
         inst["deployed_by"] = meta.get("deployed_by")
         inst["workgroup"] = meta.get("workgroup") or inst.get("workgroup")
         inst["suspend_warning"] = meta.get("suspend_warning")
+        inst["pra_jump_id"] = meta.get("pra_jump_id")
         # OCI calls them freeform tags; `_instance_to_dict` already carries the raw
         # dict, which unmanaged discovery reads. This is the render-ready form.
         inst["tags"] = tag_policy.normalise(inst.get("tags"), "oci")
@@ -607,6 +610,33 @@ class TagEditRequest(BaseModel):
     targets: List[TagTarget]
     add: dict = {}
     remove: List[str] = []
+
+
+@router.post("/instances/pra", status_code=202,
+             summary="Add, re-apply or remove a VM's PRA Shell Jump")
+def set_instance_pra(
+    payload: VmPraRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("oci", "write")),
+):
+    """Wire a VM this dashboard deployed into BeyondTrust PRA after the fact, or take it
+    out — the row action that makes PRA an opt-in rather than a deploy-form decision.
+    Queues a ``vm_pra`` job (see services/vm_pra_service); the jump's state is written
+    onto the deploy row, so Destroy removes it like a deploy-time one."""
+    from ..services import vm_pra_service
+    deploy_job = _find_deploy_job(db, "oci_deploy", "instance_ocid", payload.instance)
+    if not deploy_job:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No active deployment found for {payload.instance}.")
+    _assert_can_act(current_user, deploy_job.workgroup, f"Instance {payload.instance}",
+                    "change its PRA access")
+    try:
+        job = vm_pra_service.queue(db, cloud="oci", deploy_job=deploy_job,
+                                   payload=payload, username=current_user.username)
+    except vm_pra_service.VmPraError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "job_id": job.id, "action": payload.action}
 
 
 @router.post("/instances/tags", summary="Add or remove freeform tags across a selection")

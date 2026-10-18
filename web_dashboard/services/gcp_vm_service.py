@@ -559,14 +559,13 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
 
         # ── BeyondTrust PRA — Shell Jump (optional; SSH, so Linux only) ───────
         if _cfg_svc.get_bool("pra_enabled") and not is_windows:
-            from ..services import terraform_pra_service
-            jump_group = ((payload.jump_group or "").strip() or _cfg_svc.get("gcp_bt_jump_group_name")
-                          or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name)
-            # NB: the PRA *display* name, not the GCE instance name that _JumpointRef
-            # carries. These were one variable until the gateway block moved out, and
-            # it only worked because the metadata write above had already happened.
-            pra_jumpoint_name = ((payload.jumpoint_name or "").strip() or _cfg_svc.get("gcp_jumpoint_name")
-                                 or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name)
+            from ..services import terraform_pra_service, vm_pra_service
+            # NB: pra_jumpoint_name is the PRA *display* name, not the GCE instance name
+            # that _JumpointRef carries. These were one variable until the gateway block
+            # moved out, and it only worked because the metadata write above had already
+            # happened.
+            jump_group, pra_jumpoint_name = vm_pra_service.resolve_target(
+                "gcp", payload.jump_group, payload.jumpoint_name)
             job_service.update_progress(db, job_id, 90, f"Instance launched ({hostname}), provisioning Shell Jump…")
             try:
                 bt_result = await terraform_pra_service.provision_jump(

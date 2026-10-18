@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/vm_pra_modal.html" import vm_pra_modal %}
 {% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
 {% from "partials/schedule_picker.html" import schedule_picker %}
 {% from "partials/secret_picker.html" import secret_picker %}
@@ -374,6 +375,13 @@
                 <span x-show="!pendingPower.has(_vmKey(inst))">Suspend</span>
                 <span x-show="pendingPower.has(_vmKey(inst))" x-cloak>Suspending…</span>
               </button>
+              {% if pra_enabled %}
+              <button @click="openVmPra(inst.instance_name, inst.instance_name, inst.pra_jump_id)"
+                      x-show="inst.job_id && !(inst.os_type === 'windows')" x-cloak
+                      class="text-xs border border-teal-200 text-teal-700 hover:bg-teal-50 px-2.5 py-1.5 rounded-lg transition"
+                      title="Add this VM to BeyondTrust PRA, re-apply its Shell Jump, or remove it"
+                      x-text="inst.pra_jump_id ? 'PRA ✓' : 'Add to PRA'"></button>
+              {% endif %}
               <button @click="openTagEditor([inst])"
                       class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg transition"
                       title="Add or remove labels on this instance">Labels</button>
@@ -1796,6 +1804,8 @@
 
   {{ tag_editor("label") }}
 
+  {{ vm_pra_modal() }}
+
 </div><!-- /max-w-7xl -->
 
 <script>
@@ -1837,6 +1847,7 @@ function gcpDashboard() {
     selectAll: false,
     ...bulkPowerState(),
     ...tagEditState(),
+    ...vmPraState('gcp'),
     tagEditUrl: '/api/gcp/instances/tags',
     bulkPowerUrl: '/api/gcp/power/bulk',
     // A GCE stop is not a power cut, and it is deliberately not a SUSPEND either:

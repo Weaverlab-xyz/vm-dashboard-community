@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/vm_pra_modal.html" import vm_pra_modal %}
 {% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
 {% from "partials/schedule_picker.html" import schedule_picker %}
 {% from "partials/tag_chips.html" import tag_chips %}
@@ -199,6 +200,13 @@
             <span class="text-xs px-2 py-0.5 rounded-full"
                   :class="(inst.lifecycle_state === 'RUNNING') ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-600'"
                   x-text="inst.lifecycle_state"></span>
+            {% if pra_enabled %}
+            <button @click="openVmPra(inst.ocid, inst.display_name, inst.pra_jump_id)"
+                    x-show="inst.job_id && !false" x-cloak
+                    class="text-xs text-teal-600 hover:text-teal-800 font-medium"
+                    title="Add this VM to BeyondTrust PRA, re-apply its Shell Jump, or remove it"
+                    x-text="inst.pra_jump_id ? 'PRA ✓' : 'Add to PRA'"></button>
+            {% endif %}
             <button @click="openTagEditor([inst])"
                     class="text-xs text-blue-600 hover:text-blue-800 font-medium"
                     title="Add or remove freeform tags on this instance">Tags</button>
@@ -813,6 +821,8 @@
   </div>
 
   {{ tag_editor("tag") }}
+
+  {{ vm_pra_modal() }}
 </div>
 
 <script>
@@ -846,6 +856,8 @@ function ociDashboard() {
     selectAll: false,
     ...bulkPowerState(),
     ...tagEditState(),
+    ...secretPickerState(),
+    ...vmPraState('oci'),
     tagEditUrl: '/api/oci/instances/tags',
     bulkPowerUrl: '/api/oci/power/bulk',
     // OCI's stop verb is SOFTSTOP, which asks the guest before pulling the cord — so

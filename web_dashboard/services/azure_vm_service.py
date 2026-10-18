@@ -603,11 +603,10 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
             from ..services import terraform_pra_service
             # Resolve from config_service (wizard/DB) first, then env-var defaults.
             # Azure-specific keys override the shared bt_* keys.
-            from ..services import config_service as _cs
-            jump_group = (getattr(req, "jump_group", None) or "").strip() or _cfg("azure_bt_jump_group_name") or _cfg("bt_jump_group_name")
-            jumpoint_name = (getattr(req, "jumpoint_name", None) or "").strip() or _cfg("azure_jumpoint_name") or _cfg("bt_jumpoint_name")
-            _cred = getattr(req, "pra_credential_ref", None)
-            _client_secret = _cs.resolve_reference(_cred.strip()) if _cred else ""
+            from ..services import vm_pra_service
+            jump_group, jumpoint_name = vm_pra_service.resolve_target(
+                "azure", getattr(req, "jump_group", None), getattr(req, "jumpoint_name", None))
+            _client_secret = vm_pra_service.client_secret_for(getattr(req, "pra_credential_ref", None))
             if result.get("jumpoint_host_id"):
                 aci_note = f" (shared Gateway host: {result['jumpoint_host_id']})"
             elif result.get("jumpoint_error"):

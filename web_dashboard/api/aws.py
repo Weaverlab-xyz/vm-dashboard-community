@@ -40,6 +40,7 @@ from ..models.aws import (
     NetworkOptions,
     SSHKeySecretDetail,
 )
+from ..models.vm_pra import VmPraRequest
 from ..models.schedule import ScheduleRequestMixin
 from ..services import change_window_service, aws_service, deploy_batch, job_service, cache_service, cloud_stats, region_catalog, workgroup_service
 from ..services.aws_service import AWSError
@@ -357,6 +358,7 @@ async def _fetch_instances(db: Session) -> list:
             "job_id": job.id if job else None,
             "deployed_by": job.created_by if job else None,
             "suspend_warning": warn or None,
+            "pra_jump_id": (job.metadata_dict.get("bt_shell_jump_id") or None) if job else None,
             # The raw EC2 Tags dict is already on `live` and is spread in above; this
             # OVERWRITES it with the render-ready chip list the page binds to. It has
             # to be an overwrite rather than an addition: `tags` on the response model
@@ -1066,6 +1068,33 @@ def _instance_regions(db: Session, instance_ids: set) -> dict:
         if iid and iid in instance_ids:
             out[iid] = meta.get("region") or default_region
     return out
+
+
+@router.post("/instances/pra", status_code=202,
+             summary="Add, re-apply or remove a VM's PRA Shell Jump")
+def set_instance_pra(
+    payload: VmPraRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("aws", "write")),
+):
+    """Wire a VM this dashboard deployed into BeyondTrust PRA after the fact, or take it
+    out — the row action that makes PRA an opt-in rather than a deploy-form decision.
+    Queues a ``vm_pra`` job (see services/vm_pra_service); the jump's state is written
+    onto the deploy row, so Destroy removes it like a deploy-time one."""
+    from ..services import vm_pra_service
+    deploy_job = _find_deploy_job(db, "ec2_deploy", "instance_id", payload.instance)
+    if not deploy_job:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No active deployment found for {payload.instance}.")
+    _assert_can_act(current_user, deploy_job.workgroup, f"Instance {payload.instance}",
+                    "change its PRA access")
+    try:
+        job = vm_pra_service.queue(db, cloud="aws", deploy_job=deploy_job,
+                                   payload=payload, username=current_user.username)
+    except vm_pra_service.VmPraError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "job_id": job.id, "action": payload.action}
 
 
 @router.post("/instances/tags", summary="Add or remove tags across a selection")

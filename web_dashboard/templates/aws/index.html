@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/vm_pra_modal.html" import vm_pra_modal %}
 {% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
 {% from "partials/schedule_picker.html" import schedule_picker %}
 {% from "partials/secret_picker.html" import secret_picker %}
@@ -437,6 +438,13 @@
               <td class="px-4 py-3 text-gray-400 text-xs" x-text="timeAgo(inst.launch_time)"></td>
               <td class="px-4 py-3 text-right">
                 <div class="flex items-center justify-end gap-2">
+                  {% if pra_enabled %}
+                  <button @click="openVmPra(inst.instance_id, inst.name, inst.pra_jump_id)"
+                          x-show="inst.job_id && !(inst.platform === 'windows')" x-cloak
+                          class="text-xs text-teal-600 hover:underline"
+                          title="Add this VM to BeyondTrust PRA, re-apply its Shell Jump, or remove it"
+                          x-text="inst.pra_jump_id ? 'PRA ✓' : 'Add to PRA'"></button>
+                  {% endif %}
                   <button @click="openTagEditor([inst])"
                           class="text-xs text-blue-500 hover:underline"
                           title="Add or remove tags on this instance">Tags</button>
@@ -2143,6 +2151,8 @@
 
   {{ tag_editor("tag") }}
 
+  {{ vm_pra_modal() }}
+
 </div>
 {% endblock %}
 
@@ -2213,6 +2223,7 @@
       selectAll: false,
       ...bulkPowerState(),
       ...tagEditState(),
+      ...vmPraState('aws'),
       tagEditUrl: '/api/aws/instances/tags',
       bulkPowerUrl: '/api/aws/power/bulk',
       // The default `stop` sentence describes a power cut with unsaved work lost. An

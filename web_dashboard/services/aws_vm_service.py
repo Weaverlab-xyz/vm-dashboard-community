@@ -661,14 +661,15 @@ async def _run_deploy(
 
         # ── Step 3: BeyondTrust PRA — Shell Jump (optional; SSH, so Linux only) ─
         if _cfg_svc.get_bool("pra_enabled") and not is_windows:
-            from ..services import terraform_pra_service
+            from ..services import terraform_pra_service, vm_pra_service
             try:
-                _client_secret = _cfg_svc.resolve_reference(pra_credential_ref.strip()) if pra_credential_ref else ""
+                _client_secret = vm_pra_service.client_secret_for(pra_credential_ref)
+                _group, _jumpoint = vm_pra_service.resolve_target("aws", jump_group, jumpoint_name)
                 bt_result = await terraform_pra_service.provision_jump(
                     vm_name=instance_name,
                     hostname=hostname,
-                    jump_group_name=(jump_group or "").strip() or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name,
-                    jumpoint_name=(jumpoint_name or "").strip() or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name,
+                    jump_group_name=_group,
+                    jumpoint_name=_jumpoint,
                     tag="AWS",
                     client_secret=_client_secret,
                 )
