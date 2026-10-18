@@ -16,8 +16,10 @@
 //                       where the network is open; a local sandbox may block it)
 //
 // For each page it: loads it; clicks every visible role="tab" button in turn; and, on
-// /settings, opens every integration panel. Any `pageerror` not matched by an allowlist
-// entry is a failure. Exit code 1 on any failure, with each one named.
+// /settings, opens every integration panel. A failure is any of these not matched by an
+// allowlist entry: a `pageerror`; a `console.error` (how a caught failure usually shows);
+// an /api/ response that is a 401 or a 5xx other than 503. Exit code 1 on any failure,
+// with each one named.
 const fs = require('fs');
 const path = require('path');
 
@@ -63,9 +65,25 @@ function allowed(page, message) {
     // would otherwise surface only as "Execution context was destroyed" in whatever runs
     // next. Recorded with the request that caused it, so the failure names its own cause.
     p.on('response', r => {
-      if (r.status() === 401 && new URL(r.url()).pathname.startsWith('/api/')) {
-        seen.push({ where: pagePath, message: `401 from ${r.request().method()} ${new URL(r.url()).pathname} (logs the session out)` });
+      const u = new URL(r.url());
+      if (!u.pathname.startsWith('/api/')) return;
+      if (r.status() === 401) {
+        seen.push({ where: pagePath, message: `401 from ${r.request().method()} ${u.pathname} (logs the session out)` });
+      } else if (r.status() >= 500 && r.status() !== 503) {
+        // A page that catches the failure and shows nothing still renders cleanly, so a
+        // backend error behind it never reaches `pageerror`. 503 is excluded because it is
+        // the app's deliberate "provider unavailable" answer (an AWSError, AzureError, ...
+        // with no credentials configured, which is every cloud call here); a bare 500 is
+        // an exception nothing handled.
+        seen.push({ where: pagePath, message: `HTTP ${r.status()} from ${r.request().method()} ${u.pathname}` });
       }
+    });
+    // console.error is how a caught failure usually surfaces. Chromium also logs one line
+    // per failed resource load ("Failed to load resource: ... 404"); those are left to the
+    // response check above, which sees the request that caused them.
+    p.on('console', m => {
+      if (m.type() !== 'error' || /^Failed to load resource/.test(m.text())) return;
+      seen.push({ where: pagePath, message: `console.error: ${m.text()}` });
     });
     // Only once the page has loaded: a page that redirects on load (/login, for a session
     // that is already signed in) is doing its job. After that, nothing the script does
