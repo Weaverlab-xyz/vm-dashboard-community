@@ -387,6 +387,17 @@ Each cloud reads its credentials + a default subnet + an SSH-keypair secret from
 (emitted by the sandbox setup script). The **admin/SSH keypair** is stored in the cloud's
 own secret store and retrievable per instance from the UI.
 
+### The deploy form
+
+The single-VM deploy form on each cloud shows what most deploys decide: image, workstream,
+name and count, size, region or location, subnet and security groups, and public IP. Below
+those sit the **Add to BeyondTrust PRA** checkbox (see
+[PRA is an opt-in](#pra-is-an-opt-in-on-the-deploy-form)) and a collapsed
+**Advanced options** section holding everything that falls back to a configured default or
+is off by default: the SSH key secret override, Entitle and Password Safe registration,
+Active Directory and Entra ID join, the RDP jump, and the Gateway deploy key. Nothing was
+removed — expand Advanced to reach any of it. The bulk-deploy forms are unchanged.
+
 ### Deploying more than one VM
 
 Every deploy form has a **Count** (1–20). Leave it at 1 and nothing changes. Set it higher
@@ -616,16 +627,56 @@ user + API keypair, and (best-effort) a KMS vault SSH-keypair secret.
 ## Layer 1 — PRA (Shell Jump)
 
 When `pra_enabled` and PRA is configured (`bt_api_host`, `bt_client_id`,
-`bt_client_secret`, `bt_jump_group_name`, `bt_jumpoint_name`), every Linux deploy brokers a
+`bt_client_secret`, `bt_jump_group_name`, `bt_jumpoint_name`), a Linux deploy brokers a
 PRA **Shell Jump** via `terraform_pra_service.provision_jump(tag=<cloud>)` (the `beyondtrust/sra`
 provider), routed through the cloud's gateway host. The jump is removed on destroy from its
 stored state.
 
+### PRA is an opt-in on the deploy form
+
+Each cloud's deploy form has one **Add to BeyondTrust PRA** checkbox, ticked by default and
+shown only while PRA is enabled. Its Jump Group, Gateway and credential overrides sit in a
+collapsed section under it; leave them alone and the configured defaults apply. Untick it
+and the VM deploys with no jump (`enable_pra: false` on the request; a request that omits
+the field keeps the jump, so API callers and older clients are unchanged). On a Windows
+server, unticking also skips the Windows jump wiring, and a Windows jump **cannot** be added
+later — see below.
+
+The gateway host is ensured either way. That keeps the VM wired to the same address it would
+have had with PRA on, so a jump added later points where a deploy-time one would.
+
+### Adding PRA to a VM after deploy
+
+A Linux VM this dashboard deployed — on AWS, Azure, GCP or OCI — can be added to PRA at any
+time from its row: **Add to PRA** opens the same Jump Group / Gateway / credential choices.
+Once it has a jump the button reads **PRA ✓**, and the dialog offers **Re-apply** (replace
+the jump with one built from new choices) and **Remove from PRA**. Each runs as a `vm_pra`
+job; open it from the toast to follow it.
+
+- The jump is recorded on the VM's deploy record under the same keys a deploy-time jump
+  uses, so **Destroy** removes it exactly as it removes any other.
+- Re-apply removes the old jump before creating the new one. If the create fails, the VM is
+  left with no jump rather than a record of one that no longer exists; run it again.
+- On GCP and Azure, adding a jump also records the shared gateway host against the VM, so
+  the idle sweep keeps that gateway while the jump needs it.
+- **Windows servers are refused.** Their jumps are built from the administrator password set
+  at build time, which a later action cannot recover; decide on the deploy form.
+- The same ownership rule as Destroy applies: you need the cloud's `write` permission and
+  access to the VM's workstream.
+
+API: `POST /api/{aws|azure|gcp|oci}/instances/pra` with
+`{"instance": "<EC2 id | Azure VM name | GCE name | OCI OCID>", "action": "register" | "remove",
+"jump_group"?, "jumpoint_name"?, "pra_credential_ref"?}` → `202 {"job_id": ...}`.
+
+### Jump Group and Gateway resolution
+
 Jump Group / Gateway resolution: per-deploy form `jump_group` / `jumpoint_name` → the
 per-cloud override (`azure_bt_jump_group_name`/`azure_jumpoint_name`,
 `gcp_bt_jump_group_name`/`gcp_jumpoint_name`, `oci_bt_jump_group_name`/`oci_jumpoint_name`) →
-the `bt_*` defaults. AWS + Azure also accept a per-deploy `pra_credential_ref` (overrides
-`bt_client_secret`). **Windows VMs** (AWS, Azure and GCP) get a Shell Jump over OpenSSH
+the `bt_*` defaults, each read from config and then from its environment setting. Deploys
+and the post-deploy action share this resolution (`vm_pra_service.resolve_target`), so both
+land in the same place. AWS and Azure deploys, and the post-deploy action on every cloud,
+also accept a `pra_credential_ref` (overrides `bt_client_secret`). **Windows VMs** (AWS, Azure and GCP) get a Shell Jump over OpenSSH
 too, and a PRA **Remote RDP** jump item only on request — see
 [Windows servers](windows-servers.md).
 
