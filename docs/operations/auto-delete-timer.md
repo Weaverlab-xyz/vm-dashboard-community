@@ -154,7 +154,7 @@ panel and there is a test asserting no operator can reset them.
 
 Beyond the four gates, each individual resource must also be in a healthy idle state — a VM
 `active`, a database `available`, a cluster `registered`, `managed` or `awaiting_agent` —
-not in an exempt workgroup, and past its grace window. Never a row mid-provision,
+not in an exempt workstream, and past its grace window. Never a row mid-provision,
 mid-decommission or failed. An unrecognised status is refused, so a new state added
 elsewhere in the codebase can only ever make the sweep do *less*.
 
@@ -193,7 +193,7 @@ Panel labels, with the underlying key, since the keys are what the API and envir
 | Keep sweep history | `resource_expiry_sweep_retention_days` | `7` | Days a *completed* sweep row survives on `/jobs`. `0` = keep forever. A failed pass never expires. |
 | Max per sweep | `resource_expiry_max_per_pass` | `10` | Bounds the damage rate. Targets go oldest-overdue-first, and the cap counts **deletions, not attempts** — otherwise a few unreapable rows at the front would starve everything behind them forever. |
 | Allow admins to remove a timer | `resource_expiry_allow_never` | off | Off means the most anyone can do is extend. |
-| Exempt workgroups | `resource_expiry_exempt_workgroups` | *blank* | CSV. **VMs, cloud databases and Kubernetes clusters** carry a workgroup; cloud functions and desktop seats don't, so pin those individually instead. An *untagged* database or cluster has no workgroup to match here either. |
+| Exempt workstreams | `resource_expiry_exempt_workgroups` | *blank* | CSV. **VMs, cloud databases and Kubernetes clusters** carry a workstream; cloud functions and desktop seats don't, so pin those individually instead. An *untagged* database or cluster has no workstream to match here either. |
 
 Settings win over environment variables, which win over the built-in defaults, and every
 value is re-read each pass rather than captured at startup.
@@ -299,18 +299,18 @@ that from the deploy job's own record and **refuses rather than guess**, which i
 intended behaviour: a re-derived instance id is how you delete the wrong machine. Destroy it
 by hand.
 
-**Everything in one workgroup is exempt except one database or cluster.** Check whether that
-row is actually *tagged*. A cloud database or Kubernetes cluster carries a workgroup only
+**Everything in one workstream is exempt except one database or cluster.** Check whether that
+row is actually *tagged*. A cloud database or Kubernetes cluster carries a workstream only
 once someone assigns one — every row created before the field existed is untagged, and an
-untagged row matches no exemption. Assign it with the **Workgroup** button on
+untagged row matches no exemption. Assign it with the **Workstream** button on
 [Databases](../databases.md) or [Kubernetes](../kubernetes.md), or pin that one row instead.
 
-Note the asymmetry that remains: assigning an exempt workgroup stops a *new* resource being
+Note the asymmetry that remains: assigning an exempt workstream stops a *new* resource being
 stamped at all, but it does **not** clear a timer already on an existing row. The sweeper
 still skips it — `/inventory` shows it as exempt with the reason — but the countdown stays
 visible. Retagging is a visibility action and deliberately does not reschedule a deletion.
 
-Cloud functions and desktop seats still carry no workgroup, so pin those individually.
+Cloud functions and desktop seats still carry no workstream, so pin those individually.
 
 **A resource was deleted and nobody was told.** See *A resource was deleted and never warned*
 in [notifications.md](notifications.md) — the short version is that the warn-once latch is

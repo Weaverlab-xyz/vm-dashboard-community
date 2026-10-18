@@ -56,7 +56,7 @@
      {'slug': 'users',      'label': 'Users',      'admin': true},
      {'slug': 'groups',     'label': 'Groups',     'admin': true},
      {'slug': 'roles',      'label': 'Roles',      'admin': true},
-     {'slug': 'workgroups', 'label': 'Workgroups', 'admin': false}] %}
+     {'slug': 'workgroups', 'label': 'Workstreams', 'admin': false}] %}
 {% set tab_slugs = tabs | map(attribute='slug') | list %}
 {# The tabs that answer only to the admin flag. Workgroups is deliberately NOT among them:
    7 of the 8 /api/workgroups routes are gated on the grantable `workgroups` scope, and the
@@ -89,7 +89,7 @@
   <p class="text-sm text-gray-500 mb-6">
     Who can use this dashboard, what they may do, and which resources they may do it to.
     A <strong>role</strong> is a named set of permissions you assign to a person or to a
-    group from your identity provider; a <strong>workgroup</strong> is the other axis, and
+    group from your identity provider; a <strong>workstream</strong> is the other axis, and
     decides which VMs, databases and clusters they can see at all.
     <a href="/docs/access/permissions" target="_blank" class="text-blue-600 hover:underline">Feature guide</a>.
   </p>

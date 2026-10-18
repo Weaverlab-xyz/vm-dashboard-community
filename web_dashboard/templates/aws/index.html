@@ -891,11 +891,11 @@
 
           <!-- Workgroup -->
           <div class="mb-4">
-            <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup *</label>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Workstream *</label>
             <select x-model="deployForm.workgroup" required
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
                            focus:outline-none focus:ring-2 focus:ring-blue-500">
-              <option value="">Select workgroup…</option>
+              <option value="">Select workstream…</option>
               <template x-for="w in availableWorkgroups" :key="w">
                 <option :value="w" x-text="w"></option>
               </template>
@@ -1257,11 +1257,11 @@
           <!-- Shared: Workgroup — required by the API, and it decides who can see
                every VM in this batch, so it needs a control and not just a default -->
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-gray-400 font-normal">(shared)</span> *</label>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Workstream <span class="text-gray-400 font-normal">(shared)</span> *</label>
             <select x-model="deployForm.workgroup" required
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
                            focus:outline-none focus:ring-2 focus:ring-green-500">
-              <option value="">— select a workgroup —</option>
+              <option value="">— select a workstream —</option>
               <template x-for="wg in availableWorkgroups" :key="wg">
                 <option :value="wg" x-text="wg"></option>
               </template>
@@ -1774,10 +1774,10 @@
             </select>
           </div>
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-red-500">*</span></label>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Workstream <span class="text-red-500">*</span></label>
             <select x-model="otForm.workgroup"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-              <option value="">— select a workgroup —</option>
+              <option value="">— select a workstream —</option>
               <template x-for="wg in availableWorkgroups" :key="wg">
                 <option :value="wg" x-text="wg"></option>
               </template>
@@ -3255,7 +3255,7 @@
           return;
         }
         if (!this.deployForm.workgroup) {
-          this.bulkDeployError = 'Select a workgroup.';
+          this.bulkDeployError = 'Select a workstream.';
           return;
         }
 

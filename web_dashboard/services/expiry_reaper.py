@@ -893,7 +893,7 @@ def _skip_reason(item: dict, *, now_ts: float, grace: int, is_armed: bool) -> Op
     if not capable:
         return "not eligible for auto-delete"
     if expiry_policy.is_exempt(item):
-        return "workgroup is exempt"
+        return "workstream is exempt"
     if not expiry_policy.state_is_idle(item):
         return f"state {item.get('state') or 'unknown'!r} is not idle"
     expires_ts = expiry_policy.parse_ts(item.get("expires_at"))

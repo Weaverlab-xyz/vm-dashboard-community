@@ -142,7 +142,7 @@ def unmanaged_endpoint(
             canonical = workgroup.lower()
             if accessible is not None and canonical not in accessible:
                 raise HTTPException(status_code=403,
-                                    detail=f"No access to workgroup '{canonical}'")
+                                    detail=f"No access to workstream '{canonical}'")
 
         try:
             rows, cached_at = await discover(cloud, job_type=job_type,

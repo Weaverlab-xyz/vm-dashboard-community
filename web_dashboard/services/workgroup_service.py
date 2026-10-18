@@ -51,7 +51,7 @@ def _validate_name(name: str) -> str:
     n = _normalize(name)
     if not NAME_RE.match(n):
         raise WorkgroupError(
-            f"Invalid workgroup name '{name}'. Must be 2–64 chars, lowercase letters/digits/hyphens, "
+            f"Invalid workstream name '{name}'. Must be 2–64 chars, lowercase letters/digits/hyphens, "
             "start and end with alphanumeric."
         )
     return n
@@ -94,7 +94,7 @@ def canonical_or_none(db: Session, name: Optional[str]) -> Optional[str]:
         return None
     wg = get(db, name)
     if not wg:
-        raise WorkgroupError(f"Unknown workgroup '{name}'.")
+        raise WorkgroupError(f"Unknown workstream '{name}'.")
     return wg.name
 
 
@@ -126,7 +126,7 @@ def resolve_for_tagging(db: Session, name: Optional[str], *, user=None) -> Optio
         return canonical
     if canonical not in [w.lower() for w in user.workgroups_list]:
         raise WorkgroupAccessError(
-            f"You are not a member of workgroup '{canonical}', so you cannot assign a "
+            f"You are not a member of workstream '{canonical}', so you cannot assign a "
             f"resource to it.")
     return canonical
 
@@ -157,7 +157,7 @@ def create(
     if not display_name or not display_name.strip():
         raise WorkgroupError("display_name is required.")
     if exists(db, canonical):
-        raise WorkgroupError(f"Workgroup '{canonical}' already exists.")
+        raise WorkgroupError(f"Workstream '{canonical}' already exists.")
 
     if is_default:
         # Only one default allowed; clear any prior default.
@@ -200,7 +200,7 @@ def update(
     """
     wg = get(db, name)
     if not wg:
-        raise WorkgroupError(f"Workgroup '{name}' not found.")
+        raise WorkgroupError(f"Workstream '{name}' not found.")
     if display_name is not None:
         if not display_name.strip():
             raise WorkgroupError("display_name cannot be empty.")
@@ -223,7 +223,7 @@ def update(
     if wg.require_change_window is True and not wg.change_window_id:
         raise WorkgroupError(
             "Pick a change window before requiring one — otherwise every change "
-            "against this workgroup would be refused with nothing to book it into.")
+            "against this workstream would be refused with nothing to book it into.")
     db.commit()
     db.refresh(wg)
     return wg
@@ -233,9 +233,9 @@ def delete(db: Session, name: str) -> None:
     """Delete a workgroup. Refuses if referenced anywhere or if is_default=True."""
     wg = get(db, name)
     if not wg:
-        raise WorkgroupError(f"Workgroup '{name}' not found.")
+        raise WorkgroupError(f"Workstream '{name}' not found.")
     if wg.is_default:
-        raise WorkgroupError("Default workgroup cannot be deleted.")
+        raise WorkgroupError("Default workstream cannot be deleted.")
 
     canonical = wg.name
 
@@ -245,7 +245,7 @@ def delete(db: Session, name: str) -> None:
                  if canonical in [w.lower() for w in u.workgroups_list]]
     if user_refs:
         raise WorkgroupError(
-            f"Cannot delete workgroup '{canonical}': still assigned to {len(user_refs)} user(s): "
+            f"Cannot delete workstream '{canonical}': still assigned to {len(user_refs)} user(s): "
             f"{', '.join(user_refs[:5])}{'...' if len(user_refs) > 5 else ''}"
         )
 
@@ -255,7 +255,7 @@ def delete(db: Session, name: str) -> None:
         .count()
     )
     if active_jobs:
-        raise WorkgroupError(f"Cannot delete workgroup '{canonical}': {active_jobs} active job(s) reference it.")
+        raise WorkgroupError(f"Cannot delete workstream '{canonical}': {active_jobs} active job(s) reference it.")
 
     # Every on-prem VM tagged into this workgroup, across ALL providers — deliberately
     # not filtered to one. This replaced a guard that counted `vm_state_cache` rows, the
@@ -269,7 +269,7 @@ def delete(db: Session, name: str) -> None:
                .filter(VMWorkgroupOverride.workgroup == canonical).count())
     if vm_refs:
         raise WorkgroupError(
-            f"Cannot delete workgroup '{canonical}': {vm_refs} VM(s) are tagged into it. "
+            f"Cannot delete workstream '{canonical}': {vm_refs} VM(s) are tagged into it. "
             f"Clear or reassign them on their hypervisor page first.")
 
     # Cloud databases and K8s clusters tagged into this workgroup. The argument for
@@ -291,7 +291,7 @@ def delete(db: Session, name: str) -> None:
         refs = db.query(model.id).filter(model.workgroup == canonical).count()
         if refs:
             raise WorkgroupError(
-                f"Cannot delete workgroup '{canonical}': {refs} {label}(s) are tagged "
+                f"Cannot delete workstream '{canonical}': {refs} {label}(s) are tagged "
                 f"into it. Reassign or delete them on {page} first.")
 
     db.delete(wg)
@@ -301,7 +301,7 @@ def delete(db: Session, name: str) -> None:
 def assign_user(db: Session, name: str, user: User) -> None:
     canonical = _normalize(name)
     if not exists(db, canonical):
-        raise WorkgroupError(f"Workgroup '{name}' not found.")
+        raise WorkgroupError(f"Workstream '{name}' not found.")
     current = [w.lower() for w in user.workgroups_list]
     if canonical not in current:
         current.append(canonical)
@@ -322,7 +322,7 @@ def validate_user_workgroups(db: Session, names: List[str]) -> None:
     known = {n for n in list_names(db)}
     unknown = [n for n in names if _normalize(n) not in known]
     if unknown:
-        raise WorkgroupError(f"Unknown workgroup(s): {', '.join(unknown)}")
+        raise WorkgroupError(f"Unknown workstream(s): {', '.join(unknown)}")
 
 
 # ── Seed ──────────────────────────────────────────────────────────────────────
@@ -344,7 +344,7 @@ def seed_if_empty(db: Session) -> None:
         id=str(uuid.uuid4()),
         name="default",
         display_name="Default",
-        description="Default workgroup. Used when no specific workgroup is chosen.",
+        description="Default workstream. Used when no specific workstream is chosen.",
         is_default=True,
         created_at=now,
     ))

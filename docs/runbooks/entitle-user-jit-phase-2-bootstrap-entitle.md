@@ -70,13 +70,13 @@ cat terraform/entitle_user_jit/groups.auto.tfvars.json | jq '.groups | to_entrie
 ```
 
 **Expected** (default 102 prod-seeded groups: 1 admin + 1 baseline +
-98 scope/levels + 2 workgroups):
+98 scope/levels + 2 workstreams):
 - `auto_approve` = 32 (baseline + 31 `*-read`)
 - `single_approver` = 46 (29 `*-write` + 15 `*-use` + 2 workgroup-`*`)
 - `two_approver` = 24 (admin + 23 `*-delete`)
 
 Exact counts vary with `PERMISSION_SCOPE_LEVELS` and the number of
-workgroups — not every scope offers all four levels, so the totals are
+workstreams — not every scope offers all four levels, so the totals are
 the sum of its value lengths rather than a multiple of the scope count.
 If a row landed in the wrong tier, edit `_tier_for_group()` in
 `bootstrap_entitle_app.py` and re-run Step 1.

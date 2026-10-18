@@ -78,7 +78,7 @@ PROTECTED_KEYS = {
     # unmanaged_vms.WORKGROUP_TAG_KEYS. Editing this hands the VM to another team or
     # hides it from its own — see tests/test_workgroup_resource_tagging.py.
     "workgroup": "it decides who can see this resource; use the reassign action, which "
-                 "validates the workgroup exists and refuses to hide a resource from you",
+                 "validates the workstream exists and refuses to hide a resource from you",
     # pov_cloud_env.TAG_ENVIRONMENT / TAG_MANAGED_BY / TAG_ROLE. The environment tag is
     # what teardown and the reconcile sweep SELECT on: change it and the resource keeps
     # billing with nothing able to find it.

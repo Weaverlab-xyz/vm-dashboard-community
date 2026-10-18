@@ -248,11 +248,11 @@ def _assert_workgroup_access(user: User, workgroup: str) -> None:
     if not workgroup:
         raise HTTPException(
             status_code=403,
-            detail=("This VM is not assigned to a workgroup, so only an admin can act "
-                    "on it. An admin can tag it with Assign Workgroup."))
+            detail=("This VM is not assigned to a workstream, so only an admin can act "
+                    "on it. An admin can tag it with Assign Workstream."))
     if workgroup.lower() not in accessible:
         raise HTTPException(
-            status_code=403, detail=f"Access denied to workgroup: {workgroup}")
+            status_code=403, detail=f"Access denied to workstream: {workgroup}")
 
 
 async def _queue_one(db, current_user, *, op: str, payload: PowerOpRequest,

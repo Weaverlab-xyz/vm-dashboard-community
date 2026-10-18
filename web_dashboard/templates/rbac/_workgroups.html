@@ -20,9 +20,9 @@
 <div class="max-w-5xl" x-data="workgroupsPage()">
 
   <p class="text-sm text-gray-500 mb-6">
-    A workgroup is the <strong>other</strong> half of access control: the permission tabs
-    decide what someone may <em>do</em>, and a workgroup decides which VMs, databases and
-    clusters they may do it <em>to</em>. Each cloud resource is tagged with its workgroup,
+    A workstream is the <strong>other</strong> half of access control: the permission tabs
+    decide what someone may <em>do</em>, and a workstream decides which VMs, databases and
+    clusters they may do it <em>to</em>. Each cloud resource is tagged with its workstream,
     and a user sees only the ones they are assigned to. Administrators see everything.
     <a href="/docs/access/permissions" target="_blank" class="text-blue-600 hover:underline">Feature guide</a>.
   </p>
@@ -34,21 +34,21 @@
 
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
     <div class="flex items-center justify-between mb-4">
-      <h2 class="text-base font-semibold text-gray-700">All Workgroups</h2>
+      <h2 class="text-base font-semibold text-gray-700">All Workstreams</h2>
       <button @click="openCreate()"
               class="flex items-center gap-1.5 text-sm bg-blue-700 hover:bg-blue-800
                      text-white px-3 py-1.5 rounded-lg font-medium transition">
         <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
         </svg>
-        Create Workgroup
+        Create Workstream
       </button>
     </div>
 
     <div x-show="loading" class="py-6 text-center text-gray-400 text-sm">Loading…</div>
 
     <div x-show="!loading && workgroups.length === 0" class="py-8 text-center text-gray-400 text-sm">
-      No workgroups yet. Click "Create Workgroup" to add one.
+      No workstreams yet. Click "Create Workstream" to add one.
     </div>
 
     <div x-show="!loading && workgroups.length > 0" class="overflow-x-auto">
@@ -88,7 +88,7 @@
                 <span x-show="w.require_change_window && !w.change_window_name" x-cloak
                       class="inline-flex items-center px-2 py-0.5 rounded font-medium
                              bg-red-100 text-red-800"
-                      title="This workgroup requires a window that no longer exists, so
+                      title="This workstream requires a window that no longer exists, so
                              every gated change against it is refused. Pick another.">
                   misconfigured
                 </span>
@@ -117,7 +117,7 @@
   <div x-show="modalOpen" x-cloak
        class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
     <div class="bg-white rounded-xl shadow-xl w-full max-w-lg p-6">
-      <h3 class="text-lg font-semibold text-gray-800 mb-4" x-text="modalMode === 'create' ? 'Create Workgroup' : 'Edit Workgroup'"></h3>
+      <h3 class="text-lg font-semibold text-gray-800 mb-4" x-text="modalMode === 'create' ? 'Create Workstream' : 'Edit Workstream'"></h3>
 
       <div class="space-y-4">
         <div>
@@ -173,7 +173,7 @@
                    :disabled="!form.change_window_id"
                    class="mt-0.5 rounded border-gray-300 text-blue-600 disabled:opacity-40"/>
             <span class="text-xs text-gray-600">
-              Require it — refuse any change to this workgroup outside the window
+              Require it — refuse any change to this workstream outside the window
               <span class="block text-[11px] text-gray-500">
                 Deploys, destroys and other gated actions are refused outside the
                 window and offered a booking instead. Which actions count is the
@@ -193,7 +193,7 @@
           <input type="checkbox" id="wg_is_default" x-model="form.is_default"
                  class="rounded border-gray-300 text-blue-600 focus:ring-blue-200"/>
           <label for="wg_is_default" class="text-xs text-gray-600">
-            Mark as default workgroup
+            Mark as default workstream
           </label>
         </div>
       </div>
@@ -246,7 +246,7 @@ function workgroupsPage() {
           this.changeWindows = [];
         }
       } catch (e) {
-        this.flash('Failed to load workgroups: ' + (e.message || e), 'error');
+        this.flash('Failed to load workstreams: ' + (e.message || e), 'error');
       } finally {
         this.loading = false;
       }
@@ -283,7 +283,7 @@ function workgroupsPage() {
             local_vm_path: this.form.local_vm_path.trim() || null,
             is_default: this.form.is_default,
           });
-          this.flash('Workgroup created.', 'success');
+          this.flash('Workstream created.', 'success');
         } else {
           await API.patch('/api/workgroups/' + encodeURIComponent(this.form.name), {
             display_name: this.form.display_name.trim(),
@@ -296,7 +296,7 @@ function workgroupsPage() {
             require_change_window: !!(this.form.require_change_window
                                       && this.form.change_window_id),
           });
-          this.flash('Workgroup updated.', 'success');
+          this.flash('Workstream updated.', 'success');
         }
         this.modalOpen = false;
         await this.load();
@@ -306,10 +306,10 @@ function workgroupsPage() {
     },
 
     async deleteWorkgroup(w) {
-      if (!confirm(`Delete workgroup '${w.name}'? This cannot be undone.`)) return;
+      if (!confirm(`Delete workstream '${w.name}'? This cannot be undone.`)) return;
       try {
         await API.delete('/api/workgroups/' + encodeURIComponent(w.name));
-        this.flash('Workgroup deleted.', 'success');
+        this.flash('Workstream deleted.', 'success');
         await this.load();
       } catch (e) {
         this.flash('Delete failed: ' + (e.message || e), 'error');

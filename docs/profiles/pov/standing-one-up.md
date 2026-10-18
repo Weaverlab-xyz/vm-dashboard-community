@@ -83,7 +83,7 @@ same POV.
 |---|---|
 | The template, project and control node VM name | The POV's **name** — that is per-POV by definition |
 | … and a blank control node VM name stays blank, which means auto-detect | |
-| The idle timeout and an expiry override | The **workgroup**, which decides RBAC and the expiry exempt list. Not something a saved recipe should set silently |
+| The idle timeout and an expiry override | The **workstream**, which decides RBAC and the expiry exempt list. Not something a saved recipe should set silently |
 | The three tenant references | Any **secret** — see below |
 | The POV type — which [use cases](design/use-cases.md#choosing-the-povs-use-cases) it tests | |
 | The Gateway name, and the Resource Broker's VM, zone and installer asset | |

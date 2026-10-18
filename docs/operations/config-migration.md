@@ -75,7 +75,7 @@ this whole exercise.
   your lab. Pass `--include-on-prem` if you want them staged anyway.
 
 **Out of scope** — these live on their own admin pages, not in Settings, and
-need moving by hand: users, workgroups, OIDC group mappings, registered images,
+need moving by hand: users, workstreams, OIDC group mappings, registered images,
 remote agents, secret vault registrations.
 
 **Cannot be migrated at all:**

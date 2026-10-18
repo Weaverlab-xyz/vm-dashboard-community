@@ -192,10 +192,10 @@ the dashboard's own tags.** Both halves matter. The tag half is what keeps a VDI
 a VM whose job row was pruned, in the managed list where it belongs — those are the
 dashboard's, and they still have a Destroy button.
 
-**Who can see one.** A discovered VM has no `Job.workgroup`, so its workgroup comes from a
+**Who can see one.** A discovered VM has no `Job.workgroup`, so its workstream comes from a
 `workgroup` tag (or GCP label) if it has one, and otherwise it has none — which makes it
 **admin-only**. That is not a new rule; it is what every cloud module's `_assert_can_act`
-already says about an untagged resource. Tag your own VMs for workgroups and non-admins see
+already says about an untagged resource. Tag your own VMs for workstreams and non-admins see
 them; don't, and only admins do.
 
 **Destroy is absent, not hidden.** There is no destroy route on the discovery module and
@@ -322,7 +322,7 @@ them never has its NIC written to on the way to being told no.
 
 The sweep runs every `vm_suspend_sweep_interval_minutes` (default 10) and never powers
 anything itself: it enqueues the identical `*_power` job the Suspend button creates, so
-the audit row, the `/jobs` entry and the workgroup all come out the same either way.
+the audit row, the `/jobs` entry and the workstream all come out the same either way.
 
 ### Spend caps
 
@@ -703,7 +703,7 @@ Chips are coloured by **who owns the tag**, not by which cloud it came from:
   `dashboard:desktop_pool` is how a virtual-desktop pool finds its seats. Editing one of
   these in the cloud console will break the thing named in the tooltip.
 - **Indigo** — `workgroup`, which decides who can see the resource. Change it through the
-  reassign action, which validates the workgroup exists, not by hand.
+  reassign action, which validates the workstream exists, not by hand.
 - **Everything else** — your own, coloured per key. The same key is the same colour on
   every page and every cloud, so `env` looks the same on `/aws` and `/proxmox`.
 
@@ -751,7 +751,7 @@ promise about one page, while the refusal covers the REST API and the MCP server
 and how the dashboard tells its own VMs from discovered ones
 ```
 
-`workgroup` is refused with a pointer to the reassign action, which validates the workgroup
+`workgroup` is refused with a pointer to the reassign action, which validates the workstream
 exists and will not hand a resource to a team you are not in. The full list is the grey
 padlocked chips: `managed-by`, `povEnvironment`, `dashboard:desktop_pool`, `clouddb-id`
 and the rest.

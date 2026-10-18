@@ -1033,7 +1033,7 @@ _FINOPS = Persona(
         UseCase(
             id="finops-what-it-cost",
             title="What it cost, without asking the cloud twice",
-            summary="Spend by workgroup and by resource, from the dashboard's own "
+            summary="Spend by workstream and by resource, from the dashboard's own "
                     "record of what it built — so the question 'whose lab was that?' has "
                     "an answer that does not start with exporting a billing CSV.",
             target="/costs",

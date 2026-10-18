@@ -80,7 +80,7 @@
         </select>
       </div>
       <div class="flex items-center gap-2">
-        <label class="text-sm font-medium text-gray-600">Workgroup:</label>
+        <label class="text-sm font-medium text-gray-600">Workstream:</label>
         <select x-model="filterWorkgroup"
                 class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-blue-500">
           <option value="">All</option>
@@ -449,7 +449,7 @@
                      bg-gray-50 shadow-[inset_-1px_0_0_0_rgb(229,231,235),inset_0_-1px_0_0_rgb(229,231,235)]">Name</th>
           <th x-show="showCol('region')" class="px-3 py-2 font-semibold text-gray-600 whitespace-nowrap">Region</th>
           <th x-show="showCol('state')" class="px-3 py-2 font-semibold text-gray-600 whitespace-nowrap">State</th>
-          <th x-show="showCol('workgroup')" class="px-3 py-2 font-semibold text-gray-600 whitespace-nowrap">Workgroup</th>
+          <th x-show="showCol('workgroup')" class="px-3 py-2 font-semibold text-gray-600 whitespace-nowrap">Workstream</th>
           <th x-show="showCol('tags')" class="px-3 py-2 font-semibold text-gray-600 whitespace-nowrap">Tags</th>
           {% if password_safe_enabled %}
           <th x-show="showCol('ps')" class="px-3 py-2 font-semibold text-gray-600">
@@ -741,7 +741,7 @@
           { key: 'kind',      label: 'Kind',        has: r => !!r.kind },
           { key: 'region',    label: 'Region',      has: r => !!r.region },
           { key: 'state',     label: 'State',       has: r => !!r.state },
-          { key: 'workgroup', label: 'Workgroup',   has: r => !!r.workgroup },
+          { key: 'workgroup', label: 'Workstream',  has: r => !!r.workgroup },
           { key: 'tags',      label: 'Tags',        has: r => ((r.tags || []).length > 0) },
           // Emptiness here is "no Password Safe record matched", NOT "no chips": a row in
           // the none / not_fetched / ambiguous states has something worth reading.

@@ -10,15 +10,15 @@ page shows them together, so "everything tagged `pci`" or "every host Password S
 It is a **read of the dashboard's own records**, not a live sweep of every provider. A
 cloud VM appears because a deploy job created it; a hypervisor VM appears because its
 connection was synced. That is what keeps the page fast, and it is also why it can briefly
-lag the provider (see [Tags](#tags) below). Rows are filtered by **workgroup**: you see
-what your workgroups own, and an admin sees everything. Reading it needs the
+lag the provider (see [Tags](#tags) below). Rows are filtered by **workstream**: you see
+what your workstreams own, and an admin sees everything. Reading it needs the
 `inventory:read` permission — see [Permissions](access/permissions.md).
 
 ---
 
 ## Filtering
 
-The filter bar has **Provider**, **Kind**, **Region**, **State** and **Workgroup**, each
+The filter bar has **Provider**, **Kind**, **Region**, **State** and **Workstream**, each
 listing only the values present in your estate. Two more appear only when they have
 something to offer:
 

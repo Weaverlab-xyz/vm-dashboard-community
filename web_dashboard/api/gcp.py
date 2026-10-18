@@ -179,10 +179,10 @@ def _validate_workgroup(db: Session, user: User, workgroup: str) -> str:
     """Validate that `workgroup` exists and the user has access. Returns canonical name."""
     wg = workgroup_service.get(db, workgroup)
     if not wg:
-        raise HTTPException(status_code=400, detail=f"Unknown workgroup '{workgroup}'")
+        raise HTTPException(status_code=400, detail=f"Unknown workstream '{workgroup}'")
     canonical = wg.name
     if not user.is_effective_admin and canonical not in [w.lower() for w in user.workgroups_list]:
-        raise HTTPException(status_code=403, detail=f"You do not have access to workgroup '{canonical}'")
+        raise HTTPException(status_code=403, detail=f"You do not have access to workstream '{canonical}'")
     return canonical
 
 
@@ -212,11 +212,11 @@ def _assert_can_act(user: User, workgroup, what: str) -> None:
     if not wg:
         raise HTTPException(
             status_code=403,
-            detail=(f"{what} is not assigned to a workgroup, so only an admin can "
+            detail=(f"{what} is not assigned to a workstream, so only an admin can "
                     "destroy it."))
     if wg not in accessible:
         raise HTTPException(
-            status_code=403, detail=f"Access denied to workgroup '{wg}'")
+            status_code=403, detail=f"Access denied to workstream '{wg}'")
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -480,7 +480,7 @@ async def list_instances(
     if workgroup is not None:
         canonical = workgroup.lower()
         if accessible is not None and canonical not in accessible:
-            raise HTTPException(status_code=403, detail=f"No access to workgroup '{canonical}'")
+            raise HTTPException(status_code=403, detail=f"No access to workstream '{canonical}'")
 
     cache_key = instances_cache_key(project_id)
     if not bust:
@@ -971,7 +971,7 @@ async def reassign_instance_workgroup(
 
     wg = workgroup_service.get(db, req.workgroup)
     if not wg:
-        raise HTTPException(status_code=400, detail=f"Unknown workgroup '{req.workgroup}'")
+        raise HTTPException(status_code=400, detail=f"Unknown workstream '{req.workgroup}'")
     canonical = wg.name
 
     job = db.query(Job).filter(Job.cloud_resource_id == instance_name).first()

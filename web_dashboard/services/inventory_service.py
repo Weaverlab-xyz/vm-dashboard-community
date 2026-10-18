@@ -796,7 +796,7 @@ def collect(db: Session) -> list:
         item["ttl_capable"] = capable and not exempt
         item["expiry_exempt"] = exempt
         item["ttl_reason"] = (
-            "its workgroup is exempt from auto-delete" if exempt else why
+            "its workstream is exempt from auto-delete" if exempt else why
         )
 
     return items

@@ -800,7 +800,7 @@ def require_workgroup_access(workgroup: str):
         if workgroup not in current_user.workgroups_list:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Access denied to workgroup: {workgroup}",
+                detail=f"Access denied to workstream: {workgroup}",
             )
         return current_user
     return _check

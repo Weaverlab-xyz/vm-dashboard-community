@@ -698,19 +698,19 @@ with no recorded catalog to scope grants to. Full detail in
 [Cloud Functions](integrations/cloud-functions.md).
 ---
 
-## Workgroups (who can see a database)
+## Workstreams (who can see a database)
 
-A database with **no workgroup** is visible only to whoever created it, plus
+A database with **no workstream** is visible only to whoever created it, plus
 administrators. That is how every database provisioned or registered before this field
 existed still behaves, and it is why adding the field granted and revoked nothing.
 
-Assign one and the whole workgroup can see and manage it:
+Assign one and the whole workstream can see and manage it:
 
-- **At creation** — the **Workgroup** select on the provision form and on *Register
-  existing*. Optional; blank leaves the row creator-scoped. You may only pick a workgroup
-  you are a member of, because the workgroup rule outranks the creator rule: tagging your
-  own database into a workgroup you are not in would hide it from you.
-- **Afterwards** — the **Workgroup** button on the row, administrators only. This is the
+- **At creation** — the **Workstream** select on the provision form and on *Register
+  existing*. Optional; blank leaves the row creator-scoped. You may only pick a workstream
+  you are a member of, because the workstream rule outranks the creator rule: tagging your
+  own database into a workstream you are not in would hide it from you.
+- **Afterwards** — the **Workstream** button on the row, administrators only. This is the
   only way an existing database gets one. Clearing it returns the database to its creator.
 
 Retagging is admin-only because it is a **transfer**, not a filter. Everyone in the chosen

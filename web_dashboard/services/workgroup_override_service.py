@@ -36,7 +36,7 @@ class OverrideError(ValueError):
 def _check_provider(provider: str) -> str:
     if provider not in ALLOWED_PROVIDERS:
         raise OverrideError(
-            f"provider '{provider}' is not allowed. Workgroup overrides only apply to on-prem "
+            f"provider '{provider}' is not allowed. Workstream overrides only apply to on-prem "
             f"providers: {sorted(ALLOWED_PROVIDERS)}."
         )
     return provider
@@ -97,9 +97,9 @@ def set_many(
 
     canonical = (workgroup or "").strip().lower()
     if not canonical:
-        raise OverrideError("workgroup is required.")
+        raise OverrideError("workstream is required.")
     if not db.query(Workgroup.id).filter(Workgroup.name == canonical).first():
-        raise OverrideError(f"Unknown workgroup '{workgroup}'.")
+        raise OverrideError(f"Unknown workstream '{workgroup}'.")
 
     existing = {
         row.vm_id: row

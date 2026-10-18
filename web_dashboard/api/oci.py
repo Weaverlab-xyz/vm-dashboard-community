@@ -121,10 +121,10 @@ def _cache_key(name: str, compartment: str = "", **extra) -> str:
 def _validate_workgroup(db: Session, user: User, workgroup: str) -> str:
     wg = workgroup_service.get(db, workgroup)
     if not wg:
-        raise HTTPException(status_code=400, detail=f"Unknown workgroup '{workgroup}'")
+        raise HTTPException(status_code=400, detail=f"Unknown workstream '{workgroup}'")
     canonical = wg.name
     if not user.is_effective_admin and canonical not in [w.lower() for w in user.workgroups_list]:
-        raise HTTPException(status_code=403, detail=f"You do not have access to workgroup '{canonical}'")
+        raise HTTPException(status_code=403, detail=f"You do not have access to workstream '{canonical}'")
     return canonical
 
 
@@ -152,11 +152,11 @@ def _assert_can_act(user: User, workgroup, what: str) -> None:
     if not wg:
         raise HTTPException(
             status_code=403,
-            detail=(f"{what} is not assigned to a workgroup, so only an admin can "
+            detail=(f"{what} is not assigned to a workstream, so only an admin can "
                     "destroy it."))
     if wg not in accessible:
         raise HTTPException(
-            status_code=403, detail=f"Access denied to workgroup '{wg}'")
+            status_code=403, detail=f"Access denied to workstream '{wg}'")
 
 
 # ── Free-tier usage from this dashboard's own deploys ─────────────────────────
@@ -420,7 +420,7 @@ async def list_instances(
         raise HTTPException(status_code=400, detail="OCI not configured — run the setup wizard.")
     accessible = _accessible_workgroups(current_user)
     if workgroup is not None and accessible is not None and workgroup.lower() not in accessible:
-        raise HTTPException(status_code=403, detail=f"No access to workgroup '{workgroup.lower()}'")
+        raise HTTPException(status_code=403, detail=f"No access to workstream '{workgroup.lower()}'")
 
     cache_key = _cache_key("oci_instances")
     if not bust:

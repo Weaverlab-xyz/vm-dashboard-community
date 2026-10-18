@@ -118,11 +118,11 @@
         {{ bulk_power_buttons(['start', 'shutdown', 'stop', 'restart'], schedulable=true) }}
         <button x-show="$store.auth.isAdmin" @click="openBulkAssign()"
                 class="text-xs px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white font-medium">
-          Assign workgroup
+          Assign workstream
         </button>
         <button x-show="$store.auth.isAdmin" @click="submitBulkClear()"
                 class="text-xs px-3 py-1.5 rounded bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium">
-          Clear workgroup
+          Clear workstream
         </button>
         <button @click="selectedVmIds = []; selectAll = false"
                 class="text-xs text-gray-500 hover:text-gray-700">
@@ -140,7 +140,7 @@
           <th class="w-8 px-4 py-3"></th>
           <th class="text-left px-4 py-3 font-medium text-gray-500">Name</th>
           <th class="text-left px-4 py-3 font-medium text-gray-500">State</th>
-          <th class="text-left px-4 py-3 font-medium text-gray-500">Workgroup</th>
+          <th class="text-left px-4 py-3 font-medium text-gray-500">Workstream</th>
           <th class="text-left px-4 py-3 font-medium text-gray-500">Gen</th>
           <th class="text-left px-4 py-3 font-medium text-gray-500">vCPUs</th>
           <th class="text-left px-4 py-3 font-medium text-gray-500">CPU%</th>
@@ -423,15 +423,15 @@
   <!-- ── Bulk assign workgroup modal ───────────────────────────────────────── -->
   <div x-show="bulkAssignModal.open" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" @click.self="bulkAssignModal.open = false">
     <div class="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
-      <h2 class="text-lg font-semibold text-gray-900 mb-2">Assign workgroup</h2>
+      <h2 class="text-lg font-semibold text-gray-900 mb-2">Assign workstream</h2>
       <p class="text-sm text-gray-500 mb-4">
-        Tag <strong x-text="selectedVmIds.length"></strong> selected VM(s) with a workgroup.
+        Tag <strong x-text="selectedVmIds.length"></strong> selected VM(s) with a workstream.
       </p>
       <div class="mb-6">
-        <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-red-500">*</span></label>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Workstream <span class="text-red-500">*</span></label>
         <select x-model="bulkAssignModal.workgroup" required
                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-          <option value="">Select workgroup…</option>
+          <option value="">Select workstream…</option>
           <template x-for="w in availableWorkgroups" :key="w">
             <option :value="w" x-text="w"></option>
           </template>
@@ -564,7 +564,7 @@ function hypervDashboard() {
         this.bulkAssignModal.open = false;
         this.selectedVmIds = [];
         this.selectAll = false;
-        this.showToast(`Assigned workgroup '${wg}'.`);
+        this.showToast(`Assigned workstream '${wg}'.`);
         await this.refresh();
       } catch (e) {
         this.showToast('Assign failed: ' + (e.detail || e.message || e), 'error');
@@ -579,7 +579,7 @@ function hypervDashboard() {
         });
         this.selectedVmIds = [];
         this.selectAll = false;
-        this.showToast('Cleared workgroup.');
+        this.showToast('Cleared workstream.');
         await this.refresh();
       } catch (e) {
         this.showToast('Clear failed: ' + (e.detail || e.message || e), 'error');

@@ -302,17 +302,17 @@ Config: `entra_rbac_group_id`, `entra_rbac_group_name` (display only) and `entra
 
 ---
 
-## Workgroups (who can see a cluster)
+## Workstreams (who can see a cluster)
 
-A cluster with **no workgroup** is visible only to whoever registered or provisioned it,
+A cluster with **no workstream** is visible only to whoever registered or provisioned it,
 plus administrators — which is what every cluster predating this field still is.
 
-Assign one and the whole workgroup can see and manage it:
+Assign one and the whole workstream can see and manage it:
 
-- **At creation** — the **Workgroup** select on both the register and provision forms.
-  Optional; blank leaves the cluster creator-scoped. You may only pick a workgroup you
-  belong to, since the workgroup rule outranks the creator rule.
-- **Afterwards** — the **Workgroup** button on the row, administrators only, which is the
+- **At creation** — the **Workstream** select on both the register and provision forms.
+  Optional; blank leaves the cluster creator-scoped. You may only pick a workstream you
+  belong to, since the workstream rule outranks the creator rule.
+- **Afterwards** — the **Workstream** button on the row, administrators only, which is the
   only way an existing cluster gets one. Clearing it returns the cluster to its creator.
 
 **Weigh this more carefully here than for a VM.** The kubeconfig behind a cluster row is
@@ -325,7 +325,7 @@ Password Safe token registration, decommission, and its
 Requesting a cluster you cannot see answers **404**, not 403 — the same rule the POV and
 lab pages use, so an id cannot be confirmed by probing for it.
 
-See [Permissions](access/permissions.md) for how workgroups sit alongside permission scopes.
+See [Permissions](access/permissions.md) for how workstreams sit alongside permission scopes.
 
 ---
 

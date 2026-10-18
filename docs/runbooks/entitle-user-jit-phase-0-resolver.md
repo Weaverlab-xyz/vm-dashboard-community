@@ -58,13 +58,13 @@ Sign in as an existing admin user. Open `/rbac#groups`. For each of the
 three Entra groups created in prerequisites, add an `oauth_group_mappings`
 row:
 
-| Entra group ID | Workgroup | default_permissions JSON |
+| Entra group ID | Workstream | default_permissions JSON |
 |---|---|---|
 | `<oid of T_GROUP_A>` | `Hydra` | `{"aws": ["read"]}` |
 | `<oid of T_GROUP_B>` | `Hydra` | `{"vms": ["read"]}` |
 | `<oid of T_GROUP_C>` | `Hydra` | `{"is_admin": true}` |
 
-(Use whatever workgroup already exists in your dev DB — `Hydra` is the
+(Use whatever workstream already exists in your dev DB — `Hydra` is the
 default seed.)
 
 ## Step 3 — Union of group-derived permissions on first login
