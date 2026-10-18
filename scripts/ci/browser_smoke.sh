@@ -12,8 +12,10 @@
 # instance -- a 404 is a page this profile does not have.
 #
 # Usage:
-#   scripts/ci/browser_smoke.sh            # offline: external hosts blocked (Alpine is vendored)
-#   REQUIRE_TAILWIND=1 scripts/ci/browser_smoke.sh   # CI: also check the pinned Tailwind loads
+#   scripts/ci/browser_smoke.sh            # offline: external hosts blocked
+#   ONLINE=1 scripts/ci/browser_smoke.sh   # CI: external hosts reachable (Mermaid, Swagger UI)
+#
+# Afterwards it runs scripts/ci/css_coverage.sh over every class name the pages carried.
 #
 # Needs: python with web_dashboard/requirements.txt, node, and playwright (npm) with a
 # Chromium it can launch. CHROMIUM_PATH overrides the browser binary.
@@ -96,7 +98,8 @@ for inst in "demo 18731" "pov 18732"; do
   fi
   echo "== $1 pages: $pages"
   echo "== $1: $("$PY" -c "import json,sys; print(len(json.loads(sys.argv[1])))" "$pages") pages"
-  BASE="http://127.0.0.1:$2" TOKEN="$tok" PAGES="$pages" LABEL="$1" \
+  BASE="http://127.0.0.1:$2" TOKEN="$tok" PAGES="$pages" LABEL="$1" CLASSES_OUT="$WORK/classes-$1.json" \
     ALLOW="$ROOT/tests/browser_smoke_allow.json" node "$ROOT/tests/browser_smoke.js" || fail=1
 done
+scripts/ci/css_coverage.sh "$WORK"/classes-*.json || fail=1
 exit $fail

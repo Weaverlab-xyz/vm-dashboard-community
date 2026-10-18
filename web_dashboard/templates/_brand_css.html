@@ -1,8 +1,8 @@
 {# The operator's own three colours, as real CSS.
 
    The shipped palettes in services/ui_theme are literal Tailwind utilities, because the
-   app is on the Play CDN and a composed class name would not survive a build step that
-   purges by scanning source. An arbitrary hex cannot be a utility at all, so a custom
+   stylesheet is built by scanning source (scripts/build_css.sh), and a composed class
+   name would get no rule. An arbitrary hex cannot be a utility at all, so a custom
    palette fills the same chrome slots with the hand-written class names below. They are
    not Tailwind classes: nothing purges them, and the class attribute in base.html that
    interpolates theme.nav_bg does not change.
@@ -11,8 +11,8 @@
 
    1. EVERY SELECTOR IS SCOPED to `.brand-custom`, which ui_theme puts on <html>. A bare
       `.brand-nav` is specificity (0,1,0) -- a tie with any Tailwind utility on the same
-      element setting the same property, and a tie is broken by source order, which for a
-      sheet the CDN injects at runtime is script timing. The overlaps are real and
+      element setting the same property, and a tie is broken by source order -- an
+      accident of where each sheet happens to sit. The overlaps are real and
       deliberate: base.html:114 carries `text-white` beside theme.nav_bg, :161 and :260
       carry `hover:text-white`, :260 carries `bg-white/10`, and login.html:77 and :136
       carry `text-white` beside theme.login_btn. The descendant selector makes these

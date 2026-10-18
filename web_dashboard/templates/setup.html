@@ -4,12 +4,13 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Setup — Infrastructure Management Dashboard</title>
-  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
   <script defer src="{{ static_url('js/vendor/alpine-3.17.4.min.js') }}"></script>
   <style>
     [x-cloak] { display: none !important; }
     .step-dot { transition: background-color 0.2s, border-color 0.2s; }
   </style>
+  {# Last in <head>: same cascade order as base.html. #}
+  <link rel="stylesheet" href="{{ static_url('css/tailwind.css') }}">
 </head>
 <body class="min-h-screen bg-gray-50 flex items-center justify-center p-4">
 

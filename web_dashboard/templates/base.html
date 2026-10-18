@@ -7,14 +7,15 @@
   {# Profile-tinted mark. Fully percent-encoded in ui_theme -- a literal '#' in a hex
      colour would start a URI fragment and truncate the SVG. #}
   <link rel="icon" href="{{ theme.favicon }}">
-  {# Pinned, never floating. Tailwind is the play CDN at an exact version; Alpine is
+  {# Nothing loads from a CDN. Tailwind is built ahead of time into css/tailwind.css by
+     scripts/build_css.sh (a pinned tailwindcss, scanning every template, script and
+     Python file for class names); CI fails if the committed file is stale. Alpine is
      vendored -- the npm package's dist/cdn.min.js, renamed for its version and kept in
      the js/vendor folder of the static tree -- so no upstream release reaches an instance
      unreviewed and a CDN outage cannot take every page's interactivity down. To bump
      Alpine, replace that file (npm pack alpinejs@<version>) and the version here and in
      the other pages that own their <head>. tests/test_static_assets.py fails a floating
      CDN version anywhere. #}
-  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
   <script defer src="{{ static_url('js/vendor/alpine-3.17.4.min.js') }}"></script>
   {# Versioned, never bare. Written as a literal path with no version, this let Chrome
      keep serving a broken app.js for hours after the fix was deployed. static_url()
@@ -88,6 +89,10 @@
      tables, the code/pre rule rescues 363 elements. A feature's stylesheet does not, and
      34 of the 36 pages that extend this file have no checklist on them. #}
   {% block head %}{% endblock %}
+  {# Tailwind LAST in <head>, after every <style> above and the page's head block.
+     The Play CDN this replaced appended its sheet there at runtime, so on a
+     specificity tie a utility beat a hand-written rule; this keeps that order. #}
+  <link rel="stylesheet" href="{{ static_url('css/tailwind.css') }}">
 </head>
 <body class="{{ theme.body_bg }} min-h-screen font-sans text-gray-800">
 
