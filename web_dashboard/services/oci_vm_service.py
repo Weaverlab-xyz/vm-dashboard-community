@@ -184,8 +184,9 @@ async def _run_deploy(job_id: str, payload: OCIDeployRequest, compartment: str,
             "region":         _region(),
         }
 
-        # ── BeyondTrust PRA — Shell Jump (optional) ───────────────────────────
-        if _cfg_svc.get_bool("pra_enabled"):
+        # ── BeyondTrust PRA — Shell Jump (optional; opt-out per deploy) ───────
+        from ..services import vm_pra_service as _vps
+        if _cfg_svc.get_bool("pra_enabled") and _vps.opted_in(payload.enable_pra):
             from ..services import terraform_pra_service, vm_pra_service
             jump_group, jumpoint_name = vm_pra_service.resolve_target(
                 "oci", payload.jump_group, payload.jumpoint_name)

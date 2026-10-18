@@ -108,6 +108,9 @@ class OCIDeployRequest(ScheduleRequestMixin, BaseModel):
     register_in_passwordsafe: bool = False
     ssh_key_secret_override: Optional[str] = None   # OCI Vault secret (OCID/name) with a public_key
     # PRA per-launch overrides (fall back to oci_bt_* / bt_* config).
+    # PRA opt-in. None = the default (on, while PRA is enabled); False = no jump,
+    # added later from the VM's row if wanted (services/vm_pra_service).
+    enable_pra: Optional[bool] = None
     jump_group: Optional[str] = None
     jumpoint_name: Optional[str] = None
     count: int = Field(
@@ -160,6 +163,9 @@ class OCIBulkDeployRequest(ScheduleRequestMixin, BaseModel):
     register_in_entitle: bool = False
     register_in_passwordsafe: bool = False
     ssh_key_secret_override: Optional[str] = None
+    # PRA opt-in. None = the default (on, while PRA is enabled); False = no jump,
+    # added later from the VM's row if wanted (services/vm_pra_service).
+    enable_pra: Optional[bool] = None
     jump_group: Optional[str] = None
     jumpoint_name: Optional[str] = None
 

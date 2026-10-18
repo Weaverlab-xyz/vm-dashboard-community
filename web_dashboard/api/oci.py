@@ -921,6 +921,7 @@ async def bulk_deploy_instances(
             register_in_entitle=req.register_in_entitle,
             register_in_passwordsafe=req.register_in_passwordsafe,
             ssh_key_secret_override=req.ssh_key_secret_override,
+            enable_pra=req.enable_pra,
             jump_group=req.jump_group,
             jumpoint_name=req.jumpoint_name,
             count=1,

@@ -558,8 +558,11 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                     project_id, result["zone"], payload.instance_name)
 
         # ── BeyondTrust PRA — Shell Jump (optional; SSH, so Linux only) ───────
-        if _cfg_svc.get_bool("pra_enabled") and not is_windows:
-            from ..services import terraform_pra_service, vm_pra_service
+        from ..services import vm_pra_service
+        _want_pra = (_cfg_svc.get_bool("pra_enabled")
+                     and vm_pra_service.opted_in(getattr(payload, "enable_pra", None)))
+        if _want_pra and not is_windows:
+            from ..services import terraform_pra_service
             # NB: pra_jumpoint_name is the PRA *display* name, not the GCE instance name
             # that _JumpointRef carries. These were one variable until the gateway block
             # moved out, and it only worked because the metadata write above had already
@@ -641,7 +644,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                 db, job_id, vm_name=payload.instance_name, hostname=hostname,
                 username=win_user, password=admin_password, result=final_meta, tag="GCP",
                 register_in_passwordsafe=bool(getattr(payload, "register_in_passwordsafe", False)),
-                pra_enabled=_cfg_svc.get_bool("pra_enabled"),
+                pra_enabled=_want_pra,
                 jump_group=((payload.jump_group or "").strip()
                             or _cfg_svc.get("gcp_bt_jump_group_name")
                             or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name),

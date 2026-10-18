@@ -677,6 +677,7 @@ async def _fan_out_batch(
                 "entra_join_mode": req.entra_join_mode,
                 "enable_rdp": req.enable_rdp,
                 "ssh_key_secret_override": req.ssh_key_secret_override,
+                "enable_pra": req.enable_pra,
             },
         )
         job_service.log_audit(
@@ -787,6 +788,7 @@ async def deploy_ami(
             "entra_join_mode": req.entra_join_mode,
             "enable_rdp": req.enable_rdp,
             "ssh_key_secret_override": req.ssh_key_secret_override,
+            "enable_pra": req.enable_pra,
             # PRA jump-group fields: the runner rebuilds the whole call from this
             # metadata, so anything omitted here is silently skipped at deploy time
             # rather than failing loudly. All three are *references*, not secrets.
@@ -887,6 +889,7 @@ async def bulk_deploy_amis(
                 "entra_join_mode": req.entra_join_mode,
                 "enable_rdp": req.enable_rdp,
                 "ssh_key_secret_override": req.ssh_key_secret_override,
+                "enable_pra": req.enable_pra,
             },
         )
         job_service.log_audit(

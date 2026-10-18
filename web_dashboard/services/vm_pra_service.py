@@ -77,6 +77,17 @@ def resolve_target(cloud: str, jump_group: Optional[str] = None,
     return group, jumpoint
 
 
+def opted_in(enable_pra) -> bool:
+    """Whether a deploy asked for its jump. ``None`` — every request made before the
+    opt-in existed, and every form left alone — means yes, so PRA stays on by default
+    while ``pra_enabled`` is. Only an explicit False skips the jump.
+
+    Deliberately NOT applied to the Gateway: a VM that opts out still gets the shared
+    host ensured, so it is wired to the same address it would have been, and a jump
+    added later from its row points where a deploy-time one would have."""
+    return enable_pra is not False
+
+
 def client_secret_for(pra_credential_ref: Optional[str]) -> str:
     """The PRA API secret a per-deploy credential reference resolves to, or "" for the
     configured default."""

@@ -231,6 +231,55 @@ def test_every_cloud_router_has_the_route_and_checks_ownership():
         assert f"{mod.router.prefix}/instances/pra" in paths, mod.__name__
 
 
+# ── The deploy-form opt-in ────────────────────────────────────────────────────
+
+def test_opted_in_is_on_unless_explicitly_off():
+    assert vps.opted_in(None) and vps.opted_in(True)
+    assert not vps.opted_in(False)
+
+
+def test_every_deploy_model_carries_the_opt_in_defaulting_to_none():
+    from web_dashboard.models import aws, azure, gcp, oci
+    for model in (aws.DeployRequest, aws.BulkDeployRequest,
+                  azure.AzureDeployRequest, azure.AzureBulkDeployRequest,
+                  gcp.GCPDeployRequest, gcp.GCPBulkDeployRequest,
+                  oci.OCIDeployRequest, oci.OCIBulkDeployRequest):
+        f = model.model_fields.get("enable_pra")
+        assert f is not None and f.default is None, model.__name__
+
+
+def _src(*parts):
+    with open(os.path.join(_ROOT, "web_dashboard", *parts), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_every_runner_gates_its_jump_on_the_opt_in():
+    for cloud in ("aws", "azure", "gcp", "oci"):
+        assert "opted_in(" in _src("services", f"{cloud}_vm_service.py"), cloud
+
+
+def test_the_opt_in_survives_every_fan_out():
+    """AWS stores flat metadata per child; GCP and OCI rebuild a request per bulk item.
+    A field missed in either is silently dropped — the VM gets a jump it opted out of."""
+    assert _src("api", "aws.py").count('"enable_pra": req.enable_pra') == 3
+    assert "enable_pra=req.enable_pra" in _src("api", "gcp.py")
+    assert "enable_pra=req.enable_pra" in _src("api", "oci.py")
+
+
+def test_each_modal_offers_the_opt_in_and_folds_the_rest_away():
+    for cloud, obj in (("aws", "deployForm"), ("azure", "deployModal"),
+                       ("gcp", "deployForm"), ("oci", "deployForm")):
+        src = _src("templates", cloud, "index.html")
+        box = f'x-model="{obj}.enable_pra"'
+        assert src.count(box) == 1, cloud
+        i = src.index(box)
+        assert src.rfind("{% if pra_enabled %}", 0, i) > src.rfind("{% endif %}", 0, i), (
+            f"{cloud}: the PRA checkbox must only render while PRA is enabled")
+        adv = src.index("Advanced options", i)
+        assert "ssh_key_secret_override" in src[adv:adv + 3000], (
+            f"{cloud}: the SSH key override belongs under Advanced")
+
+
 if __name__ == "__main__":
     import traceback
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

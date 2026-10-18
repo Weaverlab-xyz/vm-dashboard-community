@@ -96,6 +96,9 @@ class GCPDeployRequest(ScheduleRequestMixin, BaseModel):
     passwordsafe_method: str = ""
     ssh_key_secret_override: Optional[str] = None  # optional Secret Manager secret to use for the SSH key (must be JSON with a public_key)
     # PRA per-deploy overrides — the configured defaults are the fallback when blank.
+    # PRA opt-in. None = the default (on, while PRA is enabled); False = no jump,
+    # added later from the VM's row if wanted (services/vm_pra_service).
+    enable_pra: Optional[bool] = None
     jump_group: Optional[str] = None             # PRA Jump Group name override (else gcp_bt_jump_group_name / bt_jump_group_name)
     jumpoint_name: Optional[str] = None          # PRA Jumpoint name override (else gcp_jumpoint_name / bt_jumpoint_name)
     # A secrets-backend reference (e.g. gcp_sm://…) for the GCE Jumpoint deploy key.
@@ -138,6 +141,9 @@ class GCPBulkDeployRequest(ScheduleRequestMixin, BaseModel):
     entra_join_mode: Optional[str] = Field(default=None, pattern=r"^(|arc|hybrid)$")
     enable_rdp: Optional[bool] = None       # Windows only — see GCPDeployRequest
     ssh_key_secret_override: Optional[str] = None
+    # PRA opt-in. None = the default (on, while PRA is enabled); False = no jump,
+    # added later from the VM's row if wanted (services/vm_pra_service).
+    enable_pra: Optional[bool] = None
     jump_group: Optional[str] = None
     jumpoint_name: Optional[str] = None
     docker_deploy_key_ref: Optional[str] = None

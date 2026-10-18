@@ -809,6 +809,7 @@ async def bulk_deploy_instances(
             entra_join_mode=req.entra_join_mode,
             enable_rdp=req.enable_rdp,
             ssh_key_secret_override=req.ssh_key_secret_override,
+            enable_pra=req.enable_pra,
             jump_group=req.jump_group,
             jumpoint_name=req.jumpoint_name,
             docker_deploy_key_ref=req.docker_deploy_key_ref,
