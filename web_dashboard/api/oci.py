@@ -134,7 +134,7 @@ def _accessible_workgroups(user: User) -> Optional[List[str]]:
     return [w.lower() for w in user.workgroups_list]
 
 
-def _assert_can_act(user: User, workgroup, what: str) -> None:
+def _assert_can_act(user: User, workgroup, what: str, action: str = "destroy it") -> None:
     """Refuse acting on something this user cannot see.
 
     Guards both teardown and power: the question is ownership, which does not
@@ -153,7 +153,7 @@ def _assert_can_act(user: User, workgroup, what: str) -> None:
         raise HTTPException(
             status_code=403,
             detail=(f"{what} is not assigned to a workstream, so only an admin can "
-                    "destroy it."))
+                    f"{action}."))
     if wg not in accessible:
         raise HTTPException(
             status_code=403, detail=f"Access denied to workstream '{wg}'")

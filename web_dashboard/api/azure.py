@@ -73,7 +73,7 @@ def _accessible_workgroups(user: User) -> Optional[List[str]]:
     return [w.lower() for w in user.workgroups_list]
 
 
-def _assert_can_act(user: User, workgroup, what: str) -> None:
+def _assert_can_act(user: User, workgroup, what: str, action: str = "destroy it") -> None:
     """Refuse acting on something this user cannot see.
 
     Guards both teardown and power: the question is ownership, which does not
@@ -92,7 +92,7 @@ def _assert_can_act(user: User, workgroup, what: str) -> None:
         raise HTTPException(
             status_code=403,
             detail=(f"{what} is not assigned to a workstream, so only an admin can "
-                    "destroy it."))
+                    f"{action}."))
     if wg not in accessible:
         raise HTTPException(
             status_code=403, detail=f"Access denied to workstream '{wg}'")
@@ -419,6 +419,19 @@ async def get_vm_ssh_key(
     `false`, the operator knows the unified KV secret is internally
     inconsistent and SSH will not work until it's repaired.
     """
+    # Ownership before the key leaves Key Vault. The keypair is SHARED by every VM this
+    # dashboard deployed, so this cannot make one VM's key private from another's; what it
+    # does is stop someone with no VM in any of their workstreams reading it at all, and
+    # keep this route answering the same "who may act on this VM" question as the rest.
+    job = db.query(Job).filter(Job.cloud_resource_id == vm_name).first()
+    if job is None:
+        for j in db.query(Job).filter(Job.job_type == "azure_deploy").all():
+            if j.metadata_dict.get("vm_name") == vm_name:
+                job = j
+                break
+    _assert_can_act(current_user, job.workgroup if job else None, f"VM '{vm_name}'",
+                    "read its credentials")
+
     kv_url           = _cfg("azure_key_vault_url")
     unified_secret   = _cfg("azure_ssh_keypair_secret_name")
     legacy_pubkey    = _cfg("azure_ssh_key_secret_name")
@@ -443,16 +456,7 @@ async def get_vm_ssh_key(
     except AzureError as e:
         raise HTTPException(status_code=503, detail=f"Private key fetch failed: {e}")
 
-    # Pull current IP from the deploy job so the response can include an
-    # ssh-ready command. Falls back to nothing if the Job row is missing
-    # (e.g. the VM was provisioned before Job.cloud_resource_id was added).
-    job = db.query(Job).filter(Job.cloud_resource_id == vm_name).first()
-    if job is None:
-        for j in db.query(Job).filter(Job.job_type == "azure_deploy").all():
-            if j.metadata_dict.get("vm_name") == vm_name:
-                job = j
-                break
-
+    # The deploy job resolved above carries the IP for an ssh-ready command.
     meta = job.metadata_dict if job else {}
     ip = meta.get("public_ip") or meta.get("private_ip")
     ssh_username = meta.get("ssh_username") or "azureuser"
@@ -499,6 +503,7 @@ async def get_vm_admin_password(
     from ..services import secrets_backend_service
 
     backend = ref = username = ip = None
+    owner = None   # the job whose workstream decides who may read this credential
 
     job = db.query(Job).filter(Job.cloud_resource_id == vm_name).first()
     if job is None:
@@ -517,6 +522,7 @@ async def get_vm_admin_password(
                         "(or RDP jump), which injects it."),
             )
         if meta.get("admin_password_ref"):
+            owner = job
             backend = meta.get("admin_password_backend") or "database"
             ref = meta["admin_password_ref"]
             username = meta.get("admin_username") or meta.get("ssh_username")
@@ -527,6 +533,7 @@ async def get_vm_admin_password(
         for j in db.query(Job).filter(Job.job_type == "vdesktop_pool_provision").all():
             entry = (j.metadata_dict.get("seat_passwords") or {}).get(vm_name)
             if entry:
+                owner = j
                 backend = entry.get("backend") or "database"
                 ref = entry.get("ref")
                 username = entry.get("username")
@@ -537,6 +544,8 @@ async def get_vm_admin_password(
             status_code=404,
             detail=f"No stored admin password for '{vm_name}' — Linux VM, or deployed outside this dashboard.",
         )
+    _assert_can_act(current_user, owner.workgroup if owner else None, f"VM '{vm_name}'",
+                    "read its credentials")
 
     try:
         password = await asyncio.to_thread(secrets_backend_service.read_sync, backend, ref)
@@ -1671,6 +1680,10 @@ def create_image_from_vm(
          and not j.metadata_dict.get("destroyed")),
         None,
     )
+    # Ownership, as destroy and power check it: an image copies the disk, and
+    # generalize=True also leaves the VM unusable. Not deployed here means admin-only.
+    _assert_can_act(current_user, deploy_job.workgroup if deploy_job else None,
+                    f"VM '{vm_name}'", "image it")
     rg = deploy_job.metadata_dict.get("resource_group") if deploy_job else _rg()
 
     job = job_service.create_job(

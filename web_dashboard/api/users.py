@@ -63,6 +63,43 @@ class UserUpdateRequest(BaseModel):
     # and for the same reason: None = no change, "" = clear the assignment, an id = set it.
     # Without the empty-string case an admin could assign a role and never remove one.
     role_id: Optional[str] = None
+    # Let this LOCAL account be claimed by single sign-on. None = no change. True marks it
+    # api/auth.SSO_PENDING: password login stops, and the next SSO login whose verified
+    # email matches links the account to that IdP identity. False undoes it while it has
+    # not happened yet. SSO never links a local account without this (audit H1).
+    sso_sign_in: Optional[bool] = None
+
+
+def _set_sso_sign_in(db, admin, user, enable: bool) -> None:
+    """Apply the Users tab's "Sign in with SSO" switch. See UserUpdateRequest.sso_sign_in."""
+    from ..services import job_service
+    from .auth import SSO_PENDING
+    provider = user.auth_provider or "local"
+    if enable:
+        if provider not in ("local", SSO_PENDING):
+            return  # already an SSO account: nothing to enable
+        if user.id == admin.id:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot switch your own account to SSO — it would end your password "
+                       "sign-in here. Ask another administrator.")
+        if user.is_service_account or user.accessor_env_id:
+            raise HTTPException(status_code=400,
+                                detail="Only a person's account can sign in with SSO.")
+        if provider == "local":
+            user.auth_provider = SSO_PENDING
+            job_service.log_audit(db, admin.username, "user_sso_sign_in_enabled",
+                                  details={"user": user.username})
+    else:
+        if provider == SSO_PENDING:
+            user.auth_provider = "local"
+            job_service.log_audit(db, admin.username, "user_sso_sign_in_disabled",
+                                  details={"user": user.username})
+        elif provider != "local":
+            raise HTTPException(
+                status_code=409,
+                detail="This account is already linked to a single sign-on identity. Reset "
+                       "it from the identity provider, or delete and recreate the account.")
 
 
 class UserTokenItem(BaseModel):
@@ -319,6 +356,8 @@ def update_user(
             user.permissions_dict = body.permissions or None
         else:
             user.permissions_dict = full_access_map()
+    if body.sso_sign_in is not None:
+        _set_sso_sign_in(db, admin, user, body.sso_sign_in)
     if body.role_id is not None:
         # Refuse an admin changing their OWN role, mirroring the is_admin guard above and
         # for a strictly stronger reason: a role can be what confers their admin, so

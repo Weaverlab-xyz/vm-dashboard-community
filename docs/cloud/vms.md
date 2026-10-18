@@ -81,6 +81,20 @@ and `/vms` (unified cross-cloud inventory).
 
 ---
 
+## Who may act on a VM
+
+One rule decides every action on a cloud VM: you may act on it if it is tagged into one of
+your workstreams, and an untagged VM is for administrators only. That covers destroy and
+power, and also reading its **SSH private key** or **Administrator password** and
+**creating an image** from it (a full copy of its disk; on Azure, *generalize* also
+leaves the VM unusable). Those last three once skipped the check, so anyone with the
+cloud's permission could read another workstream's credentials or copy its disks. The
+AWS SSH-key read is now audited, like the password reads.
+
+On Azure, every VM the dashboard deploys shares one key pair from Key Vault, so the rule
+can only stop someone with no VM in any of their workstreams reading it; use per-VM
+credentials through Password Safe where that matters.
+
 ## Power (start and suspend)
 
 A cloud VM used to be deploy-or-destroy. Every on-prem hypervisor here has had power

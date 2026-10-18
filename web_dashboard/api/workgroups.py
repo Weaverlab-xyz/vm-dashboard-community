@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from ..database import User, get_db
 from ..services import workgroup_service
 from ..services.workgroup_service import WorkgroupError
-from .auth import get_current_user, require_admin, require_permission
+from .auth import get_current_user, has_explicit_permission, require_admin, require_permission
 
 router = APIRouter(prefix="/api/workgroups", tags=["workgroups"])
 
@@ -110,6 +110,33 @@ def _raise_from(err: WorkgroupError, default_code: int = 400) -> None:
     raise HTTPException(status_code=code, detail=msg)
 
 
+def _require_steward(db: Session, user: User, name: str):
+    """The workstream ``name``, if ``user`` may change it; 403 otherwise (404 if it is gone).
+
+    ``workgroups:write`` is a grantable scope, so on its own it must not reach every
+    workstream: a holder could add themselves to anyone's and see, power and destroy what
+    is tagged there. So besides an administrator, only someone already in the workstream,
+    or the person who created it, may edit it or change who is in it.
+    """
+    wg = workgroup_service.get(db, name)
+    if not wg:
+        raise HTTPException(status_code=404, detail=f"Workstream '{name}' not found")
+    if getattr(user, "is_effective_admin", False):
+        return wg
+    mine = {w.lower() for w in (user.workgroups_list or [])}
+    if wg.name.lower() in mine or (wg.created_by_user_id and wg.created_by_user_id == user.id):
+        return wg
+    raise HTTPException(
+        status_code=403,
+        detail=f"You can change only workstreams you belong to or created; '{wg.name}' is "
+               "neither. An administrator can.")
+
+
+def _audit(db: Session, actor: User, action: str, **details) -> None:
+    from ..services import job_service
+    job_service.log_audit(db, actor.username, action, details=details)
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("", response_model=List[WorkgroupResponse])
@@ -152,6 +179,8 @@ def create_workgroup(
         )
     except WorkgroupError as exc:
         _raise_from(exc)
+    _audit(db, current_user, "workstream_create", workstream=wg.name,
+           is_default=bool(payload.is_default))
     return _to_response(db, wg)
 
 
@@ -160,8 +189,20 @@ def update_workgroup(
     name: str,
     payload: WorkgroupUpdate,
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("workgroups", "write")),
+    current_user: User = Depends(require_permission("workgroups", "write")),
 ):
+    _require_steward(db, current_user, name)
+    # The change-window gate is an approval control: whoever can clear it can make changes
+    # outside the window it exists to enforce. So it takes the same authority as editing
+    # the windows themselves, not just the right to rename a workstream.
+    window_fields = {k: v for k, v in (("change_window_id", payload.change_window_id),
+                                       ("require_change_window", payload.require_change_window))
+                     if v is not None}
+    if window_fields and not has_explicit_permission(current_user, "change_windows", "write"):
+        raise HTTPException(
+            status_code=403,
+            detail="Changing a workstream's change window needs the 'change_windows:write' "
+                   "permission or administrator.")
     try:
         wg = workgroup_service.update(
             db,
@@ -174,6 +215,8 @@ def update_workgroup(
         )
     except WorkgroupError as exc:
         _raise_from(exc)
+    _audit(db, current_user, "workstream_update", workstream=wg.name,
+           fields=sorted(k for k, v in payload.model_dump().items() if v is not None))
     return _to_response(db, wg)
 
 
@@ -205,8 +248,9 @@ def assign_member(
     name: str,
     username: str,
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("workgroups", "write")),
+    current_user: User = Depends(require_permission("workgroups", "write")),
 ):
+    _require_steward(db, current_user, name)
     user = db.query(User).filter(User.username == username).first()
     if not user:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
@@ -214,6 +258,7 @@ def assign_member(
         workgroup_service.assign_user(db, name, user)
     except WorkgroupError as exc:
         _raise_from(exc)
+    _audit(db, current_user, "workstream_member_add", workstream=name, user=username)
 
 
 @router.delete("/{name}/members/{username}", status_code=status.HTTP_204_NO_CONTENT)
@@ -221,9 +266,11 @@ def unassign_member(
     name: str,
     username: str,
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("workgroups", "write")),
+    current_user: User = Depends(require_permission("workgroups", "write")),
 ):
+    _require_steward(db, current_user, name)
     user = db.query(User).filter(User.username == username).first()
     if not user:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
     workgroup_service.unassign_user(db, name, user)
+    _audit(db, current_user, "workstream_member_remove", workstream=name, user=username)

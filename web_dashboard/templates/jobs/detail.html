@@ -4,7 +4,7 @@
 {% block content %}
 {# No x-init: Alpine 3 calls a component's init() by itself, and a second call opened a
    second WebSocket whose replay printed every line already shown a second time. #}
-<div x-data="jobDetail('{{ job_id }}')">
+<div x-data='jobDetail({{ job_id|tojson }})'>
 
   <!-- Back link -->
   <a href="/jobs" class="inline-flex items-center gap-1 text-sm text-blue-600 hover:underline mb-4">

@@ -194,7 +194,7 @@ def _accessible_workgroups(user: User) -> Optional[List[str]]:
     return [w.lower() for w in user.workgroups_list]
 
 
-def _assert_can_act(user: User, workgroup, what: str) -> None:
+def _assert_can_act(user: User, workgroup, what: str, action: str = "destroy it") -> None:
     """Refuse acting on something this user cannot see.
 
     Guards both teardown and power: the question is ownership, which does not
@@ -213,7 +213,7 @@ def _assert_can_act(user: User, workgroup, what: str) -> None:
         raise HTTPException(
             status_code=403,
             detail=(f"{what} is not assigned to a workstream, so only an admin can "
-                    "destroy it."))
+                    f"{action}."))
     if wg not in accessible:
         raise HTTPException(
             status_code=403, detail=f"Access denied to workstream '{wg}'")
@@ -533,15 +533,18 @@ async def get_instance_admin_password(
     administrator credential; 409 when Password Safe manages the account."""
     import asyncio
     from ..services import windows_admin_secret
-    meta = None
+    meta = owner = None
     for job in db.query(Job).filter(Job.job_type == "gce_deploy").all():
         m = job.metadata_dict
         if m.get("instance_name") == instance_name and not m.get("destroyed"):
-            meta = m
+            meta, owner = m, job
             break
     if meta is None:
         raise HTTPException(status_code=404,
                             detail=f"No active deployment record for instance {instance_name}.")
+    # A working administrator credential for the instance: only for its workstream.
+    _assert_can_act(current_user, owner.workgroup, f"Instance '{instance_name}'",
+                    "read its credentials")
     if meta.get("admin_password_custody") == "passwordsafe_managed":
         raise HTTPException(
             status_code=409,
@@ -1010,7 +1013,13 @@ def create_image_from_instance(
     current_user: User = Depends(require_permission("gcp", "write")),
     db: Session = Depends(get_db),
 ):
-    """Capture a GCE instance as a custom image. Runs in background."""
+    """Capture a GCE instance as a custom image. Runs in background.
+
+    Ownership first, as destroy and power check it: an image is a full copy of the disk.
+    Not deployed here means admin-only."""
+    deploy_job = _find_deploy_job(db, "gce_deploy", "instance_name", instance_name)
+    _assert_can_act(current_user, deploy_job.workgroup if deploy_job else None,
+                    f"Instance '{instance_name}'", "image it")
     # `{}` for an immediate run, so the create_job below is unchanged when nobody
     # books a window. Resolved before it, so a bad time is a 400 rather than an
     # image job that quietly never starts.

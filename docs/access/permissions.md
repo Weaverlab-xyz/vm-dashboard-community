@@ -149,7 +149,7 @@ The fourteen original scopes:
 | `images`, `containers`, `cloud_database`, `k8s`, `cloud_function` | read, write, delete | |
 | `config_mgmt` | read, write | |
 | `jobs` | read | read sees every job; cancelling and rescheduling are decided by ownership (the job's creator, or an administrator) |
-| `workgroups` | read, write | deleting a workstream needs an administrator |
+| `workgroups` | read, write | `write` covers only workstreams you belong to or created; changing one's change window also needs `change_windows:write`; deleting one needs an administrator |
 | `secrets` | use | the Secrets page itself is administrator-only |
 
 **Retired levels.** Until September 2026 these fourteen offered all four levels whether or
@@ -355,6 +355,13 @@ A scope says *what*, not *which*. Two mechanisms narrow the *which*:
   Unlike the other RBAC tabs, Workstreams is **not admin-only**: it has a real `workgroups`
   scope, so a user granted `workgroups:read` sees that tab and nothing else on the page.
   Deleting a workstream still needs an administrator.
+
+  `workgroups:write` reaches only the workstreams you are a **member of or created**:
+  editing one, or adding and removing its members. Otherwise a holder could add
+  themselves to any workstream and act on everything tagged there. Its **change window**
+  fields (*Change window*, *Require it*) also need `change_windows:write`, because
+  clearing that gate allows changes outside the window. Creating a workstream, updating
+  one and every membership change are written to the audit log.
 
   **Workstreams were called workgroups** until this release. The new name avoids a clash
   with Password Safe, whose own *workgroups* (the container for managed systems) appear in

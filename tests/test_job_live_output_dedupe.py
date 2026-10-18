@@ -134,7 +134,7 @@ def _source():
 
 
 def test_root_element_does_not_call_init_a_second_time():
-    root = re.search(r"<div[^>]*x-data=\"jobDetail\([^>]*>", _source())
+    root = re.search(r"<div[^>]*x-data=[\"']jobDetail\([^>]*>", _source())
     assert root, "jobDetail root element not found"
     assert "x-init" not in root.group(0), root.group(0)
 
