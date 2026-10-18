@@ -15,6 +15,7 @@ from ..database import Job, AuditLog
 # Stdlib-only and pure by design (see its module docstring), so this is safe at import
 # time where most sibling services are not — CHECKIN_VERBS below reads its verb lists.
 from . import agent_hypervisor_meta, audit_chain, retry_policy
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +111,7 @@ def claimable_now(now: Optional[datetime] = None) -> list:
       database.py), so existing rows are NULL and ``== False`` would exclude all of them
       — which would wedge the entire queue on the first deploy.
     """
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     return [
         (Job.retry_after.is_(None)) | (Job.retry_after <= now),
         (Job.scheduled_for.is_(None)) | (Job.scheduled_for <= now),
@@ -183,7 +184,7 @@ def create_job(
         workgroup=workgroup,
         status=status,
         progress_pct=0,
-        created_at=datetime.utcnow(),
+        created_at=utcnow(),
         created_by=created_by,
         batch_id=batch_id or None,
         agent_id=agent_id or None,
@@ -263,8 +264,8 @@ def set_running(db: Session, job_id: str) -> Optional[Job]:
     job = db.query(Job).filter(Job.id == job_id).first()
     if job:
         job.status = "running"
-        job.started_at = datetime.utcnow()
-        job.updated_at = datetime.utcnow()
+        job.started_at = utcnow()
+        job.updated_at = utcnow()
         db.commit()
     return job
 
@@ -275,7 +276,7 @@ def update_progress(db: Session, job_id: str, pct: int, message: str) -> Optiona
     if job:
         job.progress_pct = pct
         job.progress_message = message
-        job.updated_at = datetime.utcnow()
+        job.updated_at = utcnow()
         db.commit()
     return job
 
@@ -286,8 +287,8 @@ def set_completed(db: Session, job_id: str, result: Optional[dict] = None) -> Op
     if job:
         job.status = "completed"
         job.progress_pct = 100
-        job.completed_at = datetime.utcnow()
-        job.updated_at = datetime.utcnow()
+        job.completed_at = utcnow()
+        job.updated_at = utcnow()
         if result:
             existing = job.metadata_dict
             existing.update(result)
@@ -411,7 +412,7 @@ def set_failed(db: Session, job_id: str, error: str,
         db.rollback()
         job = db.query(Job).filter(Job.id == job_id).first()
     if job:
-        now = datetime.utcnow()
+        now = utcnow()
         job.error_message = error
         job.updated_at = now
         if result:
@@ -567,7 +568,7 @@ def set_cancelled(db: Session, job_id: str) -> Optional[Job]:
     job = db.query(Job).filter(Job.id == job_id).first()
     if job and job.status in ("queued", "pending", "running"):
         job.status = "cancelled"
-        job.completed_at = datetime.utcnow()
+        job.completed_at = utcnow()
         db.commit()
         db.refresh(job)
     return job
@@ -595,7 +596,7 @@ def set_missed_window(db: Session, job_id: str, reason: str) -> Optional[Job]:
     """
     job = db.query(Job).filter(Job.id == job_id).first()
     if job and job.status in ("queued", "pending"):
-        now = datetime.utcnow()
+        now = utcnow()
         job.status = "cancelled"
         job.missed_window_at = now
         job.completed_at = now
@@ -623,7 +624,7 @@ def schedule_state(job) -> str:
         if getattr(job, "approval_required", None) and not getattr(job, "approved_at", None):
             return "awaiting_approval"
         scheduled_for = getattr(job, "scheduled_for", None)
-        if scheduled_for and scheduled_for > datetime.utcnow():
+        if scheduled_for and scheduled_for > utcnow():
             return "scheduled"
         return ""
     ends = getattr(job, "window_ends_at", None)
@@ -883,7 +884,7 @@ def log_audit(
             prev_hash = last[1] if last else audit_chain.GENESIS_PREV
             entry = AuditLog(
                 id=str(uuid.uuid4()),
-                timestamp=datetime.utcnow(),
+                timestamp=utcnow(),
                 username=username,
                 action=action,
                 target_vm=target_vm,
@@ -1098,7 +1099,7 @@ def append_job_log(db: Session, job_id: str, line: str) -> None:
             .first()
         )
         nxt = (last[0] + 1) if last else 1
-        db.add(JobLog(job_id=job_id, seq=nxt, line=line, created_at=datetime.utcnow()))
+        db.add(JobLog(job_id=job_id, seq=nxt, line=line, created_at=utcnow()))
         db.commit()
     except Exception:
         db.rollback()
@@ -1223,7 +1224,7 @@ def reconcile_stale_jobs(db: Session, stale_after_minutes: int = 10) -> int:
     a job whose worker died stops heartbeating and is reconciled. Idempotent — a
     second caller (gunicorn -w 2 + the runner) finds nothing left to do. Returns
     the count."""
-    cutoff = datetime.utcnow() - timedelta(minutes=stale_after_minutes)
+    cutoff = utcnow() - timedelta(minutes=stale_after_minutes)
     n = 0
     reconciled = []
     for job in db.query(Job).filter(Job.status == "running").all():
@@ -1231,8 +1232,8 @@ def reconcile_stale_jobs(db: Session, stale_after_minutes: int = 10) -> int:
         if last and last > cutoff:
             continue  # recent heartbeat → still live, leave it
         job.status = "failed"
-        job.completed_at = datetime.utcnow()
-        job.updated_at = datetime.utcnow()
+        job.completed_at = utcnow()
+        job.updated_at = utcnow()
         job.error_message = "Interrupted by an app restart (no heartbeat) — re-run if needed."
         _flip_resource_row(db, job)
         reconciled.append(job)

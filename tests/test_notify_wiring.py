@@ -218,7 +218,7 @@ def test_expiry_policy_stays_pure():
     """expiry_policy is loaded by file path in its own test with no stubs beyond
     config_service. Reused here so a stray import added while wiring notifications
     fails loudly rather than at import time in production."""
-    allowed = {"logging", "datetime", "timedelta", "typing", "Optional", "json",
+    allowed = {"logging", "datetime", "timedelta", "timezone", "typing", "Optional", "json",
                "config", "config_service", "settings"}
     extra = {m for m in _imported(_EXPIRY_POLICY)} - allowed
     assert not extra, f"expiry_policy grew impure imports: {extra}"
@@ -228,7 +228,7 @@ def test_notify_policy_is_pure():
     """Same contract for the notification policy: stdlib plus config_service, so it
     loads by file path in tests/test_notify_policy.py with no app installed."""
     allowed = {"hashlib", "logging", "dataclasses", "dataclass", "field",
-               "datetime", "typing", "Optional", "json",
+               "datetime", "timezone", "typing", "Optional", "json",
                "config", "config_service", "settings"}
     extra = _imported(_POLICY) - allowed
     assert not extra, f"notify_policy is no longer pure: {extra}"

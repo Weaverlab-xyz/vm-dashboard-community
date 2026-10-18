@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from .. import core
+from ....utils.clock import utcnow
 
 
 def agent_checks(agent, *, state: str, directories: int, can_directory: bool,
@@ -40,7 +41,7 @@ def agent_checks(agent, *, state: str, directories: int, can_directory: bool,
 async def collect(db) -> list:
     from ... import agent_service
     from ....database import ManagedDirectory, RemoteAgent
-    now = datetime.utcnow()
+    now = utcnow()
     bound: dict = {}
     for (agent_id,) in (db.query(ManagedDirectory.agent_id)
                         .filter(ManagedDirectory.agent_id.isnot(None),

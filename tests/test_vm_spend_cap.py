@@ -28,6 +28,11 @@ import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 
+
+def _utcnow():
+    """Naive UTC now: what the deprecated datetime.utcnow() returned."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
@@ -223,12 +228,12 @@ def test_the_latches_fire_once_and_a_raised_cap_clears_them():
 
     row = _Row()
     assert spend_policy.state(row) == "warn"
-    row.spend_warned_at = datetime.utcnow()
+    row.spend_warned_at = _utcnow()
     assert spend_policy.state(row) == "", "a warned row must not re-warn"
 
     row.spend_estimate_usd = 120.0
     assert spend_policy.state(row) == "cap"
-    row.spend_capped_at = datetime.utcnow()
+    row.spend_capped_at = _utcnow()
     assert spend_policy.state(row) == "", "a capped row must not re-suspend every pass"
 
 
@@ -240,7 +245,7 @@ def _vm(job_id, job_type="ec2_deploy", meta=None, **cols):
         db.query(Job).filter(Job.id == job_id).delete()
         job = Job(id=job_id, job_type=job_type, status="completed", created_by="alice",
                   workgroup="team-a", extra_data=json.dumps(meta or AWS_META),
-                  created_at=datetime.utcnow(), completed_at=datetime.utcnow())
+                  created_at=_utcnow(), completed_at=_utcnow())
         for k, v in cols.items():
             setattr(job, k, v)
         db.add(job)
@@ -296,7 +301,7 @@ def test_the_sweep_selects_only_capped_rows():
 def test_a_capped_vm_accrues_and_then_warns_once():
     _reset()
     _vm("v1", spend_cap_usd=100.0, spend_estimate_usd=0.0,
-        spend_accrued_at=datetime.utcnow() - timedelta(hours=85))
+        spend_accrued_at=_utcnow() - timedelta(hours=85))
     out = _sweep(rate=1.0)
     assert out["accrued"] == 1
     # MAX_ACCRUAL_HOURS bounds the step at 24, which is 24% of the cap — under the 80%
@@ -316,7 +321,7 @@ def test_a_capped_vm_accrues_and_then_warns_once():
     try:
         row = db.query(Job).filter(Job.id == "v1").first()
         row.spend_estimate_usd = 85.0
-        row.spend_accrued_at = datetime.utcnow()
+        row.spend_accrued_at = _utcnow()
         db.commit()
     finally:
         db.close()
@@ -327,7 +332,7 @@ def test_a_capped_vm_accrues_and_then_warns_once():
 def test_warn_is_the_default_and_suspends_nothing():
     _reset()
     _vm("v1", spend_cap_usd=10.0, spend_estimate_usd=99.0,
-        spend_accrued_at=datetime.utcnow())
+        spend_accrued_at=_utcnow())
     out = _sweep(rate=0.0, action="warn")
     assert [a["event"] for a in out["acted"]] == ["cap"]
 
@@ -344,7 +349,7 @@ def test_warn_is_the_default_and_suspends_nothing():
 def test_suspend_enqueues_the_same_power_job_the_button_makes():
     _reset()
     _vm("v1", spend_cap_usd=10.0, spend_estimate_usd=99.0,
-        spend_accrued_at=datetime.utcnow())
+        spend_accrued_at=_utcnow())
     _sweep(rate=0.0, action="suspend")
 
     db = SessionLocal()
@@ -368,7 +373,7 @@ def test_a_capped_vm_that_cannot_be_suspended_is_reported_not_silently_skipped()
     _vm("az1", job_type="azure_deploy",
         meta={"vm_name": "az-1", "region": "eastus", "private_ip": "10.0.0.6"},
         spend_cap_usd=10.0, spend_estimate_usd=99.0,
-        spend_accrued_at=datetime.utcnow())
+        spend_accrued_at=_utcnow())
     _sweep(rate=0.0, action="suspend")
 
     db = SessionLocal()
@@ -389,7 +394,7 @@ def test_an_unpriceable_capped_vm_is_reported_every_pass():
     after it was set must not accrue zero in silence."""
     _reset()
     _vm("v1", spend_cap_usd=100.0, spend_estimate_usd=0.0,
-        spend_accrued_at=datetime.utcnow() - timedelta(hours=5))
+        spend_accrued_at=_utcnow() - timedelta(hours=5))
     out = _sweep(rate=None)
     assert len(out["unpriced"]) == 1, out
     assert out["unpriced"][0]["job_id"] == "v1"
@@ -403,7 +408,7 @@ def test_an_unpriceable_capped_vm_is_reported_every_pass():
 def test_a_destroyed_vm_is_not_accrued():
     _reset()
     _vm("gone", meta={**AWS_META, "destroyed": True}, spend_cap_usd=100.0,
-        spend_accrued_at=datetime.utcnow() - timedelta(hours=5))
+        spend_accrued_at=_utcnow() - timedelta(hours=5))
     assert _sweep(rate=1.0)["accrued"] == 0
 
 
@@ -417,7 +422,7 @@ def test_a_suspended_vm_stops_accruing_compute():
     try:
         for jid, action in (("p1", "start"), ("p2", "stop")):
             db.add(Job(id=jid, job_type="ec2_power", status="completed",
-                       created_by="system", created_at=datetime.utcnow(),
+                       created_by="system", created_at=_utcnow(),
                        extra_data=json.dumps({"action": action, "deploy_job_id": "v1"})))
         db.commit()
         assert spend_sweeper.last_power_action(db)["v1"] == "stop", "newest action wins"

@@ -44,6 +44,7 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from web_dashboard.database import Base, ChangeWindow, Job  # noqa: E402
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.services import job_service, schedule_service  # noqa: E402
 from web_dashboard.services.suspend_schedule import ScheduleError  # noqa: E402
 
@@ -70,13 +71,13 @@ def _tomorrow_midday():
     (utcnow() + 1d1h) lands in the window's closed minute, 23:59-00:00, when run between
     22:59 and 23:00 UTC. The extra minute: inside that closed minute the armed occurrence
     is already tomorrow's."""
-    return (datetime.utcnow() + timedelta(days=1, minutes=1)).replace(
+    return (utcnow() + timedelta(days=1, minutes=1)).replace(
         hour=12, minute=0, second=0, microsecond=0)
 
 
 def _job(db, job_type="ansible_local", meta=None, created_by="alice"):
     j = Job(job_type=job_type, status="completed", created_by=created_by,
-            workgroup="ansible", created_at=datetime.utcnow())
+            workgroup="ansible", created_at=utcnow())
     j.metadata_dict = meta or {"asset": "patch.yml", "target": "10.0.0.5",
                                "description": "Ansible (playbook): patch.yml"}
     db.add(j)
@@ -193,7 +194,7 @@ def test_a_schedule_is_armed_not_fired():
         db, job=_job(db), name="Weekly patch", change_window_id=window.id,
         created_by="alice")
     assert row.last_materialised_for is not None, "the new schedule was not armed"
-    assert schedule_service.due(db, datetime.utcnow()) == [], (
+    assert schedule_service.due(db, utcnow()) == [], (
         "a freshly created schedule fired immediately for the window it was created in")
 
 
@@ -302,7 +303,7 @@ def test_a_schedule_whose_window_was_deleted_is_skipped_not_raised():
         created_by="alice")
     db.query(ChangeWindow).filter(ChangeWindow.id == row.change_window_id).delete()
     db.commit()
-    assert schedule_service.due(db, datetime.utcnow() + timedelta(days=2)) == []
+    assert schedule_service.due(db, utcnow() + timedelta(days=2)) == []
 
 
 # ── The owner outliving their access ──────────────────────────────────────────

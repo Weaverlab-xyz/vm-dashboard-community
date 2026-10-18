@@ -499,16 +499,16 @@ def test_an_expired_lease_is_not_a_failure():
     """`lease_state` is separate from `status` on purpose: a credential ageing out is the
     mechanism WORKING, and it is the common case. Collapsing the two would make a correctly
     behaving identity render as broken most of the time."""
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     from web_dashboard.services import workload_cloud_service as svc
 
     class _Row:
         lease_id = "lease-1"
-        lease_expires_at = datetime.utcnow() + timedelta(minutes=30)
+        lease_expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=30)
 
     assert svc.lease_state(_Row()) == "live"
-    _Row.lease_expires_at = datetime.utcnow() - timedelta(seconds=1)
+    _Row.lease_expires_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=1)
     assert svc.lease_state(_Row()) == "expired"
     _Row.lease_id = None
     assert svc.lease_state(_Row()) == "none"

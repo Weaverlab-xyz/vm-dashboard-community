@@ -40,6 +40,7 @@ from fastapi import HTTPException  # noqa: E402
 
 from web_dashboard.database import (AuditLog, Base, ManagedDirectory,  # noqa: E402
                                     RemoteAgent, SessionLocal, engine)
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.services import directory_service as ds  # noqa: E402
 from web_dashboard.services import entitle_directory_link as link  # noqa: E402
 from web_dashboard.services import ps_directory_catalog as cat  # noqa: E402
@@ -53,7 +54,7 @@ def _agent(db):
     a = RemoteAgent(id=str(uuid.uuid4()), name=f"agent-{uuid.uuid4().hex[:6]}",
                     agent_version="2.8.0", is_active=True,
                     public_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIvend",
-                    last_seen_at=datetime.utcnow(), created_at=datetime.utcnow())
+                    last_seen_at=utcnow(), created_at=utcnow())
     db.add(a)
     db.commit()
     return a

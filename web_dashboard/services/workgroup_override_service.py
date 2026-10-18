@@ -20,6 +20,7 @@ from typing import Dict, Iterable, List, Optional
 from sqlalchemy.orm import Session
 
 from ..database import VMWorkgroupOverride, Workgroup
+from ..utils.clock import utcnow
 
 # `workstation` covers VMware Workstation VMs a co-located remote agent syncs. It is
 # keyed on vmrest's opaque VM id rather than a VMX path — the /vms page's LOCAL rows are
@@ -107,7 +108,7 @@ def set_many(
         .all()
     }
 
-    now = datetime.utcnow()
+    now = utcnow()
     for vm_id in vm_ids:
         row = existing.get(vm_id)
         if row is None:

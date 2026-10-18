@@ -32,6 +32,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-dns-link-tests")
 
 from web_dashboard.database import (Base, Job, ManagedDirectory, RemoteAgent,  # noqa: E402
                                     SessionLocal, engine)
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.services import agent_ansible_bundle as aab  # noqa: E402
 from web_dashboard.services import agent_ansible_meta as aam  # noqa: E402
 from web_dashboard.services import directory_service as ds  # noqa: E402
@@ -45,7 +46,7 @@ BIND_PW, LOCAL_PW = "J0in!Account", "L0cal!Admin"
 def _onprem(db, version="2.8.0"):
     a = RemoteAgent(id=str(uuid.uuid4()), name=f"agent-{uuid.uuid4().hex[:6]}",
                     agent_version=version, is_active=True, allowed_job_types=None,
-                    created_at=datetime.utcnow())
+                    created_at=utcnow())
     db.add(a)
     db.commit()
     return ds.register_onprem(

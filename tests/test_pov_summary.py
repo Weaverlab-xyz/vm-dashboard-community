@@ -33,7 +33,12 @@ import re
 import sys
 import tempfile
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+
+def _utcnow():
+    """Naive UTC now: what the deprecated datetime.utcnow() returned."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -108,7 +113,7 @@ def _fixture():
     done_id, live_id = str(uuid.uuid4()), str(uuid.uuid4())
     db.add(PovEnvironment(id=done_id, platform="skytap", name="acme-pov",
                           status="destroyed", created_by="se@example",
-                          created_at=datetime.utcnow() - timedelta(days=30),
+                          created_at=_utcnow() - timedelta(days=30),
                           ps_tenant_id="t-ps", pra_tenant_id="t-pra"))
     db.add(PovEnvironment(id=live_id, platform="skytap", name="live-pov",
                           status="active", created_by="se@example",
@@ -130,7 +135,7 @@ def _fixture():
                             by="povguest_acme", by_kind=pov_use_cases.KIND_ACCESSOR,
                             note="could not get to this")
     db.add(PovAccessor(environment_id=done_id, username="povguest_acme_aaa",
-                       user_id=None, source="manual", revoked_at=datetime.utcnow()))
+                       user_id=None, source="manual", revoked_at=_utcnow()))
     db.commit()
     db.close()
     _state.update(done=done_id, live=live_id)

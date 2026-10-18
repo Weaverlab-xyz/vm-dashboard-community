@@ -30,7 +30,12 @@ import os
 import sys
 import tempfile
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+
+def _utcnow():
+    """Naive UTC now: what the deprecated datetime.utcnow() returned."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -288,7 +293,7 @@ def test_expired_state_is_refused():
         # Age the row past its TTL rather than sleeping for five minutes.
         row = db.query(EphemeralState).filter(
             EphemeralState.key == f"{w1._OAUTH_STATE_PREFIX}{state}").one()
-        row.expires_at = datetime.utcnow() - timedelta(seconds=1)
+        row.expires_at = _utcnow() - timedelta(seconds=1)
         db.commit()
 
         assert w2.verify_and_consume_oauth_state(db, state) is None
@@ -306,7 +311,7 @@ def test_an_expired_row_is_still_consumed():
         w1.store_oauth_state(db, state, "https://example.test/cb")
         row = db.query(EphemeralState).filter(
             EphemeralState.key == f"{w1._OAUTH_STATE_PREFIX}{state}").one()
-        row.expires_at = datetime.utcnow() - timedelta(seconds=1)
+        row.expires_at = _utcnow() - timedelta(seconds=1)
         db.commit()
 
         w2.verify_and_consume_oauth_state(db, state)
@@ -328,7 +333,7 @@ def test_abandoned_ceremonies_are_swept():
         assert _rows() == 5
 
         db.query(EphemeralState).update(
-            {EphemeralState.expires_at: datetime.utcnow() - timedelta(seconds=1)},
+            {EphemeralState.expires_at: _utcnow() - timedelta(seconds=1)},
             synchronize_session=False)
         db.commit()
 

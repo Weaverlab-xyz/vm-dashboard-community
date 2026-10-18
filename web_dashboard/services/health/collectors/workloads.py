@@ -27,6 +27,7 @@ from typing import Optional
 
 from .. import core
 from .resources import stored_check
+from ....utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -204,7 +205,7 @@ async def collect(db) -> list:
     from ... import feature_flags, workload_credential_lease as wcl
     from ....database import (AgentCell, K8sCluster, PersonalAccessToken, SpireLab,
                               WorkloadCredentialLease)
-    now = datetime.utcnow()
+    now = utcnow()
     items = []
 
     for cloud in wcl.CLOUDS:

@@ -37,6 +37,7 @@ from fastapi import HTTPException  # noqa: E402
 
 from web_dashboard.database import (Base, ManagedDirectory, RemoteAgent,  # noqa: E402
                                     SessionLocal, engine)
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.services import agent_ansible_meta as aam  # noqa: E402
 from web_dashboard.services import directory_service as ds  # noqa: E402
 
@@ -54,8 +55,8 @@ def _agent(db, version="2.8.0"):
     a = RemoteAgent(id=str(uuid.uuid4()), name=f"agent-{uuid.uuid4().hex[:6]}",
                     agent_version=version, is_active=True,
                     public_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdir",
-                    last_seen_at=datetime.utcnow(), allowed_job_types=None,
-                    created_at=datetime.utcnow())
+                    last_seen_at=utcnow(), allowed_job_types=None,
+                    created_at=utcnow())
     db.add(a)
     db.commit()
     return a

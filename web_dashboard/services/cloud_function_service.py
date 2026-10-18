@@ -36,6 +36,7 @@ from ..database import CloudFunction, Job
 from . import (cloud_function_package, config_service, job_service, region_catalog,
                terraform, terraform_provider_env)
 from .region_config import resolve_region
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -957,7 +958,7 @@ def _azure_sas_url(account: str, account_key: str, container: str, key: str) -> 
     token = generate_blob_sas(
         account_name=account, container_name=container, blob_name=key,
         account_key=account_key, permission=BlobSasPermissions(read=True),
-        expiry=datetime.utcnow() + timedelta(days=_AZURE_SAS_DAYS))
+        expiry=utcnow() + timedelta(days=_AZURE_SAS_DAYS))
     return f"https://{account}.blob.core.windows.net/{container}/{key}?{token}"
 
 
@@ -1064,8 +1065,8 @@ def deploy(db: Session, *, cloud: str, region: str, name: str, workload: str,
         network_mode=network_mode,
         network_ref=json.dumps(network) if network else None,
         env_ref=json.dumps(environment or {}),
-        created_by=created_by, created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        created_by=created_by, created_at=utcnow(),
+        updated_at=utcnow(),
     )
     db.add(row)
     db.commit()
@@ -1255,7 +1256,7 @@ def update_environment(db: Session, *, fn_id: str, environment: dict,
     row.package_uri = package_location(row.cloud, row.id, sha256_hex)["uri"]
     row.env_ref = json.dumps(merged)
     provenance = _record_provenance(row)
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
 
     environment_vars = dict(merged)
@@ -1307,7 +1308,7 @@ async def run_update_apply(db: Session, *, fn_id: str, job_id: str,
         row.resource_id = str(outputs.get("resource_id") or row.resource_id or "")
         row.invoke_url = str(outputs.get("invoke_url") or row.invoke_url or "")
         row.status = "available"
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         job_service.set_completed(db, job_id, result={
             "fn_id": row.id, "invoke_url": row.invoke_url})
@@ -1419,7 +1420,7 @@ async def run_deploy_apply(db: Session, *, fn_id: str, job_id: str,
         if outputs.get("network_mode"):
             row.network_mode = str(outputs["network_mode"])
         row.status = "available"
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
 
         if row.cloud == "azure":
@@ -1440,7 +1441,7 @@ async def run_deploy_apply(db: Session, *, fn_id: str, job_id: str,
             "resource_id": row.resource_id})
     except Exception as exc:
         row.status = "failed"
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         logger.error("cloudfn: deploy failed for %s: %s", fn_id, exc)
         job_service.set_failed(db, job_id, str(exc))
@@ -1609,7 +1610,7 @@ def start_decommission(db: Session, fn_id: str, created_by: str = "") -> dict:
         db, job_type="cloudfn_decommission", created_by=created_by,
         metadata={"fn_id": row.id, "cloud": row.cloud, "name": row.name})
     row.status = "deleting"
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
     return {"ok": True, "fn_id": row.id, "job_id": job.id}
 
@@ -1648,7 +1649,7 @@ async def run_decommission(db: Session, *, fn_id: str, job_id: str) -> None:
             on_line=_job_stream(job_id, 10, "Destroying the function…"),
         )
         row.status = "deleted"
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         # The bearer secret and host key are useless once the endpoint is gone.
         for suffix in ("bearer", "invoke-key"):
@@ -1659,7 +1660,7 @@ async def run_decommission(db: Session, *, fn_id: str, job_id: str) -> None:
         job_service.set_completed(db, job_id, result={"fn_id": row.id})
     except Exception as exc:
         row.status = "failed"
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         logger.error("cloudfn: decommission failed for %s: %s", fn_id, exc)
         job_service.set_failed(db, job_id, str(exc))
@@ -1741,7 +1742,7 @@ async def run_entitle_register(db: Session, *, fn_id: str, job_id: str,
             # on the row.
             config_service.set(f"cloudfn/{row.id}/entitle-tfstate",
                                str(result.get("tf_state_json") or ""))
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         job_service.set_completed(db, job_id, {
             "fn_id": fn_id, "action": action,

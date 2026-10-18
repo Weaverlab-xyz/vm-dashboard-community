@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Optional
 
 from .. import core
+from ....utils.clock import utcnow
 
 _PROVIDER_LABELS = {"aws": "AWS", "azure": "Azure", "gcp": "Google Cloud", "oci": "OCI",
                     "portainer": "Portainer", "rancher": "Rancher"}
@@ -102,7 +103,7 @@ def expiry_item(result: dict, *, enabled: bool) -> Optional[core.Item]:
 async def collect(db) -> list:
     from ... import expiry_policy, expiry_reaper, suspend_sweeper
     from ....database import CloudCostCache, DashboardStatCache, Job
-    now = datetime.utcnow()
+    now = utcnow()
     items = provider_items(db.query(DashboardStatCache).all(), kind="api",
                            area_label="API", now=now)
     items += provider_items(db.query(CloudCostCache).all(), kind="cost",

@@ -29,6 +29,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from typing import Optional
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ def _session():
 
 def alive(db, now: Optional[datetime] = None) -> bool:
     from ..database import SpireAdminRelay
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     return (db.query(SpireAdminRelay)
             .filter(SpireAdminRelay.seen_at >= now - timedelta(seconds=ALIVE_WITHIN_S))
             .first()) is not None
@@ -161,7 +162,7 @@ def serve_once(db, me: str) -> int:
         won = (db.query(SpireAdminCall)
                .filter(SpireAdminCall.id == call_id, SpireAdminCall.status == "pending")
                .update({"status": "running", "served_by": me,
-                        "claimed_at": datetime.utcnow()}, synchronize_session=False))
+                        "claimed_at": utcnow()}, synchronize_session=False))
         db.commit()
         if won != 1:
             continue                       # another process took it
@@ -178,7 +179,7 @@ def serve_once(db, me: str) -> int:
         row.stdout_enc = config_service.encrypt_value(proc.stdout or "")
         row.stderr_enc = config_service.encrypt_value(proc.stderr or "")
         row.status = "done"
-        row.finished_at = datetime.utcnow()
+        row.finished_at = utcnow()
         db.commit()
         done += 1
     return done
@@ -186,7 +187,7 @@ def serve_once(db, me: str) -> int:
 
 def heartbeat(db, me: str, transport: str, now: Optional[datetime] = None) -> None:
     from ..database import SpireAdminRelay
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     row = db.get(SpireAdminRelay, me)
     if row is None:
         db.add(SpireAdminRelay(id=me, transport=transport, seen_at=now))
@@ -199,7 +200,7 @@ def heartbeat(db, me: str, transport: str, now: Optional[datetime] = None) -> No
 def sweep(db, now: Optional[datetime] = None) -> None:
     """Calls nobody collected, and relays that stopped checking in."""
     from ..database import SpireAdminCall, SpireAdminRelay
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     db.query(SpireAdminCall).filter(SpireAdminCall.created_at < now - RETAIN).delete()
     db.query(SpireAdminRelay).filter(SpireAdminRelay.seen_at < now - RETAIN).delete()
     db.commit()

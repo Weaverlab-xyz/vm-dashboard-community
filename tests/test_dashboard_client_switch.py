@@ -35,7 +35,12 @@ import os
 import re
 import sys
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+
+def _utcnow():
+    """Naive UTC now: what the deprecated datetime.utcnow() returned."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -300,7 +305,7 @@ def test_refresh_honours_its_minimum_interval():
         db.add(DashboardStatCache(tile_key="aws_instances", scope="", provider="aws",
                                   payload='{"count": 1}',
                                   payload_version=store.PAYLOAD_VERSION,
-                                  fetched_at=datetime.utcnow(), stale=False,
+                                  fetched_at=_utcnow(), stale=False,
                                   consecutive_failures=0))
         db.commit()
         out = asyncio.run(api.dashboard_refresh(db=db, current_user=_U()))
@@ -312,7 +317,7 @@ def test_refresh_honours_its_minimum_interval():
             "clicking")
 
         # …and once the floor has passed, it queues.
-        old = datetime.utcnow() - timedelta(seconds=store.min_refresh_interval_seconds() + 5)
+        old = _utcnow() - timedelta(seconds=store.min_refresh_interval_seconds() + 5)
         db.query(DashboardStatCache).update({DashboardStatCache.fetched_at: old})
         db.commit()
         out2 = asyncio.run(api.dashboard_refresh(db=db, current_user=_U()))

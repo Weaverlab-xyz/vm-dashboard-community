@@ -50,6 +50,7 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from web_dashboard.database import Base, Job  # noqa: E402
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.services import job_service, schedule_sweeper  # noqa: E402
 
 
@@ -63,7 +64,7 @@ def _session():
 def _add(db, **kw):
     kw.setdefault("job_type", "ansible_local")
     kw.setdefault("status", "pending")
-    kw.setdefault("created_at", datetime.utcnow())
+    kw.setdefault("created_at", utcnow())
     kw.setdefault("created_by", "tester")
     job = Job(**kw)
     db.add(job)
@@ -73,7 +74,7 @@ def _add(db, **kw):
 
 def _closed(minutes_ago=30):
     """A window whose end is comfortably past MISSED_GRACE."""
-    return datetime.utcnow() - timedelta(minutes=minutes_ago)
+    return utcnow() - timedelta(minutes=minutes_ago)
 
 
 # ── The core rule ─────────────────────────────────────────────────────────────
@@ -138,7 +139,7 @@ def test_a_running_job_is_never_reaped():
     job = _add(db, status="running", started_at=_closed(60),
                window_ends_at=_closed(30))
 
-    due = schedule_sweeper.due_missed(db, datetime.utcnow())
+    due = schedule_sweeper.due_missed(db, utcnow())
     assert job.id not in [j.id for j in due], "the sweep selected a RUNNING job"
 
     job_service.set_missed_window(db, job.id, "window closed")
@@ -151,8 +152,8 @@ def test_the_reap_waits_out_the_grace_period():
     second earlier. Without the grace the sweep races the claim query it is backstopping.
     """
     db = _session()
-    job = _add(db, window_ends_at=datetime.utcnow() - timedelta(seconds=1))
-    due = schedule_sweeper.due_missed(db, datetime.utcnow())
+    job = _add(db, window_ends_at=utcnow() - timedelta(seconds=1))
+    due = schedule_sweeper.due_missed(db, utcnow())
     assert job.id not in [j.id for j in due], (
         "reaped a job the instant its window closed — this races _claim_one")
 
@@ -161,16 +162,16 @@ def test_a_job_with_no_window_is_never_reaped():
     """`window_ends_at IS NULL` is every job that predates this feature and every
     unscheduled one. They must be invisible to this sweep forever."""
     db = _session()
-    job = _add(db, created_at=datetime.utcnow() - timedelta(days=400))
-    due = schedule_sweeper.due_missed(db, datetime.utcnow())
+    job = _add(db, created_at=utcnow() - timedelta(days=400))
+    due = schedule_sweeper.due_missed(db, utcnow())
     assert job.id not in [j.id for j in due], "reaped a job that carries no window"
 
 
 def test_a_job_still_inside_its_window_is_not_reaped():
     db = _session()
-    job = _add(db, scheduled_for=datetime.utcnow() - timedelta(minutes=5),
-               window_ends_at=datetime.utcnow() + timedelta(hours=3))
-    due = schedule_sweeper.due_missed(db, datetime.utcnow())
+    job = _add(db, scheduled_for=utcnow() - timedelta(minutes=5),
+               window_ends_at=utcnow() + timedelta(hours=3))
+    due = schedule_sweeper.due_missed(db, utcnow())
     assert job.id not in [j.id for j in due]
 
 
@@ -181,14 +182,14 @@ def test_an_unapproved_job_says_so():
     capacity or a longer window — so the message names which happened."""
     db = _session()
     job = _add(db, approval_required=True, window_ends_at=_closed())
-    reason = schedule_sweeper._reason(job, datetime.utcnow())
+    reason = schedule_sweeper._reason(job, utcnow())
     assert "approval" in reason.lower(), reason
 
 
 def test_a_starved_job_says_so():
     db = _session()
     job = _add(db, window_ends_at=_closed())
-    reason = schedule_sweeper._reason(job, datetime.utcnow())
+    reason = schedule_sweeper._reason(job, utcnow())
     assert "approval" not in reason.lower(), reason
     assert "reschedule" in reason.lower(), reason
 
@@ -216,7 +217,7 @@ def test_nothing_is_enqueued_when_nothing_is_scheduled():
 
 def test_a_sweep_is_enqueued_when_something_is_scheduled():
     db = _session()
-    _add(db, scheduled_for=datetime.utcnow() + timedelta(hours=4))
+    _add(db, scheduled_for=utcnow() + timedelta(hours=4))
     assert schedule_sweeper.enqueue_sweep_if_due(db) is not None
 
 
@@ -224,7 +225,7 @@ def test_a_second_tick_does_not_enqueue_a_duplicate():
     """Two gunicorn workers reach the same tick ~0.4s apart. The active-job check covers
     this one; the recency check below covers the case it provably cannot."""
     db = _session()
-    _add(db, scheduled_for=datetime.utcnow() + timedelta(hours=4))
+    _add(db, scheduled_for=utcnow() + timedelta(hours=4))
     first = schedule_sweeper.enqueue_sweep_if_due(db)
     second = schedule_sweeper.enqueue_sweep_if_due(db)
     assert first is not None and second is None
@@ -240,11 +241,11 @@ def test_the_recency_guard_holds_when_the_pass_already_finished():
     pairs 0.13-0.4s apart. Only the recency term catches it.
     """
     db = _session()
-    _add(db, scheduled_for=datetime.utcnow() + timedelta(hours=4))
+    _add(db, scheduled_for=utcnow() + timedelta(hours=4))
     first = schedule_sweeper.enqueue_sweep_if_due(db)
     done = db.query(Job).filter(Job.id == first).first()
     done.status = "completed"          # the pass finished between the two ticks
-    done.completed_at = datetime.utcnow()
+    done.completed_at = utcnow()
     db.commit()
 
     assert schedule_sweeper.enqueue_sweep_if_due(db) is None, (

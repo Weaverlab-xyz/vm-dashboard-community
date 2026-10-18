@@ -186,7 +186,7 @@ def test_active_oci_count_ignores_destroyed_rows():
     from web_dashboard.database import Base, Job, SessionLocal, engine
     Base.metadata.create_all(bind=engine)
     import json
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     db = SessionLocal()
     try:
@@ -194,7 +194,7 @@ def test_active_oci_count_ignores_destroyed_rows():
         for jid, meta in (("live-1", {}), ("live-2", {}), ("gone", {"destroyed": True})):
             db.add(Job(id=jid, job_type="oci_deploy", status="completed",
                        created_by="alice", extra_data=json.dumps(meta),
-                       created_at=datetime.utcnow()))
+                       created_at=datetime.now(timezone.utc).replace(tzinfo=None)))
         db.commit()
         assert jumpoint_host_service._active_oci_count(db) == 2
     finally:

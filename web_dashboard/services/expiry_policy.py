@@ -22,8 +22,14 @@ infrastructure:
     stranded-runner reaper.
 """
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+
+def _utcnow() -> datetime:
+    """Naive UTC now (datetime.utcnow() is deprecated). Local rather than
+    utils.clock: this module is loaded on its own, without the package."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 logger = logging.getLogger(__name__)
 
@@ -368,7 +374,7 @@ def exempt_workgroups() -> frozenset:
 # Mixing in an aware datetime would raise on subtraction.
 
 def _now() -> datetime:
-    return datetime.utcnow()
+    return _utcnow()
 
 
 def parse_ts(value) -> Optional[float]:

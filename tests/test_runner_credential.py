@@ -52,6 +52,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- app deps missing
 # First-party imports UNGUARDED: a broken module must fail this file, not skip it.
 from web_dashboard.database import (AuditLog, Base, RunnerCredentialGrant,  # noqa: E402
                                     SessionLocal, engine, get_db)
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.services import (agent_sealing, agent_service,  # noqa: E402
                                     cloud_ansible_secrets, config_service,
                                     runner_credential as rc, runner_fetch as rf)
@@ -152,7 +153,7 @@ def test_single_use_and_a_failed_proof_still_burns_it():
 
 
 def test_an_expired_token_is_refused():
-    token = _issue(now=datetime.utcnow() - timedelta(minutes=11))
+    token = _issue(now=utcnow() - timedelta(minutes=11))
     _refused(lambda: _redeem(token, _ecs_proof(token)), "expired")
 
 
@@ -169,7 +170,7 @@ def test_revoke_and_sweep_remove_grants():
     db = SessionLocal()
     try:
         assert rc.revoke_for_job(db, "job-rev") == 1
-        _issue(job="job-old", now=datetime.utcnow() - timedelta(hours=1))
+        _issue(job="job-old", now=utcnow() - timedelta(hours=1))
         assert rc.sweep(db) >= 1
         assert not db.query(RunnerCredentialGrant).filter(
             RunnerCredentialGrant.job_id.in_(["job-rev", "job-old"])).count()

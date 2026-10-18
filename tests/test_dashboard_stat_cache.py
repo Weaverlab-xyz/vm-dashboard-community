@@ -35,7 +35,12 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+
+def _utcnow():
+    """Naive UTC now: what the deprecated datetime.utcnow() returned."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -197,7 +202,7 @@ def test_an_expired_lease_lets_another_worker_take_over():
         assert w1.claim(db, "azure_vms", provider="azure")[0] is True
         # The first worker died mid-collection: its lease is the only thing releasing it.
         db.query(DashboardStatCache).update(
-            {DashboardStatCache.lease_until: datetime.utcnow() - timedelta(seconds=1)})
+            {DashboardStatCache.lease_until: _utcnow() - timedelta(seconds=1)})
         db.commit()
         ok, _s, _r = w2.claim(db, "azure_vms", provider="azure")
         assert ok is True, (
@@ -223,7 +228,7 @@ def test_a_tile_past_its_ttl_is_reclaimed():
     _seed_good()
     db = _db()
     try:
-        old = datetime.utcnow() - timedelta(seconds=w1.ttl_seconds() + 5)
+        old = _utcnow() - timedelta(seconds=w1.ttl_seconds() + 5)
         db.query(DashboardStatCache).update({DashboardStatCache.fetched_at: old})
         db.commit()
         ok, _s, reason = w1.claim(db, "aws_instances", provider="aws")
@@ -277,9 +282,9 @@ def test_repeated_failures_escalate_but_stay_capped():
                 {DashboardStatCache.cooldown_until: None})
             db.commit()
             w1.claim(db, "oci_instances", provider="oci", force=True,
-                     now=datetime.utcnow() + timedelta(days=1))
+                     now=_utcnow() + timedelta(days=1))
             snap = w1.finish(db, "oci_instances", None, error="still down")
-            waits.append((snap["cooldown_until"] - datetime.utcnow()).total_seconds())
+            waits.append((snap["cooldown_until"] - _utcnow()).total_seconds())
     finally:
         db.close()
     assert waits[1] > waits[0], "backoff does not escalate"
@@ -369,7 +374,7 @@ def test_min_age_lets_the_app_defer_to_the_worker():
     db = _db()
     try:
         # Past the TTL, so the WORKER would claim it...
-        old = datetime.utcnow() - timedelta(seconds=w1.ttl_seconds() + 5)
+        old = _utcnow() - timedelta(seconds=w1.ttl_seconds() + 5)
         db.query(DashboardStatCache).update({DashboardStatCache.fetched_at: old})
         db.commit()
 
@@ -380,7 +385,7 @@ def test_min_age_lets_the_app_defer_to_the_worker():
             f"({reason}) — with a worker running it should cost one SELECT and nothing else")
 
         # ...and once nothing has touched it for the whole window, the app takes over.
-        older = datetime.utcnow() - timedelta(seconds=w1.stale_after_seconds() + 5)
+        older = _utcnow() - timedelta(seconds=w1.stale_after_seconds() + 5)
         db.query(DashboardStatCache).update({DashboardStatCache.fetched_at: older})
         db.commit()
         ok2, _s2, _r2 = w1.claim(db, "aws_instances", provider="aws",
@@ -428,7 +433,7 @@ def test_clear_cooldowns_reopens_every_provider():
             "a Setup save must reopen the provider — the operator just changed the "
             "credential we were backing off from")
         ok, _s, _r = w1.claim(db, "aws_instances", provider="aws", force=True,
-                              now=datetime.utcnow() + timedelta(days=1))
+                              now=_utcnow() + timedelta(days=1))
         assert ok is True
     finally:
         db.close()

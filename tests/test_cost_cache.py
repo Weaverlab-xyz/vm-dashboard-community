@@ -31,7 +31,12 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+
+def _utcnow():
+    """Naive UTC now: what the deprecated datetime.utcnow() returned."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -200,7 +205,7 @@ def test_a_failure_never_overwrites_a_good_payload():
 
     # Age the figure past the TTL so the next read genuinely tries to refresh it, then
     # snapshot fetched_at so we can prove the FAILURE left it alone.
-    _set("aws", "summary", fetched_at=datetime.utcnow() - timedelta(days=1))
+    _set("aws", "summary", fetched_at=_utcnow() - timedelta(days=1))
     good_at = _row().fetched_at
     _stub(w1, lambda v, c: _fail(c, "429 Too Many Requests", throttled=True, retry_after=300))
     out = _run(w1.get_summary())
@@ -239,7 +244,7 @@ def test_a_fresh_figure_is_served_without_querying():
 def test_a_stale_figure_is_served_with_as_of_and_re_queried():
     _reset()
     _run(w1.get_summary())
-    _set("aws", "summary", fetched_at=datetime.utcnow() - timedelta(days=1))
+    _set("aws", "summary", fetched_at=_utcnow() - timedelta(days=1))
     entry = _entry(_run(w1.get_summary()))
     assert len(_calls()) == 2, "past the TTL it must re-query"
     assert entry["status"] == "ok" and entry["stale"] is False
@@ -254,7 +259,7 @@ def test_a_429_sets_a_cooldown_from_retry_after():
     _stub(w1, lambda v, c: _fail(c, "429", throttled=True, retry_after=1800))
     _run(w1.get_summary())
     row = _row()
-    delta = (row.cooldown_until - datetime.utcnow()).total_seconds()
+    delta = (row.cooldown_until - _utcnow()).total_seconds()
     assert 1700 < delta <= 1800, delta
     assert row.consecutive_failures == 1
 
@@ -264,7 +269,7 @@ def test_a_short_retry_after_is_floored():
     _reset()
     _stub(w1, lambda v, c: _fail(c, "429", throttled=True, retry_after=5))
     _run(w1.get_summary())
-    delta = (_row().cooldown_until - datetime.utcnow()).total_seconds()
+    delta = (_row().cooldown_until - _utcnow()).total_seconds()
     assert delta > w1._THROTTLE_BASE_S - 60, delta
 
 
@@ -274,7 +279,7 @@ def test_a_non_throttle_failure_backs_off_more_gently():
     _reset()
     _stub(w1, lambda v, c: _fail(c, "no permission"))
     _run(w1.get_summary())
-    delta = (_row().cooldown_until - datetime.utcnow()).total_seconds()
+    delta = (_row().cooldown_until - _utcnow()).total_seconds()
     assert w1._FAIL_BASE_S - 5 < delta <= w1._FAIL_BASE_S, delta
     assert delta < w1._THROTTLE_BASE_S
 
@@ -282,7 +287,7 @@ def test_a_non_throttle_failure_backs_off_more_gently():
     _set("aws", "summary", cooldown_until=None, next_query_allowed_at=None)
     _run(w1.get_summary())
     assert _row().consecutive_failures == 2
-    delta = (_row().cooldown_until - datetime.utcnow()).total_seconds()
+    delta = (_row().cooldown_until - _utcnow()).total_seconds()
     assert w1._FAIL_BASE_S < delta <= w1._FAIL_BASE_S * 2, delta
 
 
@@ -290,7 +295,7 @@ def test_cooldown_is_capped():
     _reset()
     _stub(w1, lambda v, c: _fail(c, "429", throttled=True, retry_after=99999))
     _run(w1.get_summary())
-    delta = (_row().cooldown_until - datetime.utcnow()).total_seconds()
+    delta = (_row().cooldown_until - _utcnow()).total_seconds()
     assert delta <= w1._COOLDOWN_MAX_S
 
 
@@ -300,7 +305,7 @@ def test_refresh_true_does_not_query_during_a_cooldown():
     _reset()
     _run(w1.get_summary())                                   # seed a good figure
     _stub(w1, lambda v, c: _fail(c, "429", throttled=True, retry_after=900))
-    _set("aws", "summary", fetched_at=datetime.utcnow() - timedelta(days=1))
+    _set("aws", "summary", fetched_at=_utcnow() - timedelta(days=1))
     _run(w1.get_summary())                                   # earns the cooldown
     before = len(_calls())
 
@@ -340,7 +345,7 @@ def test_refresh_after_the_min_interval_does_query():
     _reset()
     _run(w1.get_summary())
     _set("aws", "summary",
-         fetched_at=datetime.utcnow() - timedelta(seconds=w1.min_refresh_interval_seconds() + 5))
+         fetched_at=_utcnow() - timedelta(seconds=w1.min_refresh_interval_seconds() + 5))
     _run(w1.get_summary(refresh=True))
     assert len(_calls()) == 2, "a forced refresh past the floor must re-query"
 
@@ -380,8 +385,8 @@ def test_an_expired_lease_lets_another_worker_take_over():
     """A process that dies mid-fetch must not wedge the row forever."""
     _reset()
     _run(w1.get_summary())
-    _set("aws", "summary", fetched_at=datetime.utcnow() - timedelta(days=1),
-         lease_until=datetime.utcnow() - timedelta(seconds=1), lease_owner="dead:1",
+    _set("aws", "summary", fetched_at=_utcnow() - timedelta(days=1),
+         lease_until=_utcnow() - timedelta(seconds=1), lease_owner="dead:1",
          next_query_allowed_at=None)
     _run(w2.get_summary())
     assert len(_calls()) == 2, "an expired lease still blocked the claim"
@@ -390,8 +395,8 @@ def test_an_expired_lease_lets_another_worker_take_over():
 def test_a_live_lease_blocks_a_second_claim():
     _reset()
     _run(w1.get_summary())
-    _set("aws", "summary", fetched_at=datetime.utcnow() - timedelta(days=1),
-         lease_until=datetime.utcnow() + timedelta(seconds=60), lease_owner="other:1",
+    _set("aws", "summary", fetched_at=_utcnow() - timedelta(days=1),
+         lease_until=_utcnow() + timedelta(seconds=60), lease_owner="other:1",
          next_query_allowed_at=None)
     out = _run(w2.get_summary())
     assert len(_calls()) == 1, "two processes queried the same cloud at once"
@@ -408,7 +413,7 @@ def test_claiming_one_view_paces_the_whole_cloud():
     row = _row("aws", "breakdown")
     assert row is not None, "claiming one view must create the cloud's other row"
     assert row.next_query_allowed_at is not None, "claiming one view must pace the cloud"
-    assert row.next_query_allowed_at > datetime.utcnow()
+    assert row.next_query_allowed_at > _utcnow()
 
 
 def test_a_paced_view_waits_rather_than_skipping():
@@ -428,7 +433,7 @@ def test_a_month_rollover_is_a_miss_not_a_stale_serve():
     _reset()
     _run(w1.get_summary())
     _set("aws", "summary", period="1999-01",
-         fetched_at=datetime.utcnow() - timedelta(days=1))
+         fetched_at=_utcnow() - timedelta(days=1))
     _stub(w1, lambda v, c: _fail(c, "down"))
     entry = _entry(_run(w1.get_summary()))
     assert len(_calls()) == 2, "last month's row must not satisfy a read"
@@ -441,7 +446,7 @@ def test_a_payload_version_bump_is_a_miss():
     _reset()
     _run(w1.get_summary())
     _set("aws", "summary", payload_version=w1.PAYLOAD_VERSION + 1,
-         fetched_at=datetime.utcnow() - timedelta(days=1))
+         fetched_at=_utcnow() - timedelta(days=1))
     _stub(w1, lambda v, c: _fail(c, "down"))
     assert _entry(_run(w1.get_summary()))["status"] == "unavailable"
 
@@ -513,7 +518,7 @@ def test_breakdown_keeps_every_scope_key_when_stale():
     _reset()
     _run(w1.get_breakdown())
     _stub(w1, lambda v, c: _fail(c, "429", throttled=True, retry_after=900))
-    _set("aws", "breakdown", fetched_at=datetime.utcnow() - timedelta(days=1),
+    _set("aws", "breakdown", fetched_at=_utcnow() - timedelta(days=1),
          next_query_allowed_at=None)
     entry = _entry(_run(w1.get_breakdown()))
     # The stubbed breakdown entry is an _ok() summary shape; what matters is that the

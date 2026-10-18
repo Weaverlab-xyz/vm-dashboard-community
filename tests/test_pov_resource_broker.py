@@ -33,6 +33,7 @@ sys.path.insert(0, _ROOT)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-pov-rb")
 
 from web_dashboard import database as d  # noqa: E402
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 
 d.Base.metadata.create_all(bind=d.engine)
 
@@ -51,7 +52,7 @@ def _agent(db, *, version="2.4.0",
     row.public_key = "k"
     row.agent_version = version
     row.reported_job_types = json.dumps(list(reported))
-    row.last_seen_at = datetime.utcnow()
+    row.last_seen_at = utcnow()
     db.commit()
     return row
 

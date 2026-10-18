@@ -44,6 +44,7 @@ from sqlalchemy.orm import Session
 
 from ..database import DirectoryHealth, ManagedDirectory, RemoteAgent
 from . import config_service
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -279,7 +280,7 @@ def sync_check(sync: Optional[dict], *, now: Optional[datetime] = None) -> Optio
     except ValueError:
         return _check("hybrid_sync", "Entra Connect sync", UNKNOWN,
                       f"Unreadable last sync time {raw!r}.")
-    age = (now or datetime.utcnow()) - last
+    age = (now or utcnow()) - last
     status = OK if age <= SYNC_WARN_AFTER else (WARN if age <= SYNC_FAIL_AFTER else FAIL)
     minutes = max(0, int(age.total_seconds() // 60))
     return _check("hybrid_sync", "Entra Connect sync", status,
@@ -392,7 +393,7 @@ def _onprem(db: Session, row: ManagedDirectory, health: DirectoryHealth,
     if refusal:
         out.append(_check(_PROBE_KEY, "LDAP answers", UNKNOWN, refusal))
     else:
-        now = datetime.utcnow()
+        now = utcnow()
         waiting = health.pending_job_id and health.pending_since and \
             now - health.pending_since < PENDING_TIMEOUT
         due = force or not health.probe_queued_at or \
@@ -471,7 +472,7 @@ def _deep(db: Session, row: ManagedDirectory, agent: RemoteAgent, state: str,
     if refusal:
         return kept + [_check(_DEEP_KEY, "Domain controller check", UNKNOWN, refusal)]
 
-    now = datetime.utcnow()
+    now = utcnow()
     waiting = bool(health.deep_job_id and health.deep_since
                    and now - health.deep_since < DEEP_PENDING_TIMEOUT)
     hours = deep_interval_hours()
@@ -672,7 +673,7 @@ def _dc_check(dc: dict, now: datetime) -> dict:
 
 def dc_health_checks(report: dict, *, now: Optional[datetime] = None) -> list:
     """Checks from a parsed dc-health report. Pure."""
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     out = [_replication_check(report, now), _fsmo_check(report)]
     out.extend(_dc_check(dc, now) for dc in report.get("dcs") or [])
     if not report.get("dcs"):
@@ -794,7 +795,7 @@ async def check(db: Session, row: ManagedDirectory, *, force: bool = False,
                          f"{str(exc)[:300]}")]
     health.checks = json.dumps(checks)
     health.status = overall(checks)
-    health.checked_at = datetime.utcnow()
+    health.checked_at = utcnow()
     health.duration_ms = int((time.monotonic() - started) * 1000)
     db.commit()
     return to_dict(row, health)
@@ -811,7 +812,7 @@ async def check_due(db: Session) -> int:
     minutes = interval_minutes()
     if not minutes or not feature_flags.enabled("directories_enabled"):
         return 0
-    now = datetime.utcnow()
+    now = utcnow()
     rows = [r for r in db.query(ManagedDirectory)
             .filter(ManagedDirectory.status != "deleted").all() if monitored(r)]
     done = 0

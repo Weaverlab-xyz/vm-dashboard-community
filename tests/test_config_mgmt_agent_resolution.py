@@ -18,7 +18,12 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _utcnow():
+    """Naive UTC now: what the deprecated datetime.utcnow() returned."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -70,9 +75,9 @@ def _agent(db, name, *, active=True, granted=True, version="2.5.0", online=True)
         # "enrolling" without one, and the gate refuses anything that is not "online" —
         # so an agent missing it fails every test here with the offline message.
         public_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI" + name,
-        last_seen_at=datetime.utcnow() if online else datetime(2020, 1, 1),
+        last_seen_at=_utcnow() if online else datetime(2020, 1, 1),
         allowed_job_types=None if granted else json.dumps(["agent_hypervisor"]),
-        created_at=datetime.utcnow())
+        created_at=_utcnow())
     db.add(row)
     db.commit()
     return row
@@ -84,11 +89,11 @@ def _scene(db, *, vm_ips=("10.0.0.5",)):
     db.add(HypervisorConnection(id="conn-ws", kind="workstation", name="ws", host="",
                                 port=8697, agent_id="agent-host",
                                 agent_connection_name="ws", is_active=True,
-                                created_at=datetime.utcnow()))
+                                created_at=_utcnow()))
     db.add(HypervisorVMCache(connection_id="conn-ws", vm_id="vm-1", name="oracle9",
                              power_state="poweredOn", guest_os="oracleLinux9_64",
                              ip_addresses=json.dumps(list(vm_ips)),
-                             synced_at=datetime.utcnow()))
+                             synced_at=_utcnow()))
     db.commit()
 
 

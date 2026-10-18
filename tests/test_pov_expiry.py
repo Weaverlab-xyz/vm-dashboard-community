@@ -39,6 +39,7 @@ sys.path.insert(0, _ROOT)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-pov-expiry")
 
 from web_dashboard import database as d  # noqa: E402
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 
 d.Base.metadata.create_all(bind=d.engine)
 
@@ -118,11 +119,11 @@ def _ago(**kw) -> str:
     `utcfromtimestamp` here would apply that shift twice and put a past deadline in the
     future — a test-only trap, but one that reads exactly like a broken reaper.
     """
-    return (datetime.utcnow() - timedelta(**kw)).isoformat()
+    return (utcnow() - timedelta(**kw)).isoformat()
 
 
 def test_an_expired_pov_becomes_a_reap_target():
-    now = datetime.utcnow().timestamp()
+    now = utcnow().timestamp()
     target = pol.reap_target(
         _item(expires_at=_ago(hours=2)),
         now_ts=now, grace_min=30, armed_at_ts=now - 10 * _HOUR)
@@ -132,7 +133,7 @@ def test_an_expired_pov_becomes_a_reap_target():
 
 def test_an_unarmed_feature_reaps_no_pov():
     """A freshly flipped toggle cannot act on an estate nobody has reviewed."""
-    now = datetime.utcnow().timestamp()
+    now = utcnow().timestamp()
     assert pol.reap_target(
         _item(expires_at=_ago(hours=5)),
         now_ts=now, grace_min=30, armed_at_ts=now - 60) is None
@@ -141,7 +142,7 @@ def test_an_unarmed_feature_reaps_no_pov():
 def test_a_pov_inside_the_grace_window_is_not_yet_reaped():
     """Never act at the instant of expiry: it absorbs clock skew between the app and the
     worker, and gives a mis-stamped environment a window of its own."""
-    now = datetime.utcnow().timestamp()
+    now = utcnow().timestamp()
     assert pol.reap_target(
         _item(expires_at=_ago(minutes=5)),
         now_ts=now, grace_min=30, armed_at_ts=now - 10 * _HOUR) is None
@@ -151,7 +152,7 @@ def test_a_pov_inside_the_grace_window_is_not_yet_reaped():
 
 def test_a_pov_appears_in_the_inventory_with_its_timer():
     db = d.SessionLocal()
-    when = datetime.utcnow() + timedelta(days=5)
+    when = utcnow() + timedelta(days=5)
     env = _env(db, expires_at=when, workgroup="wg1", created_by="someone")
     item = inventory_service._pov_item(env)
     assert item["id"] == f"pov:{env.id}"
@@ -177,7 +178,7 @@ def test_a_destroyed_pov_is_not_collected():
 
 def test_the_reaper_can_resolve_a_pov_row():
     db = d.SessionLocal()
-    env = _env(db, expires_at=datetime.utcnow() + timedelta(days=1))
+    env = _env(db, expires_at=utcnow() + timedelta(days=1))
     resolved = reaper._resolve_row(db, f"pov:{env.id}")
     assert resolved is not None and resolved[0].id == env.id
     assert reaper._resolve_row(db, "pov:nope") is None
@@ -191,7 +192,7 @@ def test_reaping_a_pov_enqueues_the_same_job_the_delete_endpoint_creates():
     before the Gateway before the broker. Going through the queue is what keeps that in
     one place."""
     db = d.SessionLocal()
-    env = _env(db, expires_at=datetime.utcnow() - timedelta(hours=2), workgroup="wg1")
+    env = _env(db, expires_at=utcnow() - timedelta(hours=2), workgroup="wg1")
     job_id = reaper._reap_row(db, {"kind": "pov", "id": f"pov:{env.id}"})
     job = db.query(d.Job).filter(d.Job.id == job_id).first()
     assert job is not None
@@ -206,7 +207,7 @@ def test_reaping_clears_the_timer_so_it_cannot_happen_twice():
     """At-most-once is structural: clearing `expires_at` in the same commit removes the
     row from `expired()`'s view entirely."""
     db = d.SessionLocal()
-    env = _env(db, expires_at=datetime.utcnow() - timedelta(hours=2))
+    env = _env(db, expires_at=utcnow() - timedelta(hours=2))
     reaper._reap_row(db, {"kind": "pov", "id": f"pov:{env.id}"})
     db.refresh(env)
     assert env.expires_at is None
@@ -287,8 +288,8 @@ def test_an_extend_re_opens_the_whole_ladder():
 
 def test_set_expiry_clears_both_latches():
     db = d.SessionLocal()
-    env = _env(db, expires_at=datetime.utcnow() + timedelta(hours=1),
-               expiry_warned_at=datetime.utcnow(),
+    env = _env(db, expires_at=utcnow() + timedelta(hours=1),
+               expiry_warned_at=utcnow(),
                warned_stage_minutes=pol.WARN_LADDER_MINUTES[-1])
     item = inventory_service._pov_item(env)
     out = reaper.set_expiry(db, [item], extend_hours=48, is_admin=True, actor="t")
@@ -363,7 +364,7 @@ def test_the_default_is_stamped_once_an_operator_opts_in():
     pol.pov_default_hours = lambda: 30 * 24
     try:
         when = pol.default_expiry_for_kind("pov")
-        assert when is not None and when > datetime.utcnow() + timedelta(days=1)
+        assert when is not None and when > utcnow() + timedelta(days=1)
     finally:
         pol.enabled, pol.pov_default_hours = original
 
@@ -387,7 +388,7 @@ def test_a_pov_on_a_CLOUD_is_reapable_exactly_like_one_on_skytap():
     short-circuiting ahead of them, a cloud POV would take the VM path and be looked up as
     a deploy job that does not exist.
     """
-    now = datetime.utcnow().timestamp()
+    now = utcnow().timestamp()
     for cloud in ("skytap",) + tuple(lab_platforms.CLOUD_PLATFORMS):
         item = _item(cloud=cloud, expires_at=_ago(hours=2))
         capable, why = pol.ttl_capable(item)

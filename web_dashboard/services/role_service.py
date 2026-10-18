@@ -43,6 +43,7 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 
 from ..database import AccessRole, OAuthGroupMapping, User
+from ..utils.clock import utcnow
 
 # Same shape as workgroup_service.NAME_RE: a slug is a URL-safe handle, and it is what the
 # built-in seeds are keyed by, so it must be stable and lowercase.
@@ -421,7 +422,7 @@ def update(db: Session, role: AccessRole, *, name=None, description=None,
         validate_role_permissions(permissions, slug=role.slug)
         role.permissions_dict = permissions
         fanned = fan_out(db, role)
-    role.updated_at = datetime.utcnow()
+    role.updated_at = utcnow()
     db.commit()
     return fanned
 

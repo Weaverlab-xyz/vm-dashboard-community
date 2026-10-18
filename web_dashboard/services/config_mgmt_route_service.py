@@ -32,8 +32,14 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
+
+
+def _utcnow() -> datetime:
+    """Naive UTC now (datetime.utcnow() is deprecated). Local rather than
+    utils.clock: this module is loaded on its own, without the package."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 logger = logging.getLogger(__name__)
 
@@ -380,7 +386,7 @@ def update(db, route_id: str, **fields) -> dict:
         row.label = str(fields["label"]).strip() or None
     if fields.get("is_active") is not None:
         row.is_active = bool(fields["is_active"])
-    row.updated_at = datetime.utcnow()
+    row.updated_at = _utcnow()
     db.commit()
     db.refresh(row)
     return serialize(row)

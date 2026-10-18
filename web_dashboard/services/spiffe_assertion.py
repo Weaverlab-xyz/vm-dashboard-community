@@ -44,6 +44,7 @@ from jose import jwt
 from jose.exceptions import JWTError
 
 from .external_workload import ASYMMETRIC_ALGS
+from ..utils.clock import utcfromtimestamp, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -233,7 +234,7 @@ def _resync_own_bundle(db, row, kid: Optional[str], keys: list) -> bool:
 
 def is_stale(row) -> bool:
     return bool(not row.jwks_url and row.bundle_captured_at
-                and datetime.utcnow() - row.bundle_captured_at > BUNDLE_STALE_AFTER)
+                and utcnow() - row.bundle_captured_at > BUNDLE_STALE_AFTER)
 
 
 # ── Verification ─────────────────────────────────────────────────────────────
@@ -298,10 +299,10 @@ def consume(db, assertion: str, exp: float) -> None:
     # agents would otherwise grow one row per exchange forever.
     db.query(EphemeralState).filter(
         EphemeralState.key.like(_REPLAY_PREFIX + "%"),
-        EphemeralState.expires_at < datetime.utcnow()).delete(synchronize_session=False)
+        EphemeralState.expires_at < utcnow()).delete(synchronize_session=False)
     try:
         db.add(EphemeralState(key=key, value="",
-                              expires_at=datetime.utcfromtimestamp(float(exp) + LEEWAY)))
+                              expires_at=utcfromtimestamp(float(exp) + LEEWAY)))
         db.flush()
     except IntegrityError as exc:
         db.rollback()

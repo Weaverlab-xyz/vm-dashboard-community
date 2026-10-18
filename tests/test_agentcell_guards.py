@@ -31,6 +31,7 @@ if _ROOT not in sys.path:
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-agentcell-guards")
 
 from web_dashboard.services import agentcell_service as A  # noqa: E402
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 
 
 # -- the admin refusal ---------------------------------------------------------
@@ -75,7 +76,7 @@ def test_the_expiry_is_always_a_datetime():
     """The model allows None. This cell must never produce one."""
     out = A.pat_expires_at(1)
     assert isinstance(out, datetime), "pat_expires_at returned something that is not a time"
-    assert out > datetime.utcnow(), "the expiry is not in the future"
+    assert out > utcnow(), "the expiry is not in the future"
 
 
 # -- the worker would be meaningless ------------------------------------------

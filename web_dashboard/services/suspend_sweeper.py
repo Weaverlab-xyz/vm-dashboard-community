@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session
 
 from ..database import Job
 from . import job_service, suspend_schedule, vm_suspend_policy
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ _DEPLOY_TYPES = vm_suspend_policy.deploy_types_for(_POWER_JOB)
 
 
 def _utcnow() -> datetime:
-    return datetime.utcnow()
+    return utcnow()
 
 
 def enabled() -> bool:

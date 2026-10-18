@@ -50,6 +50,7 @@ from sqlalchemy.orm import Session
 
 from ..database import Job
 from . import job_service
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,7 @@ _FINISHED_LOOKBACK = 3 * 60 * 60
 
 
 def _utcnow() -> datetime:
-    return datetime.utcnow()
+    return utcnow()
 
 
 def interval_seconds() -> int:

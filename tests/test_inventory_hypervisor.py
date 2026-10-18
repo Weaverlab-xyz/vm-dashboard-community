@@ -23,7 +23,12 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _utcnow():
+    """Naive UTC now: what the deprecated datetime.utcnow() returned."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -56,7 +61,7 @@ def _reset(db):
 
 def _agent(db):
     agent = RemoteAgent(name="desk-01", public_key="k", is_active=True,
-                        enrolled_at=datetime.utcnow(), last_seen_at=datetime.utcnow())
+                        enrolled_at=_utcnow(), last_seen_at=_utcnow())
     db.add(agent)
     db.commit()
     db.refresh(agent)
@@ -68,7 +73,7 @@ def _conn(db, agent, *, kind, name, active=True, site=""):
     conn = HypervisorConnection(
         id=str(uuid.uuid4()), kind=kind, name=name, agent_id=agent.id,
         agent_connection_name=name, is_active=active, site=site,
-        created_by="t", created_at=datetime.utcnow())
+        created_by="t", created_at=_utcnow())
     db.add(conn)
     db.commit()
     return conn
@@ -86,7 +91,7 @@ def _vm(db, conn, *, vm_id, name, state=None, scope="", ips=()):
     db.add(HypervisorVMCache(
         connection_id=conn.id, vm_id=vm_id, name=name, power_state=state,
         scope=scope, vm_type="vm", tags="[]",
-        ip_addresses=json.dumps(list(ips)), synced_at=datetime.utcnow()))
+        ip_addresses=json.dumps(list(ips)), synced_at=_utcnow()))
     db.commit()
 
 
@@ -251,7 +256,7 @@ def test_a_vm_the_dashboard_deployed_is_listed_once_from_its_job():
         _vm(db, conn, vm_id="100", name="web-01", scope="pve1")
 
         db.add(Job(id="job-1", job_type="proxmox_deploy", status="completed",
-                   created_by="admin", created_at=datetime.utcnow(),
+                   created_by="admin", created_at=_utcnow(),
                    extra_data=json.dumps({"connection_id": conn.id, "vmid": 100,
                                           "vm_name": "web-01", "node": "pve1"})))
         db.commit()
@@ -275,7 +280,7 @@ def test_a_job_that_predates_the_id_merge_still_dedups_on_name_and_node():
         _vm(db, conn, vm_id="101", name="Web-02", scope="pve1")
 
         db.add(Job(id="job-2", job_type="proxmox_deploy", status="completed",
-                   created_by="admin", created_at=datetime.utcnow(),
+                   created_by="admin", created_at=_utcnow(),
                    extra_data=json.dumps({"vm_name": "web-02", "node": "pve1"})))
         db.commit()
 
@@ -293,7 +298,7 @@ def test_a_vm_nobody_deployed_survives_the_dedup():
         _vm(db, conn, vm_id="999", name="hand-made", scope="pve1")
 
         db.add(Job(id="job-3", job_type="proxmox_deploy", status="completed",
-                   created_by="admin", created_at=datetime.utcnow(),
+                   created_by="admin", created_at=_utcnow(),
                    extra_data=json.dumps({"connection_id": conn.id, "vmid": 100,
                                           "vm_name": "web-01", "node": "pve1"})))
         db.commit()

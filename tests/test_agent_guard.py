@@ -23,7 +23,12 @@ import os
 import sys
 import tempfile
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+
+def _utcnow():
+    """Naive UTC now: what the deprecated datetime.utcnow() returned."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -260,7 +265,7 @@ def test_the_enrolment_window_reopens_on_its_own():
     _clear_enroll_attempts()
     db = SessionLocal()
     try:
-        stale = datetime.utcnow() - timedelta(
+        stale = _utcnow() - timedelta(
             minutes=agent_guard.DEFAULT_ENROLL_WINDOW_MINUTES + 1)
         for _ in range(agent_guard.DEFAULT_ENROLL_MAX_PER_IP + 5):
             db.add(AgentEnrollAttempt(ip="10.0.0.11", attempted_at=stale))

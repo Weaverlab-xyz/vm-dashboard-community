@@ -32,6 +32,7 @@ from jose import jwt
 from jose.exceptions import JWTError
 
 from . import oidc_service
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +171,7 @@ def resolve(token: str, db):
     if service_account_problem(user):
         return None
 
-    now = datetime.utcnow()
+    now = utcnow()
     if not mapping.last_used_at or now - mapping.last_used_at > _TOUCH_INTERVAL:
         mapping.last_used_at = now
         db.commit()

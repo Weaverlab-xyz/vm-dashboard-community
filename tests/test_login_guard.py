@@ -26,7 +26,12 @@ import os
 import sys
 import tempfile
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+
+def _utcnow():
+    """Naive UTC now: what the deprecated datetime.utcnow() returned."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -72,7 +77,7 @@ def _fail_n(n: int, *, username: str, ip: str = "", at: datetime = None):
         for i in range(n):
             login_guard.record_failure(
                 db, username=username, ip=ip,
-                now=(at or datetime.utcnow()) + timedelta(milliseconds=i))
+                now=(at or _utcnow()) + timedelta(milliseconds=i))
     finally:
         db.close()
 
@@ -111,7 +116,7 @@ def test_the_retry_after_is_when_the_block_actually_lifts():
     _reset()
     cap = login_guard.DEFAULT_MAX_PER_USER
     window = timedelta(minutes=login_guard.DEFAULT_WINDOW_MINUTES)
-    now = datetime.utcnow()
+    now = _utcnow()
     # Oldest failure 10 minutes ago, the rest just now.
     _fail_n(1, username="alice", at=now - timedelta(minutes=10))
     _fail_n(cap - 1, username="alice", at=now)
@@ -128,7 +133,7 @@ def test_failures_outside_the_window_do_not_count():
     """Sliding, not cumulative — otherwise an account accretes failures forever and
     eventually locks out on a typo months later."""
     _reset()
-    old = datetime.utcnow() - timedelta(minutes=login_guard.DEFAULT_WINDOW_MINUTES + 5)
+    old = _utcnow() - timedelta(minutes=login_guard.DEFAULT_WINDOW_MINUTES + 5)
     _fail_n(login_guard.DEFAULT_MAX_PER_USER * 2, username="alice", at=old)
     assert _check("alice") is None
 
@@ -140,7 +145,7 @@ def test_the_block_is_not_a_lockout():
     cap = login_guard.DEFAULT_MAX_PER_USER
     window = login_guard.DEFAULT_WINDOW_MINUTES
     # A full budget burned, but long enough ago that it has aged out.
-    _fail_n(cap, username="alice", at=datetime.utcnow() - timedelta(minutes=window + 1))
+    _fail_n(cap, username="alice", at=_utcnow() - timedelta(minutes=window + 1))
     assert _check("alice") is None, "the block must lift on its own"
 
 
@@ -248,7 +253,7 @@ def test_recording_a_failure_never_raises():
 
 def test_the_sweep_drops_rows_past_retention():
     _reset()
-    old = datetime.utcnow() - timedelta(
+    old = _utcnow() - timedelta(
         minutes=login_guard.DEFAULT_RETENTION_MINUTES + 10)
     _fail_n(5, username="alice", at=old)
     _fail_n(2, username="bob")

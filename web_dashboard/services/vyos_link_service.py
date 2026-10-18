@@ -37,6 +37,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy.orm import Session
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -405,21 +406,21 @@ async def run(db: Session, row, job_id: str, *, check_only: bool) -> None:
                 on_line=directory_service._job_stream(job_id, 5, "Building the VyOS peer…",
                                                       "gcp"))
             read_outputs(row, outputs)
-            row.updated_at = datetime.utcnow()
+            row.updated_at = utcnow()
             db.commit()
         await broadcast_progress(job_id, 70, "Configuring WireGuard on the peer…")
         state, output = await configure(row, job_id)
     except Exception as exc:  # noqa: BLE001
         row.status = "failed"
         row.error_message = str(exc)[:2000]
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         logger.error("vyos link %s failed: %s", row.id, exc)
         job_service.set_failed(db, job_id, str(exc)[:2000])
         return
 
     cfg = link_config(row)
-    cfg["last_check"] = datetime.utcnow().isoformat()
+    cfg["last_check"] = utcnow().isoformat()
     cfg["tunnel"] = state or "unknown"
     _set_config(row, cfg)
     result = {"directory_id": row.id, "name": row.name, "tunnel": state or "unknown",
@@ -431,7 +432,7 @@ async def run(db: Session, row, job_id: str, *, check_only: bool) -> None:
         row.status = "failed" if not check_only else row.status
         row.error_message = ("the configuration play ended without reporting a result — "
                              "read the job's output")
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         job_service.set_failed(db, job_id, f"{row.error_message}\n\n{output[-4000:]}")
         return
@@ -443,7 +444,7 @@ async def run(db: Session, row, job_id: str, *, check_only: bool) -> None:
         row.error_message = (f"the peer is configured, but {play_vars(row)['probe_address']} "
                              "did not answer through the tunnel — paste the on-prem commands "
                              "into your router, then Check link")
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
     job_service.set_completed(db, job_id, result=result)
 

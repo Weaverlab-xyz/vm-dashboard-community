@@ -27,7 +27,12 @@ Run: python tests/test_job_retry.py   (or under pytest)
 import os
 import sys
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+
+def _utcnow():
+    """Naive UTC now: what the deprecated datetime.utcnow() returned."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -75,7 +80,7 @@ def _job(job_id, job_type="ec2_power", **cols):
     try:
         db.query(Job).filter(Job.id == job_id).delete()
         job = Job(id=job_id, job_type=job_type, status="running", created_by="alice",
-                  created_at=datetime.utcnow(), started_at=datetime.utcnow())
+                  created_at=_utcnow(), started_at=_utcnow())
         for k, v in cols.items():
             setattr(job, k, v)
         db.add(job)
@@ -188,7 +193,7 @@ def test_a_transient_failure_is_requeued_rather_than_failed():
     row = _read("j1")
     assert row.status == "pending", "a retryable failure goes back on the queue"
     assert row.attempts == 1
-    assert row.retry_after is not None and row.retry_after > datetime.utcnow()
+    assert row.retry_after is not None and row.retry_after > _utcnow()
     assert row.error_message == THROTTLE, "the reason must survive the requeue"
     # completed_at must stay NULL: the run has not completed, and stamping it would make a
     # requeued job read as finished to every duration and staleness check in the tree.
@@ -510,7 +515,7 @@ def test_the_claim_skips_a_job_whose_backoff_has_not_passed():
         db.close()
 
     _job("waiting", status="pending", attempts=1,
-         retry_after=datetime.utcnow() + timedelta(minutes=5))
+         retry_after=_utcnow() + timedelta(minutes=5))
     db = SessionLocal()
     try:
         assert jobs_worker._claim_one(db, allowed=("ec2_power",)) is None, \
@@ -520,7 +525,7 @@ def test_the_claim_skips_a_job_whose_backoff_has_not_passed():
 
     # Once the backoff has passed it is claimable again.
     _job("ready", status="pending", attempts=1,
-         retry_after=datetime.utcnow() - timedelta(seconds=1))
+         retry_after=_utcnow() - timedelta(seconds=1))
     db = SessionLocal()
     try:
         claimed = jobs_worker._claim_one(db, allowed=("ec2_power",))

@@ -72,6 +72,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from ..database import K8sCluster, WorkloadK8sToken
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -435,7 +436,7 @@ async def run(db: Session, *, row_id: str, job_id: str, action: str = "register"
         # the same reason ansible_run_gate gives).
         row.error_message = str(exc)[:2000]
         row.status = "failed"
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         logger.error("workload-k8s: %s failed for %s: %s", action, row_id, exc)
         job_service.set_failed(db, job_id, str(exc))
@@ -521,7 +522,7 @@ async def _run_register(db: Session, row: WorkloadK8sToken, job_id: str) -> dict
     # the ids alone would have nothing able to remove the objects it created.
     row.ps_tf_state = reg.get("tf_state_json")
     _mark(row, "managed_system")
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
 
     # 4. The rotation that makes the account hold something real.
@@ -532,7 +533,7 @@ async def _run_register(db: Session, row: WorkloadK8sToken, job_id: str) -> dict
     _mark(row, "first_rotation")
     row.status = "active"
     row.error_message = None
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
 
     for note in warnings:
@@ -557,7 +558,7 @@ async def _run_rotate(db: Session, row: WorkloadK8sToken, job_id: str) -> dict:
     await ps_k8s_token_service._rotate_token_once(      # noqa: SLF001
         db, cluster, int(row.ps_account_id), warnings=warnings, namespace=row.namespace)
     row.rotated = True
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
     return {"id": row.id, "rotated": True, "warnings": warnings,
             "note": ("a token already retrieved keeps working until its TTL expires — "
@@ -618,6 +619,6 @@ async def _run_deregister(db: Session, row: WorkloadK8sToken, job_id: str) -> di
         logger.warning("workload-k8s: cluster teardown for %s failed: %s", row.id, exc)
 
     row.status = "deleted"
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
     return {"id": row.id, "notes": notes}

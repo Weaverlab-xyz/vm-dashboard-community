@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import Job, User, VMWorkgroupOverride, Workgroup
+from ..utils.clock import utcnow
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$")
 
@@ -170,7 +171,7 @@ def create(
         description=(description or None),
         local_vm_path=(local_vm_path or None),
         is_default=bool(is_default),
-        created_at=datetime.utcnow(),
+        created_at=utcnow(),
         created_by_user_id=created_by_user_id,
     )
     db.add(wg)
@@ -337,7 +338,7 @@ def seed_if_empty(db: Session) -> None:
     if db.query(Workgroup.id).first() is not None:
         return
 
-    now = datetime.utcnow()
+    now = utcnow()
     # Always seed `default` first so it survives even if the dict has bad entries.
     db.add(Workgroup(
         id=str(uuid.uuid4()),

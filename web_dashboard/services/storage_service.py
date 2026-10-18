@@ -1234,8 +1234,8 @@ def image_key(backend: str, image_name: str, ext: str = "vhd", ts: Optional[str]
     repeated builds of the same image name produce distinct keys.
     """
     if ts is None:
-        from datetime import datetime
-        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     blob = f"images/{image_name}-{ts}.{ext}"
     if backend == "s3":
         prefix = (_cfg("storage_s3_prefix") or "config-mgmt").rstrip("/")

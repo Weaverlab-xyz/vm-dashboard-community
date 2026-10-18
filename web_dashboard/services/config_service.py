@@ -421,9 +421,9 @@ def set(key: str, value: str, workgroup: str | None = None) -> None:
             existing = q.filter(AppConfig.workgroup == workgroup).first()
         if existing:
             existing.value = encrypted
-            existing.updated_at = datetime.utcnow()
+            existing.updated_at = utcnow()
         else:
-            db.add(AppConfig(key=key, value=encrypted, workgroup=workgroup, updated_at=datetime.utcnow()))
+            db.add(AppConfig(key=key, value=encrypted, workgroup=workgroup, updated_at=utcnow()))
         db.commit()
         with _cache_lock:
             _cache[(key, workgroup)] = value
@@ -449,9 +449,9 @@ def set_many(pairs: dict, workgroup: str | None = None) -> None:
                 existing = q.filter(AppConfig.workgroup == workgroup).first()
             if existing:
                 existing.value = encrypted
-                existing.updated_at = datetime.utcnow()
+                existing.updated_at = utcnow()
             else:
-                db.add(AppConfig(key=key, value=encrypted, workgroup=workgroup, updated_at=datetime.utcnow()))
+                db.add(AppConfig(key=key, value=encrypted, workgroup=workgroup, updated_at=utcnow()))
         db.commit()
         with _cache_lock:
             for k, v in pairs.items():
@@ -529,6 +529,7 @@ def mark_setup_complete() -> None:
 # secret_hygiene.SECRET_KEYS for why it replaced four.
 from .secret_hygiene import BACKEND_PREFIXES as _VAULT_PREFIXES  # noqa: E402
 from .secret_hygiene import SECRET_KEYS as _SECRET_KEYS  # noqa: E402
+from ..utils.clock import utcnow
 
 #: What get_all_public() puts in place of a stored secret.
 MASK = "••••••••"

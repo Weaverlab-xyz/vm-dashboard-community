@@ -38,6 +38,7 @@ from typing import Optional, Tuple
 
 from jose import jwt
 from sqlalchemy.orm import Session
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +191,7 @@ def create_client(db: Session, user, *, name: str, secret_days: Optional[int] = 
         user_id=user.id,
         name=name[:100],
         secret_hash=hash_secret(raw),
-        secret_expires_at=datetime.utcnow() + timedelta(days=days),
+        secret_expires_at=utcnow() + timedelta(days=days),
         token_ttl_seconds=ttl,
         created_by=created_by or None,
         is_active=True,
@@ -214,7 +215,7 @@ def rotate_client(db: Session, client, *, secret_days: Optional[int] = None,
                     "Secret lifetime (days)")
     grace = _bounded(grace_minutes, DEFAULT_ROTATION_GRACE_MINUTES, 0,
                      MAX_ROTATION_GRACE_MINUTES, "Rotation grace (minutes)")
-    now = datetime.utcnow()
+    now = utcnow()
     raw = _new_secret()
     if grace:
         client.previous_secret_hash = client.secret_hash
@@ -243,7 +244,7 @@ def authenticate_client(db: Session, client_id: str, secret: str,
 
     if not client_id or not secret:
         return None
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     client = db.query(OAuthClient).filter(OAuthClient.client_id == client_id).first()
     if not client or not client.is_active:
         return None
@@ -324,7 +325,7 @@ def issue_access_token(user, client, scope: Optional[dict]) -> Tuple[str, int]:
     from ..config import settings
 
     ttl = int(client.token_ttl_seconds or DEFAULT_TOKEN_TTL_SECONDS)
-    now = datetime.utcnow()
+    now = utcnow()
     payload = {
         "sub": user.username,
         "type": TOKEN_TYPE,
@@ -372,4 +373,4 @@ def resolve_workload_token(db: Session, payload: dict):
 
 
 def touch_client(db: Session, client) -> None:
-    client.last_used_at = datetime.utcnow()
+    client.last_used_at = utcnow()

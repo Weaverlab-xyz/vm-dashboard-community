@@ -34,6 +34,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-health-workload-tests")
 
 from web_dashboard.database import (AgentCell, Base, K8sCluster,  # noqa: E402
                                     PersonalAccessToken, SessionLocal, SpireLab, engine)
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.services import feature_flags  # noqa: E402
 from web_dashboard.services.health.collectors import workloads as W  # noqa: E402
 
@@ -162,10 +163,10 @@ def test_collect_respects_flags_and_reads_password_safe_once_per_cluster():
     lab = SpireLab(id=str(uuid.uuid4()), name="td-lab", trust_domain="lab.example",
                    status="available", created_by="t")
     cell = AgentCell(id=str(uuid.uuid4()), name="cell-1", status="available",
-                     pat_expires_at=datetime.utcnow() + timedelta(hours=30))
+                     pat_expires_at=utcnow() + timedelta(hours=30))
     pat = PersonalAccessToken(id=str(uuid.uuid4()), user_id=str(uuid.uuid4()), name="ci",
                               token_hash=uuid.uuid4().hex + uuid.uuid4().hex,
-                              last_used_at=datetime.utcnow(), is_active=True)
+                              last_used_at=utcnow(), is_active=True)
     db.add_all([cluster, plain, lab, cell, pat])
     db.commit()
     calls = []

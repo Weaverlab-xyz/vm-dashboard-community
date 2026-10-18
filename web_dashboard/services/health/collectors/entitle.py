@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from .. import core
+from ....utils.clock import utcnow
 
 _APP_STATUS = {"active": core.OK, "failed": core.FAIL, "applying": core.UNKNOWN,
                "destroying": core.UNKNOWN}
@@ -24,7 +25,7 @@ _APP_STATUS = {"active": core.OK, "failed": core.FAIL, "applying": core.UNKNOWN,
 def sweep_item(result: dict, *, gate_on: bool, interval_s: int,
                now: Optional[datetime] = None) -> Optional[core.Item]:
     """The sweep's health from its stored result, or None when JIT is not in use. Pure."""
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     if not gate_on:
         return None
     checks = []

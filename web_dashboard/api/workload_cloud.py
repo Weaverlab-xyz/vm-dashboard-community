@@ -33,6 +33,7 @@ from ..database import User, get_db
 from ..services import config_service, workload_cloud_service
 from ..services.workload_cloud_service import WorkloadCloudError
 from .auth import require_permission
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/workload-cloud", tags=["workload-cloud"])
@@ -228,7 +229,7 @@ def register_identity(req: RegisterRequest, db: Session = Depends(get_db),
     _require_enabled()
     expires_at = None
     if req.expires_in_hours and req.expires_in_hours > 0:
-        expires_at = datetime.utcnow() + timedelta(hours=int(req.expires_in_hours))
+        expires_at = utcnow() + timedelta(hours=int(req.expires_in_hours))
     try:
         return workload_cloud_service.register(
             db, name=req.name, cloud=req.cloud, dynamic_name=req.dynamic_name,

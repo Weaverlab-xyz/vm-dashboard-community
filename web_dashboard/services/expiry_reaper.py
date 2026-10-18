@@ -50,6 +50,7 @@ from ..database import (CertLab, CloudDatabase, Job, JobLog, K8sCluster, Managed
                         PovEnvironment, SpireLab, WorkloadCloudCredential,
                         WorkloadK8sToken)
 from . import expiry_policy, job_service
+from ..utils.clock import utcfromtimestamp
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +125,7 @@ def _armed_at() -> Optional[datetime]:
     ts = expiry_policy.parse_ts(raw)
     if ts is None:
         return None
-    return datetime.utcfromtimestamp(ts)
+    return utcfromtimestamp(ts)
 
 
 def _enforce_since() -> Optional[datetime]:
@@ -134,7 +135,7 @@ def _enforce_since() -> Optional[datetime]:
     except Exception:                                  # pragma: no cover - defensive
         pass
     ts = expiry_policy.parse_ts(raw) if raw else None
-    return datetime.utcfromtimestamp(ts) if ts else None
+    return utcfromtimestamp(ts) if ts else None
 
 
 def _note_enforcement(db: Session, now: datetime) -> Optional[datetime]:

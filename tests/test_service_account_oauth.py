@@ -47,6 +47,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from jose import jwt  # noqa: E402
 
 from web_dashboard.config import settings  # noqa: E402
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.database import (Base, OAuthClient, SessionLocal, User,  # noqa: E402
                                     engine, get_password_hash)
 from web_dashboard.api import auth as auth_api  # noqa: E402
@@ -276,7 +277,7 @@ def test_an_expired_secret_is_refused():
     cl = _make_client(sa["id"])
     db = SessionLocal()
     row = db.query(OAuthClient).filter(OAuthClient.id == cl["id"]).first()
-    row.secret_expires_at = datetime.utcnow() - timedelta(minutes=1)
+    row.secret_expires_at = utcnow() - timedelta(minutes=1)
     db.commit()
     db.close()
     assert _token(cl["client_id"], cl["client_secret"]).status_code == 401
@@ -380,7 +381,7 @@ def test_rotation_keeps_the_old_secret_for_its_grace_window_only():
     assert _token(cl["client_id"], cl["client_secret"]).status_code == 200
     db = SessionLocal()
     row = db.query(OAuthClient).filter(OAuthClient.id == cl["id"]).first()
-    row.previous_expires_at = datetime.utcnow() - timedelta(seconds=1)
+    row.previous_expires_at = utcnow() - timedelta(seconds=1)
     db.commit()
     db.close()
     assert _token(cl["client_id"], cl["client_secret"]).status_code == 401

@@ -12,8 +12,14 @@ this file by path with no package context, so module-level imports must stay std
 """
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Iterable, Optional
+
+
+def _utcnow() -> datetime:
+    """Naive UTC now (datetime.utcnow() is deprecated). Local rather than
+    utils.clock: this module is loaded on its own, without the package."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def content_hash(asset_bytes: bytes) -> str:
@@ -43,7 +49,7 @@ def evaluate(rows: Iterable[dict], current_hashes: dict, stale_days: int,
     ``{stale_days, items, unverified_count, changed_count}``; drift rows sort
     first, oldest-applied first.
     """
-    now = now or datetime.utcnow()
+    now = now or _utcnow()
     items = []
     for r in rows:
         applied_at = r.get("applied_at")
@@ -82,7 +88,7 @@ def record_apply(db, target: str, playbook_ref: str, content_hash: str,
            .filter(ConfigApplyState.target == target,
                    ConfigApplyState.playbook_ref == playbook_ref)
            .first())
-    now = datetime.utcnow()
+    now = _utcnow()
     if row:
         row.content_hash = content_hash
         row.inputs_hash = inputs_hash

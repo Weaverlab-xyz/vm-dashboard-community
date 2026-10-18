@@ -31,11 +31,12 @@ if _ROOT not in sys.path:
 
 from web_dashboard.database import (Base, Job, PovEnvironment, SessionLocal,  # noqa: E402
                                     engine)
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.services import job_service                                 # noqa: E402
 
 Base.metadata.create_all(bind=engine)
 
-_OLD = datetime.utcnow() - timedelta(hours=1)
+_OLD = utcnow() - timedelta(hours=1)
 
 
 def _reset():
@@ -63,7 +64,7 @@ def _job(job_id, job_type, status, env_id):
     try:
         db.add(Job(id=job_id, job_type=job_type, status=status,
                    extra_data=json.dumps({"environment_id": env_id}),
-                   created_at=datetime.utcnow(), updated_at=datetime.utcnow()))
+                   created_at=utcnow(), updated_at=utcnow()))
         db.commit()
     finally:
         db.close()
@@ -109,7 +110,7 @@ def test_live_provision_job_is_left_alone():
 
 def test_a_fresh_row_is_left_alone():
     _reset()
-    _env("e1", "provisioning", created_at=datetime.utcnow())
+    _env("e1", "provisioning", created_at=utcnow())
     _sweep()
     assert _row("e1")[0] == "provisioning", (
         "a row created moments ago was failed before its job could be queued")

@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from ..database import PersonalAccessToken, User, get_db
 from .auth import get_current_user, require_person
+from ..utils.clock import utcnow
 
 router = APIRouter(prefix="/api/tokens", tags=["tokens"])
 
@@ -72,7 +73,7 @@ def create_token(
     """
     raw = _generate_raw()
     expires_at = (
-        datetime.utcnow() + timedelta(days=body.expires_days)
+        utcnow() + timedelta(days=body.expires_days)
         if body.expires_days
         else None
     )

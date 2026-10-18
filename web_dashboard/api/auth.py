@@ -38,6 +38,7 @@ from ..services.fido2_service import (
     b64url_decode,
 )
 from ..services import external_workload, login_guard, personas, public_url, service_accounts
+from ..utils.clock import utcnow
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
@@ -61,9 +62,9 @@ def _get_user_from_pat(raw_token: str, db: Session) -> User:
     )
     if not pat:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or revoked token")
-    if pat.expires_at and pat.expires_at < datetime.utcnow():
+    if pat.expires_at and pat.expires_at < utcnow():
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
-    pat.last_used_at = datetime.utcnow()
+    pat.last_used_at = utcnow()
     db.commit()
     user = db.query(User).filter(User.id == pat.user_id, User.is_active == True).first()
     if not user:
@@ -81,14 +82,14 @@ def _get_user_from_pat(raw_token: str, db: Session) -> User:
 
 def create_access_token(data: dict) -> str:
     payload = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=settings.access_token_expire_minutes)
+    expire = utcnow() + timedelta(minutes=settings.access_token_expire_minutes)
     payload.update({"exp": expire, "type": "access"})
     return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
 
 def _create_pre_auth_token(user_id: str) -> str:
     """Short-lived token issued after password check; authorises the FIDO2 step only."""
-    expire = datetime.utcnow() + timedelta(minutes=_PRE_AUTH_EXPIRE_MINUTES)
+    expire = utcnow() + timedelta(minutes=_PRE_AUTH_EXPIRE_MINUTES)
     payload = {"sub": user_id, "type": "pre_auth", "exp": expire}
     return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
@@ -926,7 +927,7 @@ def login_mfa(
     for c in db_creds:
         if bytes(c.credential_id) == matched_id:
             c.sign_count = new_sign_count
-            c.last_used_at = datetime.utcnow()
+            c.last_used_at = utcnow()
             db.commit()
             break
 

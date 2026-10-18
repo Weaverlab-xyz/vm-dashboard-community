@@ -34,6 +34,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from web_dashboard.services import cert_lab_service as cls        # noqa: E402
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 from web_dashboard.services import expiry_policy, job_service      # noqa: E402
 
 
@@ -199,7 +200,7 @@ def test_the_same_instance_still_builds_a_gcp_ca():
 
 
 def test_a_row_is_shaped_by_its_cloud():
-    original = _with_timer(datetime.utcnow() + timedelta(hours=8))
+    original = _with_timer(utcnow() + timedelta(hours=8))
     created = job_service.create_job
     job_service.create_job = lambda *a, **k: SimpleNamespace(id="job-1")
     try:
@@ -221,7 +222,7 @@ def test_a_row_is_shaped_by_its_cloud():
 
 
 def test_a_gcp_build_still_needs_its_project():
-    original = _with_timer(datetime.utcnow() + timedelta(hours=8))
+    original = _with_timer(utcnow() + timedelta(hours=8))
     try:
         cls.provision(_FakeDB(), name="Demo", project="", created_by="t", cloud="gcp")
     except cls.CertLabError as exc:
@@ -235,7 +236,7 @@ def test_a_gcp_build_still_needs_its_project():
 # ── the ids, which CAS never gives back ───────────────────────────────────────
 
 def _provision_gcp(name, **kw):
-    original = _with_timer(datetime.utcnow() + timedelta(hours=8))
+    original = _with_timer(utcnow() + timedelta(hours=8))
     created = job_service.create_job
     job_service.create_job = lambda *a, **k: SimpleNamespace(id="job-1")
     try:

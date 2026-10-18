@@ -36,7 +36,12 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+
+def _utcnow():
+    """Naive UTC now: what the deprecated datetime.utcnow() returned."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -112,7 +117,7 @@ def _job(job_id, job_type, created_by, workgroup, extra=None, status="completed"
         db.add(Job(id=job_id, job_type=job_type, status=status,
                    created_by=created_by, workgroup=workgroup,
                    extra_data=json.dumps(extra or {}),
-                   created_at=datetime.utcnow(), completed_at=datetime.utcnow()))
+                   created_at=_utcnow(), completed_at=_utcnow()))
         db.commit()
     finally:
         db.close()
@@ -466,7 +471,7 @@ def test_valid_pat_populates_the_context_var():
         db.add(PersonalAccessToken(
             id=str(_uuid.uuid4()), user_id=uid, name="test",
             token_hash=hashlib.sha256(raw.encode()).hexdigest(),
-            is_active=True, expires_at=datetime.utcnow() + timedelta(days=1)))
+            is_active=True, expires_at=_utcnow() + timedelta(days=1)))
         db.commit()
     finally:
         db.close()

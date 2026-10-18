@@ -38,6 +38,7 @@ sys.path.insert(0, _ROOT)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-pov-broker")
 
 from web_dashboard import database as d  # noqa: E402
+from web_dashboard.utils.clock import utcnow  # noqa: E402
 
 d.Base.metadata.create_all(bind=d.engine)
 
@@ -968,7 +969,7 @@ def test_the_adapter_exposes_inject_bootstrap():
 def _agent(name, *, agent_id=None, public_key="k" * 64, active=True):
     db = d.SessionLocal()
     row = d.RemoteAgent(name=name, public_key=public_key, is_active=active,
-                        last_seen_at=d.datetime.utcnow())
+                        last_seen_at=utcnow())
     if agent_id:
         row.id = agent_id
     db.add(row)

@@ -39,6 +39,7 @@ from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment
 from . import config_service, lab_platforms
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,7 @@ _generate_password = generate_password
 
 
 def _now() -> datetime:
-    return datetime.utcnow()
+    return utcnow()
 
 
 # ── state ────────────────────────────────────────────────────────────────────

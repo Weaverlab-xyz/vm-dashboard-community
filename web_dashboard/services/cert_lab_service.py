@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 
 from ..database import CertLab
 from . import expiry_policy, job_service, terraform, terraform_provider_env
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -386,7 +387,7 @@ async def rewire_functional_account(db: Session, *, lab_id: str,
     fa = await cert_ps_service.ensure_functional_account(row, outputs, package)
     _set_functional_account(row, package, fa)
     row.error_message = None
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     db.commit()
 
     # **A re-wire onto the OTHER BeyondInsight path mints a SECOND account, and this row
@@ -650,7 +651,7 @@ async def run_provision_apply(db: Session, *, lab_id: str, job_id: str) -> None:
         await broadcast_progress(job_id, 90,
                                  "Wiring up the Password Safe functional account…")
         fa_note = await _wire_up_functional_account(row, outputs)
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         job_service.set_completed(db, job_id, result={
             "lab_id": row.id, "pool_id": row.pool_id,
@@ -670,7 +671,7 @@ async def run_provision_apply(db: Session, *, lab_id: str, job_id: str) -> None:
         message = f"{_explain_apply_failure(row, str(exc))}{note}"
         row.status = "failed"
         row.error_message = message[:2000]
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         logger.error("cert-lab: provision failed for %s: %s", lab_id, exc)
         job_service.set_failed(db, job_id, message)
@@ -738,7 +739,7 @@ def start_decommission(db: Session, *, lab_id: str, created_by: str) -> dict:
     # Clear the timer in the same transaction that starts the teardown: at-most-once,
     # and it stops the next sweep pass from enqueueing a second destroy for the same row.
     row.expires_at = None
-    row.updated_at = datetime.utcnow()
+    row.updated_at = utcnow()
     job = job_service.create_job(
         db, DECOMMISSION_JOB_TYPE, created_by, workgroup=row.workgroup,
         metadata={"lab_id": row.id, "name": row.name, "cloud": row.cloud,
@@ -835,7 +836,7 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str) -> None:
                                 row.cloud))
         row.status = "deleted"
         row.error_message = None
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         job_service.set_completed(db, job_id, result={"lab_id": row.id,
                                                       "pool_id": row.pool_id})
@@ -845,7 +846,7 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str) -> None:
         # already failed once, on a loop, silently.
         row.status = "failed"
         row.error_message = str(exc)[:2000]
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         logger.error("cert-lab: teardown failed for %s: %s", lab_id, exc)
         job_service.set_failed(db, job_id, str(exc))
@@ -1014,7 +1015,7 @@ async def run_ps_register(db: Session, *, lab_id: str, job_id: str, account_name
         row.ps_address = address
         row.ps_package = package
         row.ps_tf_state = reg.get("tf_state_json")
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         # No credential change is fired here, deliberately — unlike the k8s token path,
         # which rotates on register to prove the whole path at once. Issuance is meant to
@@ -1036,7 +1037,7 @@ async def run_ps_register(db: Session, *, lab_id: str, job_id: str, account_name
             "platform": cert_ps_service.platform_name(package)})
     except Exception as exc:
         row.error_message = str(exc)[:2000]
-        row.updated_at = datetime.utcnow()
+        row.updated_at = utcnow()
         db.commit()
         logger.error("cert-lab: Password Safe registration failed for %s: %s", lab_id, exc)
         job_service.set_failed(db, job_id, str(exc))

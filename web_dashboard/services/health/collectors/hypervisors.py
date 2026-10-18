@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from .. import core
+from ....utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +121,7 @@ async def collect(db) -> list:
     from ... import agent_service, feature_flags, hypervisor_connection_service as hcs
     from ... import hypervisor_sync_service
     from ....database import HypervisorConnection, RemoteAgent
-    now = datetime.utcnow()
+    now = utcnow()
     items = []
     rows = (db.query(HypervisorConnection)
             .filter(HypervisorConnection.is_active.is_(True))

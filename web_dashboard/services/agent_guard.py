@@ -58,6 +58,7 @@ from sqlalchemy.orm import Session
 
 from ..database import AgentEnrollAttempt, AgentNonce
 from . import agent_signing
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +155,7 @@ def check_request(db: Session, agent_id: str, *, now: Optional[datetime] = None)
         return
     cap = min(cap, _MAX_ROWS_SCANNED)
 
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     window = _request_window()
     stamps = [
         row.seen_at for row in
@@ -186,7 +187,7 @@ def check_enroll(db: Session, *, ip: str = "", now: Optional[datetime] = None) -
     """
     if not _enabled():
         return
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     window = _enroll_window()
     cutoff = now - window
 
@@ -223,7 +224,7 @@ def record_enroll_failure(db: Session, *, ip: str = "",
         return
     try:
         db.add(AgentEnrollAttempt(ip=(ip or "")[:45],
-                                  attempted_at=now or datetime.utcnow()))
+                                  attempted_at=now or utcnow()))
         db.commit()
         sweep_enroll_attempts(db)
     except Exception:  # noqa: BLE001
@@ -240,7 +241,7 @@ def sweep_enroll_attempts(db: Session, now: Optional[datetime] = None) -> int:
     table only grows when enrolment is failing, which is exactly when it needs tidying,
     and it needs no timer process."""
     try:
-        cutoff = (now or datetime.utcnow()) - timedelta(
+        cutoff = (now or utcnow()) - timedelta(
             minutes=_cfg_int("agent_enroll_retention_minutes",
                              DEFAULT_ENROLL_RETENTION_MINUTES))
         deleted = db.query(AgentEnrollAttempt).filter(

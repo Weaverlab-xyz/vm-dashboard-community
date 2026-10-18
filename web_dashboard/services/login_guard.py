@@ -39,6 +39,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from ..database import LoginAttempt
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,7 @@ def check(db: Session, *, username: str, ip: str = "", now: Optional[datetime] =
     """
     if not _enabled():
         return
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     window = _window()
     cutoff = now - window
     key = normalize_username(username)
@@ -153,7 +154,7 @@ def record_failure(db: Session, *, username: str, ip: str = "",
         return
     try:
         db.add(LoginAttempt(username=normalize_username(username), ip=(ip or "")[:45],
-                            attempted_at=now or datetime.utcnow()))
+                            attempted_at=now or utcnow()))
         db.commit()
         _sweep(db)
     except Exception:  # noqa: BLE001
@@ -189,7 +190,7 @@ def _sweep(db: Session, now: Optional[datetime] = None) -> int:
     the table only grows when logins are failing, so that is exactly when it needs
     tidying, and it needs no timer process."""
     try:
-        cutoff = (now or datetime.utcnow()) - timedelta(
+        cutoff = (now or utcnow()) - timedelta(
             minutes=_cfg_int("login_retention_minutes", DEFAULT_RETENTION_MINUTES))
         deleted = db.query(LoginAttempt).filter(
             LoginAttempt.attempted_at < cutoff).delete(synchronize_session=False)
@@ -206,7 +207,7 @@ def _sweep(db: Session, now: Optional[datetime] = None) -> int:
 def recent_failures(db: Session, *, minutes: int = 60, limit: int = 100) -> list:
     """Recent failed attempts, newest first — the visibility that did not exist before.
     Consumed by the admin surface; returns plain tuples, never ORM rows."""
-    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    cutoff = utcnow() - timedelta(minutes=minutes)
     rows = (
         db.query(LoginAttempt.username, LoginAttempt.ip, LoginAttempt.attempted_at)
         .filter(LoginAttempt.attempted_at >= cutoff)

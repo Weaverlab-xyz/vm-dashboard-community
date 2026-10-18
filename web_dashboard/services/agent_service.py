@@ -44,6 +44,7 @@ from sqlalchemy.orm import Session
 
 from ..database import AgentNonce, Job, RemoteAgent
 from . import agent_guard, agent_signing, config_service, job_service
+from ..utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +152,7 @@ def create_agent(db: Session, *, name: str, site: str = "", description: str = "
         site=(site or "").strip(),
         description=(description or "").strip(),
         enroll_code_hash=hash_code(code),
-        enroll_expires_at=datetime.utcnow() + timedelta(minutes=ENROLL_TTL_MINUTES),
+        enroll_expires_at=utcnow() + timedelta(minutes=ENROLL_TTL_MINUTES),
         created_by=created_by,
     )
     db.add(agent)
@@ -171,7 +172,7 @@ def reissue_enroll_code(db: Session, agent: RemoteAgent) -> str:
     """
     code = new_enroll_code()
     agent.enroll_code_hash = hash_code(code)
-    agent.enroll_expires_at = datetime.utcnow() + timedelta(minutes=ENROLL_TTL_MINUTES)
+    agent.enroll_expires_at = utcnow() + timedelta(minutes=ENROLL_TTL_MINUTES)
     agent.public_key = None
     agent.enrolled_at = None
     agent.spiffe_id = None
@@ -273,7 +274,7 @@ def _attest(db: Session, *, svid: str, public_key: str, proof: str, audiences,
         logger.warning("agent attest refused for %s: %s", sub, exc)
         raise refused
 
-    now = datetime.utcnow()
+    now = utcnow()
     agent.public_key = public_key          # replaces any Ed25519 key: one key per agent
     agent.auth_mode = "spiffe"
     agent.agent_version = (agent_version or "")[:32]
@@ -353,7 +354,7 @@ def status_of(agent: RemoteAgent, *, now: Optional[datetime] = None) -> str:
         return "enrolling"
     if not agent.last_seen_at:
         return "offline"
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     fresh = (now - agent.last_seen_at).total_seconds() <= ONLINE_WINDOW_SECONDS
     return "online" if fresh else "offline"
 
@@ -401,7 +402,7 @@ def _redeem(db: Session, *, code: str, public_key: str, agent_version: str = "",
         raise AgentError("Invalid enrolment code.")
     if not agent.is_active:
         raise AgentError("This agent has been revoked.")
-    if agent.enroll_expires_at and agent.enroll_expires_at < datetime.utcnow():
+    if agent.enroll_expires_at and agent.enroll_expires_at < utcnow():
         raise AgentError("Enrolment code has expired. Issue a new one from the Agents page.")
 
     # Reject a malformed key here rather than storing it and failing every later poll
@@ -415,8 +416,8 @@ def _redeem(db: Session, *, code: str, public_key: str, agent_version: str = "",
     agent.public_key = public_key
     agent.policy_hash = (policy_hash or "")[:64]
     agent.agent_version = (agent_version or "")[:32]
-    agent.enrolled_at = datetime.utcnow()
-    agent.last_seen_at = datetime.utcnow()
+    agent.enrolled_at = utcnow()
+    agent.last_seen_at = utcnow()
     agent.last_seen_ip = (ip or "")[:45]
     # Single-use: consumed on success, so a captured code cannot enroll a second,
     # attacker-controlled container against the same row.
@@ -459,7 +460,7 @@ def authenticate(db: Session, *, agent_id: str, timestamp: str, nonce: str,
     if not _consume_nonce(db, agent_id, nonce):
         raise AgentError("Replayed request.")
 
-    agent.last_seen_at = datetime.utcnow()
+    agent.last_seen_at = utcnow()
     if ip:
         agent.last_seen_ip = ip[:45]
     db.commit()
@@ -476,7 +477,7 @@ def _consume_nonce(db: Session, agent_id: str, nonce: str) -> bool:
     if not nonce or len(nonce) > 64:
         return False
     try:
-        db.add(AgentNonce(agent_id=agent_id, nonce=nonce, seen_at=datetime.utcnow()))
+        db.add(AgentNonce(agent_id=agent_id, nonce=nonce, seen_at=utcnow()))
         db.commit()
         return True
     except IntegrityError:
@@ -488,7 +489,7 @@ def sweep_nonces(db: Session, *, older_than_seconds: int = 0) -> int:
     """Drop nonces older than the signature window — they can no longer be replayed
     because the timestamp check would reject them anyway, so keeping them is pure
     storage. Called opportunistically from the lease path."""
-    cutoff = datetime.utcnow() - timedelta(
+    cutoff = utcnow() - timedelta(
         seconds=older_than_seconds or (agent_signing.SIGNATURE_WINDOW_SECONDS * 4))
     deleted = db.query(AgentNonce).filter(AgentNonce.seen_at < cutoff).delete(
         synchronize_session=False)
@@ -534,7 +535,7 @@ def lease_one(db: Session, agent: RemoteAgent) -> Optional[dict]:
         )
         if job is None:
             return None
-        now = datetime.utcnow()
+        now = utcnow()
         claimed = (
             db.query(Job)
             .filter(Job.id == job.id, Job.status == "queued", Job.agent_id == agent.id)

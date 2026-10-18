@@ -34,6 +34,7 @@ from typing import Callable, Optional
 from urllib.parse import urlparse
 
 from . import agent_sealing, config_service, runner_fetch
+from ..utils.clock import utcnow
 
 SETTING = "ansible_runner_credential_callback"
 ECS_TASK_ROLE = "ansible_ecs_task_role_arn"
@@ -119,7 +120,7 @@ def issue(db, *, job_id: str, runner: str, values: dict,
     from ..database import RunnerCredentialGrant
     if runner not in RUNNERS:
         raise RunnerCredentialError(f"no collect-from-dashboard path for {runner}")
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     # Opportunistic: a run that crashed before its own revoke left an expired grant —
     # unusable, values encrypted, but not worth keeping. Each issue clears them.
     sweep(db, now)
@@ -144,7 +145,7 @@ def sweep(db, now: Optional[datetime] = None) -> int:
     """Delete grants past their expiry — a run that crashed before its own revoke."""
     from ..database import RunnerCredentialGrant
     n = db.query(RunnerCredentialGrant).filter(
-        RunnerCredentialGrant.expires_at < (now or datetime.utcnow())).delete(
+        RunnerCredentialGrant.expires_at < (now or utcnow())).delete(
         synchronize_session=False)
     db.commit()
     return n
@@ -237,7 +238,7 @@ def redeem(db, *, token: str, proof: dict, reply_key: str,
            google_verify: Callable = _verify_google) -> tuple:
     """``(sealed envelope, {job_id, runner, identity})``, or RunnerCredentialError."""
     from ..database import RunnerCredentialGrant
-    now = now or datetime.utcnow()
+    now = now or utcnow()
     h = _hash(str(token or ""))
     # Burn it first: an atomic claim, so two racing callers cannot both proceed and a
     # failed proof still spends the token.
