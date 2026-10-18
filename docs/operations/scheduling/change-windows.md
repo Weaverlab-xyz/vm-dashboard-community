@@ -85,7 +85,7 @@ A teardown is the operation a change window most needs to cover — the
 the same argument, which is why the change-freeze policy is the one that deliberately
 applies to teardowns as well as deploys.
 
-You do not pre-book a destroy from a picker; you press Destroy, and if the workgroup
+You do not pre-book a destroy from a picker; you press Destroy, and if the workstream
 has a required window the dashboard refuses and offers:
 
 > `prod` may only be changed during Prod Weekend (Sat 02:00–06:00 (UTC), 4h). The next
@@ -196,14 +196,14 @@ Two reasons, and the message says which:
 
 ---
 
-## Requiring a window for a whole workgroup
+## Requiring a window for a whole workstream
 
 Everything above is a **choice**: the operator picks Now, and Now is what happens. A
 workgroup-level window is a **constraint** — it cannot be bypassed by clicking Run now.
 
-**RBAC → Workgroups → Edit → Change window**, then tick **Require it**.
+**RBAC → Workstreams → Edit → Change window**, then tick **Require it**.
 
-With that set, any *gated* change against a resource in that workgroup is refused outside
+With that set, any *gated* change against a resource in that workstream is refused outside
 the window, with the reason and the next occurrence:
 
 ```
@@ -222,7 +222,7 @@ Gated actions**. One
 list, not two — if an action is worth gating on policy, it is the kind of action a
 change window is about. Two consequences worth knowing:
 
-* **Nothing is constrained until that list has entries.** A workgroup can require a
+* **Nothing is constrained until that list has entries.** A workstream can require a
   window and still allow everything, if no action is gated.
 * **Power operations are not on it by default**, so a window does not block start/stop
   unless an administrator adds them. That is usually right — powering a VM off is
@@ -236,7 +236,7 @@ You do **not** need to enable the policy engine. `admission_control_enabled` swi
 * **Required, with a window that was deleted** → every gated change is refused, saying
   so. An administrator picks another. Failing closed here is deliberate: somebody asked
   for these changes to be gated, and a broken gate is not an open one.
-* **Required, with no window picked** → refused at the point of saving the workgroup,
+* **Required, with no window picked** → refused at the point of saving the workstream,
   not at deploy time. Storing that state would block every change with nothing to book
   into.
 * **The dashboard cannot tell whether a window is required** (a schema problem) → the

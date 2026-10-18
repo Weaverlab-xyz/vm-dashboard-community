@@ -176,7 +176,7 @@ def create_group_mapping(payload: GroupMappingCreate, db: Session = Depends(get_
         valid_workgroups = workgroup_service.list_names(db)
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown workgroup '{payload.workgroup}'. Valid values: {valid_workgroups}",
+            detail=f"Unknown workstream '{payload.workgroup}'. Valid values: {valid_workgroups}",
         )
     if db.query(OAuthGroupMapping).filter(OAuthGroupMapping.entra_group_id == payload.entra_group_id).first():
         raise HTTPException(status_code=409, detail="A mapping for this Entra group ID already exists.")
@@ -231,7 +231,7 @@ def update_group_mapping(mapping_id: str, payload: GroupMappingUpdate,
         if not workgroup_service.exists(db, payload.workgroup):
             raise HTTPException(
                 status_code=400,
-                detail=f"Unknown workgroup '{payload.workgroup}'. Valid values: "
+                detail=f"Unknown workstream '{payload.workgroup}'. Valid values: "
                        f"{workgroup_service.list_names(db)}")
         mapping.workgroup = payload.workgroup
     if payload.display_name is not None:

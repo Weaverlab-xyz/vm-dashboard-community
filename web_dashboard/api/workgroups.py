@@ -128,7 +128,7 @@ def get_workgroup(
 ):
     wg = workgroup_service.get(db, name)
     if not wg:
-        raise HTTPException(status_code=404, detail=f"Workgroup '{name}' not found")
+        raise HTTPException(status_code=404, detail=f"Workstream '{name}' not found")
     members = [u.username for u in workgroup_service.members(db, wg.name)]
     base = _to_response(db, wg)
     return WorkgroupDetailResponse(**base.model_dump(), members=members)
@@ -196,7 +196,7 @@ def list_members(
     _: User = Depends(require_permission("workgroups", "read")),
 ):
     if not workgroup_service.exists(db, name):
-        raise HTTPException(status_code=404, detail=f"Workgroup '{name}' not found")
+        raise HTTPException(status_code=404, detail=f"Workstream '{name}' not found")
     return [u.username for u in workgroup_service.members(db, name)]
 
 

@@ -18,7 +18,7 @@ Walked as a POV install, the page came out like this:
 | Containers | one tile, Gateways |
 | Managed Services | one tile, OT Demo Cells — **whose only link 404s here** |
 | Quick deploy | gone — all eight shortcuts are estate-only |
-| Workgroup actions | gone |
+| Workstream actions | gone |
 | Use cases for *role* | rendered, and every card grey: "Not available on this instance" |
 | Focus picker | rendered, offering eight roles — none of which changed anything here |
 | Overview | Active Jobs, Deployed Resources |
@@ -123,7 +123,7 @@ raise five on its own, which would otherwise bury every failed job on the instan
 The next-step line links into the tab of `/pov/<id>` that owns that step. The dashboard
 holds a row and a step name; the POV page holds the handlers, the refusals and the
 confirmations. A button here would either send blind or need its own copy of that decision
-— the same reasoning the workgroup card on this page already records.
+— the same reasoning the workstream card on this page already records.
 
 ### Two things that look like bugs and are not
 

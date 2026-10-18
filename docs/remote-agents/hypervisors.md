@@ -411,7 +411,7 @@ stock install this usually is not available to you.
 `restart` onto `shutdown` would quietly do something other than what was asked.
 
 Synced VMs appear on the **Workstation** page alongside the ones this host scans locally,
-badged with the agent's name. They are tagged into workgroups the same way Proxmox and
+badged with the agent's name. They are tagged into workstreams the same way Proxmox and
 Nutanix VMs are, and an untagged VM is admin-only — which is what stops an agent widening
 what a non-admin can see.
 

@@ -76,8 +76,8 @@ Concretely:
 - For every dashboard permission tuple (`<scope>:<level>` —
   `aws:read`, `vms:write`, `images:delete`, etc.) there is an
   Entra ID security group named `dashboard-<scope>-<level>`.
-- For every workgroup, there's an Entra group
-  `dashboard-workgroup-<name>` — workgroup membership is
+- For every workstream, there's an Entra group
+  `dashboard-workgroup-<name>` — workstream membership is
   Entitle-grantable too.
 - `dashboard-admin` exists as a separate, high-value group;
   membership grants the `is_admin` flag for the duration.
@@ -153,7 +153,7 @@ The dashboard quickstart provisions:
 |---|---|---|
 | `dashboard-admin` | `default_permissions = {"is_admin": true}` | Highest-value grant; recommend non-auto-approve policy |
 | `dashboard-<scope>-<level>` for each level a scope offers in `PERMISSION_SCOPE_LEVELS` | `default_permissions = {"<scope>": ["<level>"]}` | 98 groups today. Per-scope levels, not the scopes × levels cross product — a level a scope does not offer would be a permanent group in the tenant that can never grant anything. |
-| `dashboard-workgroup-<wg>` for each workgroup the operator manages | `workgroup = "<wg>"` (uses the existing workgroup field) | Per-workgroup membership grant |
+| `dashboard-workgroup-<wg>` for each workstream the operator manages | `workgroup = "<wg>"` (uses the existing workstream field) | Per-workgroup membership grant |
 | `dashboard-baseline` (optional) | `default_permissions = {"vms": ["read"], "jobs": ["read"]}` | Default safe-read role for any authenticated user; auto-approve recommended |
 
 The naming convention is the operator's, not the dashboard's —
@@ -284,8 +284,8 @@ Adds:
 - Three sub-modes:
   - `--scope=permissions` — the 27 scope/level groups only.
   - `--scope=workgroups` — the per-workgroup groups (reads from
-    the workgroups table; needs to run AFTER workgroups exist).
-  - `--scope=all` — everything (admin + permissions + workgroups
+    the workstreams table; needs to run AFTER workstreams exist).
+  - `--scope=all` — everything (admin + permissions + workstreams
     + baseline).
 - For prod (multi-tenant), accepts `--tenant=<slug>` and prefixes
   group names with the tenant.
@@ -508,10 +508,10 @@ real second tenant).
   Tighter tokens = tighter grant cycle but more login friction.
   Phase 4 surfaces this as a documented tuning knob; consider
   whether to ship a default change with Phase 0.
-- **`dashboard-workgroup-<wg>` overlap with existing workgroup
+- **`dashboard-workgroup-<wg>` overlap with existing workstream
   field.** The current `oauth_group_mappings.workgroup` column
-  assigns a single workgroup per mapping. The JIT model wants
-  workgroup *membership* granted per-group. May need a slight
+  assigns a single workstream per mapping. The JIT model wants
+  workstream *membership* granted per-group. May need a slight
   schema update — confirm in Phase 1.
 
 ## 10. Sizing

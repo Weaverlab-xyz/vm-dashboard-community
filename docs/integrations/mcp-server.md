@@ -119,22 +119,22 @@ All tools are **read-only**. Deploy, start, and stop actions must be performed
 in the web UI or via the REST API.
 
 **Every tool returns only what the token's owner can see in the web UI.** A token
-belonging to a non-admin returns that user's workgroups and their own resources —
+belonging to a non-admin returns that user's workstreams and their own resources —
 not the estate. So an empty result means *"none visible to you"*, which is not the
 same as *"none exist"*, and the two are deliberately indistinguishable.
 
 | Tool | Description | Who sees what |
 |---|---|---|
 | `dashboard_summary` | Active jobs, today's failures, enabled integrations | Job counts scoped like `/jobs`; integration flags match the unauthenticated `/api/features` |
-| `list_jobs` | Recent jobs — filter by status and/or workgroup | Your own jobs unless you hold `jobs:read` or are an admin |
+| `list_jobs` | Recent jobs — filter by status and/or workstream | Your own jobs unless you hold `jobs:read` or are an admin |
 | `get_job` | Detail for one job by UUID | Same scope as `list_jobs`; the deploy payload is filtered (below) |
-| `list_inventory` | Every resource, normalised across providers | Your workgroups; resources with no workgroup only if you created them |
-| `list_ec2_instances` | EC2 instances deployed via this dashboard | Your workgroups |
-| `list_azure_vms` | Azure VMs deployed via this dashboard | Your workgroups |
-| `list_gcp_instances` | GCE instances deployed via this dashboard | Your workgroups |
-| `list_oci_instances` | OCI compute instances deployed via this dashboard | Your workgroups |
+| `list_inventory` | Every resource, normalised across providers | Your workstreams; resources with no workstream only if you created them |
+| `list_ec2_instances` | EC2 instances deployed via this dashboard | Your workstreams |
+| `list_azure_vms` | Azure VMs deployed via this dashboard | Your workstreams |
+| `list_gcp_instances` | GCE instances deployed via this dashboard | Your workstreams |
+| `list_oci_instances` | OCI compute instances deployed via this dashboard | Your workstreams |
 | `list_amis` | AMIs owned by the configured AWS account | Requires `aws:read` |
-| `list_vms` | VMware Workstation VMs synced by an agent | Only VMs an admin has tagged into one of your workgroups |
+| `list_vms` | VMware Workstation VMs synced by an agent | Only VMs an admin has tagged into one of your workstreams |
 | `list_containers` | Cached containers for one Portainer endpoint | Requires `containers:read`; takes an `endpoint_id` |
 | `list_databases` | Cloud databases | Your own unless you are an (effective) admin |
 | `list_k8s_clusters` | Kubernetes clusters | Your own unless you are an (effective) admin |
@@ -192,7 +192,7 @@ whether your PAT is valid.
 
 **A tool returns fewer resources than the web UI shows you** — check which user
 the token belongs to. Tools apply that user's permissions, so a token created by
-a non-admin returns their workgroups and their own resources. "None visible to
+a non-admin returns their workstreams and their own resources. "None visible to
 you" and "none exist" deliberately look the same.
 
 **"Connection refused"** — verify the dashboard is running:

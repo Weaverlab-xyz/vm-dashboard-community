@@ -232,7 +232,7 @@
             <span class="ml-1 text-gray-600" x-text="fmt(row.pat_revoked_at)"></span>
           </div>
           <div x-show="row.workgroup" x-cloak>
-            <span class="text-gray-500">Workgroup</span>
+            <span class="text-gray-500">Workstream</span>
             <span class="ml-1" x-text="row.workgroup"></span>
           </div>
           <div x-show="row.created_by" x-cloak>
@@ -492,7 +492,7 @@
         </div>
 
         <div>
-          <label class="block text-xs font-medium text-gray-700 mb-1">Workgroup</label>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Workstream</label>
           <select x-model="form.workgroup" class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
             <option value="">(none)</option>
             <template x-for="w in options.workgroups" :key="w">
@@ -503,7 +503,7 @@
                creator, so an untagged agent stays with the person who minted it rather
                than becoming admin-only. -->
           <p class="text-xs text-gray-500 mt-1">
-            Everyone in this workgroup can see and manage the agent &mdash; including
+            Everyone in this workstream can see and manage the agent &mdash; including
             revoking its token. Leave it blank and only you and administrators can.
           </p>
         </div>

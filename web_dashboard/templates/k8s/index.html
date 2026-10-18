@@ -60,7 +60,7 @@
           <th class="px-4 py-3">Name</th>
           <th class="px-4 py-3">Cloud</th>
           <th class="px-4 py-3">Region</th>
-          <th class="px-4 py-3">Workgroup</th>
+          <th class="px-4 py-3">Workstream</th>
           <th class="px-4 py-3">Status</th>
           <th class="px-4 py-3">Management</th>
           <th class="px-4 py-3">API server</th>
@@ -86,7 +86,7 @@
             <td class="px-4 py-3 text-xs text-gray-500">
               <span x-show="c.workgroup" x-text="c.workgroup"></span>
               <span x-show="!c.workgroup" class="text-gray-300"
-                    title="Not assigned to a workgroup, so only its creator and administrators can see it.">&ndash;</span>
+                    title="Not assigned to a workstream, so only its creator and administrators can see it.">&ndash;</span>
             </td>
             <td class="px-4 py-3">
               <span class="text-xs font-medium px-1.5 py-0.5 rounded"
@@ -105,8 +105,8 @@
                    kubeconfig, to a different set of people. Matches require_admin on
                    PATCH /api/k8s/clusters/{id}/workgroup. -->
               <button @click="openRetag(c)" x-show="$store.auth.isAdmin" x-cloak
-                      title="Assign this cluster to a workgroup, or clear it. Everyone in the workgroup can then see and manage it."
-                      class="text-xs px-2 py-1 text-gray-600 hover:underline">Workgroup</button>
+                      title="Assign this cluster to a workstream, or clear it. Everyone in the workstream can then see and manage it."
+                      class="text-xs px-2 py-1 text-gray-600 hover:underline">Workstream</button>
               {# "Launch mgmt" (Rancher management plane) hidden pending a full Rancher
                  setup — the deploy needs rancher_server_url + a designated mgmt cluster +
                  cert-manager/ingress/LB (fails "rancher_server_url is not configured"
@@ -188,15 +188,15 @@
        @click.self="retagTarget = null">
     <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md">
       <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-        <h3 class="text-lg font-semibold">Workgroup</h3>
+        <h3 class="text-lg font-semibold">Workstream</h3>
         <button @click="retagTarget = null" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
       </div>
       <div class="px-6 py-5 space-y-3">
         <p class="text-sm text-gray-500">
-          Everyone in the chosen workgroup can see and manage
+          Everyone in the chosen workstream can see and manage
           <span class="font-mono text-gray-700" x-text="retagTarget ? retagTarget.name : ''"></span>
           &mdash; including its cluster-admin kubeconfig, brokered access, and its
-          auto-delete timer. Clearing the workgroup returns it to its creator.
+          auto-delete timer. Clearing the workstream returns it to its creator.
         </p>
         <select x-model="retagValue" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
           <option value="">(none &mdash; creator and admins only)</option>
@@ -273,7 +273,7 @@
              the cluster creator-scoped, which is what every cluster registered before
              this field existed already is. -->
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup</label>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Workstream</label>
           <select x-model="form.workgroup" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             <option value="">(none &mdash; only you and admins)</option>
             <template x-for="w in availableWorkgroups" :key="w">
@@ -281,7 +281,7 @@
             </template>
           </select>
           <p class="text-xs text-gray-400 mt-1">
-            Everyone in this workgroup can see and manage this cluster &mdash; its
+            Everyone in this workstream can see and manage this cluster &mdash; its
             kubeconfig is cluster-admin, so this is a real grant. Leave blank and only
             you and administrators can.
           </p>
@@ -336,7 +336,7 @@
           <!-- Optional, unlike the cloud VM deploy forms where it is required. Blank
                keeps the cluster creator-scoped. -->
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup</label>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Workstream</label>
             <select x-model="provForm.workgroup" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <option value="">(none &mdash; only you and admins)</option>
               <template x-for="w in availableWorkgroups" :key="w">
@@ -344,7 +344,7 @@
               </template>
             </select>
             <p class="text-xs text-gray-400 mt-1">
-              Everyone in this workgroup can see and manage this cluster. Its kubeconfig
+              Everyone in this workstream can see and manage this cluster. Its kubeconfig
               is cluster-admin, so this is a real grant.
             </p>
           </div>
@@ -1121,9 +1121,9 @@ function k8sPage() {
                         { workgroup: this.retagValue || '' });
         this.retagTarget = null;
         await this.refresh();
-        this.flash('Workgroup updated.');
+        this.flash('Workstream updated.');
       } catch (e) {
-        this.retagError = e.message || 'Could not update the workgroup.';
+        this.retagError = e.message || 'Could not update the workstream.';
       } finally {
         this.retagSaving = false;
       }

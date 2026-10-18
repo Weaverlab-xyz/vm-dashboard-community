@@ -172,7 +172,7 @@
       <code>list_expiring</code>, <code>config_drift</code>, <code>list_agents</code>, <code>cost_summary</code>,
       <code>secret_staleness</code>.
       All tools are read-only, and each returns only what the token's owner can see in the UI —
-      a token belonging to a non-admin sees that user's workgroups, not the estate.
+      a token belonging to a non-admin sees that user's workstreams, not the estate.
     </p>
   </div>
 
@@ -954,15 +954,15 @@
           </label>
 
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Exempt workgroups</label>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Exempt workstreams</label>
             <input type="text" x-model="panelCfg.resource_expiry_exempt_workgroups"
                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
                    placeholder="platform, shared-infra">
             <p class="text-[11px] text-gray-400 mt-1">
-              Comma-separated. Resources in these workgroups never get a timer and are never
+              Comma-separated. Resources in these workstreams never get a timer and are never
               deleted. <strong>VMs, cloud databases and Kubernetes clusters</strong> carry a
-              workgroup; cloud functions and desktop seats don't, so use "never expires" for
-              those instead. A database or cluster left untagged has no workgroup to match
+              workstream; cloud functions and desktop seats don't, so use "never expires" for
+              those instead. A database or cluster left untagged has no workstream to match
               here either. Blank = none.
             </p>
           </div>
@@ -8772,7 +8772,7 @@
                    placeholder="groups">
             <p class="text-[11px] text-gray-400 mt-1">
               Claim carrying the user's groups, matched against the mappings on
-              <a href="/rbac#groups" class="underline text-blue-600">Groups</a> to assign workgroups.
+              <a href="/rbac#groups" class="underline text-blue-600">Groups</a> to assign workstreams.
               Usually <code>groups</code>; some Okta setups use <code>roles</code>.
             </p>
           </div>
@@ -8799,7 +8799,7 @@
               <p>Token: <code class="break-all" x-text="oidcTest.doc?.token_endpoint"></code></p>
               <p x-show="oidcTest.doc?.groups_claim_advertised === false" class="text-amber-800">
                 The provider does not advertise a
-                <code x-text="oidcTest.doc?.groups_claim"></code> claim. Group→workgroup mapping may
+                <code x-text="oidcTest.doc?.groups_claim"></code> claim. Group→workstream mapping may
                 not work until it is configured to emit one — some providers emit claims they do not
                 advertise, so this is worth checking rather than assuming broken.
               </p>
@@ -9075,7 +9075,7 @@ function settingsPage() {
       { key: 'vm_spend_cap', label: 'VM spend caps', group: 'governance', hasConfig: false, enabled: false,
         desc: 'Give a cloud VM a dollar cap. Spend is accrued every sweep at the provider list price and, when the cap is reached, the VM is warned about or suspended — never destroyed. The estimate excludes reservations, credits, free tier, transfer and snapshots, so it errs high, which is the safe direction for a cap. Off by default; a cap is per-VM, so turning this on accrues nothing until you set one. A cap is refused on a VM whose region has no price source, rather than stored and silently never firing.' },
       { key: 'cloud_unmanaged_discovery', label: 'Discover unmanaged cloud VMs', group: 'cloud', hasConfig: false, enabled: false,
-        desc: 'Show cloud VMs this dashboard did not deploy, in a separate list on each cloud console. Discovered VMs can be started and stopped; they can never be destroyed from here. Off by default because it lists every instance in the account, subscription or project rather than the ones the dashboard deployed. A discovered VM is admin-only unless it carries a workgroup tag.' },
+        desc: 'Show cloud VMs this dashboard did not deploy, in a separate list on each cloud console. Discovered VMs can be started and stopped; they can never be destroyed from here. Off by default because it lists every instance in the account, subscription or project rather than the ones the dashboard deployed. A discovered VM is admin-only unless it carries a workstream tag.' },
       { key: 'multi_region', label: 'Multi-region',            group: 'cloud', hasConfig: true,  enabled: true, configOnly: true,
         desc: 'Per-region resource config sets for AWS, GCP and Azure — subnets, security groups, SSH secrets, networks. Blank fields fall back to the flat defaults.' },
       { key: 'oidc',         label: 'Single sign-on (OIDC)',   group: 'platform', hasConfig: true,  enabled: true, configOnly: true,

@@ -39,10 +39,10 @@ def _validate_workgroup(db: Session, user: User, workgroup: str) -> str:
     """Validate that `workgroup` exists and the user has access. Returns canonical name."""
     wg = workgroup_service.get(db, workgroup)
     if not wg:
-        raise HTTPException(status_code=400, detail=f"Unknown workgroup '{workgroup}'")
+        raise HTTPException(status_code=400, detail=f"Unknown workstream '{workgroup}'")
     canonical = wg.name
     if not user.is_effective_admin and canonical not in [w.lower() for w in user.workgroups_list]:
-        raise HTTPException(status_code=403, detail=f"You do not have access to workgroup '{canonical}'")
+        raise HTTPException(status_code=403, detail=f"You do not have access to workstream '{canonical}'")
     return canonical
 
 

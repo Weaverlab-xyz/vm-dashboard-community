@@ -174,7 +174,7 @@ the disabled state are unaffected. `OPA_BINARY` overrides the binary path;
 `prod_window.rego` freezes changes on named **weekdays**, in UTC, for everybody. A
 [change window](change-windows.md) is the inverse and is considerably more precise: a
 named period with a start time, a length and a real timezone, attached to a
-**workgroup**, and — the part a freeze cannot do — a refusal that offers to *book* the
+**workstream**, and — the part a freeze cannot do — a refusal that offers to *book* the
 change rather than just rejecting it.
 
 They share this feature's **gated actions** list, so there is one answer to "what counts
@@ -182,7 +182,7 @@ as a change". Use the freeze for a blunt estate-wide "nothing on a Sunday"; use 
 window when a team has an agreed maintenance period and you want work to land inside it
 rather than be turned away.
 
-A workgroup window needs no Rego and does **not** require `admission_control_enabled` —
+A workstream window needs no Rego and does **not** require `admission_control_enabled` —
 that flag switches the policy engine on, and a maintenance window is enforced in the
 dashboard.
 

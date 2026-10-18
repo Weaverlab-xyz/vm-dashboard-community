@@ -52,7 +52,7 @@ docker compose exec app python -m web_dashboard.scripts.bootstrap_entitle_groups
 
 **Expected:** the script prints `Planned inventory: N groups` (102
 on a default prod seed: 1 admin + 1 baseline + 98 scope/levels + 2
-workgroups), authenticates against Graph to read existing groups,
+workstreams), authenticates against Graph to read existing groups,
 then prints a table showing `create` for every row (assuming
 nothing pre-exists) and `created` for every mapping. No Graph
 writes occur and no DB rows are inserted.
@@ -118,7 +118,7 @@ docker compose exec db psql -U dashboardadmin -d vmclidashboard `
 - One `dashboard-admin` row with `default_permissions = {"is_admin": true}`.
 - One `dashboard-baseline` row.
 - One row per scope/level tuple with the matching JSON.
-- One `dashboard-workgroup-<wg>` row per configured workgroup,
+- One `dashboard-workgroup-<wg>` row per configured workstream,
   with `default_permissions = NULL` and `workgroup = <wg>`.
 
 ## Step 5 — Spot-check the Entra side
@@ -151,7 +151,7 @@ the resolver matches against now actually exists in Entra.
 
 ## Step 7 — Partial scope re-runs
 
-For day-2 operations (a new workgroup added, a new scope appearing
+For day-2 operations (a new workstream added, a new scope appearing
 in `PERMISSION_SCOPES`):
 
 ```powershell

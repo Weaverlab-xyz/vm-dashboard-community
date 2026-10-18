@@ -53,7 +53,7 @@ Any spec-compliant OIDC provider works. Verified/common ones:
 | Authentik / Authelia | `groups` claim. |
 | Okta | Group memberships often surface as `roles` rather than `groups` — set **Groups claim** accordingly. |
 | Auth0 | Groups/roles usually need a custom claim/action to be emitted. |
-| Google Workspace | Standard OIDC; Google does not emit groups in the ID token — group→workgroup mapping won't apply. |
+| Google Workspace | Standard OIDC; Google does not emit groups in the ID token — group→workstream mapping won't apply. |
 | JumpCloud | `groups` claim. |
 | Ping | `groups` claim (configurable). |
 | GitLab | Standard OIDC. |
@@ -114,7 +114,7 @@ Integrations → Single sign-on (OIDC)** and fill in:
 | Client secret | `oidc_client_secret` | — | Optional — leave blank for a public client. Stored encrypted; shown as dots on reload. Leave the dots untouched to keep the stored value. |
 | Button label | `oidc_provider_name` | issuer host | Shown on the login page as "Sign in with …". |
 | Scopes | `oidc_scopes` | `openid profile email groups` | Space-separated. `openid` is always included even if you omit it. |
-| Groups claim | `oidc_groups_claim` | `groups` | The ID-token claim that carries the user's group names/IDs, used for workgroup mapping. Set to `roles` for Okta-style setups. |
+| Groups claim | `oidc_groups_claim` | `groups` | The ID-token claim that carries the user's group names/IDs, used for workstream mapping. Set to `roles` for Okta-style setups. |
 
 > **There is no separate "enable" toggle.** SSO goes live the moment an **issuer
 > and client ID** are saved, and turns off when you clear the issuer. Settings are
@@ -133,21 +133,21 @@ whether the groups claim you configured appears in the provider's
 > result is not necessarily a problem. A typo'd issuer, on the other hand, fails
 > here with the exact URL it couldn't reach.
 
-### Step 4 — Map groups to workgroups (authorization)
+### Step 4 — Map groups to workstreams (authorization)
 
 Authentication proves *who* someone is; **group mappings decide what they can do.**
 On the **RBAC → Groups** tab (`/rbac#groups`), add a mapping for each provider group:
 
 - **Group ID** — the value that appears in the user's groups claim (for Entra, the
   group's **object ID**, not its name).
-- **Workgroup** — the dashboard workgroup that group's members are placed in.
+- **Workstream** — the dashboard workstream that group's members are placed in.
 - **Default permissions** *(optional)* — a JSON object of permission scopes granted
   to that group.
 
 On every SSO login the dashboard:
 
 1. Reads the user's group claims and matches them against your mappings.
-2. Assigns the matched **workgroups** and unions each matched group's
+2. Assigns the matched **workstreams** and unions each matched group's
    **default permissions** into the user's session permissions (so removing someone
    from a group in the IdP drops the corresponding access on their next login).
 3. **Auto-creates the user on first login** if any group matched — no
@@ -170,7 +170,7 @@ admin-granted ones, see the [Entitle user-JIT design doc](design/entitle-user-ji
 |---|---|
 | **SSO login button** | A "Sign in with `<label>`" button appears on the login page once configured. |
 | **Auto-provisioning** | Users in a mapped group are created automatically on first login. |
-| **Group-driven access** | Workgroups and permissions are derived from IdP group membership and re-synced on every login. |
+| **Group-driven access** | Workstreams and permissions are derived from IdP group membership and re-synced on every login. |
 | **Permission enforcement** | Derived permissions feed the dashboard's scope/level checks (`vms`, `aws`, `k8s`, `cloud_database`, …). |
 | **Workload tokens** | Optional, separate from sign-in: the same (or another) IdP's *access tokens* for workloads, mapped to [service accounts](access/service-accounts.md#tokens-from-your-own-idp-no-dashboard-secret). Configured under **Workload tokens** in this panel; needs an audience, not a client id. |
 

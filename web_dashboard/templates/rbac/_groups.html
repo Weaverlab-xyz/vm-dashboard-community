@@ -13,7 +13,7 @@
 <div class="max-w-3xl" x-data="groupsPage()">
 
   <p class="text-sm text-gray-500 mb-6">
-    Map groups from your identity provider onto dashboard workgroups, a permission set and
+    Map groups from your identity provider onto dashboard workstreams, a permission set and
     an access role. Members of a mapped group are provisioned automatically on first login
     &mdash; no manual user creation needed.
     <a href="/docs/oidc" target="_blank" class="text-blue-600 hover:underline">Set up single sign-on</a>.
@@ -54,7 +54,7 @@
             <th class="pb-2 pr-4">Display Name</th>
             <th class="pb-2 pr-4">Group Object ID</th>
             <th class="pb-2 pr-4">Role</th>
-            <th class="pb-2 pr-4">Workgroup</th>
+            <th class="pb-2 pr-4">Workstream</th>
             {# Gated with its own <td> below on the SAME name. Two conditions, or one of
                them forgotten, and every cell after it shifts one column left. #}
             {% if persona_focus %}<th class="pb-2 pr-4">Focus</th>{% endif %}
@@ -146,10 +146,10 @@
       </div>
 
       <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup</label>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Workstream</label>
         <select x-model="form.workgroup" required
                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-          <option value="">— select a workgroup —</option>
+          <option value="">— select a workstream —</option>
           <template x-for="wg in availableWorkgroups" :key="wg">
             <option :value="wg" x-text="wg"></option>
           </template>
@@ -237,8 +237,8 @@
       <li>Users sign in via <strong>Sign in with Microsoft</strong> on the login page.</li>
       <li>The group memberships in their token are checked against this table.</li>
       <li>Matching users are auto-created and assigned the corresponding workgroup(s).</li>
-      <li>If a user is in multiple mapped groups they receive all matching workgroups.</li>
-      <li>Workgroup, permission and role assignments are re-synced from the provider on every login.</li>
+      <li>If a user is in multiple mapped groups they receive all matching workstreams.</li>
+      <li>Workstream, permission and role assignments are re-synced from the provider on every login.</li>
     </ul>
     <p class="mt-3 font-medium">Required App Registration setup</p>
     <ul class="list-disc list-inside space-y-1 text-blue-700 mt-1">

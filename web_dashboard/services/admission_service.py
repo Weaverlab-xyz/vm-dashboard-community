@@ -271,9 +271,9 @@ def _enforce_change_window(action: str, request: dict, actor, db, now,
             # keeping with the rest of this module: an administrator asked for these
             # changes to be gated, and a deleted window is a broken gate, not an open
             # one. The message names the fix rather than just refusing.
-            reasons = [f"workgroup {name!r} requires a change window, but the window it "
+            reasons = [f"workstream {name!r} requires a change window, but the window it "
                        f"points at no longer exists. An administrator needs to pick "
-                       f"another on the Workgroups tab."]
+                       f"another on the Workstreams tab."]
             _audit_deny(db, actor, action, reasons)
             raise HTTPException(status_code=403,
                                 detail={"error": "change_window", "reasons": reasons})
@@ -314,9 +314,9 @@ def _enforce_change_window(action: str, request: dict, actor, db, now,
         # and admitting the change because the check itself broke would be the one
         # outcome nobody asked for.
         logger.warning("change-window gate failed for %s/%s: %s", action, name, exc)
-        reasons = [f"workgroup {name!r} requires a change window and the window could "
+        reasons = [f"workstream {name!r} requires a change window and the window could "
                    f"not be evaluated ({exc}). An administrator needs to check it on "
-                   f"the Workgroups tab."]
+                   f"the Workstreams tab."]
         _audit_deny(db, actor, action, reasons)
         raise HTTPException(status_code=403,
                             detail={"error": "change_window", "reasons": reasons})

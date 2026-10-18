@@ -54,7 +54,7 @@ until this release nothing in the codebase ever noticed it was finished.
 
 This is **not** a second sweeper. A POV is a new *kind* in the one that already exists, so
 every gate — the arming delay, report-only, the enforcement gate, the per-pass cap, the
-exempt workgroups — is the same code that guards a cloud VM. The only thing POV-specific is
+exempt workstreams — is the same code that guards a cloud VM. The only thing POV-specific is
 the default lifetime and the shape of the warnings.
 
 ### Turning it on

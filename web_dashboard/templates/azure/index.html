@@ -422,10 +422,10 @@
           </label>
         </div>
         <div>
-          <label class="block text-xs font-medium text-gray-700 mb-1">Workgroup <span class="text-red-500">*</span></label>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Workstream <span class="text-red-500">*</span></label>
           <select x-model="deployModal.workgroup" required
                   class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500">
-            <option value="">Select workgroup…</option>
+            <option value="">Select workstream…</option>
             <template x-for="w in availableWorkgroups" :key="w">
               <option :value="w" x-text="w"></option>
             </template>
@@ -725,10 +725,10 @@
       <div class="space-y-3 border-t border-gray-100 pt-4">
         <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wide mb-1">Shared Settings</label>
         <div>
-          <label class="block text-xs font-medium text-gray-700 mb-1">Workgroup <span class="text-red-500">*</span></label>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Workstream <span class="text-red-500">*</span></label>
           <select x-model="bulkModal.workgroup" required
                   class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
-            <option value="">Select workgroup…</option>
+            <option value="">Select workstream…</option>
             <template x-for="w in availableWorkgroups" :key="w">
               <option :value="w" x-text="w"></option>
             </template>
@@ -1341,10 +1341,10 @@
             </select>
           </div>
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-red-500">*</span></label>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Workstream <span class="text-red-500">*</span></label>
             <select x-model="otForm.workgroup"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-              <option value="">— select a workgroup —</option>
+              <option value="">— select a workstream —</option>
               <template x-for="wg in availableWorkgroups" :key="wg">
                 <option :value="wg" x-text="wg"></option>
               </template>
@@ -2567,7 +2567,7 @@ function azureDashboard() {
     async submitBulkDeploy() {
       const m = this.bulkModal;
       if (!m.subnetId) return toast('Please select a subnet', 'error');
-      if (!m.workgroup) return toast('Select a workgroup', 'error');
+      if (!m.workgroup) return toast('Select a workstream', 'error');
 
       // Linux VMs in the batch need a key; a Windows-only batch does not.
       const sshPublicKey = this.bulkHasLinux() ? (m.sshPublicKey || '').trim() : '';

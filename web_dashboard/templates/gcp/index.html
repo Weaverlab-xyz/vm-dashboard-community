@@ -459,10 +459,10 @@
 
         <!-- Workgroup -->
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-red-500">*</span></label>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Workstream <span class="text-red-500">*</span></label>
           <select x-model="deployForm.workgroup" required
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">Select workgroup…</option>
+            <option value="">Select workstream…</option>
             <template x-for="w in availableWorkgroups" :key="w">
               <option :value="w" x-text="w"></option>
             </template>
@@ -831,10 +831,10 @@
         </div>
 
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-gray-400 font-normal">(shared)</span> *</label>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Workstream <span class="text-gray-400 font-normal">(shared)</span> *</label>
           <select x-model="bulkModal.workgroup"
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
-            <option value="">— select a workgroup —</option>
+            <option value="">— select a workstream —</option>
             <template x-for="wg in availableWorkgroups" :key="wg">
               <option :value="wg" x-text="wg"></option>
             </template>
@@ -1295,10 +1295,10 @@
             </select>
           </div>
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-red-500">*</span></label>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Workstream <span class="text-red-500">*</span></label>
             <select x-model="otForm.workgroup"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-              <option value="">— select a workgroup —</option>
+              <option value="">— select a workstream —</option>
               <template x-for="wg in availableWorkgroups" :key="wg">
                 <option :value="wg" x-text="wg"></option>
               </template>
@@ -1730,7 +1730,7 @@
         </div>
 
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-red-500">*</span></label>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Workstream <span class="text-red-500">*</span></label>
           <select x-model="netForm.workgroup"
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
             <option value="">— select —</option>
@@ -2561,7 +2561,7 @@ function gcpDashboard() {
 
     async submitBulkDeploy() {
       const m = this.bulkModal;
-      if (!m.workgroup) { m.error = 'Select a workgroup.'; return; }
+      if (!m.workgroup) { m.error = 'Select a workstream.'; return; }
       if (m.names.some(n => !n || !n.trim())) { m.error = 'Every instance needs a name.'; return; }
       m.submitting = true;
       m.error = '';

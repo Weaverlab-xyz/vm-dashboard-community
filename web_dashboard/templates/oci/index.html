@@ -597,7 +597,7 @@
                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
           </div>
           <div>
-            <label class="block text-xs font-medium text-gray-600 mb-1">Workgroup</label>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Workstream</label>
             <select x-model="deployForm.workgroup"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <option value="">(select)</option>
@@ -714,10 +714,10 @@
         </div>
 
         <div>
-          <label class="block text-xs font-medium text-gray-600 mb-1">Workgroup (shared)</label>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Workstream (shared)</label>
           <select x-model="bulkModal.workgroup"
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-            <option value="">— select a workgroup —</option>
+            <option value="">— select a workstream —</option>
             <template x-for="wg in availableWorkgroups" :key="wg">
               <option :value="wg" x-text="wg"></option>
             </template>

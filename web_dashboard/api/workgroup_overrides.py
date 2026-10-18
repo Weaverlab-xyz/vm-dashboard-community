@@ -41,7 +41,7 @@ def bulk_assign(
         raise HTTPException(
             status_code=400,
             detail=(
-                f"provider '{payload.provider}' is not allowed. Workgroup overrides only apply "
+                f"provider '{payload.provider}' is not allowed. Workstream overrides only apply "
                 f"to on-prem providers: {sorted(ALLOWED_PROVIDERS)}."
             ),
         )
@@ -68,7 +68,7 @@ def bulk_clear(
         raise HTTPException(
             status_code=400,
             detail=(
-                f"provider '{payload.provider}' is not allowed. Workgroup overrides only apply "
+                f"provider '{payload.provider}' is not allowed. Workstream overrides only apply "
                 f"to on-prem providers: {sorted(ALLOWED_PROVIDERS)}."
             ),
         )

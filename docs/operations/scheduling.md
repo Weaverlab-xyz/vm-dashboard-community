@@ -67,7 +67,7 @@ and schedules you are allowed to see.
 | EPM for Linux package sync | — | yes |
 
 Why the exceptions exist, and what happens when a window is missed, needs approval, or
-is required for a whole workgroup, is all in [Change Windows](scheduling/change-windows.md). Why an
+is required for a whole workstream, is all in [Change Windows](scheduling/change-windows.md). Why an
 on-premises power booking needs an agent is under
 [Scheduling power operations](scheduling/change-windows.md#scheduling-power-operations).
 

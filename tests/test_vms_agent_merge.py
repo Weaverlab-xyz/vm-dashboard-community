@@ -276,7 +276,7 @@ def test_a_non_admin_is_refused_an_untagged_vm_with_a_usable_reason():
         vms_api._assert_workgroup_access(_Dev(), "")
     except HTTPException as exc:
         assert exc.status_code == 403
-        assert "Assign Workgroup" in exc.detail, (
+        assert "Assign Workstream" in exc.detail, (
             "the refusal has to name the fix — it is the operator's whole diagnosis")
     else:
         raise AssertionError("an untagged VM must be refused to a non-admin")

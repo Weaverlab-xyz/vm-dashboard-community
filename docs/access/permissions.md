@@ -9,7 +9,7 @@ Two independent questions, and keeping them apart is the whole model:
 | Question | Answered by | Where |
 |---|---|---|
 | What may this user **do**? | a **role**, or a **scope** and a **level** | RBAC &rarr; Users / Groups / Roles |
-| Which **objects** may they do it to? | a workgroup tag, or a POV grant | RBAC &rarr; Workgroups; the POV access picker |
+| Which **objects** may they do it to? | a workstream tag, or a POV grant | RBAC &rarr; Workstreams; the POV access picker |
 
 **Administrator**, on this page and in the app, means any one of four things: the **Admin**
 flag on the user, the built-in **Administrator** role, a group mapping whose role or
@@ -149,7 +149,7 @@ The fourteen original scopes:
 | `images`, `containers`, `cloud_database`, `k8s`, `cloud_function` | read, write, delete | |
 | `config_mgmt` | read, write | |
 | `jobs` | read | read sees every job; cancelling and rescheduling are decided by ownership (the job's creator, or an administrator) |
-| `workgroups` | read, write | deleting a workgroup needs an administrator |
+| `workgroups` | read, write | deleting a workstream needs an administrator |
 | `secrets` | use | the Secrets page itself is administrator-only |
 
 **Retired levels.** Until September 2026 these fourteen offered all four levels whether or
@@ -257,7 +257,7 @@ stored separately for exactly this reason, so they survive.
 
 ## Groups
 
-A group mapping turns a group from your identity provider into a workgroup, an optional
+A group mapping turns a group from your identity provider into a workstream, an optional
 role, and a default permission set. **Not Entra-only** — any OIDC provider works, and the
 "Group Object ID" field takes whatever identifier that provider's groups claim emits. The
 stored column is still called `entra_group_id`, which is why you will see that name in the
@@ -268,8 +268,8 @@ Things to know:
 - **If any mappings exist, signing in requires a match.** An OIDC user in none of the
   mapped groups is refused at sign-in (`not_authorized`). With no mappings configured,
   only users who already have an account can sign in.
-- **A login also rewrites the user's workgroups** to the matched mappings' workgroups.
-  Workgroups set by hand on an OIDC user do not survive their next sign-in.
+- **A login also rewrites the user's workstreams** to the matched mappings' workstreams.
+  Workstreams set by hand on an OIDC user do not survive their next sign-in.
 - The grid is labelled "Default Permissions for new users", but it is not only for new
   users. Its permissions are re-applied to every member **at each login**, so a mistake in a
   mapping keeps reasserting itself until the mapping is fixed — and a change you make
@@ -321,9 +321,9 @@ Some things answer only to the **Admin** flag, because a grantable version of th
 a way to become an administrator:
 
 - **RBAC (Users, Groups, Roles)** — anyone who can edit a user, or a role a user
-  holds, can make themselves admin. The fourth tab, **Workgroups**, is the exception: it
+  holds, can make themselves admin. The fourth tab, **Workstreams**, is the exception: it
   scopes *objects* rather than actions, so it has a grantable `workgroups` scope. The page
-  is `/rbac`. `/users`, `/groups` and `/workgroups` still resolve, straight to their tab,
+  is `/rbac`. `/users`, `/groups` and `/workstreams` (or the older `/workgroups`) still resolve, straight to their tab,
   so older bookmarks and runbook links keep working.
 - **Settings / first-run setup**, and **Secrets Management** — the whole page, including
   the vault registry. The `secrets` scope's `read`, `write` and `delete` levels do not open
@@ -331,7 +331,7 @@ a way to become an administrator:
 - **Virtual Desktops**, while it is a preview.
 - **Worker concurrency and preflight**, which are instance-wide plumbing.
 - **[Health](../operations/health.md)**, one view over every tenant, onboarded account
-  and agent across all workgroups.
+  and agent across all workstreams.
 
 Two more have no scope for narrower reasons:
 
@@ -347,24 +347,33 @@ Two more have no scope for narrower reasons:
 
 A scope says *what*, not *which*. Two mechanisms narrow the *which*:
 
-- **Workgroups** tag resources and users; the cloud, container, Databases and Kubernetes
-  lists show you the rows whose workgroup you are in. Untagged resources are visible to
-  whoever deployed them. They live on the **RBAC &rarr; Workgroups** tab, beside the
+- **Workstreams** tag resources and users; the cloud, container, Databases and Kubernetes
+  lists show you the rows whose workstream you are in. Untagged resources are visible to
+  whoever deployed them. They live on the **RBAC &rarr; Workstreams** tab, beside the
   permission tabs, because the two answer the two halves of the same question.
 
-  Unlike the other RBAC tabs, Workgroups is **not admin-only**: it has a real `workgroups`
+  Unlike the other RBAC tabs, Workstreams is **not admin-only**: it has a real `workgroups`
   scope, so a user granted `workgroups:read` sees that tab and nothing else on the page.
-  Deleting a workgroup still needs an administrator.
+  Deleting a workstream still needs an administrator.
+
+  **Workstreams were called workgroups** until this release. The new name avoids a clash
+  with Password Safe, whose own *workgroups* (the container for managed systems) appear in
+  the same Settings forms; a field labelled "Workgroup" in Settings now always means the
+  Password Safe one. Only the name a person reads changed. These keep the old spelling
+  so scripts, policies and live resources need no change: the `/api/workgroups` routes and
+  every `workgroup` field in the API, the `workgroups` permission scope, the `Workgroup`
+  tag written on cloud resources, and `/workgroups`, which still opens the tab
+  (`/workstreams` is its name now).
 - **POV access** narrows the POV pages to named environments, as described above.
 
 "Untagged resources are visible to whoever deployed them" is the whole rule, and it is
-worth reading twice: a workgroup is a property of the **row**, not of the page. A cloud
+worth reading twice: a workstream is a property of the **row**, not of the page. A cloud
 database or Kubernetes cluster carries one only once somebody assigns it — at creation, or
-later with the admin-only **Workgroup** button on [Databases](../databases.md) /
+later with the admin-only **Workstream** button on [Databases](../databases.md) /
 [Kubernetes](../kubernetes.md). Until then the row is creator-scoped, which is why adding the
 field granted and revoked nothing on upgrade.
 
-Tagging a row widens what its workgroup can **do** to it, not only what they can see: the
+Tagging a row widens what its workstream can **do** to it, not only what they can see: the
 list, every by-id action, a Configuration Management run against it, and its auto-delete
 timer all answer to the same rule. Sharing a database with your team means the team can run
 plays against it and extend its timer.

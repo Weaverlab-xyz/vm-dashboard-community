@@ -14,7 +14,7 @@ You can reuse the app registration you already have:
 1. In the app registration, add a second redirect URI:
    `{your-host}/api/auth/oauth/oidc/callback`. Keep the old one until you have switched.
 2. Make sure the ID token carries a **groups** claim (**Token configuration → Add groups
-   claim**), if you map groups to workgroups.
+   claim**), if you map groups to workstreams.
 3. In **Settings → Integrations → Single sign-on (OIDC)**, set the issuer to
    `https://login.microsoftonline.com/<tenant-id>/v2.0`, with the same client ID and secret.
    Use **Test** to check discovery.
@@ -64,8 +64,8 @@ Once saved, the login page shows a **Sign in with Microsoft** button
 without a restart. Until a client ID and tenant are saved there is no button at all, and
 when [generic OIDC](../oidc.md) is also configured its button comes first.
 
-Optional: map Entra group object IDs to dashboard workgroups from
+Optional: map Entra group object IDs to dashboard workstreams from
 **Settings → Groups** — users in a mapped group are auto-created and
-assigned workgroups on first OAuth login.
+assigned workstreams on first OAuth login.
 
 ---

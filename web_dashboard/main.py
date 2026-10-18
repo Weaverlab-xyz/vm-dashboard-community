@@ -2163,9 +2163,16 @@ async def groups_page(request: Request):
     return templates.TemplateResponse(request, "rbac/index.html", _rbac_context(request, "groups"))
 
 
+@app.get("/workstreams", response_class=HTMLResponse, include_in_schema=False)
 @app.get("/workgroups", response_class=HTMLResponse, include_in_schema=False)
 async def workgroups_page(request: Request):
-    """The Workgroups TAB of the RBAC page.
+    """The Workstreams TAB of the RBAC page.
+
+    Users read "Workstream"; the code, the API (/api/workgroups), the database and the cloud
+    `Workgroup` tag keep "workgroup", because Password Safe has its own workgroups and the
+    two sat side by side in the same forms. /workstreams is the page's name now. /workgroups
+    keeps rendering it, not redirecting, for the bookmarks and runbooks that print it -- the
+    same reason /users and /groups survive above.
 
     A workgroup is the object half of access control -- a permission scope says what a
     principal may DO, a workgroup says which VMs, databases and clusters they may do it TO --
