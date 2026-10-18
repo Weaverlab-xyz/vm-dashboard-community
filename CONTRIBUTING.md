@@ -176,6 +176,14 @@ It installs no pytest, because CI has none: a test file whose imports fail print
 and exits 0 without pytest, but exits 1 with it, so an extra package would make a session
 disagree with CI.
 
+A test that reads the clock should pass at any time of day and on any date. Steer by a
+fixed `now=` where the code takes one; where it reads the real clock, build every
+timestamp the assertion depends on from `utcnow()`, never a literal date, and don't step
+a fixed number of hours into a window that closes. `scripts/ci/fake_clock.py --sweep
+tests/test_x.py` runs a file at the times that break such tests (midnight, the hour
+before it, month and year ends, a leap day, daylight-saving changes, dates years ahead)
+and names any time whose result differs from a real run.
+
 ### Other checks CI runs
 
 Each has a script, or a single command, that runs the same way locally:
