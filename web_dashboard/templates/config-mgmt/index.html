@@ -94,7 +94,7 @@
                   <option value="">Select an asset…</option>
                   <template x-for="a in assets" :key="a.backend + '|' + a.name">
                     <option :value="a.backend + '|' + a.name"
-                            x-text="a.name + ' (' + backendLabel(a.backend) + ')'"></option>
+                            x-text="a.name + ' (' + backendLabel(a.backend) + ')' + (a.workgroup ? ' · workstream ' + a.workgroup : '')"></option>
                   </template>
                 </select>
                 <!-- Type + backend badge for selected asset -->

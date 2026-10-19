@@ -338,7 +338,8 @@
             <div x-show="isAdmin && postRuns.length < 10" class="flex gap-2">
               <select x-model="runToAdd" class="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
                 <option value="">Add an asset…</option>
-                <template x-for="a in runAssets" :key="a.backend + '/' + a.name">
+                <!-- An asset scoped to another workstream is refused by the PUT. -->
+                <template x-for="a in runAssets.filter(x => !x.workgroup || x.workgroup === runsLoadedFor)" :key="a.backend + '/' + a.name">
                   <option :value="a.backend + '|' + a.name" x-text="a.name + ' (' + a.backend + ')'"></option>
                 </template>
               </select>
@@ -411,6 +412,7 @@ function workgroupsPage() {
     // when it changed and a non-admin's save never reaches the admin-only endpoint.
     postRuns: [],
     runsLoaded: '',
+    runsLoadedFor: '',
     runsError: '',
     runAssets: [],
     runToAdd: '',
@@ -519,6 +521,7 @@ function workgroupsPage() {
       this.runsError = '';
       this.runsLoaded = '';
       this.runToAdd = '';
+      this.runsLoadedFor = name;
       try {
         const r = await API.get('/api/workgroups/' + encodeURIComponent(name) + '/post-deploy-runs');
         this.postRuns = (r.runs || []).map(x => ({asset: x.asset, asset_backend: x.asset_backend || ''}));

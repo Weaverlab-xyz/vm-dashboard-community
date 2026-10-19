@@ -496,6 +496,40 @@ you need a record.
 
 ---
 
+## Scoping an asset to a workstream
+
+Every asset is **global** by default: anyone who can open the Storage page sees it, and
+anyone who can run Config Management can run it. An administrator can limit an asset to
+one workstream with the **Workstream** column on the asset table. From then on only that
+workstream's members, and administrators, can:
+
+- see it — on the Storage page, in the Config Management asset picker, and in the
+  provisioner-script pickers on the cloud deploy forms;
+- fetch, run or delete it — `/api/storage/fetch`, `/api/config-mgmt/run` and `/run-bulk`,
+  and a Compose deploy from Containers all answer **404**, the same as for an asset that
+  doesn't exist;
+- replace it — an upload of the same name by anyone else is refused (**409**). Without
+  this, the scope would stay on the file and the team's runs would execute the uploader's
+  version.
+
+Other things to know:
+
+- **The scope follows the asset.** **Move** carries it to the new backend, **Migrate**
+  copies it with each copied asset, and deleting the asset drops it.
+- **Workstream post-deploy runs** can only use assets that are global or scoped to that
+  workstream (see [Workstream post-deploy runs](../cloud/vms.md#workstream-post-deploy-runs)).
+- **A workstream can't be deleted** while assets are scoped to it. Make them global or
+  scope them elsewhere first.
+- **Jobs already queued still run.** The check is made when a run is requested, not
+  when the job starts.
+
+Changing a scope is **administrator-only** and audited (`storage_asset_scope_update`).
+The API is `PUT /api/storage/scope` with `{"backend": "s3", "name": "baseline.yml",
+"workgroup": "team-a"}`; `"workgroup": null` makes the asset global again. A blank
+`backend` means the active backend.
+
+---
+
 ## API reference
 
 | Method + path | Auth | Purpose |
@@ -513,6 +547,7 @@ you need a record.
 | `POST /api/storage/upload/abort` | logged-in user | Discard `{handle}`'s staged parts. Never fails loudly. |
 | `POST /api/storage/migrate` | admin | Copy `{source, target, overwrite}` → returns `{copied, skipped, failed}`. |
 | `DELETE /api/storage/asset/{name}` | admin | Remove a single asset from the active backend. |
+| `PUT /api/storage/scope` | admin | Limit `{backend, name}` to `workgroup`, or make it global with `null`. See [Scoping an asset to a workstream](#scoping-an-asset-to-a-workstream). |
 
 Storage credentials live in the encrypted DB exactly the same way as
 other config values; nothing on this page reads or writes

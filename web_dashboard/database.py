@@ -1740,6 +1740,25 @@ class Workgroup(Base):
     post_deploy_runs = Column(Text, nullable=True)
 
 
+class StorageAssetScope(Base):
+    """A stored asset an administrator has limited to one workstream
+    (services/asset_scope_service).
+
+    Assets live in buckets, not here, so this is a row per scoped asset keyed the way
+    the Storage page names one: backend + name. No row = global, which is every asset
+    that predates the table — creating it scopes nothing. A plain workgroup string, no
+    ForeignKey, for the reason the cloud-database column has none; deleting a
+    workstream that still scopes assets is refused instead (workgroup_service.delete).
+    """
+    __tablename__ = "storage_asset_scopes"
+
+    backend = Column(String(32), primary_key=True)
+    name = Column(String(255), primary_key=True)
+    workgroup = Column(String(64), nullable=False, index=True)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+    updated_by = Column(String(100), nullable=True)
+
+
 class VMWorkgroupOverride(Base):
     """Workgroup assignments for VMs the dashboard didn't deploy itself.
 

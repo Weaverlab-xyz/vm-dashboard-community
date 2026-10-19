@@ -466,6 +466,11 @@ def deploy_compose(
         raise HTTPException(status_code=400, detail="provider must be one of: ecs, aci, gce")
     if not req.compose_backend or not req.compose_file:
         raise HTTPException(status_code=400, detail="compose_backend and compose_file are required")
+    from ..services import asset_scope_service
+    try:
+        asset_scope_service.check(db, current_user, req.compose_backend, req.compose_file)
+    except asset_scope_service.AssetScopeDenied as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
     job = job_service.create_job(
         db,
