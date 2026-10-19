@@ -365,7 +365,9 @@ A scope says *what*, not *which*. Two mechanisms narrow the *which*:
 
   Its **deploy defaults** take the same authority as editing it, and are audited too. They
   are a fixed list holding no secrets — see
-  [Workstream deploy defaults](../cloud/vms.md#workstream-deploy-defaults).
+  [Workstream deploy defaults](../cloud/vms.md#workstream-deploy-defaults). Its **network
+  defaults** take the same authority — see
+  [Workstream network defaults](../cloud/vms.md#workstream-network-defaults).
   Its **bound secrets** (an SSH key secret per cloud and a PRA credential) are
   **administrator-only** to change; members can see which are bound. See
   [Workstream secret bindings](../cloud/vms.md#workstream-secret-bindings).

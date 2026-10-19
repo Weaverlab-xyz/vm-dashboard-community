@@ -537,6 +537,12 @@
                       x-text="sn.name + ' (' + [sn.ip_cidr_range, networkOpts.region].filter(Boolean).join(', ') + ')'"></option>
             </template>
           </select>
+          <!-- Network defaults (workstreamDefaultsState): saved per workstream and region,
+               and filled into this field the next time that workstream deploys there. -->
+          <button type="button" x-show="deployForm.workgroup && deployForm.subnetwork" x-cloak
+                  @click="saveNetworkDefault()" :disabled="wsNetSaving"
+                  class="mt-1 text-xs text-blue-600 hover:underline disabled:text-gray-400">
+            Save as this workstream's network for this region</button>
         </div>
 
         <!-- Disk size -->
@@ -2496,6 +2502,7 @@ function gcpDashboard() {
     async onZoneChange() {
       this.deployForm.subnetwork = '';
       await this.loadNetworkOpts(this.deployForm.zone);
+      this.applyNetworkDefaults();
     },
 
     // Same for the bulk modal's shared Zone. Without this the Subnetwork picker keeps

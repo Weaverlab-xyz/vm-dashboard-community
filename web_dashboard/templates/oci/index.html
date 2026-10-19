@@ -596,6 +596,12 @@
               <option :value="sn.ocid" x-text="sn.display_name + ' (' + sn.cidr_block + ')'"></option>
             </template>
           </select>
+          <!-- Network defaults (workstreamDefaultsState): saved per workstream and region,
+               and filled into this field the next time that workstream deploys there. -->
+          <button type="button" x-show="deployForm.workgroup && deployForm.subnet_ocid" x-cloak
+                  @click="saveNetworkDefault()" :disabled="wsNetSaving"
+                  class="mt-1 text-xs text-blue-600 hover:underline disabled:text-gray-400">
+            Save as this workstream's network for this region</button>
         </div>
 
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">

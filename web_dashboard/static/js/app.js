@@ -304,6 +304,19 @@ window.secretPickerState = function () {
 // the page's own default stands. The server applies the same defaults again to a
 // request that leaves `enable_pra` out, so the form is a preview, not the authority.
 window.workstreamDefaultsState = function (formName, cloud) {
+    // Network defaults (GET /api/workgroups/{name}/network-defaults) are per cloud and
+    // region: which form field holds the region, and which field each default fills.
+    const NET = {
+        aws:   { region: f => f.region || '',
+                 fields: { subnet_id: 'subnet_id', security_group_ids: 'security_group_ids' } },
+        azure: { region: f => f.location || '',
+                 fields: { subnet_id: 'subnetId', nsg_ids: 'nsgIds' } },
+        // A GCP subnetwork is regional; the form picks a zone.
+        gcp:   { region: f => (f.zone || '').replace(/-[a-z]$/, ''),
+                 fields: { subnetwork: 'subnetwork' } },
+        oci:   { region: () => 'default', fields: { subnet_ocid: 'subnet_ocid' } },
+    }[cloud];
+    const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
     const FIELDS = {
         pra_enabled: 'enable_pra',
         register_in_entitle: 'register_in_entitle',
@@ -321,6 +334,12 @@ window.workstreamDefaultsState = function (formName, cloud) {
         // The picked workstream's post-deploy runs, shown above Advanced with a skip box.
         wsRunsByWg: {},
         wsRuns: [],
+        wsNetByWg: {},
+        // What applyNetworkDefaults (or the page's own server default, via
+        // markNetworkAutoFilled) last put in each field. A field still holding it is
+        // not the operator's choice, so a later default may replace it.
+        wsNetFilled: {},
+        wsNetSaving: false,
 
         async applyWorkstreamDefaults() {
             const form = this[formName];
@@ -363,6 +382,64 @@ window.workstreamDefaultsState = function (formName, cloud) {
             };
             for (const [key, field] of Object.entries(FIELDS)) {
                 if (p[key] !== null && p[key] !== undefined && field in form) form[field] = p[key];
+            }
+            await this.loadNetworkDefaults(wg);
+            this.applyNetworkDefaults();
+        },
+
+        async loadNetworkDefaults(wg) {
+            if (!NET || !wg || this.wsNetByWg[wg] !== undefined) return;
+            try {
+                this.wsNetByWg[wg] = (await API.get('/api/workgroups/' + encodeURIComponent(wg)
+                                                    + '/network-defaults')) || {};
+            } catch (e) {
+                this.wsNetByWg[wg] = {};
+            }
+        },
+
+        // Fill the network fields from the picked workstream's defaults for the form's
+        // current region. Only a field that is empty, or still holds what was filled in
+        // automatically, is changed — never one the operator picked. Pages call this
+        // after a region change has cleared the fields and reloaded the options.
+        applyNetworkDefaults() {
+            const form = this[formName];
+            if (!NET || !form || !form.workgroup) return;
+            const d = ((this.wsNetByWg[form.workgroup] || {})[cloud] || {})[NET.region(form)] || {};
+            for (const [key, field] of Object.entries(NET.fields)) {
+                const v = d[key];
+                if (v === undefined || !(field in form)) continue;
+                const cur = form[field];
+                const empty = cur === null || cur === undefined || cur === ''
+                              || (Array.isArray(cur) && cur.length === 0);
+                if (empty || same(cur, this.wsNetFilled[field])) {
+                    form[field] = Array.isArray(v) ? [...v] : v;
+                    this.wsNetFilled[field] = form[field];
+                }
+            }
+        },
+
+        // The page filled a field from its own server default (AWS's sandbox subnet):
+        // record it, so a workstream default may still replace it.
+        markNetworkAutoFilled(field, value) {
+            this.wsNetFilled[field] = value;
+        },
+
+        // "Save as this workstream's default": the form's current network for its region.
+        async saveNetworkDefault() {
+            const form = this[formName];
+            if (!NET || !form || !form.workgroup) return;
+            const values = {};
+            for (const [key, field] of Object.entries(NET.fields)) values[key] = form[field];
+            this.wsNetSaving = true;
+            try {
+                this.wsNetByWg[form.workgroup] = await API.put(
+                    '/api/workgroups/' + encodeURIComponent(form.workgroup) + '/network-defaults',
+                    { cloud, region: NET.region(form), values });
+                toast('Saved as ' + form.workgroup + "'s network for " + NET.region(form));
+            } catch (e) {
+                toast(e.message || 'Could not save the network default', 'error');
+            } finally {
+                this.wsNetSaving = false;
             }
         },
     };
