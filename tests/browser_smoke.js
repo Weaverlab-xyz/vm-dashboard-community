@@ -30,7 +30,7 @@ function loadPlaywright() {
   for (const p of ['playwright', '/opt/node22/lib/node_modules/playwright']) {
     try { return require(p); } catch (_) { /* try the next */ }
   }
-  throw new Error('playwright is not installed (npm install playwright@1.56.1)');
+  throw new Error('playwright is not installed (npm install playwright@1.64.1)');
 }
 
 const { chromium } = loadPlaywright();

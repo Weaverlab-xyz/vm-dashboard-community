@@ -15,7 +15,7 @@
 # below, re-run, and commit both.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-VERSION=3.4.17
+VERSION=3.4.19
 OUT=web_dashboard/static/css/tailwind.css
 CLI=(${TAILWINDCSS:-npx --yes tailwindcss@$VERSION})
 
