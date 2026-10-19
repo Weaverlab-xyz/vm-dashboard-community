@@ -1728,6 +1728,11 @@ class Workgroup(Base):
     # JSON object holding only the keys it sets. NULL = sets none: every VM it deploys
     # takes the global defaults, which is every workstream that predates the column.
     deploy_defaults = Column(Text, nullable=True)
+    # Secret REFERENCES bound to the workstream by an administrator
+    # (services/workgroup_service.SECRET_CLOUDS): the SSH key secret per cloud and a PRA
+    # credential. Never a value. Kept apart from deploy_defaults because members edit
+    # those and only an administrator may edit these. NULL = none bound.
+    secret_bindings = Column(Text, nullable=True)
 
 
 class VMWorkgroupOverride(Base):
@@ -5425,6 +5430,9 @@ def init_db():
             # A workstream's deploy defaults, a JSON object. NULL = none set, which is
             # every existing workstream, so nothing changes until someone sets one.
             "ALTER TABLE workgroups ADD COLUMN deploy_defaults TEXT",
+            # Secret references an administrator binds to a workstream. NULL = none,
+            # every existing workstream, so deploys are unchanged until one is bound.
+            "ALTER TABLE workgroups ADD COLUMN secret_bindings TEXT",
 
             # Service accounts and their OAuth clients (services/service_accounts). A bare
             # BOOLEAN for the PostgreSQL reason on users.is_admin; NULL reads as "a person",

@@ -676,6 +676,36 @@ to point at. The defaults are stored on the workstream itself and go when it is 
 The API is `GET`/`PUT /api/workgroups/{name}/profile`; on a `PUT`, a field left out is
 unchanged and `null` sets it back to the global default.
 
+### Workstream secret bindings
+
+An administrator can bind secret **references** to a workstream: the SSH key pair secret its
+VMs use on each cloud, and the PRA credential its jumps are provisioned with. Only names and
+references are stored (a Secrets Manager name, an `aws_sm://…` reference); the values stay in
+your secret manager. Set them on **RBAC → Workstreams → Edit → Bound secrets**. Members see
+what is bound, because their deploys use it, but only an administrator can change it.
+
+| Bound secret | Where it applies |
+|---|---|
+| SSH key secret (AWS, Azure, GCP, OCI — one each) | Every deploy into the workstream on that cloud: the key injected into the VM, and the key Entitle and Password Safe registration use. |
+| PRA credential | The Shell Jump of every deploy into the workstream, on all four clouds, and **Add to PRA** on its VMs' rows. |
+
+How a deploy uses them:
+
+- **Left at the default**, the deploy gets the bound reference. The job records the
+  reference it actually used.
+- **A different one named by a non-admin** is refused: *this workstream's SSH key secret is
+  set by an administrator*. The deploy form disables that field when a key is bound and
+  shows which one is used.
+- **An administrator** may still name a different one for a single deploy.
+- **A workstream with nothing bound** behaves as before: the global default, or any
+  override the deployer picks.
+
+Binding is administrator-only on purpose. A member who could bind a secret could point
+their team's deploys at any secret the dashboard's cloud identity can read. Every change is
+audited. The API is `GET`/`PUT /api/workgroups/{name}/secret-bindings`; the `PUT` takes
+`{"ssh_key_secret": {"aws": "..."}, "pra_credential_ref": "..."}`, changes only the clouds
+it names, and `null` unbinds.
+
 ### Adding PRA to a VM after deploy
 
 A Linux VM this dashboard deployed — on AWS, Azure, GCP or OCI — can be added to PRA at any
@@ -706,8 +736,9 @@ workstream default → the per-cloud override (`azure_bt_jump_group_name`/`azure
 `gcp_bt_jump_group_name`/`gcp_jumpoint_name`, `oci_bt_jump_group_name`/`oci_jumpoint_name`) →
 the `bt_*` defaults, each read from config and then from its environment setting. Deploys
 and the post-deploy action share this resolution (`vm_pra_service.resolve_target`), so both
-land in the same place. AWS and Azure deploys, and the post-deploy action on every cloud,
-also accept a `pra_credential_ref` (overrides `bt_client_secret`). **Windows VMs** (AWS, Azure and GCP) get a Shell Jump over OpenSSH
+land in the same place. Deploys and the post-deploy action on all four clouds also accept a
+`pra_credential_ref` (overrides `bt_client_secret`); a workstream can
+[bind one](#workstream-secret-bindings). **Windows VMs** (AWS, Azure and GCP) get a Shell Jump over OpenSSH
 too, and a PRA **Remote RDP** jump item only on request — see
 [Windows servers](windows-servers.md).
 

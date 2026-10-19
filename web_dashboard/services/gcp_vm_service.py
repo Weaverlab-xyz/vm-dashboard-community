@@ -579,6 +579,8 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                     jump_group_name=jump_group,
                     jumpoint_name=pra_jumpoint_name,
                     tag="GCP",
+                    client_secret=vm_pra_service.client_secret_for(
+                        getattr(payload, "pra_credential_ref", None)),
                 )
                 final_meta["bt_shell_jump_id"] = bt_result.get("shell_jump_id")
                 final_meta["bt_jump_group_name"] = bt_result.get("jump_group_name")
@@ -651,6 +653,8 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                 pra_enabled=_want_pra,
                 jump_group=_win_group,
                 jumpoint_name=_win_gateway,
+                client_secret=vm_pra_service.client_secret_for(
+                    getattr(payload, "pra_credential_ref", None)),
                 ssh=win_ssh, rdp=win_rdp,
                 ssh_status=win_ssh_status, ssh_detail=win_ssh_detail,
             )

@@ -101,6 +101,7 @@ class GCPDeployRequest(ScheduleRequestMixin, BaseModel):
     enable_pra: Optional[bool] = None
     jump_group: Optional[str] = None             # PRA Jump Group name override (else gcp_bt_jump_group_name / bt_jump_group_name)
     jumpoint_name: Optional[str] = None          # PRA Jumpoint name override (else gcp_jumpoint_name / bt_jumpoint_name)
+    pra_credential_ref: Optional[str] = None     # secret ref → bt_client_secret override for the shell jump
     # A secrets-backend reference (e.g. gcp_sm://…) for the GCE Jumpoint deploy key.
     docker_deploy_key_ref: Optional[str] = None  # else gcp_cloud_run_docker_deploy_key
     count: int = Field(
@@ -146,6 +147,7 @@ class GCPBulkDeployRequest(ScheduleRequestMixin, BaseModel):
     enable_pra: Optional[bool] = None
     jump_group: Optional[str] = None
     jumpoint_name: Optional[str] = None
+    pra_credential_ref: Optional[str] = None     # secret ref → bt_client_secret override for the shell jump
     docker_deploy_key_ref: Optional[str] = None
 
 

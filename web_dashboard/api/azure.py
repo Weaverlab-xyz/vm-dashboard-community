@@ -39,6 +39,7 @@ from ..models.azure import (
     AzureVMInfo,
 )
 from ..models.vm_pra import VmPraRequest
+from .workgroups import enforce_secret_bindings
 from ..models.schedule import SCHEDULE_FIELDS, ScheduleRequestMixin
 from ..services import (azure_service, azure_listing, change_window_service,
                         deploy_batch, job_service,
@@ -1006,6 +1007,7 @@ async def deploy_vm(
     await _reject_cross_region_network(req.subnet_id, req.nsg_ids, loc)
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
     req.workgroup = workgroup
+    enforce_secret_bindings("azure", req, workgroup, current_user)
     await _validate_ssh_key_override(req.ssh_key_secret_override)
 
     if req.count > 1:
@@ -1109,6 +1111,7 @@ async def bulk_deploy_vms(
     await _reject_cross_region_network(req.subnet_id, req.nsg_ids, loc)
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
     req.workgroup = workgroup
+    enforce_secret_bindings("azure", req, workgroup, current_user)
     await _validate_ssh_key_override(req.ssh_key_secret_override)
 
     # Bulk means one VM per selected IMAGE, so every item has to resolve to one —
@@ -1299,6 +1302,9 @@ def set_instance_pra(
             detail=f"No active deployment found for {payload.instance}.")
     _assert_can_act(current_user, deploy_job.workgroup, f"VM '{payload.instance}'",
                     "change its PRA access")
+    if payload.action == "register":
+        # A credential bound to the VM's workstream applies here as at deploy time.
+        enforce_secret_bindings("azure", payload, deploy_job.workgroup, current_user)
     try:
         job = vm_pra_service.queue(db, cloud="azure", deploy_job=deploy_job,
                                    payload=payload, username=current_user.username)

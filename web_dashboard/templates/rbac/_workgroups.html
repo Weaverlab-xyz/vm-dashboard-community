@@ -17,6 +17,7 @@
    Jinja block (named without spelling the tag, because a source sweep for one would
    otherwise match this sentence). #}
 
+{% from "partials/secret_picker.html" import secret_picker %}
 <div class="max-w-5xl" x-data="workgroupsPage()">
 
   <p class="text-sm text-gray-500 mb-6">
@@ -259,6 +260,48 @@
           </div>
         </details>
 
+        <!-- Bound secrets: secret REFERENCES this workstream's deploys use. Only an
+             administrator may change them (PUT .../secret-bindings is require_admin), so
+             the inputs are read-only for anyone else; a member still sees what is bound,
+             because their deploys use it. -->
+        <details x-show="modalMode === 'edit'" x-cloak class="border-t border-gray-200 pt-3">
+          <summary class="cursor-pointer select-none text-xs font-medium text-gray-600">
+            Bound secrets
+            <span class="font-normal text-gray-400">— set by an administrator; names only, never values</span>
+          </summary>
+          <div class="mt-3 space-y-3">
+            <p x-show="bindingsError" x-cloak class="text-[11px] text-red-600" x-text="bindingsError"></p>
+            <p class="text-[11px] text-gray-500">
+              A deploy into this workstream that names no SSH key secret or PRA credential uses
+              these. While one is bound, only an administrator can choose a different one.
+            </p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <template x-for="c in bindingClouds" :key="c.id">
+                <label class="block">
+                  <span class="block text-xs font-medium text-gray-600 mb-1" x-text="c.label + ' SSH key secret'"></span>
+                  <input type="text" x-model="bindings.ssh[c.id]" :disabled="!isAdmin"
+                         :placeholder="isAdmin ? c.hint : 'Not bound'"
+                         class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono disabled:bg-gray-50"/>
+                </label>
+              </template>
+            </div>
+            <div x-show="isAdmin">
+              {{ secret_picker("bindings", "praCredBackend", "pra_credential_ref",
+                               "PRA credential",
+                               "The bt_client_secret override this workstream's jumps are provisioned with.") }}
+              <p x-show="bindings.pra_credential_ref" class="text-[11px] text-gray-500 mt-1">
+                Bound: <span class="font-mono" x-text="bindings.pra_credential_ref"></span>
+                <button type="button" @click="bindings.pra_credential_ref = ''; bindings.praCredBackend = ''"
+                        class="ml-2 text-red-500 hover:text-red-700">Unbind</button>
+              </p>
+            </div>
+            <p x-show="!isAdmin" class="text-xs text-gray-600">
+              PRA credential:
+              <span class="font-mono" x-text="bindings.pra_credential_ref || 'Not bound'"></span>
+            </p>
+          </div>
+        </details>
+
         <div x-show="modalMode === 'create'" class="flex items-center gap-2">
           <input type="checkbox" id="wg_is_default" x-model="form.is_default"
                  class="rounded border-gray-300 text-blue-600 focus:ring-blue-200"/>
@@ -285,6 +328,7 @@
 <script>
 function workgroupsPage() {
   return {
+    ...secretPickerState(),
     workgroups: [],
     loading: true,
     toast: '',
@@ -311,9 +355,23 @@ function workgroupsPage() {
     // the payload's r.jumpoints on fetch, the way every picker state does it — see
     // tests/test_pra_picker_bindings.py for why the two spellings must not drift.
     wsPraOpts: {jump_groups: [], gateways: []},
+    // Secret references bound to the workstream (admin-only to change). `ssh` is per
+    // cloud; the PRA credential is a composed secret_picker reference.
+    isAdmin: false,
+    bindings: {ssh: {}, praCredBackend: '', pra_credential_ref: ''},
+    bindingsError: '',
+    bindingsLoaded: '',
+    bindingClouds: [
+      {id: 'aws', label: 'AWS', hint: 'Secrets Manager secret name'},
+      {id: 'azure', label: 'Azure', hint: 'Key Vault secret name'},
+      {id: 'gcp', label: 'GCP', hint: 'Secret Manager secret name'},
+      {id: 'oci', label: 'OCI', hint: 'Vault secret OCID or name'},
+    ],
 
     async init() {
       requireAuth();
+      this.isAdmin = !!(Alpine.store('auth') && Alpine.store('auth').isAdmin);
+      if (this.isAdmin) this.loadSecretBackends();
       await this.load();
     },
 
@@ -356,8 +414,12 @@ function workgroupsPage() {
       };
       this.profile = {};
       this.profileError = '';
+      this.bindings = {ssh: {}, praCredBackend: '', pra_credential_ref: ''};
+      this.bindingsError = '';
+      this.bindingsLoaded = '';
       this.modalOpen = true;
       this.loadProfile(w.name);
+      this.loadBindings(w.name);
     },
 
     async loadProfile(name) {
@@ -383,6 +445,25 @@ function workgroupsPage() {
           this.wsPraOpts = {jump_groups: r.jump_groups || [], gateways: r.jumpoints || []};
         } catch (e) { /* the saved names are still offered, and Global default */ }
       }
+    },
+
+    async loadBindings(name) {
+      try {
+        const b = await API.get('/api/workgroups/' + encodeURIComponent(name) + '/secret-bindings');
+        this.bindings = {ssh: {...(b.ssh_key_secret || {})}, praCredBackend: '',
+                         pra_credential_ref: b.pra_credential_ref || ''};
+        // What was loaded, so a save sends nothing when nothing changed — and a
+        // non-admin's save never touches the admin-only endpoint.
+        this.bindingsLoaded = JSON.stringify(this.bindingsPayload());
+      } catch (e) {
+        this.bindingsError = 'Bound secrets unavailable: ' + (e.message || e);
+      }
+    },
+
+    bindingsPayload() {
+      const ssh = {};
+      for (const c of this.bindingClouds) ssh[c.id] = (this.bindings.ssh[c.id] || '').trim() || null;
+      return {ssh_key_secret: ssh, pra_credential_ref: (this.bindings.pra_credential_ref || '').trim() || null};
     },
 
     profilePayload() {
@@ -424,6 +505,11 @@ function workgroupsPage() {
           if (!this.profileError) {
             await API.put('/api/workgroups/' + encodeURIComponent(this.form.name) + '/profile',
                           this.profilePayload());
+          }
+          if (this.isAdmin && !this.bindingsError
+              && JSON.stringify(this.bindingsPayload()) !== this.bindingsLoaded) {
+            await API.put('/api/workgroups/' + encodeURIComponent(this.form.name) + '/secret-bindings',
+                          this.bindingsPayload());
           }
           this.flash('Workstream updated.', 'success');
         }

@@ -366,6 +366,9 @@ A scope says *what*, not *which*. Two mechanisms narrow the *which*:
   Its **deploy defaults** take the same authority as editing it, and are audited too. They
   are a fixed list holding no secrets — see
   [Workstream deploy defaults](../cloud/vms.md#workstream-deploy-defaults).
+  Its **bound secrets** (an SSH key secret per cloud and a PRA credential) are
+  **administrator-only** to change; members can see which are bound. See
+  [Workstream secret bindings](../cloud/vms.md#workstream-secret-bindings).
 
   **Workstreams were called workgroups** until this release. The new name avoids a clash
   with Password Safe, whose own *workgroups* (the container for managed systems) appear in
