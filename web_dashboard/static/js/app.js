@@ -371,6 +371,19 @@ window.workstreamDefaultsState = function (formName, cloud) {
     };
 };
 
+// The PRA opt-in a workstream's deploys default to (its profile's pra_enabled, else on),
+// for the bulk deploy forms, which carry their own state rather than the single form's
+// workstreamDefaultsState. Never rejects: an unreadable profile means the default, on.
+window.workstreamPraDefault = async function (wg) {
+    if (!wg) return true;
+    try {
+        const p = await API.get('/api/workgroups/' + encodeURIComponent(wg) + '/profile');
+        return p.pra_enabled === false ? false : true;
+    } catch (e) {
+        return true;
+    }
+};
+
 // ── Post-deploy PRA access on a cloud VM row ─────────────────────────────────
 //
 // Spread into a cloud page component (`...vmPraState('aws')`, after

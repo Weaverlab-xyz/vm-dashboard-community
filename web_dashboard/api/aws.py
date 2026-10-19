@@ -48,6 +48,7 @@ from ..services.aws_service import AWSError
 from .auth import require_admin, require_permission
 from ..services import vm_suspend_policy
 from ..services import tag_policy
+from ..services import vm_pra_service
 from . import unmanaged
 from . import tag_batch
 from .power_batch import queue_power_batch
@@ -363,7 +364,7 @@ async def _fetch_instances(db: Session) -> list:
             "job_id": job.id if job else None,
             "deployed_by": job.created_by if job else None,
             "suspend_warning": warn or None,
-            "pra_jump_id": (job.metadata_dict.get("bt_shell_jump_id") or None) if job else None,
+            "pra_jump_id": vm_pra_service.jump_id(job.metadata_dict) if job else None,
             # The raw EC2 Tags dict is already on `live` and is spread in above; this
             # OVERWRITES it with the render-ready chip list the page binds to. It has
             # to be an overwrite rather than an addition: `tags` on the response model

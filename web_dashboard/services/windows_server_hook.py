@@ -332,11 +332,37 @@ async def wire(db, job_id: str, *, vm_name: str, hostname: str, username: str,
         if want_rdp:
             result["bt_rdp_error"] = missing
         return
-    from . import terraform_pra_service
     ps_owned = result["admin_password_custody"] == CUSTODY_PASSWORD_SAFE
 
+    async def _progress(pct: int, msg: str) -> None:
+        job_service.update_progress(db, job_id, pct, msg)
+
+    await wire_pra(vm_name=vm_name, hostname=hostname, username=username,
+                   password=password, ps_owned=ps_owned, result=result, tag=tag,
+                   jump_group=jump_group, jumpoint_name=jumpoint_name,
+                   client_secret=client_secret, want_shell=want_shell,
+                   want_rdp=want_rdp, progress=_progress)
+
+
+async def wire_pra(*, vm_name: str, hostname: str, username: str, password: str,
+                   ps_owned: bool, result: dict, tag: str, jump_group: str,
+                   jumpoint_name: str, client_secret: str, want_shell: bool,
+                   want_rdp: bool, progress=None) -> None:
+    """The PRA half of :func:`wire`: the Shell Jump (with its SSH Vault account) and/or
+    the RDP jump (with its Vault account), written onto ``result``. A failure is
+    recorded as ``bt_error`` / ``bt_rdp_error``, never raised.
+
+    Shared with ``vm_pra_service.attach``, which adds PRA to a Windows server after its
+    deploy from the same inputs the deploy kept: the stored admin password (or none, when
+    Password Safe holds the account) and the access it recorded."""
+    from . import terraform_pra_service
+
+    async def say(pct: int, msg: str) -> None:
+        if progress is not None:
+            await progress(pct, msg)
+
     if want_shell:
-        job_service.update_progress(db, job_id, 96, "Creating the PRA Shell Jump (SSH)…")
+        await say(96, "Creating the PRA Shell Jump (SSH)…")
         try:
             # A plain username: `.\user` is an NLA convention, and OpenSSH on Windows
             # resolves a bare name to the local account itself.
@@ -362,7 +388,7 @@ async def wire(db, job_id: str, *, vm_name: str, hostname: str, username: str,
 
     if not want_rdp:
         return
-    job_service.update_progress(db, job_id, 97, "Creating the PRA Remote RDP jump item…")
+    await say(97, "Creating the PRA Remote RDP jump item…")
     try:
         jump = await terraform_pra_service.provision_rdp_jump(
             name=vm_name, hostname=hostname,

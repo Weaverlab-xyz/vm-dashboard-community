@@ -49,6 +49,7 @@ from ..services.azure_service import AzureError
 from .auth import require_admin, require_permission
 from ..services import vm_suspend_policy
 from ..services import tag_policy
+from ..services import vm_pra_service
 from . import unmanaged
 from . import tag_batch
 from .power_batch import queue_power_batch
@@ -616,7 +617,7 @@ def _deploy_job_meta(db: Session) -> dict:
             # in its confirmation BEFORE queueing, which is the point of a warning that
             # does not block.
             "suspend_warning": _suspend_warning(j),
-            "pra_jump_id": j.metadata_dict.get("bt_shell_jump_id") or None,
+            "pra_jump_id": vm_pra_service.jump_id(j.metadata_dict),
         }
         for j in deploy_jobs if j.metadata_dict.get("vm_name")
     }
