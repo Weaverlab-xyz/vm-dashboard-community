@@ -504,6 +504,12 @@
               <option :value="s.id" x-text="s.vnet_name + ' / ' + s.name + ' (' + [s.address_prefix, networkOpts.location].filter(Boolean).join(', ') + ')'"></option>
             </template>
           </select>
+          <!-- Network defaults (workstreamDefaultsState): saved per workstream and region,
+               and filled into this field the next time that workstream deploys there. -->
+          <button type="button" x-show="deployModal.workgroup && deployModal.subnetId" x-cloak
+                  @click="saveNetworkDefault()" :disabled="wsNetSaving"
+                  class="mt-1 text-xs text-blue-600 hover:underline disabled:text-gray-400">
+            Save as this workstream's network for this region</button>
         </div>
         <div>
           <label class="block text-xs font-medium text-gray-700 mb-1">Network Security Groups</label>
@@ -2053,6 +2059,7 @@ function azureDashboard() {
       this.deployModal.subnetId = '';
       this.deployModal.nsgIds = [];
       await this.loadNetworkOpts(true, this.deployModal.location);
+      this.applyNetworkDefaults();
     },
 
     // Same for the bulk modal's shared Location, where the cost is higher: a stale

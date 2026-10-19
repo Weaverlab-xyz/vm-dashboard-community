@@ -1738,6 +1738,10 @@ class Workgroup(Base):
     # {asset, asset_backend}. Administrator-only like secret_bindings, because each one
     # is code run on every new machine. NULL = none.
     post_deploy_runs = Column(Text, nullable=True)
+    # The subnet / security groups its deploy forms start from, per cloud and region
+    # (services/workgroup_service.NETWORK_KEYS): {cloud: {region: {key: value}}}. A form
+    # convenience, never applied by the server. NULL = none.
+    network_defaults = Column(Text, nullable=True)
 
 
 class StorageAssetScope(Base):
@@ -5460,6 +5464,7 @@ def init_db():
             # Assets run on every VM deployed into a workstream. NULL = none, every
             # existing workstream, so no deploy changes until an administrator sets one.
             "ALTER TABLE workgroups ADD COLUMN post_deploy_runs TEXT",
+            "ALTER TABLE workgroups ADD COLUMN network_defaults TEXT",
 
             # Service accounts and their OAuth clients (services/service_accounts). A bare
             # BOOLEAN for the PostgreSQL reason on users.is_admin; NULL reads as "a person",

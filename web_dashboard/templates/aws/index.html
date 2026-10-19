@@ -999,6 +999,12 @@
                 <option :value="s.id" x-text="s.name"></option>
               </template>
             </select>
+          <!-- Network defaults (workstreamDefaultsState): saved per workstream and region,
+               and filled into this field the next time that workstream deploys there. -->
+          <button type="button" x-show="deployForm.workgroup && deployForm.subnet_id" x-cloak
+                  @click="saveNetworkDefault()" :disabled="wsNetSaving"
+                  class="mt-1 text-xs text-blue-600 hover:underline disabled:text-gray-400">
+            Save as this workstream's network for this region</button>
           </div>
 
           <!-- Security Groups -->
@@ -2598,8 +2604,18 @@
             this.networkOptsRegion = region || '';
             // Preselect the sandbox private subnet + VM SG (where the on-demand NAT
             // route applies) when the operator hasn't already chosen. Overridable.
-            if (!this.deployForm.subnet_id && o.default_subnet_id) this.deployForm.subnet_id = o.default_subnet_id;
-            if (this.deployForm.security_group_ids.length === 0 && o.default_security_group_id) this.deployForm.security_group_ids = [o.default_security_group_id];
+            // The picked workstream's network for this region comes first; the server's
+            // default fills whatever it leaves empty, and is marked as automatic so a
+            // later workstream change may still replace it.
+            this.applyNetworkDefaults();
+            if (!this.deployForm.subnet_id && o.default_subnet_id) {
+              this.deployForm.subnet_id = o.default_subnet_id;
+              this.markNetworkAutoFilled('subnet_id', o.default_subnet_id);
+            }
+            if (this.deployForm.security_group_ids.length === 0 && o.default_security_group_id) {
+              this.deployForm.security_group_ids = [o.default_security_group_id];
+              this.markNetworkAutoFilled('security_group_ids', this.deployForm.security_group_ids);
+            }
           }
         } catch (e) {
           // Caught here, like loadAmis: with no AWS credentials every caller -- the OT

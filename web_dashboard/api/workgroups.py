@@ -388,6 +388,45 @@ def put_post_deploy_runs(
     return PostDeployRuns(runs=out)
 
 
+class NetworkDefault(BaseModel):
+    cloud: str = Field(..., max_length=16)
+    region: str = Field(..., max_length=64)
+    values: Optional[dict] = None
+
+
+@router.get("/{name}/network-defaults")
+def get_network_defaults(
+    name: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The subnet / security groups this workstream's deploy forms start from, per cloud
+    and region: ``{cloud: {region: {key: value}}}``."""
+    wg = _require_steward(db, current_user, name)
+    return workgroup_service.network_defaults(wg.name, db)
+
+
+@router.put("/{name}/network-defaults")
+def put_network_defaults(
+    name: str,
+    payload: NetworkDefault,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Set or clear one cloud+region's defaults. Same authority as the deploy defaults:
+    they only pre-fill a form, and the deploy still validates whatever it is sent."""
+    wg = _require_steward(db, current_user, name)
+    try:
+        out = workgroup_service.set_network_defaults(
+            db, wg.name, payload.cloud, payload.region, payload.values)
+    except WorkgroupError as exc:
+        _raise_from(exc)
+    _audit(db, current_user, "workstream_network_defaults_update", workstream=wg.name,
+           cloud=payload.cloud, region=payload.region.lower(),
+           cleared=not (payload.values or {}))
+    return out
+
+
 @router.get("/{name}/members", response_model=List[str])
 def list_members(
     name: str,

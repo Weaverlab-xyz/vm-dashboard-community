@@ -684,6 +684,29 @@ to point at. The defaults are stored on the workstream itself and go when it is 
 The API is `GET`/`PUT /api/workgroups/{name}/profile`; on a `PUT`, a field left out is
 unchanged and `null` sets it back to the global default.
 
+### Workstream network defaults
+
+A workstream can remember the network its VMs usually go into, per cloud and region:
+the subnet and security groups on AWS, the subnet and network security groups on Azure, the
+subnetwork on GCP, and the subnet on OCI. Pick them on a deploy form and click **Save as
+this workstream's network for this region** under the subnet. The next deploy into that
+workstream and region starts with them filled in.
+
+- **They fill the form, nothing more.** Only empty fields are filled, plus fields still
+  holding a default the form put there itself (AWS's configured default subnet). A subnet
+  you picked is never replaced. The server applies none of it, and the deploy is validated
+  as usual.
+- **Regions are separate.** Changing region clears the network fields, as before, then
+  fills them from the workstream's defaults for the new region. GCP keys them by region,
+  taken from the zone; OCI has one region.
+- **The workstream editor** lists them under **Network defaults**, with **Remove** for each.
+
+Like the deploy defaults, any member of the workstream, its creator, or an administrator can
+change them, and every change is audited. The API is `GET`/`PUT
+/api/workgroups/{name}/network-defaults`; the `PUT` takes `{"cloud": "aws", "region":
+"us-east-1", "values": {"subnet_id": "...", "security_group_ids": ["..."]}}`, changes only
+that region, and `null` values clear it.
+
 ### Workstream secret bindings
 
 An administrator can bind secret **references** to a workstream: the SSH key pair secret its

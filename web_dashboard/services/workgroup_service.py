@@ -642,6 +642,120 @@ def set_post_deploy_runs(db: Session, name: str, runs) -> list:
     return clean
 
 
+# ── Network defaults (members) ─────────────────────────────────────────────────
+#
+# The subnet and security groups a workstream's deploy forms start from. Network values
+# are regional — a subnet exists in one region — so they are kept per cloud and region:
+# {cloud: {region: {key: value}}}; OCI has one region and keys it "default". They only
+# pre-fill a form (static/js/app.js workstreamDefaultsState); the server applies none, so
+# a member may set them like the deploy defaults. Keys are an allowlist per cloud.
+
+NETWORK_KEYS = {
+    "aws":   {"subnet_id": str, "security_group_ids": list},
+    "azure": {"subnet_id": str, "nsg_ids": list},
+    "gcp":   {"subnetwork": str},
+    "oci":   {"subnet_ocid": str},
+}
+NETWORK_MAX_REGIONS = 50
+_REGION_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+
+
+def _net_value(kind, value, where: str):
+    if kind is str:
+        if not isinstance(value, str) or len(value.strip()) > 512:
+            raise WorkgroupError(f"{where} must be an id of at most 512 characters")
+        return value.strip()
+    if (not isinstance(value, list) or len(value) > 20
+            or not all(isinstance(v, str) and 0 < len(v.strip()) <= 512 for v in value)):
+        raise WorkgroupError(f"{where} must be a list of at most 20 ids")
+    return [v.strip() for v in value]
+
+
+def _read_network(wg: Optional[Workgroup]) -> dict:
+    stored = getattr(wg, "network_defaults", None) if wg is not None else None   # see _read_defaults
+    if not stored:
+        return {}
+    try:
+        raw = json.loads(stored)
+    except (ValueError, TypeError):
+        return {}
+    out: dict = {}
+    for cloud, keys in NETWORK_KEYS.items():
+        regions = (raw.get(cloud) if isinstance(raw, dict) else None) or {}
+        if not isinstance(regions, dict):
+            continue
+        for region, values in regions.items():
+            if not (isinstance(region, str) and _REGION_RE.match(region)
+                    and isinstance(values, dict)):
+                continue
+            clean = {}
+            for key, kind in keys.items():
+                if key in values:
+                    try:
+                        v = _net_value(kind, values[key], key)
+                    except WorkgroupError:
+                        continue
+                    if v:
+                        clean[key] = v
+            if clean:
+                out.setdefault(cloud, {})[region] = clean
+    return out
+
+
+def network_defaults(name: Optional[str], db: Optional[Session] = None) -> dict:
+    """``{cloud: {region: {key: value}}}`` for the workstream; ``{}`` when none."""
+    wg_name = _normalize(name or "")
+    if not wg_name:
+        return {}
+    if db is not None:
+        return _read_network(get(db, wg_name))
+    from ..database import SessionLocal
+    own = SessionLocal()
+    try:
+        return _read_network(get(own, wg_name))
+    finally:
+        own.close()
+
+
+def set_network_defaults(db: Session, name: str, cloud: str, region: str,
+                         values: Optional[dict]) -> dict:
+    """Set — or with empty/None ``values``, clear — the network defaults for one cloud and
+    region. Only that region changes. Returns the workstream's whole map."""
+    wg = get(db, name)
+    if wg is None:
+        raise WorkgroupError(f"Workstream '{name}' not found.")
+    keys = NETWORK_KEYS.get(cloud)
+    if keys is None:
+        raise WorkgroupError(f"Unknown cloud: {cloud}")
+    region = (region or "").strip().lower()
+    if not _REGION_RE.match(region):
+        raise WorkgroupError("region must be a cloud region, location or zone name")
+    values = values or {}
+    if not isinstance(values, dict):
+        raise WorkgroupError("values must map a network field to its value")
+    unknown = sorted(set(values) - set(keys))
+    if unknown:
+        raise WorkgroupError(f"Not a {cloud} network default: {', '.join(unknown)}")
+    clean = {}
+    for key, value in values.items():
+        if value in (None, "", []):
+            continue
+        clean[key] = _net_value(keys[key], value, key)
+    current = _read_network(wg)
+    regions = current.setdefault(cloud, {})
+    if clean:
+        if region not in regions and len(regions) >= NETWORK_MAX_REGIONS:
+            raise WorkgroupError(f"At most {NETWORK_MAX_REGIONS} regions per cloud")
+        regions[region] = clean
+    else:
+        regions.pop(region, None)
+    if not regions:
+        current.pop(cloud, None)
+    wg.network_defaults = json.dumps(current, sort_keys=True) if current else None
+    db.commit()
+    return current
+
+
 # ── Seed ──────────────────────────────────────────────────────────────────────
 
 def seed_if_empty(db: Session) -> None:
