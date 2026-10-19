@@ -32,7 +32,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-admin-demotion")
 
 from web_dashboard.api import users as users_api  # noqa: E402
 from web_dashboard.api.auth import PERMISSION_SCOPES, has_permission  # noqa: E402
-from web_dashboard.database import Base, SessionLocal, User, engine  # noqa: E402
+from web_dashboard.database import AccessRole, Base, SessionLocal, User, engine  # noqa: E402
 from web_dashboard.services import role_service  # noqa: E402
 
 Base.metadata.create_all(bind=engine)
@@ -42,6 +42,19 @@ def _db():
     db = SessionLocal()
     role_service.seed_builtins(db)
     return db
+
+
+def _nothing_role(db):
+    """A role that grants nothing. A demotion must now land on a role
+    (api/users.ROLE_REQUIRED); landing on this one keeps every assertion below about the
+    MAP, which is what these tests are for."""
+    role = db.query(AccessRole).filter(AccessRole.slug == "demotion-grants-nothing").first()
+    if role is None:
+        role = AccessRole(id=str(uuid.uuid4()), slug="demotion-grants-nothing",
+                          name="Grants nothing", permissions=None)
+        db.add(role)
+        db.commit()
+    return role
 
 
 def _root(db):
@@ -78,7 +91,7 @@ def _grants_nothing(u):
 def test_unticking_admin_leaves_nothing_granted():
     db = _db()
     root, u = _root(db), _legacy_admin(db)
-    u = _patch(db, u, root, is_admin=False)
+    u = _patch(db, u, root, is_admin=False, role_id=_nothing_role(db).id)
     assert not u.is_effective_admin
     assert u.permissions_dict == {s: [] for s in PERMISSION_SCOPES}, u.permissions_dict
     assert _grants_nothing(u), "a demoted admin can still reach a section"
@@ -88,14 +101,15 @@ def test_a_stale_map_under_the_admin_does_not_come_back():
     """Grants nobody has looked at since the flag started bypassing them."""
     db = _db()
     root, u = _root(db), _legacy_admin(db, perms={"aws": ["read", "write", "delete"]})
-    u = _patch(db, u, root, is_admin=False)
+    u = _patch(db, u, root, is_admin=False, role_id=_nothing_role(db).id)
     assert not has_permission(u, "aws", "delete")
 
 
 def test_permissions_sent_with_the_demotion_are_honoured():
     db = _db()
     root, u = _root(db), _legacy_admin(db)
-    u = _patch(db, u, root, is_admin=False, permissions={"vms": ["read"]})
+    u = _patch(db, u, root, is_admin=False, permissions={"vms": ["read"]},
+               role_id=_nothing_role(db).id)
     assert has_permission(u, "vms", "read") and not has_permission(u, "aws", "read")
 
 
@@ -117,7 +131,8 @@ def test_removing_the_administrator_role_is_a_demotion_too():
     role_service.apply_role_to_user(db, u, role_service.get_by_slug(db, "administrator"))
     db.commit()
     assert u.is_effective_admin
-    u = _patch(db, u, root, role_id="")
+    # Moving it onto another role: clearing it outright is refused now.
+    u = _patch(db, u, root, role_id=_nothing_role(db).id)
     assert not u.is_effective_admin and _grants_nothing(u)
 
 
@@ -128,6 +143,7 @@ def test_an_unrelated_edit_does_not_touch_a_non_admins_map():
              hashed_password="x", is_active=True, is_admin=False)
     u.permissions_dict = {"vms": ["read"]}
     db.add(u)
+    role_service.apply_role_to_user(db, u, _nothing_role(db))
     db.commit()
     u = _patch(db, u, root, full_name="Renamed")
     assert u.permissions_dict == {"vms": ["read"]}

@@ -71,7 +71,12 @@
                    grant comes from. The permission chips two columns over are the mapping's
                    own additions on top of it. -->
               <td class="py-2.5 pr-4 text-xs">
-                <span x-show="!m.role_name" class="text-gray-400">&mdash;</span>
+                <!-- Amber, not a dash: every mapping needs a role now (api/groups.py
+                     ROLE_REQUIRED), and this one predates the rule. It still signs people
+                     in; it just cannot be saved again without one. -->
+                <span x-show="!m.role_name"
+                      class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
+                             bg-amber-50 text-amber-700 border border-amber-200">No role</span>
                 <span x-show="m.role_name"
                       class="inline-flex items-center px-2 py-0.5 rounded-full text-xs
                              font-medium bg-gray-100 text-gray-600" x-text="m.role_name"></span>
@@ -190,16 +195,17 @@
       </div>
       {% endif %}
 
-      <!-- Access role. Above the grid deliberately: a role is the normal way to grant
-           access and the grid below it is this mapping's addition on top. -->
+      <!-- Access role. Above the grid deliberately: the role is the base grant and the grid
+           below it is this mapping's addition on top. Required -- the API refuses a mapping
+           without one (api/groups.py ROLE_REQUIRED). -->
       <div class="mb-4">
         <label class="block text-sm font-medium text-gray-700 mb-1">
-          Role <span class="text-gray-400 font-normal">(optional)</span>
+          Role <span class="text-red-500">*</span>
         </label>
-        <select x-model="form.role_id"
+        <select x-model="form.role_id" required
                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
                        focus:outline-none focus:ring-2 focus:ring-blue-500">
-          <option value="">No role &mdash; use the permissions below only</option>
+          <option value="" disabled>&mdash; choose a role &mdash;</option>
           <template x-for="r in availableRoles" :key="r.id">
             <option :value="r.id" x-text="r.name + (r.is_builtin ? '' : ' (custom)')"></option>
           </template>
@@ -234,9 +240,9 @@
   <div class="mt-6 bg-blue-50 border border-blue-100 rounded-lg p-4 text-sm text-blue-800">
     <p class="font-medium mb-1">How it works</p>
     <ul class="list-disc list-inside space-y-1 text-blue-700">
-      <li>Users sign in via <strong>Sign in with Microsoft</strong> on the login page.</li>
-      <li>The group memberships in their token are checked against this table.</li>
-      <li>Matching users are auto-created and assigned the corresponding workgroup(s).</li>
+      <li>Users sign in with single sign-on on the login page &mdash; <strong>Sign in with Microsoft</strong> or your OIDC provider's button.</li>
+      <li>The groups (or app roles) in their token are checked against this table.</li>
+      <li>Matching users are auto-created and given each matched mapping's role, workstream and extra permissions.</li>
       <li>If a user is in multiple mapped groups they receive all matching workstreams.</li>
       <li>Workstream, permission and role assignments are re-synced from the provider on every login.</li>
     </ul>
@@ -324,8 +330,7 @@ function groupsPage() {
           // Otherwise EVERY scope with its granted levels, so "nothing ticked" can never
           // be mistaken for {}. See buildPermissionsPayload.
           default_permissions: this.form.permissionsUnrestricted ? {} : this.buildPermissionsPayload(),
-          // Blank sent as null: on create there is no "no change" state to tell apart, and
-          // the API reads a blank as no role.
+          // Required; the <select> enforces it and the API refuses a blank anyway.
           role_id: this.form.role_id || null,
           persona: this.form.persona || null,
           // Only meaningful alongside a persona, so it is not sent without one -- a
