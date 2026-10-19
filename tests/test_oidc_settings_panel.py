@@ -41,7 +41,8 @@ def test_oidc_is_config_only():
 
 def test_panel_fields_match_what_the_service_reads():
     """Guard against drift between the panel and the services it configures:
-    services/oidc_service.py (SSO) and services/external_workload.py (workload tokens).
+    services/oidc_service.py (SSO), services/external_workload.py (workload tokens) and
+    services/public_url.py (the UI origin the callbacks are built from).
 
     The expected set is READ from the services' ``_cfg("...")`` calls rather than listed
     here, so a key a service starts reading without a panel field (or the reverse) fails
@@ -52,6 +53,10 @@ def test_panel_fields_match_what_the_service_reads():
     for name in ("oidc_service.py", "external_workload.py"):
         with open(os.path.join(_ROOT, "web_dashboard", "services", name), encoding="utf-8") as fh:
             expected |= set(re.findall(r'_cfg\("([a-z_]+)"', fh.read()))
+    # services/public_url.py: the browser origin both SSO callbacks are built from.
+    with open(os.path.join(_ROOT, "web_dashboard", "services", "public_url.py"),
+              encoding="utf-8") as fh:
+        expected |= set(re.findall(r'^UI_CONFIG_KEY = "([a-z_]+)"', fh.read(), re.M))
     assert "oidc_issuer" in expected and "workload_idp_audience" in expected, \
         "the _cfg scan found nothing -- the services no longer read config that way"
     assert model_fields == expected, (

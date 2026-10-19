@@ -180,6 +180,46 @@ def test_a_sloppy_configured_value_still_produces_a_clean_callback():
         _set_public_base("")
 
 
+# ── split host: public_base_url is the AGENT host ─────────────────────────────
+
+def _set(key: str, value: str) -> None:
+    config_service.set(key, value)
+    config_service.invalidate()
+
+
+def test_split_host_callbacks_use_the_ui_host_not_the_agent_host():
+    """On the ACA installs public_base_url is the agent hostname, whose gateway 404s every
+    path but /api/agent/*. webauthn_origin is the browser origin, so both callbacks must
+    land there, through every proxy configuration."""
+    _set_public_base("https://agents.example.com")
+    _set("webauthn_origin", "https://dash.example.com")
+    try:
+        for trusted, headers in (("127.0.0.1", None), ("127.0.0.1", PROXY_HEADERS),
+                                 (PROXY_IP, PROXY_HEADERS)):
+            assert _entra(trusted, headers) ==                 "https://dash.example.com/api/auth/oauth/azure/callback"
+            assert _oidc(trusted, headers) ==                 "https://dash.example.com/api/auth/oauth/oidc/callback"
+    finally:
+        _set("webauthn_origin", "")
+        _set_public_base("")
+
+
+def test_ui_base_url_overrides_both():
+    _set_public_base("https://agents.example.com")
+    _set("ui_base_url", "https://sso.example.com/")
+    try:
+        assert _oidc("127.0.0.1") == "https://sso.example.com/api/auth/oauth/oidc/callback"
+        assert _entra("127.0.0.1") == "https://sso.example.com/api/auth/oauth/azure/callback"
+    finally:
+        _set("ui_base_url", "")
+        _set_public_base("")
+
+
+def test_with_nothing_set_both_callbacks_still_derive_from_the_request():
+    _set_public_base("")
+    assert _entra("127.0.0.1") == "http://testserver/api/auth/oauth/azure/callback"
+    assert _oidc("127.0.0.1") == "http://testserver/api/auth/oauth/oidc/callback"
+
+
 # ── the diagnostic ────────────────────────────────────────────────────────────
 
 # ── what pinning actually buys ────────────────────────────────────────────────

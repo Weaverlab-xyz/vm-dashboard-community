@@ -180,8 +180,10 @@ existing key — so a blocked re-issue leaves the running container working. Res
 setting Public base URL back to the pinned value, or by resetting the audience.
 
 A divergence is not *always* a mistake, though, which is why the refusal is not a dead end.
-`PUBLIC_BASE_URL` is one value doing two jobs — the OAuth callback origin as well as the
-agent audience — and a split vhost is exactly the case where those want different hostnames.
+`PUBLIC_BASE_URL` used to do two jobs — the OAuth callback origin as well as the agent
+audience — and a split vhost is exactly the case where those want different hostnames. The
+callbacks now come from `UI_BASE_URL`, else a non-localhost `WEBAUTHN_ORIGIN`, so on a split
+vhost set `PUBLIC_BASE_URL` to the agent host without breaking SSO ([OIDC](../oidc.md#step-1--register-an-application-with-your-idp)).
 Confirming the prompt re-issues with `?acknowledge_audience=true`, which mints against the
 **pinned** audience, labels the command with which URL it used, and logs and audits the
 exception. It does not move the pin: the override is permission to use the pinned audience,

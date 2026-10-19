@@ -8731,10 +8731,29 @@
 
           <!-- Redirect URI is the thing operators most often get wrong, and the
                provider rejects the login before we ever see it — so show the exact
-               value to register, derived from the current origin. -->
+               value the SERVER will send (GET /api/auth/oauth/redirect-uris), not the
+               current browser origin, which can differ on a split-host install. -->
           <div class="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2.5">
             <p class="text-[11px] font-medium text-blue-900 mb-1">Register this redirect URI with your provider</p>
-            <code class="text-[11px] text-blue-800 break-all" x-text="window.location.origin + '/api/auth/oauth/oidc/callback'"></code>
+            <code class="text-[11px] text-blue-800 break-all" x-text="oidcCallbackUri()"></code>
+            <p x-show="oidcCallbackUri() && !oidcCallbackUri().startsWith(window.location.origin + '/')" x-cloak
+               class="text-[11px] text-amber-700 mt-1">
+              This is not the origin you are browsing from. SSO sends the browser back here, so it
+              must be the host users sign in on — set <strong>UI base URL</strong> below if it is wrong.
+            </p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">UI base URL</label>
+            <input type="text" x-model="panelCfg.ui_base_url"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="https://dash.example.com">
+            <p class="text-[11px] text-gray-400 mt-1">
+              The origin a browser reaches this dashboard at; both SSO callbacks (OIDC and Sign-in
+              with Microsoft) are built from it. Blank uses <code>WEBAUTHN_ORIGIN</code> when that is
+              not localhost, then <code>PUBLIC_BASE_URL</code>, then the request. Set it when
+              <code>PUBLIC_BASE_URL</code> is a separate agent hostname. Agents never use it.
+            </p>
           </div>
 
           <div>
@@ -9167,6 +9186,7 @@ function settingsPage() {
     panelSecretsTouched: [],
     entitleAgentToken: '',   // read-only display of the auto-minted Entitle agent token name
     agentAudience: null,     // read-only view of the pinned agent signing audience (Remote Agents panel)
+    oauthRedirectUris: null, // read-only: the SSO callbacks the server will send (OIDC panel)
     spiffeIdentity: null,    // read-only status of the dashboard's own SPIFFE token files (Remote Agents panel)
     spiffeIssuerCheck: { running: false, result: null, error: '' },
     agentAudienceResetting: false,
@@ -9826,6 +9846,23 @@ function settingsPage() {
       }
     },
 
+    // The OIDC callback to register. An edited-but-unsaved UI base URL previews what
+    // saving it will produce (same normalisation as services/public_url.normalize);
+    // otherwise it is exactly what the server sends.
+    oidcCallbackUri() {
+      const path = '/api/auth/oauth/oidc/callback';
+      let typed = (this.panelCfg?.ui_base_url || '').trim();
+      const saved = this.oauthRedirectUris?.ui_base_url || '';
+      if (typed) {
+        if (!typed.includes('://')) typed = 'https://' + typed;
+        const [scheme, rest] = [typed.split('://')[0], typed.split('://').slice(1).join('://')];
+        const host = rest.split('/')[0];
+        const origin = host ? `${scheme.toLowerCase()}://${host}` : '';
+        if (origin && origin !== saved) return origin + path;
+      }
+      return this.oauthRedirectUris?.oidc || (window.location.origin + path);
+    },
+
     async openPanel(intg) {
       this.panel = intg;
       this.panelCfg = {};
@@ -9932,6 +9969,12 @@ function settingsPage() {
           try {
             this.spiffeIdentity = await API.get('/api/spiffe-identity');
           } catch (e) { /* read-only status; the panel still saves without it */ }
+        }
+        if (intg.key === 'oidc') {
+          this.oauthRedirectUris = null;
+          try {
+            this.oauthRedirectUris = await API.get('/api/auth/oauth/redirect-uris');
+          } catch (e) { /* oidcCallbackUri() falls back to the browser origin */ }
         }
         if (intg.key === 'remote_agents') {
           this.agentAudience = null;

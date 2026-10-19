@@ -1315,16 +1315,18 @@ def _build_redirect_uri(request: Request) -> str:
     """
     The Entra OAuth callback URI.
 
-    Prefers the configured ``public_base_url``, falling back to deriving it from the
-    incoming request so the flow still works via localhost, an IP or a hostname without
-    reconfiguration. The preference order matters behind a reverse proxy: a derived URI
-    is only ``https`` because ProxyHeadersMiddleware rewrote the scheme from
-    ``X-Forwarded-Proto``, so a proxy missing from ``trusted_proxy_hosts`` would produce
-    an ``http://`` callback that Entra rejects as a redirect-URI mismatch. Stating the
-    origin once removes that dependency entirely.
+    Built from the browser-facing origin (``public_url.ui_resolve``: ``ui_base_url``,
+    then a non-loopback ``webauthn_origin``, then ``public_base_url``), falling back to
+    deriving it from the incoming request so the flow still works via localhost, an IP
+    or a hostname without reconfiguration. Not ``public_base_url`` first: on a
+    split-host install that is the AGENT host, whose gateway 404s this path, so Entra
+    would send every login back to a 404. And not the request first: behind a reverse
+    proxy a derived URI is only ``https`` because ProxyHeadersMiddleware rewrote the
+    scheme from ``X-Forwarded-Proto``, so an untrusted proxy would produce an
+    ``http://`` callback that Entra rejects as a redirect-URI mismatch.
     """
     try:
-        return (public_url.join("/api/auth/oauth/azure/callback", request)
+        return (public_url.ui_join("/api/auth/oauth/azure/callback", request)
                 or settings.azure_oauth_redirect_uri)
     except Exception:
         return settings.azure_oauth_redirect_uri
@@ -1440,10 +1442,23 @@ def oauth_azure_callback(
 # Google Workspace, JumpCloud, Ping, GitLab. See services/oidc_service.py.
 
 def _oidc_redirect_uri(request: Request) -> str:
-    """The OIDC callback, resolved exactly like the Entra one above — configured
-    ``public_base_url`` first, request-derived as the fallback."""
-    return (public_url.join("/api/auth/oauth/oidc/callback", request)
+    """The OIDC callback, resolved exactly like the Entra one above — the browser-facing
+    origin first, request-derived as the fallback."""
+    return (public_url.ui_join("/api/auth/oauth/oidc/callback", request)
             or f"{request.url.scheme}://{request.url.netloc}/api/auth/oauth/oidc/callback")
+
+
+@router.get("/oauth/redirect-uris")
+def oauth_redirect_uris(request: Request, _admin: User = Depends(require_admin)):
+    """The exact callback URIs the server will send, for Settings to show as "register
+    this". The panel used to print ``window.location.origin + path``, which only agreed
+    with the server by coincidence — the server builds them from ``ui_base_url`` and
+    friends, not from whichever host the admin happens to be browsing."""
+    return {
+        "azure": _build_redirect_uri(request),
+        "oidc": _oidc_redirect_uri(request),
+        "ui_base_url": public_url.ui_configured(),
+    }
 
 
 @router.get("/oauth/oidc/login")

@@ -90,6 +90,16 @@ means only on the two hostnames it knows about. The environment's default
 `*.azurecontainerapps.io` name will start returning 404, and that is the design
 working, not a fault.
 
+**`PUBLIC_BASE_URL` with two hostnames.** It is the remote-agent signing audience,
+and enrolment codes embed it — so once agents enrol on `agents.example.com`, set it
+to that host. It used to double as the SSO callback origin, which then pointed the
+IdP at a hostname the gateway 404s for everything but `/api/agent/*`. The SSO
+callbacks now come from `UI_BASE_URL`, else `WEBAUTHN_ORIGIN` (already
+`https://dash.example.com` above), so nothing more is needed as long as
+`WEBAUTHN_ORIGIN` is the UI host. Set `UI_BASE_URL=https://dash.example.com`
+explicitly if it is not. Register `https://dash.example.com/api/auth/oauth/{azure,oidc}/callback`
+with the IdP — see [OIDC Step 1](../../oidc.md#step-1--register-an-application-with-your-idp).
+
 ## Custom domains
 
 ```bash

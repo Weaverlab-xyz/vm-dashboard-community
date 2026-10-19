@@ -177,6 +177,75 @@ def test_join_returns_empty_when_the_origin_is_unknown():
     assert pu.join("/api/auth/x") == ""
 
 
+# ── the browser-facing origin (split-host installs) ───────────────────────────
+
+AGENT = "https://pov-agents.example.com"
+UI = "https://pov.example.com"
+
+
+def test_split_host_callbacks_follow_webauthn_origin_not_the_agent_host():
+    """THE split-host assertion. public_base_url is the agent host (enrolment codes embed
+    it), and its gateway 404s everything but /api/agent/*; webauthn_origin is already the
+    exact browser origin. The callbacks must use the latter."""
+    CONF.clear()
+    CONF.update(public_base_url=AGENT, webauthn_origin=UI + "/")
+    try:
+        assert pu.ui_join("/api/auth/oauth/oidc/callback", _Req("http", "10.0.0.5"))             == UI + "/api/auth/oauth/oidc/callback"
+        assert pu.ui_join("/api/auth/oauth/azure/callback")             == UI + "/api/auth/oauth/azure/callback"
+        # ...and the agent audience is untouched.
+        assert pu.resolve() == AGENT
+    finally:
+        CONF.clear()
+
+
+def test_an_explicit_ui_base_url_wins_over_webauthn_origin():
+    CONF.clear()
+    CONF.update(public_base_url=AGENT, webauthn_origin="https://other.example.com",
+                ui_base_url="pov.example.com/login")
+    try:
+        assert pu.ui_resolve() == UI
+    finally:
+        CONF.clear()
+
+
+def test_a_loopback_webauthn_origin_is_ignored():
+    """The shipped default is http://localhost:8001; it says nothing about a real install,
+    so it must not beat public_base_url (single-host, proxied) or the request."""
+    CONF.clear()
+    for loopback in ("http://localhost:8001", "http://127.0.0.1:8001", "http://[::1]:8001"):
+        CONF.clear()
+        CONF["webauthn_origin"] = loopback
+        assert pu.ui_resolve(_Req("http", "10.0.0.5:8001")) == "http://10.0.0.5:8001", loopback
+        CONF["public_base_url"] = "https://dash.example.com"
+        assert pu.ui_resolve(_Req("http", "10.0.0.5:8001")) == "https://dash.example.com", loopback
+    CONF.clear()
+
+
+def test_single_host_installs_still_use_public_base_url():
+    """No ui_base_url, no webauthn_origin: public_base_url IS the UI origin, and keeps
+    decoupling the callbacks from proxy trust."""
+    CONF.clear()
+    CONF["public_base_url"] = "https://dash.example.com"
+    try:
+        assert pu.ui_resolve(_Req("http", "10.0.0.5")) == "https://dash.example.com"
+    finally:
+        CONF.clear()
+
+
+def test_with_nothing_configured_the_ui_origin_derives_from_the_request():
+    CONF.clear()
+    assert pu.ui_resolve(_Req("http", "localhost:8001")) == "http://localhost:8001"
+    assert pu.ui_join("/x") == ""
+
+
+def test_the_callbacks_use_the_ui_resolver():
+    """A callback built from public_url.join follows public_base_url to the agent host."""
+    auth = _source("web_dashboard/api/auth.py")
+    for path in ("/api/auth/oauth/azure/callback", "/api/auth/oauth/oidc/callback"):
+        assert f'public_url.ui_join("{path}"' in auth, path
+        assert f'public_url.join("{path}"' not in auth, path
+
+
 # ── https detection ───────────────────────────────────────────────────────────
 
 def test_is_https_prefers_the_configured_origin():
@@ -217,7 +286,7 @@ def test_no_caller_still_derives_its_own_absolute_url():
     # _oidc_redirect_uri; there must be no more than that.
     assert auth.count(hand_rolled) <= 1, (
         "auth.py should resolve through public_url, keeping at most one inline fallback")
-    assert "public_url.join" in auth
+    assert "public_url.ui_join" in auth
 
 
 def test_the_default_proxy_trust_is_not_a_wildcard():

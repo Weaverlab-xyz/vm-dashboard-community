@@ -55,10 +55,16 @@ and expand the OAuth panel — the Client ID and Tenant ID will be
 pre-filled if already configured; leave the secret field blank to keep
 the stored value.
 
-The redirect URI is derived automatically from your browser's host —
-you do not set it in the dashboard. Register the same URI that appears
-in the wizard hint (`{your-host}/api/auth/oauth/azure/callback`) in the
-Azure app registration under **Authentication**.
+The redirect URI is `<ui-origin>/api/auth/oauth/azure/callback`, where the
+origin is resolved the same way as the OIDC callback's: `UI_BASE_URL`, then a
+non-localhost `WEBAUTHN_ORIGIN`, then `PUBLIC_BASE_URL`, then the request (see
+[OIDC Step 1](../oidc.md#step-1--register-an-application-with-your-idp)). On a
+single-host install that is the host in your browser; register that URI in the
+Azure app registration under **Authentication**. On a split-host install, where
+`PUBLIC_BASE_URL` is the agent hostname, register the **UI** host — and make sure
+`WEBAUTHN_ORIGIN` or `UI_BASE_URL` names it, or Entra sends users back to the
+agent host, which 404s. `GET /api/auth/oauth/redirect-uris` (admin) returns the
+exact values the server sends.
 
 Once saved, the login page shows a **Sign in with Microsoft** button
 without a restart. Until a client ID and tenant are saved there is no button at all, and

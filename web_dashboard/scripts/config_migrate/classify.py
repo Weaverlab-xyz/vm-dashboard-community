@@ -54,6 +54,7 @@ _INSTANCE_LOCAL = frozenset({
     # of *this* deployment's proxy (uvicorn 0.27 compares strings — a hostname
     # or CIDR silently never matches). See SECURITY.md.
     "public_base_url",
+    "ui_base_url",
     "trusted_proxy_hosts",
     "notify_base_url",
     "azure_oauth_redirect_uri",

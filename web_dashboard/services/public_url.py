@@ -1,7 +1,9 @@
 """Where this dashboard is reachable from the outside.
 
 Three things need an absolute URL for the dashboard itself: the Entra OAuth callback,
-the OIDC callback, and the audience a remote agent signs against. All three used to
+the OIDC callback, and the audience a remote agent signs against. (The two callbacks
+are browser-facing and resolve through ``ui_*`` below, which can differ from the agent
+audience on a split-host install.) All three used to
 derive it from the incoming request — `f"{request.url.scheme}://{request.url.netloc}"`
 — which quietly couples them to something unrelated: **which proxy headers the app
 trusts**.
@@ -25,6 +27,7 @@ from __future__ import annotations
 from typing import Optional
 
 CONFIG_KEY = "public_base_url"
+UI_CONFIG_KEY = "ui_base_url"
 
 
 def configured() -> str:
@@ -80,6 +83,70 @@ def resolve(request=None, *, fallback: str = "") -> str:
 def join(path: str, request=None, *, fallback: str = "") -> str:
     """An absolute URL for a dashboard-relative path, or "" if the origin is unknown."""
     base = resolve(request, fallback=fallback)
+    if not base:
+        return ""
+    return f"{base}/{(path or '').lstrip('/')}"
+
+
+# ── the browser-facing origin ─────────────────────────────────────────────────
+#
+# ``public_base_url`` is two things on a single-host install and one thing on a split
+# one. Split installs (the ACA dash and POV instances) put the agent API on its own
+# hostname behind a gateway that 404s every path except /api/agent/*, and set
+# ``public_base_url`` to THAT host, because enrolment codes embed it and agents sign
+# against it. Building an OAuth callback from it then sends the identity provider back
+# to a 404. So browser-facing URLs resolve through their own chain, and the agent
+# audience is left exactly as it was.
+
+_LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "[::1]")
+
+
+def _read(key: str) -> str:
+    try:
+        from . import config_service
+        from ..config import settings
+        return normalize(config_service.get(key) or getattr(settings, key, "") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _is_loopback(origin: str) -> bool:
+    host = origin.partition("://")[2].lower()
+    host = host.rsplit(":", 1)[0] if not host.endswith("]") else host
+    return host in _LOOPBACK_HOSTS
+
+
+def ui_configured() -> str:
+    """The origin a browser reaches the dashboard UI at, or "" when nothing states it.
+
+    ``ui_base_url`` when set; else ``webauthn_origin`` unless it is a loopback origin
+    (the shipped default is ``http://localhost:8001``, which says nothing about a real
+    install — and a laptop reached over localhost derives the same thing anyway); else
+    ``public_base_url``, which on a single-host install IS the UI origin and keeps the
+    proxy-trust decoupling it was introduced for.
+    """
+    explicit = _read(UI_CONFIG_KEY)
+    if explicit:
+        return explicit
+    webauthn = _read("webauthn_origin")
+    if webauthn and not _is_loopback(webauthn):
+        return webauthn
+    return configured()
+
+
+def ui_resolve(request=None, *, fallback: str = "") -> str:
+    """``ui_configured()``, else the request's origin, else ``fallback``."""
+    origin = ui_configured()
+    if origin:
+        return origin
+    if request is not None:
+        origin = derive(request)
+    return origin or fallback
+
+
+def ui_join(path: str, request=None, *, fallback: str = "") -> str:
+    """An absolute browser-facing URL (an OAuth callback), or "" if the origin is unknown."""
+    base = ui_resolve(request, fallback=fallback)
     if not base:
         return ""
     return f"{base}/{(path or '').lstrip('/')}"
