@@ -812,6 +812,7 @@ async def bulk_deploy_instances(
             enable_rdp=req.enable_rdp,
             ssh_key_secret_override=req.ssh_key_secret_override,
             enable_pra=req.enable_pra,
+            skip_post_deploy=req.skip_post_deploy,
             jump_group=req.jump_group,
             jumpoint_name=req.jumpoint_name,
             pra_credential_ref=req.pra_credential_ref,

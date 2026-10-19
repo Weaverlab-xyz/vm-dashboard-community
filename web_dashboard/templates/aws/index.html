@@ -1068,6 +1068,16 @@
             </details>
           </div>
           {% endif %}
+          <!-- The workstream's post-deploy runs (services/post_deploy_service), named so
+               the operator knows what will run on the VM, with a per-deploy way out. -->
+          <div x-show="wsRuns.length" x-cloak class="rounded-lg border border-gray-200 px-3 py-2 mb-4">
+            <p class="text-xs text-gray-600">Runs after deploy:
+              <span class="font-mono" x-text="wsRuns.map(r => r.asset).join(', ')"></span></p>
+            <label class="mt-1 flex items-center gap-2 text-xs text-gray-600">
+              <input type="checkbox" x-model="deployForm.skip_post_deploy" class="rounded text-blue-600">
+              Skip them for this deploy
+            </label>
+          </div>
           <details class="mb-4">
             <summary class="cursor-pointer select-none text-sm font-medium text-gray-700">Advanced options
               <span class="font-normal text-gray-400">— SSH key override, integrations, Windows identity</span></summary>
@@ -2286,7 +2296,7 @@
         subnet_id: '',
         security_group_ids: [],
         workgroup: '',
-        enable_pra: true, jump_group: '', jumpoint_name: '',
+        enable_pra: true, skip_post_deploy: false, jump_group: '', jumpoint_name: '',
         praCredBackend: '', pra_credential_ref: '',
         register_in_entitle: false,
         register_in_passwordsafe: false,
@@ -2370,7 +2380,7 @@
         ami_id: '', instance_name: '', instance_type: 't3.medium',
         region: '', subnet_id: '', security_group_ids: [], workgroup: '',
         protocols: ['modbus'], plc_port: null, hmi_port: 1881,
-        enable_pra: true, jump_group: '', jumpoint_name: '',
+        enable_pra: true, skip_post_deploy: false, jump_group: '', jumpoint_name: '',
         runtime: 'k3s',
         register_in_passwordsafe: true, register_in_entitle: false,
         // The plant's DMZ broker, deployed alongside the cell when Entitle is ticked.
@@ -2380,7 +2390,7 @@
       },
       otTunnelForm: {
         name: '', hostname: '', protocol: 'modbus', remote_port: null,
-        enable_pra: true, jump_group: '', jumpoint_name: '',
+        enable_pra: true, skip_post_deploy: false, jump_group: '', jumpoint_name: '',
         submitting: false, error: '', message: '',
       },
 
@@ -2935,7 +2945,7 @@
           security_group_ids: [],
           workgroup: this.availableWorkgroups.includes('default') ? 'default' :
                      (this.availableWorkgroups[0] || ''),
-          enable_pra: true, jump_group: '', jumpoint_name: '',
+          enable_pra: true, skip_post_deploy: false, jump_group: '', jumpoint_name: '',
           // The secret_picker macro binds to both of these; without them here the
           // wholesale reset drops the keys and the picker starts on undefined.
           praCredBackend: '', pra_credential_ref: '',
@@ -3064,6 +3074,7 @@
             security_group_ids: this.deployForm.security_group_ids,
             workgroup: this.deployForm.workgroup,
             enable_pra: this.deployForm.enable_pra !== false,
+            skip_post_deploy: !!this.deployForm.skip_post_deploy,
             jump_group: this.deployForm.jump_group || null,
             jumpoint_name: this.deployForm.jumpoint_name || null,
             pra_credential_ref: this.deployForm.pra_credential_ref || null,

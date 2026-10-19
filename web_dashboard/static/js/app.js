@@ -318,6 +318,9 @@ window.workstreamDefaultsState = function (formName, cloud) {
         // in Advanced, and the reason a non-admin's override control is disabled. The
         // server fills a blank override from the binding and refuses a different one.
         wsBound: { ssh: '', pra: '' },
+        // The picked workstream's post-deploy runs, shown above Advanced with a skip box.
+        wsRunsByWg: {},
+        wsRuns: [],
 
         async applyWorkstreamDefaults() {
             const form = this[formName];
@@ -341,8 +344,19 @@ window.workstreamDefaultsState = function (formName, cloud) {
                 }
                 this.wsBindings[wg] = b;
             }
+            let runs = this.wsRunsByWg[wg];
+            if (runs === undefined) {
+                try {
+                    runs = ((await API.get('/api/workgroups/' + encodeURIComponent(wg)
+                                           + '/post-deploy-runs')) || {}).runs || [];
+                } catch (e) {
+                    runs = [];
+                }
+                this.wsRunsByWg[wg] = runs;
+            }
             // The operator may have switched workstreams while the requests were out.
             if (this[formName] !== form || form.workgroup !== wg) return;
+            this.wsRuns = runs;
             this.wsBound = {
                 ssh: ((b.ssh_key_secret || {})[cloud]) || '',
                 pra: b.pra_credential_ref || '',

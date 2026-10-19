@@ -550,6 +550,81 @@ def apply_secret_bindings(cloud: str, req, workgroup: Optional[str], user) -> No
                 "to use it, or ask an administrator to change it.")
 
 
+# ── Post-deploy runs (administrator only) ─────────────────────────────────────
+#
+# Config-Management assets — playbooks, scripts, packages — run on every VM deployed
+# into the workstream, in order, once it is up: an agent install, a hardening baseline.
+# Administrator-only like the secret bindings: each entry is code that will run on every
+# new machine the workstream's members deploy. services/post_deploy_service queues them.
+
+POST_DEPLOY_MAX = 10
+
+
+def _read_runs(wg: Optional[Workgroup]) -> list:
+    stored = getattr(wg, "post_deploy_runs", None) if wg is not None else None   # see _read_defaults
+    if not stored:
+        return []
+    try:
+        raw = json.loads(stored)
+    except (ValueError, TypeError):
+        return []
+    out = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        asset = item.get("asset")
+        backend = item.get("asset_backend") or ""
+        if isinstance(asset, str) and asset and isinstance(backend, str):
+            out.append({"asset": asset, "asset_backend": backend})
+    return out[:POST_DEPLOY_MAX]
+
+
+def post_deploy_runs(name: Optional[str], db: Optional[Session] = None) -> list:
+    """The workstream's post-deploy runs, ``[{asset, asset_backend}]`` in run order;
+    ``[]`` when it has none or does not exist."""
+    wg_name = _normalize(name or "")
+    if not wg_name:
+        return []
+    if db is not None:
+        return _read_runs(get(db, wg_name))
+    from ..database import SessionLocal
+    own = SessionLocal()
+    try:
+        return _read_runs(get(own, wg_name))
+    finally:
+        own.close()
+
+
+def set_post_deploy_runs(db: Session, name: str, runs) -> list:
+    """Replace a workstream's post-deploy runs. Each entry names an asset and, optionally,
+    the storage backend it lives on (blank = the active backend at run time). The caller
+    must be an administrator."""
+    wg = get(db, name)
+    if wg is None:
+        raise WorkgroupError(f"Workstream '{name}' not found.")
+    if not isinstance(runs, list):
+        raise WorkgroupError("runs must be a list")
+    if len(runs) > POST_DEPLOY_MAX:
+        raise WorkgroupError(f"At most {POST_DEPLOY_MAX} post-deploy runs per workstream")
+    clean = []
+    for i, item in enumerate(runs):
+        if not isinstance(item, dict):
+            raise WorkgroupError(f"run {i + 1} must be an object with an asset")
+        asset = item.get("asset")
+        backend = item.get("asset_backend") or ""
+        if not isinstance(asset, str) or not asset.strip():
+            raise WorkgroupError(f"run {i + 1} names no asset")
+        asset = asset.strip()
+        if len(asset) > 255 or ".." in asset or asset.startswith("/"):
+            raise WorkgroupError(f"run {i + 1}: '{asset[:60]}' is not an asset name")
+        if not isinstance(backend, str) or len(backend) > 32:
+            raise WorkgroupError(f"run {i + 1}: bad storage backend")
+        clean.append({"asset": asset, "asset_backend": backend.strip()})
+    wg.post_deploy_runs = json.dumps(clean) if clean else None
+    db.commit()
+    return clean
+
+
 # ── Seed ──────────────────────────────────────────────────────────────────────
 
 def seed_if_empty(db: Session) -> None:

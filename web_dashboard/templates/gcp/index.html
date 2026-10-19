@@ -608,6 +608,16 @@
           </details>
         </div>
         {% endif %}
+        <!-- The workstream's post-deploy runs (services/post_deploy_service), named so
+             the operator knows what will run on the VM, with a per-deploy way out. -->
+        <div x-show="wsRuns.length" x-cloak class="rounded-lg border border-gray-200 px-3 py-2">
+          <p class="text-xs text-gray-600">Runs after deploy:
+            <span class="font-mono" x-text="wsRuns.map(r => r.asset).join(', ')"></span></p>
+          <label class="mt-1 flex items-center gap-2 text-xs text-gray-600">
+            <input type="checkbox" x-model="deployForm.skip_post_deploy" class="rounded text-blue-600">
+            Skip them for this deploy
+          </label>
+        </div>
         <details>
           <summary class="cursor-pointer select-none text-sm font-medium text-gray-700">Advanced options
             <span class="font-normal text-gray-400">— SSH key override, integrations, Windows identity</span></summary>
@@ -2017,7 +2027,7 @@ function gcpDashboard() {
       image_self_link: '', instance_name: '', machine_type: 'e2-medium',
       zone: '', subnetwork: '', workgroup: '',
       protocols: ['modbus'], plc_port: null, hmi_port: 1881,
-      enable_pra: true, jump_group: '', jumpoint_name: '',
+      enable_pra: true, skip_post_deploy: false, jump_group: '', jumpoint_name: '',
       runtime: 'k3s',
       register_in_passwordsafe: true, register_in_entitle: false,
       // The plant's DMZ broker, deployed alongside the cell when Entitle is ticked.
@@ -2027,7 +2037,7 @@ function gcpDashboard() {
     },
     otTunnelForm: {
       name: '', hostname: '', protocol: 'modbus', remote_port: null,
-      enable_pra: true, jump_group: '', jumpoint_name: '',
+      enable_pra: true, skip_post_deploy: false, jump_group: '', jumpoint_name: '',
       submitting: false, error: '', message: '',
     },
 
@@ -2045,7 +2055,7 @@ function gcpDashboard() {
       zone: '', subnetwork: '', workgroup: '',
       vyos_release: '1.4', ruleset: 'BLOCKLIST',
       register_in_passwordsafe: true,
-      enable_pra: true, jump_group: '', jumpoint_name: '',
+      enable_pra: true, skip_post_deploy: false, jump_group: '', jumpoint_name: '',
     },
 
     async init() {
@@ -2528,7 +2538,7 @@ function gcpDashboard() {
         disk_size_gb:       Math.max(img?.disk_size_gb || 20, 20),
         network_tags:       [],
         workgroup:          this._defaultWorkgroup(),
-        enable_pra: true, jump_group: '', jumpoint_name: '',
+        enable_pra: true, skip_post_deploy: false, jump_group: '', jumpoint_name: '',
         // The Gateway deploy key secret_picker binds to both; without them the
         // wholesale reset drops the keys and the picker starts on undefined.
         dockerKeyBackend: '', docker_deploy_key_ref: '',
@@ -2679,6 +2689,7 @@ function gcpDashboard() {
           network_tags:       this.deployForm.network_tags,
           workgroup:          this.deployForm.workgroup,
           enable_pra:         this.deployForm.enable_pra !== false,
+          skip_post_deploy:   !!this.deployForm.skip_post_deploy,
           jump_group:         this.deployForm.jump_group || null,
           jumpoint_name:      this.deployForm.jumpoint_name || null,
           docker_deploy_key_ref: this.deployForm.docker_deploy_key_ref || null,

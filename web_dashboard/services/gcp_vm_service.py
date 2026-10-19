@@ -661,6 +661,10 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             admin_password = ""
 
         job_service.set_completed(db, job_id, final_meta)
+        # The workstream's post-deploy runs (services/post_deploy_service): separate,
+        # delayed Config-Management jobs. Best-effort; never fails the deploy.
+        from ..services import post_deploy_service
+        post_deploy_service.queue_runs(db, job_id)
         if agent_join_row is not None:
             _queue_agent_join(db, job_id, agent_join_row, payload, final_meta)
         if hybrid_check:

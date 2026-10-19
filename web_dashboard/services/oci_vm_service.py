@@ -229,6 +229,10 @@ async def _run_deploy(job_id: str, payload: OCIDeployRequest, compartment: str,
                                       result=final_meta, tag="OCI", ssh_key_secret=secret)
 
         job_service.set_completed(db, job_id, final_meta)
+        # The workstream's post-deploy runs (services/post_deploy_service): separate,
+        # delayed Config-Management jobs. Best-effort; never fails the deploy.
+        from ..services import post_deploy_service
+        post_deploy_service.queue_runs(db, job_id)
         # Prefix, not an exact key: the instance list is cached per region+compartment
         # (api/oci._cache_key), and this runner has no request context to rebuild the
         # one key with. Dropping every region's entry is also the correct blast radius

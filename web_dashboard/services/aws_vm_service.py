@@ -734,6 +734,10 @@ async def _run_deploy(
             admin_password = ""
 
         job_service.set_completed(db, job_id, result)
+        # The workstream's post-deploy runs (services/post_deploy_service): separate,
+        # delayed Config-Management jobs. Best-effort; never fails the deploy.
+        from ..services import post_deploy_service
+        post_deploy_service.queue_runs(db, job_id)
         if hybrid_check and result.get("ad_joined"):
             _queue_hybrid_check(db, job_id, instance_name, _aws_region, instance_id)
         if arc_join:

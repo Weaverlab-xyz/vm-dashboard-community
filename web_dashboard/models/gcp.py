@@ -99,6 +99,9 @@ class GCPDeployRequest(ScheduleRequestMixin, BaseModel):
     # PRA opt-in. None = the default (on, while PRA is enabled); False = no jump,
     # added later from the VM's row if wanted (services/vm_pra_service).
     enable_pra: Optional[bool] = None
+    # True = do not queue the workstream's post-deploy runs for this deploy
+    # (services/post_deploy_service).
+    skip_post_deploy: bool = False
     jump_group: Optional[str] = None             # PRA Jump Group name override (else gcp_bt_jump_group_name / bt_jump_group_name)
     jumpoint_name: Optional[str] = None          # PRA Jumpoint name override (else gcp_jumpoint_name / bt_jumpoint_name)
     pra_credential_ref: Optional[str] = None     # secret ref → bt_client_secret override for the shell jump
@@ -145,6 +148,9 @@ class GCPBulkDeployRequest(ScheduleRequestMixin, BaseModel):
     # PRA opt-in. None = the default (on, while PRA is enabled); False = no jump,
     # added later from the VM's row if wanted (services/vm_pra_service).
     enable_pra: Optional[bool] = None
+    # True = do not queue the workstream's post-deploy runs for this deploy
+    # (services/post_deploy_service).
+    skip_post_deploy: bool = False
     jump_group: Optional[str] = None
     jumpoint_name: Optional[str] = None
     pra_credential_ref: Optional[str] = None     # secret ref → bt_client_secret override for the shell jump

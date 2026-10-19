@@ -1733,6 +1733,11 @@ class Workgroup(Base):
     # credential. Never a value. Kept apart from deploy_defaults because members edit
     # those and only an administrator may edit these. NULL = none bound.
     secret_bindings = Column(Text, nullable=True)
+    # Config-Management assets an administrator chose to run on every VM deployed into
+    # the workstream, in order (services/post_deploy_service): a JSON list of
+    # {asset, asset_backend}. Administrator-only like secret_bindings, because each one
+    # is code run on every new machine. NULL = none.
+    post_deploy_runs = Column(Text, nullable=True)
 
 
 class VMWorkgroupOverride(Base):
@@ -5433,6 +5438,9 @@ def init_db():
             # Secret references an administrator binds to a workstream. NULL = none,
             # every existing workstream, so deploys are unchanged until one is bound.
             "ALTER TABLE workgroups ADD COLUMN secret_bindings TEXT",
+            # Assets run on every VM deployed into a workstream. NULL = none, every
+            # existing workstream, so no deploy changes until an administrator sets one.
+            "ALTER TABLE workgroups ADD COLUMN post_deploy_runs TEXT",
 
             # Service accounts and their OAuth clients (services/service_accounts). A bare
             # BOOLEAN for the PostgreSQL reason on users.is_admin; NULL reads as "a person",
