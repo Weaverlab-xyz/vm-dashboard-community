@@ -40,6 +40,7 @@ from ..models.oci import (
     OCISSHKeyDetail,
 )
 from ..models.vm_pra import VmPraRequest
+from .workgroups import enforce_secret_bindings
 from ..models.schedule import SCHEDULE_FIELDS, ScheduleRequestMixin
 from ..services import (
     change_window_service,
@@ -631,6 +632,9 @@ def set_instance_pra(
             detail=f"No active deployment found for {payload.instance}.")
     _assert_can_act(current_user, deploy_job.workgroup, f"Instance {payload.instance}",
                     "change its PRA access")
+    if payload.action == "register":
+        # A credential bound to the VM's workstream applies here as at deploy time.
+        enforce_secret_bindings("oci", payload, deploy_job.workgroup, current_user)
     try:
         job = vm_pra_service.queue(db, cloud="oci", deploy_job=deploy_job,
                                    payload=payload, username=current_user.username)
@@ -846,6 +850,7 @@ async def bulk_deploy_instances(
 
     compartment = _compartment()
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
+    enforce_secret_bindings("oci", req, workgroup, current_user)
 
     names = [i.instance_name for i in req.items]
     for name in names:
@@ -924,6 +929,7 @@ async def bulk_deploy_instances(
             enable_pra=req.enable_pra,
             jump_group=req.jump_group,
             jumpoint_name=req.jumpoint_name,
+            pra_credential_ref=req.pra_credential_ref,
             count=1,
         )
         job = job_service.create_job(
@@ -1004,6 +1010,7 @@ async def deploy_instance(
     compartment = _compartment()
     workgroup = _validate_workgroup(db, current_user, payload.workgroup)
     payload.workgroup = workgroup
+    enforce_secret_bindings("oci", payload, workgroup, current_user)
 
     # ── Placement precheck (hard gate) ────────────────────────────────────────
     # Before the free-tier prompt on purpose, same as the build route: a shape that

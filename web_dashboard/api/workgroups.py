@@ -278,6 +278,57 @@ def put_workgroup_profile(
     return WorkgroupProfile(**out)
 
 
+def enforce_secret_bindings(cloud: str, req, workgroup, user) -> None:
+    """For the cloud deploy routes: fill ``req``'s SSH key secret and PRA credential from
+    the workstream's bindings, or refuse (403) a non-admin who names other ones. Call it
+    right after the workstream is resolved and before the override is validated or the
+    request fans out — see workgroup_service.apply_secret_bindings."""
+    try:
+        workgroup_service.apply_secret_bindings(cloud, req, workgroup, user)
+    except workgroup_service.SecretBindingDenied as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+
+class SecretBindings(BaseModel):
+    """Secret REFERENCES bound to a workstream — names and refs, never values. On a PUT
+    a field left out is unchanged; in ``ssh_key_secret`` only the clouds named change,
+    and null or blank unbinds."""
+    ssh_key_secret: Optional[dict] = None
+    pra_credential_ref: Optional[str] = Field(None, max_length=1024)
+
+
+@router.get("/{name}/secret-bindings", response_model=SecretBindings)
+def get_secret_bindings(
+    name: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """What this workstream's deploys use, so the deploy form can say so. The names are
+    no secret to the people who deploy with them; the values are never returned."""
+    wg = _require_steward(db, current_user, name)
+    return SecretBindings(**workgroup_service.bindings(wg.name, db))
+
+
+@router.put("/{name}/secret-bindings", response_model=SecretBindings)
+def put_secret_bindings(
+    name: str,
+    payload: SecretBindings,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Administrator only: binding a secret decides what every member's deploys use, and
+    a member who could set it could point their team at any secret the dashboard reads."""
+    values = payload.model_dump(exclude_unset=True)
+    try:
+        out = workgroup_service.set_bindings(db, name, values)
+    except WorkgroupError as exc:
+        _raise_from(exc)
+    _audit(db, current_user, "workstream_secret_bindings_update", workstream=name.lower(),
+           fields=sorted(values),
+           clouds=sorted((values.get("ssh_key_secret") or {}).keys()))
+    return SecretBindings(**out)
+
+
 @router.get("/{name}/members", response_model=List[str])
 def list_members(
     name: str,

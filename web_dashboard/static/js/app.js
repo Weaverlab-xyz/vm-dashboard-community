@@ -303,7 +303,7 @@ window.secretPickerState = function () {
 // fields this form has; a default the workstream leaves unset (null) is not touched, so
 // the page's own default stands. The server applies the same defaults again to a
 // request that leaves `enable_pra` out, so the form is a preview, not the authority.
-window.workstreamDefaultsState = function (formName) {
+window.workstreamDefaultsState = function (formName, cloud) {
     const FIELDS = {
         pra_enabled: 'enable_pra',
         register_in_entitle: 'register_in_entitle',
@@ -313,6 +313,11 @@ window.workstreamDefaultsState = function (formName) {
     };
     return {
         wsProfiles: {},
+        wsBindings: {},
+        // The secret references bound to the picked workstream, for this cloud: shown
+        // in Advanced, and the reason a non-admin's override control is disabled. The
+        // server fills a blank override from the binding and refuses a different one.
+        wsBound: { ssh: '', pra: '' },
 
         async applyWorkstreamDefaults() {
             const form = this[formName];
@@ -327,8 +332,21 @@ window.workstreamDefaultsState = function (formName) {
                 }
                 this.wsProfiles[wg] = p;
             }
-            // The operator may have switched workstreams while the request was out.
+            let b = this.wsBindings[wg];
+            if (b === undefined) {
+                try {
+                    b = await API.get('/api/workgroups/' + encodeURIComponent(wg) + '/secret-bindings');
+                } catch (e) {
+                    b = {};
+                }
+                this.wsBindings[wg] = b;
+            }
+            // The operator may have switched workstreams while the requests were out.
             if (this[formName] !== form || form.workgroup !== wg) return;
+            this.wsBound = {
+                ssh: ((b.ssh_key_secret || {})[cloud]) || '',
+                pra: b.pra_credential_ref || '',
+            };
             for (const [key, field] of Object.entries(FIELDS)) {
                 if (p[key] !== null && p[key] !== undefined && field in form) form[field] = p[key];
             }

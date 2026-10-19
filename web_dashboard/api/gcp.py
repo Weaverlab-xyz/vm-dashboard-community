@@ -31,6 +31,7 @@ from ..models.gcp import (
     GCPSSHKeyDetail,
 )
 from ..models.vm_pra import VmPraRequest
+from .workgroups import enforce_secret_bindings
 from ..models.schedule import SCHEDULE_FIELDS, ScheduleRequestMixin
 from ..services import change_window_service, cache_service, cloud_stats, deploy_batch, job_service, region_catalog, workgroup_service
 from ..services import gcp_service
@@ -765,6 +766,7 @@ async def bulk_deploy_instances(
     region = _region_from_zone(zone)
     _reject_cross_region_subnetwork(req.subnetwork, zone, region)
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
+    enforce_secret_bindings("gcp", req, workgroup, current_user)
 
     # Names here are typed per row in the bulk modal, so unlike the count path they can
     # genuinely repeat. Both checks run before anything is created.
@@ -812,6 +814,7 @@ async def bulk_deploy_instances(
             enable_pra=req.enable_pra,
             jump_group=req.jump_group,
             jumpoint_name=req.jumpoint_name,
+            pra_credential_ref=req.pra_credential_ref,
             docker_deploy_key_ref=req.docker_deploy_key_ref,
             count=1,
         )
@@ -895,6 +898,7 @@ async def deploy_instance(
     _reject_cross_region_subnetwork(payload.subnetwork, zone, region)
     workgroup = _validate_workgroup(db, current_user, payload.workgroup)
     payload.workgroup = workgroup
+    enforce_secret_bindings("gcp", payload, workgroup, current_user)
 
     if payload.count > 1:
         return await _fan_out_batch(payload, db, current_user,
@@ -1177,6 +1181,9 @@ def set_instance_pra(
             detail=f"No active deployment found for {payload.instance}.")
     _assert_can_act(current_user, deploy_job.workgroup, f"Instance '{payload.instance}'",
                     "change its PRA access")
+    if payload.action == "register":
+        # A credential bound to the VM's workstream applies here as at deploy time.
+        enforce_secret_bindings("gcp", payload, deploy_job.workgroup, current_user)
     try:
         job = vm_pra_service.queue(db, cloud="gcp", deploy_job=deploy_job,
                                    payload=payload, username=current_user.username)

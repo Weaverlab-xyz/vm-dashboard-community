@@ -350,10 +350,13 @@ PROFILE_KEYS = {
 
 
 def _read_defaults(wg: Optional[Workgroup]) -> dict:
-    if wg is None or not wg.deploy_defaults:
+    # getattr: a stand-in workstream object (tests stub get(), and so may a caller) that
+    # predates the column reads as "sets nothing", never as an AttributeError mid-deploy.
+    stored = getattr(wg, "deploy_defaults", None) if wg is not None else None
+    if not stored:
         return {}
     try:
-        raw = json.loads(wg.deploy_defaults)
+        raw = json.loads(stored)
     except (ValueError, TypeError):
         return {}
     # Only known keys of the right type survive a read, so a row edited by hand cannot
@@ -423,6 +426,128 @@ def set_profile(db: Session, name: str, values: dict) -> dict:
     wg.deploy_defaults = json.dumps(current, sort_keys=True) if current else None
     db.commit()
     return dict(current)
+
+
+# ── Secret bindings (administrator only) ──────────────────────────────────────
+#
+# References — a secret's name or an aws_sm:// style ref, never its value — that a
+# workstream's deploys use: the SSH key pair secret on each cloud, and the PRA credential
+# a jump is provisioned with. Bound by an administrator; a member could otherwise point
+# their team's deploys at any secret the dashboard's cloud identity can read.
+#
+# Once one is bound, a deploy into the workstream that names none gets it, and a
+# non-admin may not name a different one (apply_secret_bindings). A workstream with
+# nothing bound behaves exactly as before.
+
+SECRET_CLOUDS = ("aws", "azure", "gcp", "oci")
+_MAX_REF = 1024
+
+
+class SecretBindingDenied(WorkgroupAccessError):
+    """A non-admin asked for a secret other than the one bound to their workstream."""
+
+
+def _read_bindings(wg: Optional[Workgroup]) -> dict:
+    out = {"ssh_key_secret": {}, "pra_credential_ref": None}
+    stored = getattr(wg, "secret_bindings", None) if wg is not None else None   # see _read_defaults
+    if not stored:
+        return out
+    try:
+        raw = json.loads(stored)
+    except (ValueError, TypeError):
+        return out
+    ssh = raw.get("ssh_key_secret") if isinstance(raw, dict) else None
+    if isinstance(ssh, dict):
+        out["ssh_key_secret"] = {c: v for c, v in ssh.items()
+                                 if c in SECRET_CLOUDS and isinstance(v, str) and v}
+    pra = raw.get("pra_credential_ref") if isinstance(raw, dict) else None
+    if isinstance(pra, str) and pra:
+        out["pra_credential_ref"] = pra
+    return out
+
+
+def bindings(name: Optional[str], db: Optional[Session] = None) -> dict:
+    """``{"ssh_key_secret": {cloud: ref}, "pra_credential_ref": ref | None}`` for a
+    workstream; empty when it binds nothing or does not exist."""
+    wg_name = _normalize(name or "")
+    if not wg_name:
+        return _read_bindings(None)
+    if db is not None:
+        return _read_bindings(get(db, wg_name))
+    from ..database import SessionLocal
+    own = SessionLocal()
+    try:
+        return _read_bindings(get(own, wg_name))
+    finally:
+        own.close()
+
+
+def _ref(value, what: str) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise WorkgroupError(f"{what} must be a string or null")
+    text = value.strip()
+    if len(text) > _MAX_REF:
+        raise WorkgroupError(f"{what} is too long")
+    return text or None
+
+
+def set_bindings(db: Session, name: str, values: dict) -> dict:
+    """Change a workstream's bound secrets. ``ssh_key_secret`` is a per-cloud map and
+    only the clouds it names change; ``pra_credential_ref`` replaces when present. A
+    null or blank reference unbinds. The caller must be an administrator."""
+    wg = get(db, name)
+    if wg is None:
+        raise WorkgroupError(f"Workstream '{name}' not found.")
+    unknown = sorted(set(values) - {"ssh_key_secret", "pra_credential_ref"})
+    if unknown:
+        raise WorkgroupError(f"Not a bindable secret: {', '.join(unknown)}")
+    current = _read_bindings(wg)
+    if "ssh_key_secret" in values:
+        ssh = values["ssh_key_secret"] or {}
+        if not isinstance(ssh, dict):
+            raise WorkgroupError("ssh_key_secret must map a cloud to a secret reference")
+        bad = sorted(set(ssh) - set(SECRET_CLOUDS))
+        if bad:
+            raise WorkgroupError(f"Unknown cloud: {', '.join(bad)}")
+        for cloud, value in ssh.items():
+            ref = _ref(value, f"ssh_key_secret.{cloud}")
+            if ref:
+                current["ssh_key_secret"][cloud] = ref
+            else:
+                current["ssh_key_secret"].pop(cloud, None)
+    if "pra_credential_ref" in values:
+        current["pra_credential_ref"] = _ref(values["pra_credential_ref"], "pra_credential_ref")
+    empty = not current["ssh_key_secret"] and not current["pra_credential_ref"]
+    wg.secret_bindings = None if empty else json.dumps(current, sort_keys=True)
+    db.commit()
+    return current
+
+
+def apply_secret_bindings(cloud: str, req, workgroup: Optional[str], user) -> None:
+    """Fill a deploy request's secret references from its workstream's bindings, and
+    refuse a non-admin who names a different one. Mutates ``req`` in place, BEFORE the
+    caller validates the override and fans out, so every child of a batch, the job
+    metadata and the runner all see the reference actually used.
+
+    Raises SecretBindingDenied for a non-admin asking for another secret than the bound
+    one. Fields a request model does not have (an older model) are skipped."""
+    bound = bindings(workgroup)
+    is_admin = bool(getattr(user, "is_effective_admin", False))
+    for field, ref, label in (
+        ("ssh_key_secret_override", bound["ssh_key_secret"].get(cloud), "SSH key secret"),
+        ("pra_credential_ref", bound["pra_credential_ref"], "PRA credential"),
+    ):
+        if not ref or not hasattr(req, field):
+            continue
+        asked = (getattr(req, field) or "").strip()
+        if not asked:
+            setattr(req, field, ref)
+        elif asked != ref and not is_admin:
+            raise SecretBindingDenied(
+                f"This workstream's {label} is set by an administrator; leave it blank "
+                "to use it, or ask an administrator to change it.")
 
 
 # ── Seed ──────────────────────────────────────────────────────────────────────

@@ -41,6 +41,7 @@ from ..models.aws import (
     SSHKeySecretDetail,
 )
 from ..models.vm_pra import VmPraRequest
+from .workgroups import enforce_secret_bindings
 from ..models.schedule import ScheduleRequestMixin
 from ..services import change_window_service, aws_service, deploy_batch, job_service, cache_service, cloud_stats, region_catalog, workgroup_service
 from ..services.aws_service import AWSError
@@ -157,7 +158,11 @@ async def _validate_ssh_key_override(override: Optional[str]) -> None:
     from ..services import ssh_key_secret
     try:
         raw = await aws_service.get_secret(override, _aws_region())
-    except AWSError as e:
+    except Exception as e:  # noqa: BLE001 — get_secret lets botocore's ClientError through
+        # (a missing secret, an AccessDenied, a bad token), not only AWSError, and that was
+        # a 500. Since a workstream's bound secret fills this in on every deploy into it,
+        # a bound secret someone deleted would 500 every one of them. GCP's twin catches
+        # everything for the same reason.
         raise HTTPException(status_code=400, detail=f"SSH key secret '{override}' could not be read: {e}")
     try:
         ssh_key_secret.validate_public_key_secret(raw, secret_name=override)
@@ -739,6 +744,8 @@ async def deploy_ami(
     _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
 
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
+
+    enforce_secret_bindings("aws", req, workgroup, current_user)
     region = _resolve_region(req.region)
     await _validate_ssh_key_override(req.ssh_key_secret_override)
 
@@ -837,6 +844,8 @@ async def bulk_deploy_amis(
         raise HTTPException(status_code=400, detail="At least one AMI item is required.")
 
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
+
+    enforce_secret_bindings("aws", req, workgroup, current_user)
     region = _resolve_region(req.region)
     await _validate_ssh_key_override(req.ssh_key_secret_override)
 
@@ -1092,6 +1101,9 @@ def set_instance_pra(
             detail=f"No active deployment found for {payload.instance}.")
     _assert_can_act(current_user, deploy_job.workgroup, f"Instance {payload.instance}",
                     "change its PRA access")
+    if payload.action == "register":
+        # A credential bound to the VM's workstream applies here as at deploy time.
+        enforce_secret_bindings("aws", payload, deploy_job.workgroup, current_user)
     try:
         job = vm_pra_service.queue(db, cloud="aws", deploy_job=deploy_job,
                                    payload=payload, username=current_user.username)

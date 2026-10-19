@@ -113,6 +113,7 @@ class OCIDeployRequest(ScheduleRequestMixin, BaseModel):
     enable_pra: Optional[bool] = None
     jump_group: Optional[str] = None
     jumpoint_name: Optional[str] = None
+    pra_credential_ref: Optional[str] = None     # secret ref → bt_client_secret override for the shell jump
     count: int = Field(
         default=1, ge=1, le=MAX_DEPLOY_COUNT,
         description="Number of identical instances to launch. 1 is a plain single "
@@ -168,6 +169,7 @@ class OCIBulkDeployRequest(ScheduleRequestMixin, BaseModel):
     enable_pra: Optional[bool] = None
     jump_group: Optional[str] = None
     jumpoint_name: Optional[str] = None
+    pra_credential_ref: Optional[str] = None     # secret ref → bt_client_secret override for the shell jump
 
 
 class OCIBulkDeployJobResult(BaseModel):
