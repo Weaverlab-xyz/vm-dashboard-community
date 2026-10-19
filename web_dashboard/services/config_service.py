@@ -354,8 +354,10 @@ def _resolve_external(raw: str, workgroup: str | None = None) -> str:
         if raw.startswith(prefix):
             vault_id, ref = _parse_ref(raw, backend)
             if not _vault_allows(vault_id, backend, workgroup):
-                logger.warning("Refused secret reference into vault %r: it is scoped to "
-                               "another workstream than %r", vault_id, workgroup)
+                # Nothing from the reference is logged: CodeQL traces the vault id back
+                # to the secret reference itself.
+                logger.warning("Refused a secret reference into a vault scoped to "
+                               "another workstream")
                 return ""
             now = time.monotonic()
             cache_key = (raw, vault_id, workgroup)
