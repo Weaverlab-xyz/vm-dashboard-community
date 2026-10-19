@@ -1149,8 +1149,13 @@ def _complete_oauth_login(db, *, subject, email, display_name, groups, provider,
         #
         # Resolved with ONE query rather than per mapping: `matched` is usually short, but a
         # login is on the critical path and a per-row lookup here would be an N+1 on it.
+        # From the mapping ROWS, not `matched`: those are (workgroup, permissions) tuples, so
+        # reading `role_id` off them found nothing and every group-conferred role -- the
+        # Administrator one included -- was silently dropped at sign-in. The .env fallback
+        # has no rows and so no roles.
         _role_maps = []
-        _matched_role_ids = {m.role_id for m, _ in matched if getattr(m, "role_id", None)}
+        _matched_role_ids = {m.role_id for m in db_mappings
+                             if m.entra_group_id in user_group_ids and m.role_id}
         if _matched_role_ids:
             from ..database import AccessRole
             _role_maps = [r.permissions_dict for r in

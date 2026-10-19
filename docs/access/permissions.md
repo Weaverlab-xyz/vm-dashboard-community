@@ -57,15 +57,38 @@ So the grid's states are:
 A role, a group mapping's permissions and an Entitle grant all add to the user's own map.
 None of them can take anything away from it.
 
+## Every person and every group mapping has a role
+
+A person's account and a group mapping must each name a [role](#roles). The grid next to it
+is an addition **on top of** that role, never a substitute for one. Access that lived only
+in a grid was a second, unnamed permission set that no role edit could reach.
+
+- **Creating** a user or a mapping without a role is refused (`422`, "Choose a role").
+  Through the API that means sending `role_id`.
+- **A role cannot be cleared** from a person or a mapping. Move it to another role instead.
+- **Unticking Admin** (or moving off the Administrator role) has to land on a role in the
+  same save.
+- **Rows saved before this rule keep working.** They sign in and keep their access, and
+  RBAC marks them with an amber **No role** badge. The next edit to one of them has to choose
+  a role. Activating or deactivating an account, resetting its password and the
+  **Sign in with SSO** switch are not edits, and work as before.
+
+Exempt, because this page does not author their access:
+
+- the **Admin** flag, which is itself the whole grant;
+- **service accounts**, which can still be granted with a map alone;
+- accounts **single sign-on provisioned**. Their access is rebuilt from their group
+  mapping, and so from that mapping's role, at every sign-in;
+- **your own row**, because you cannot change your own role.
+
 ## New users start restricted
 
-Creating a user from **RBAC → Users → + New User** gives them a permission map with nothing
-granted. The grid is on the create panel for that reason: grant what they need before you
-save, or they will be able to sign in and see nothing. The panel says so when you are about
-to create one that way.
+Creating a user from **RBAC → Users → + New User** gives them their role and a permission
+map with nothing granted on top of it. The grid is on the create panel so you can add what
+the role does not cover before you save.
 
 An account created through the API without a `permissions` field also starts with nothing
-granted. Send `{}` for Full access, or a map.
+granted beyond its role. Send `{}` for Full access, or a map.
 
 **Passwords can be at most 72 bytes.** bcrypt, which hashes them, reads no further, so a
 longer one is refused when it is set (here, on edit, in the setup wizard and on a headless
@@ -81,10 +104,10 @@ OAuth client. It can never be an administrator either. An OAuth access token may
 ## Removing admin leaves nothing granted
 
 Unticking **Admin** on a user, or moving them off the **Administrator** role, leaves them
-with **no permissions** until you grant some, either by assigning a role or by ticking
-boxes in the grid. The grid resets to nothing ticked, with "Full access" unticked, and
-the panel warns that the user will see nothing. Grant what they need in the
-same save, or later.
+with **only the role you choose** in that save (one is
+[required](#every-person-and-every-group-mapping-has-a-role)). The grid resets to nothing
+ticked, with "Full access" unticked, so nothing the grid held before comes back. Tick
+anything they need beyond the role in the same save, or later.
 
 Two things behind it are worth knowing:
 
@@ -98,8 +121,8 @@ Two things behind it are worth knowing:
 An administrator is also created with nothing granted underneath the flag, so unticking
 Admin later leaves them with nothing.
 
-**Group mappings start with nothing granted.** A new mapping on RBAC → Groups grants its
-members nothing unless you give it a role, tick sections, or tick "Full access". A member
+**Group mappings grant their role and nothing more by default.** A new mapping on RBAC →
+Groups must name a role; its grid adds sections, or "Full access", on top. A member
 who matches several mappings gets the union of what they grant. A mapping that the upgrade
 converted from "no permissions" keeps its old behaviour exactly: it grants Full access only
 to a member whom no other matched mapping grants anything. Saving the mapping from the grid
@@ -257,8 +280,8 @@ stored separately for exactly this reason, so they survive.
 
 ## Groups
 
-A group mapping turns a group from your identity provider into a workstream, an optional
-role, and a default permission set. **Not Entra-only** — any OIDC provider works, and the
+A group mapping turns a group from your identity provider into a workstream, a role
+(required), and a default permission set added on top of it. **Not Entra-only** — any OIDC provider works, and the
 "Group Object ID" field takes whatever identifier that provider's groups claim emits. The
 stored column is still called `entra_group_id`, which is why you will see that name in the
 API and in the database.
@@ -300,7 +323,8 @@ Nine roles ship with the dashboard:
 keeps what the shipped roles mean stable, so a support conversation about "the Auditor
 role" is about the same thing on every install. A custom role can be edited and deleted
 freely; deleting one that is still assigned asks first, and the people who held it keep
-only whatever their own permission grid grants.
+only whatever their own permission grid grants. They then show **No role**, and the next
+edit to each of them has to choose one.
 
 **A role and the grid add up.** The grid on a user or a group mapping is an *override*
 layered on top of their role, not a replacement for it — so the usual shape is "give them

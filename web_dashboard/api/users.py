@@ -36,8 +36,8 @@ class UserCreateRequest(BaseModel):
     # Which POVs the new user may reach. Same column, same meaning as on update -- [] or
     # omitted is every POV their `pov` scope allows.
     pov_env_ids: Optional[List[str]] = None
-    # The access role to assign. Omitted = no role, which is the pre-roles behaviour and
-    # leaves `permissions` above as the only statement about this user's access.
+    # The access role to assign. REQUIRED unless `is_admin` is set -- see ROLE_REQUIRED.
+    # Typed Optional only so a missing one gets that sentence, not pydantic's generic 422.
     role_id: Optional[str] = None
 
 
@@ -177,6 +177,42 @@ def _refuse_service_account_escalation(db: Session, user: User, *, is_admin=None
                 detail="A service account cannot hold an administrator role.")
 
 
+# A person's account holds a role. The grid is an addition on top of it, not a
+# substitute: grid-only access was a second, unnamed permission set that no role edit
+# reaches. Accounts saved before the rule keep working until edited. The exemptions are
+# the accounts whose access this page does not author:
+#   * the Admin flag     -- itself the whole grant; the form hides the role picker for it
+#   * service accounts   -- workloads, which a role can never make admin; grid-only stays
+#   * SSO-provisioned    -- their access is rebuilt from their GROUP MAPPING at every
+#                           sign-in, and every mapping now names a role (api/groups.py)
+ROLE_REQUIRED = ("Choose a role. Every person's account needs one; the permission grid "
+                 "adds to it rather than replacing it. Tick Admin for an administrator.")
+_SSO_PROVIDERS = ("azure_ad", "oidc")
+# Changing only these is operating on an account, not editing its access, so it does not
+# force a role onto a row saved before roles were required.
+_OPERATIONAL_FIELDS = frozenset({"is_active", "password", "sso_sign_in"})
+
+
+def _would_leave_without_role(user: User, body: "UserUpdateRequest", admin: User) -> bool:
+    """True if this PATCH would leave a person's account with no role.
+
+    Judged on the state the request LEAVES, so clearing a role, unticking Admin without
+    choosing one, and editing a row saved before the rule are one refusal. Decided BEFORE
+    anything is written: `_set_sso_sign_in` audits, and `log_audit` commits, so a refusal
+    raised after it could not take the earlier changes back.
+
+    Not on your own row: you cannot change your own role, so it could never be satisfied.
+    """
+    if user.id == admin.id or not (body.model_fields_set - _OPERATIONAL_FIELDS):
+        return False
+    is_admin = user.is_admin if body.is_admin is None else body.is_admin
+    if (is_admin or user.is_service_account or user.accessor_env_id
+            or (user.auth_provider or "local") in _SSO_PROVIDERS):
+        return False
+    role_id = user.role_id if body.role_id is None else body.role_id.strip()
+    return not role_id
+
+
 def _resolve_role(db: Session, raw: Optional[str]):
     """A role id from a request body to an `AccessRole`, or None to clear. 422 if unknown.
 
@@ -242,6 +278,9 @@ def create_user(
         raise HTTPException(status_code=409, detail="Username already exists")
     if password_length_error(body.password):
         raise HTTPException(status_code=400, detail=password_length_error(body.password))
+    role = _resolve_role(db, body.role_id)
+    if role is None and not body.is_admin:
+        raise HTTPException(status_code=422, detail=ROLE_REQUIRED)
     user = User(
         username=body.username,
         hashed_password=get_password_hash(body.password),
@@ -265,11 +304,11 @@ def create_user(
         user.permissions_dict = _nothing_granted()
     if body.pov_env_ids is not None:
         user.pov_env_ids_list = body.pov_env_ids
-    if body.role_id is not None:
+    if role is not None:
         # Assigned through role_service, which is the single writer of the two role columns
         # and always writes them together -- an id without its materialised copy is a user
         # who can do nothing, by way of the deny sentinel in database.py.
-        role_service.apply_role_to_user(db, user, _resolve_role(db, body.role_id))
+        role_service.apply_role_to_user(db, user, role)
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -310,6 +349,8 @@ def update_user(
         raise HTTPException(status_code=400, detail="Cannot remove your own admin privilege")
     if body.password and password_length_error(body.password):
         raise HTTPException(status_code=400, detail=password_length_error(body.password))
+    if _would_leave_without_role(user, body, admin):
+        raise HTTPException(status_code=422, detail=ROLE_REQUIRED)
     was_admin = _admin_here(user)
 
     if body.full_name is not None:
@@ -358,7 +399,10 @@ def update_user(
             user.permissions_dict = full_access_map()
     if body.sso_sign_in is not None:
         _set_sso_sign_in(db, admin, user, body.sso_sign_in)
-    if body.role_id is not None:
+    # The form sends the role on every save, so only a CHANGE is a role edit. Comparing
+    # here is what lets an admin edit their own name: the refusal below used to fire on the
+    # unchanged role the form always carries.
+    if body.role_id is not None and body.role_id.strip() != (user.role_id or ""):
         # Refuse an admin changing their OWN role, mirroring the is_admin guard above and
         # for a strictly stronger reason: a role can be what confers their admin, so
         # swapping it can lock them out of this very page with no way back short of the

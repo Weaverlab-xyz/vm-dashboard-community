@@ -41,7 +41,9 @@ class GroupMappingCreate(BaseModel):
     persona: Optional[str] = None
     persona_priority: Optional[int] = None
     # The access role every member of this group is granted. Unioned into their
-    # session_permissions at login, alongside default_permissions above.
+    # session_permissions at login, alongside default_permissions above. REQUIRED: typed
+    # Optional only so a missing one answers with ROLE_REQUIRED's sentence rather than
+    # pydantic's generic "field required".
     role_id: Optional[str] = None
 
 
@@ -104,6 +106,15 @@ def _valid_persona(raw) -> Optional[str]:
     if want not in personas.VALID_PERSONAS:
         raise HTTPException(status_code=422, detail=f"Unknown persona '{want}'")
     return want
+
+
+# Every mapping names a role. The grid beside it is an addition ON TOP of that role, not
+# a substitute for one: a mapping whose access lived only in its grid was a second,
+# unnamed permission set that no role edit could reach. Rows saved before this rule keep
+# working -- the login path reads whatever they hold -- and are made to pick a role the
+# next time they are edited.
+ROLE_REQUIRED = ("Choose a role for this mapping. Every group mapping needs one; the "
+                 "permissions below are added on top of it.")
 
 
 def _resolve_role(db: Session, raw):
@@ -186,6 +197,9 @@ def create_group_mapping(payload: GroupMappingCreate, db: Session = Depends(get_
     # rewriting itself into every member's permissions, and there is no PUT on this
     # resource to correct it with -- only delete and recreate.
     validate_permissions_payload(payload.default_permissions)
+    role = _resolve_role(db, payload.role_id)
+    if role is None:
+        raise HTTPException(status_code=422, detail=ROLE_REQUIRED)
 
     mapping = OAuthGroupMapping(
         entra_group_id=payload.entra_group_id.strip(),
@@ -194,7 +208,7 @@ def create_group_mapping(payload: GroupMappingCreate, db: Session = Depends(get_
         default_permissions=_stored_permissions(payload.default_permissions),
         persona=_valid_persona(payload.persona),
         persona_priority=payload.persona_priority,
-        role_id=(_resolve_role(db, payload.role_id).id if payload.role_id else None),
+        role_id=role.id,
     )
     db.add(mapping)
     db.commit()
@@ -221,7 +235,8 @@ def update_group_mapping(mapping_id: str, payload: GroupMappingUpdate,
 
     Same validation as create, deliberately: `workgroup` must exist, `persona` must be a
     registry key, `default_permissions` goes through the catalog validator, and an unknown
-    `role_id` is a 422 rather than a stored dangling reference.
+    `role_id` is a 422 rather than a stored dangling reference. A role cannot be cleared,
+    and a mapping that predates required roles must be given one by whatever edit is made.
     """
     mapping = db.query(OAuthGroupMapping).filter(OAuthGroupMapping.id == mapping_id).first()
     if not mapping:
@@ -250,7 +265,14 @@ def update_group_mapping(mapping_id: str, payload: GroupMappingUpdate,
         mapping.persona_priority = payload.persona_priority if mapping.persona else None
     if payload.role_id is not None:
         role = _resolve_role(db, payload.role_id)
-        mapping.role_id = role.id if role else None
+        if role is None:
+            db.rollback()
+            raise HTTPException(status_code=422, detail=ROLE_REQUIRED)
+        mapping.role_id = role.id
+    if not mapping.role_id:
+        # A mapping saved before roles were required: any edit has to give it one.
+        db.rollback()
+        raise HTTPException(status_code=422, detail=ROLE_REQUIRED)
 
     db.commit()
     db.refresh(mapping)

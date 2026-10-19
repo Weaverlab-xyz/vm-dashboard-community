@@ -30,10 +30,30 @@ sys.path.insert(0, _ROOT)
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from web_dashboard.database import Base, SessionLocal, User, engine, get_db  # noqa: E402
+from web_dashboard.database import (AccessRole, Base, SessionLocal, User,  # noqa: E402
+                                    engine, get_db)
 from web_dashboard.api import users as users_api  # noqa: E402
 from web_dashboard.api.auth import (  # noqa: E402
     PERMISSION_SCOPES, has_permission, require_admin)
+
+# Every person's account now needs a role (api/users.ROLE_REQUIRED). These tests are about
+# the per-user MAP, so each user gets a role that grants nothing: whatever they can do,
+# the map below decided it, exactly as before roles were required.
+_EMPTY_ROLE_SLUG = "lp-grants-nothing"
+
+
+def _empty_role_id():
+    db = SessionLocal()
+    try:
+        role = db.query(AccessRole).filter(AccessRole.slug == _EMPTY_ROLE_SLUG).first()
+        if role is None:
+            role = AccessRole(id=str(uuid.uuid4()), slug=_EMPTY_ROLE_SLUG,
+                              name="Grants nothing", permissions=None)
+            db.add(role)
+            db.commit()
+        return role.id
+    finally:
+        db.close()
 
 
 def _client():
@@ -58,9 +78,10 @@ def _client():
 
 def _create(**body):
     name = body.pop("username", None) or ("u" + uuid.uuid4().hex[:10])
-    payload = {"username": name, "password": "pw"}
+    client = _client()  # creates the tables the role lookup below needs
+    payload = {"username": name, "password": "pw", "role_id": _empty_role_id()}
     payload.update(body)
-    resp = _client().post("/api/users", json=payload)
+    resp = client.post("/api/users", json=payload)
     db = SessionLocal()
     try:
         return resp, db.query(User).filter(User.username == name).first()
@@ -168,6 +189,12 @@ def test_an_edit_sending_an_empty_map_is_full_access_for_a_person_only():
 
 
 # ── the validator runs on this path too ───────────────────────────────────────
+
+def test_a_person_without_a_role_is_refused_on_create():
+    resp, user = _create(role_id=None, permissions={})
+    assert resp.status_code == 422 and "role" in resp.text.lower(), resp.text
+    assert user is None
+
 
 def test_an_unknown_scope_is_refused_on_create():
     """api/users.py's PATCH has validated since the validator existed; the create path did

@@ -81,6 +81,13 @@
                    permission grid, so naming a role there would suggest it still applies. -->
               <div x-show="!u.is_admin && u.role_name" class="text-xs text-gray-500 mt-0.5"
                    x-text="u.role_name"></div>
+              <!-- A person's account saved before roles were required. It keeps working;
+                   the next edit has to choose a role (api/users.ROLE_REQUIRED). Same
+                   exemptions as roleRequired(), minus your own row, which can't fix it. -->
+              <span x-show="!u.is_admin && !u.role_name && !u.is_service_account
+                            && !['azure_ad', 'oidc'].includes(u.auth_provider)"
+                    class="inline-block mt-0.5 text-xs px-2 py-0.5 rounded-full bg-amber-50
+                           text-amber-700 border border-amber-200">No role</span>
             </td>
             <td class="px-4 py-3">
               <span :class="u.is_active ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'"
@@ -245,14 +252,20 @@
         <!-- Access role. Above the grid deliberately: a role is the normal way to grant
              access and the grid below it is the per-user override, so the reading order
              matches the model. -->
+        <!-- Required for a person's account (api/users.py ROLE_REQUIRED); see roleRequired()
+             for the accounts that are exempt and why. The blank option stays in the list so
+             a row saved before the rule opens showing it, but it cannot be submitted. -->
         <div x-show="!form.is_admin">
           <label class="block text-sm font-medium text-gray-700 mb-1">
-            Role <span class="text-gray-400 font-normal">(optional)</span>
+            Role
+            <span x-show="roleRequired()" class="text-red-500">*</span>
+            <span x-show="!roleRequired()" class="text-gray-400 font-normal">(optional)</span>
           </label>
-          <select x-model="form.role_id" @change="onRoleChanged()"
+          <select x-model="form.role_id" @change="onRoleChanged()" :required="roleRequired()"
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-1
                          focus:outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">No role &mdash; use the grid below only</option>
+            <option value="" :disabled="roleRequired()"
+                    x-text="roleRequired() ? '— choose a role —' : 'No role — use the grid below only'"></option>
             <template x-for="r in selectableRoles()" :key="r.id">
               <option :value="r.id" x-text="r.name + (r.is_builtin ? '' : ' (custom)')"></option>
             </template>
@@ -271,7 +284,7 @@
             This service account will hold no access at all. Grant a role or at least one
             section — there is no “unrestricted” for a workload.
           </p>
-          <p x-show="!form.is_service_account && !form.permissionsUnrestricted && permGrantedCount() === 0"
+          <p x-show="!form.is_service_account && !form.role_id && !form.permissionsUnrestricted && permGrantedCount() === 0"
              class="text-xs text-amber-600 mt-1">
             This user will be able to sign in and see nothing. Grant at least one section,
             or tick “Full access”.
@@ -844,9 +857,28 @@ function usersPage() {
       this.roleWasAdmin = this.isAdminRole(this.form.role_id);
     },
 
+    // Mirrors api/users._would_leave_without_role. A person's account must hold a role;
+    // exempt are the Admin flag (the picker is hidden for it), service accounts, accounts
+    // single sign-on provisioned (their group mapping, which requires a role, rebuilds their
+    // access at every sign-in) and your own row (you cannot change your own role).
+    roleRequired() {
+      const u = this.editingUser;
+      if (this.form.is_admin || this.form.is_service_account) return false;
+      if (u && (u.id === this.currentUserId || ['azure_ad', 'oidc'].includes(u.auth_provider))) {
+        return false;
+      }
+      return true;
+    },
+
     roleHint() {
       const r = (this.availableRoles || []).find(x => x.id === this.form.role_id);
-      if (!r) return 'Without a role, this user gets only what the grid below grants.';
+      if (!r && this.roleRequired()) {
+        return 'Choose a role — every person’s account needs one. The grid below adds to it.';
+      }
+      if (!r && this.editingUser && ['azure_ad', 'oidc'].includes(this.editingUser.auth_provider)) {
+        return 'Their access comes from their group mapping at each sign-in. A role here is added on top.';
+      }
+      if (!r) return 'Without a role, this account gets only what the grid below grants.';
       if (r.permissions && r.permissions.is_admin) {
         return 'Administrator bypasses the permission grid entirely.';
       }
@@ -859,8 +891,8 @@ function usersPage() {
       // and Delete on your own row, and an admin who cannot see that has no way to tell
       // why one row looks different.
       const me = await API.get('/api/auth/me');
-      // Allowed to fail quietly and stay empty: the picker then offers "No role" alone,
-      // which is exactly the pre-roles behaviour rather than a broken form.
+      // Allowed to fail quietly and stay empty: the picker then offers nothing to choose,
+      // and the API's ROLE_REQUIRED message says why a person's account cannot be saved.
       try { this.availableRoles = await API.get('/api/roles') || []; } catch (e) {}
       // Same contract: fail quietly and stay empty rather than break the form.
       try { this.availableWorkgroups = await API.get('/api/groups/workgroups') || []; } catch (e) {}
@@ -896,8 +928,8 @@ function usersPage() {
         is_admin: false, is_active: true,
         permissions: {}, permissionsUnrestricted: false,
         povEnvIds: [], povEnvToAdd: '', persona: '',
-        // No role by default. A new account therefore starts with the grid alone, and the
-        // grid starts at nothing granted -- least privilege on both axes.
+        // Nothing pre-selected: a person's account must have a role CHOSEN (roleRequired),
+        // never defaulted, and the grid starts at nothing granted on top of it.
         role_id: '',
         is_service_account: false,
       };
