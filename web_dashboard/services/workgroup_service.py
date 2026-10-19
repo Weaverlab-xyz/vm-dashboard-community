@@ -350,10 +350,13 @@ PROFILE_KEYS = {
 
 
 def _read_defaults(wg: Optional[Workgroup]) -> dict:
-    if wg is None or not wg.deploy_defaults:
+    # getattr: a stand-in workstream object (tests stub get(), and so may a caller) that
+    # predates the column reads as "sets nothing", never as an AttributeError mid-deploy.
+    stored = getattr(wg, "deploy_defaults", None) if wg is not None else None
+    if not stored:
         return {}
     try:
-        raw = json.loads(wg.deploy_defaults)
+        raw = json.loads(stored)
     except (ValueError, TypeError):
         return {}
     # Only known keys of the right type survive a read, so a row edited by hand cannot
@@ -446,10 +449,11 @@ class SecretBindingDenied(WorkgroupAccessError):
 
 def _read_bindings(wg: Optional[Workgroup]) -> dict:
     out = {"ssh_key_secret": {}, "pra_credential_ref": None}
-    if wg is None or not wg.secret_bindings:
+    stored = getattr(wg, "secret_bindings", None) if wg is not None else None   # see _read_defaults
+    if not stored:
         return out
     try:
-        raw = json.loads(wg.secret_bindings)
+        raw = json.loads(stored)
     except (ValueError, TypeError):
         return out
     ssh = raw.get("ssh_key_secret") if isinstance(raw, dict) else None
