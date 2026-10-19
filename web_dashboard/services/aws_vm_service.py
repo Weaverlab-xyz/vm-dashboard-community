@@ -666,7 +666,7 @@ async def _run_deploy(
         if _want_pra and not is_windows:
             from ..services import terraform_pra_service
             try:
-                _client_secret = vm_pra_service.client_secret_for(pra_credential_ref)
+                _client_secret = vm_pra_service.client_secret_for(pra_credential_ref, workgroup)
                 _group, _jumpoint = vm_pra_service.resolve_target(
                     "aws", jump_group, jumpoint_name, workgroup=workgroup)
                 bt_result = await terraform_pra_service.provision_jump(
@@ -727,7 +727,7 @@ async def _run_deploy(
                 pra_enabled=_want_pra,
                 jump_group=_win_group,
                 jumpoint_name=_win_gateway,
-                client_secret=_cfg_svc.resolve_reference(pra_credential_ref.strip()) if pra_credential_ref else "",
+                client_secret=vm_pra_service.client_secret_for(pra_credential_ref, workgroup),
                 ssh=win_ssh, rdp=win_rdp,
                 ssh_status=win_ssh_status, ssh_detail=win_ssh_detail,
             )

@@ -306,6 +306,12 @@
               {{ secret_picker("bindings", "praCredBackend", "pra_credential_ref",
                                "PRA credential",
                                "The bt_client_secret override this workstream's jumps are provisioned with.") }}
+              <!-- Typed, for a reference into a registered vault (azure_kv://<vault>/<name>),
+                   which the picker's single-store list cannot offer. A vault limited to
+                   another workstream is refused on save. -->
+              <label class="block mt-2 text-[11px] text-gray-500">or a reference
+                <input type="text" x-model="bindings.pra_credential_ref" placeholder="azure_kv://team-a-kv/pra-client"
+                       class="mt-1 w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono"></label>
               <p x-show="bindings.pra_credential_ref" class="text-[11px] text-gray-500 mt-1">
                 Bound: <span class="font-mono" x-text="bindings.pra_credential_ref"></span>
                 <button type="button" @click="bindings.pra_credential_ref = ''; bindings.praCredBackend = ''"

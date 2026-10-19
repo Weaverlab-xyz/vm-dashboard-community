@@ -7,6 +7,9 @@ PATCH /api/secrets/config      — save backend connection config
 POST /api/secrets/test         — test the currently configured backend connection
 GET  /api/secrets/list         — all known secret keys with backend and value-presence info
 POST /api/secrets/migrate      — migrate DB-stored secrets to the configured external backend
+GET  /api/secrets/vaults       — registered vaults (multi-vault references) and their scope
+PUT  /api/secrets/vaults/{id}  — register or change a vault, optionally scoped to a workstream
+DELETE /api/secrets/vaults/{id}
 """
 import asyncio
 import logging
@@ -708,3 +711,74 @@ async def delete_bss_folder(folder_id: str, request: Request):
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(e))
     return {"ok": True, "id": folder_id}
+
+
+# ── Vault registry ────────────────────────────────────────────────────────────
+# A reference can name a registered vault (`azure_kv://<vault-id>/<secret>`), and a vault
+# can be scoped to one workstream: it then resolves only for that workstream's deploys
+# (services/secret_vault_service). Administrator-only, like everything on this page, and
+# audited, because a scope decides which team's deploys can read a vault at all.
+
+class VaultRequest(BaseModel):
+    backend: str
+    endpoint: str
+    workgroup: str | None = None
+
+
+def _vault_db():
+    from ..database import SessionLocal
+    return SessionLocal()
+
+
+def _audit_vault(request: Request, action: str, **details) -> None:
+    from .auth import admin_username_from_request
+    from ..services import job_service
+    db = _vault_db()
+    try:
+        job_service.log_audit(db, admin_username_from_request(request), action,
+                              details=details)
+    finally:
+        db.close()
+
+
+@router.get("/vaults")
+async def list_vaults(request: Request):
+    _require_admin(request)
+    from ..services import secret_vault_service as svs
+    db = _vault_db()
+    try:
+        return {"vaults": svs.list_vaults(db)}
+    finally:
+        db.close()
+
+
+@router.put("/vaults/{vault_id}")
+async def put_vault(vault_id: str, payload: VaultRequest, request: Request):
+    _require_admin(request)
+    from ..services import secret_vault_service as svs
+    db = _vault_db()
+    try:
+        row = svs.upsert(db, vault_id, payload.backend, payload.endpoint, payload.workgroup)
+    except svs.VaultError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+    _audit_vault(request, "secret_vault_update", **row)
+    return row
+
+
+@router.delete("/vaults/{vault_id}")
+async def delete_vault(vault_id: str, request: Request):
+    _require_admin(request)
+    from ..services import secret_vault_service as svs
+    db = _vault_db()
+    try:
+        svs.delete(db, vault_id)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except svs.VaultError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    finally:
+        db.close()
+    _audit_vault(request, "secret_vault_delete", id=vault_id)
+    return {"ok": True}

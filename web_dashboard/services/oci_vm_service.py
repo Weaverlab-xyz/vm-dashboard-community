@@ -195,7 +195,8 @@ async def _run_deploy(job_id: str, payload: OCIDeployRequest, compartment: str,
                 bt_result = await terraform_pra_service.provision_jump(
                     vm_name=payload.instance_name, hostname=hostname,
                     jump_group_name=jump_group, jumpoint_name=jumpoint_name, tag="OCI",
-                    client_secret=vm_pra_service.client_secret_for(payload.pra_credential_ref),
+                    client_secret=vm_pra_service.client_secret_for(payload.pra_credential_ref,
+                                                                   payload.workgroup),
                 )
                 final_meta["bt_shell_jump_id"] = bt_result.get("shell_jump_id")
                 final_meta["bt_jump_group_name"] = bt_result.get("jump_group_name")

@@ -293,6 +293,33 @@ def _is_registered_vault(vault_id: str, backend: str) -> bool:
         return False
 
 
+def _vault_workgroup(vault_id: str, backend: str) -> str | None:
+    """The workstream a registered vault is scoped to, or None (any caller may use it).
+    An unreadable registry reads as unscoped, like ``_is_registered_vault``."""
+    try:
+        from ..database import SessionLocal, SecretVault
+        db = SessionLocal()
+        try:
+            row = db.query(SecretVault.workgroup).filter(
+                SecretVault.id == vault_id, SecretVault.backend == backend).first()
+            return (row[0] or None) if row else None
+        finally:
+            db.close()
+    except Exception:
+        return None
+
+
+def _vault_allows(vault_id: str | None, backend: str, workgroup: str | None) -> bool:
+    """Whether a caller resolving for ``workgroup`` may read through ``vault_id``. A vault
+    scoped to a workstream (secret_vault_service) resolves only for that workstream; a
+    caller that names none — a global Settings key, a Config-Management run — is refused
+    too, so a team's vault is never read on anyone else's behalf."""
+    if not vault_id:
+        return True
+    scope = _vault_workgroup(vault_id, backend)
+    return not scope or scope == (workgroup or "").strip().lower()
+
+
 def _parse_ref(raw: str, backend: str) -> tuple[str | None, str]:
     """Split a reference into (vault_id, secret_ref).
 
@@ -320,12 +347,18 @@ def _parse_ref(raw: str, backend: str) -> tuple[str | None, str]:
 def _resolve_external(raw: str, workgroup: str | None = None) -> str:
     """If raw is an external backend reference, fetch and cache the real value.
 
-    The workgroup arg is reserved for future per-workgroup default-vault
-    resolution; today it only flows through for telemetry / cache-key
-    separation."""
+    ``workgroup`` is the workstream the value is resolved for. A reference into a vault
+    scoped to another workstream (or to one, when the caller names none) resolves to ""
+    — the same answer as any other failed read — and is logged."""
     for prefix, backend in _EXT_PREFIXES.items():
         if raw.startswith(prefix):
             vault_id, ref = _parse_ref(raw, backend)
+            if not _vault_allows(vault_id, backend, workgroup):
+                # Nothing from the reference is logged: CodeQL traces the vault id back
+                # to the secret reference itself.
+                logger.warning("Refused a secret reference into a vault scoped to "
+                               "another workstream")
+                return ""
             now = time.monotonic()
             cache_key = (raw, vault_id, workgroup)
             with _ext_cache_lock:
@@ -474,6 +507,8 @@ def describe_reference(raw: str, workgroup: str | None = None):
     for prefix, backend in _EXT_PREFIXES.items():
         if raw.startswith(prefix):
             vault_id, ref = _parse_ref(raw, backend)
+            if not _vault_allows(vault_id, backend, workgroup):
+                return None
             now = time.monotonic()
             cache_key = ("__desc__", raw, vault_id, workgroup)
             with _ext_cache_lock:

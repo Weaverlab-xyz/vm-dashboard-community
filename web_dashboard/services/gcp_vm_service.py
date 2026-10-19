@@ -203,7 +203,8 @@ async def _acquire_paired_jumpoint(db, job_id: str, payload: GCPDeployRequest,
     job_service.update_progress(db, job_id, 5, f"Starting BeyondTrust Gateway {name}…")
     try:
         if getattr(payload, "docker_deploy_key_ref", None):
-            deploy_key = _cfg_svc.resolve_reference(payload.docker_deploy_key_ref.strip())
+            deploy_key = _cfg_svc.resolve_reference(payload.docker_deploy_key_ref.strip(),
+                                                    workgroup=getattr(payload, "workgroup", None))
         else:
             deploy_key = await _resolve_gcp_jumpoint_deploy_key()
         if not deploy_key:
@@ -580,7 +581,8 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                     jumpoint_name=pra_jumpoint_name,
                     tag="GCP",
                     client_secret=vm_pra_service.client_secret_for(
-                        getattr(payload, "pra_credential_ref", None)),
+                        getattr(payload, "pra_credential_ref", None),
+                        getattr(payload, "workgroup", None)),
                 )
                 final_meta["bt_shell_jump_id"] = bt_result.get("shell_jump_id")
                 final_meta["bt_jump_group_name"] = bt_result.get("jump_group_name")
@@ -654,7 +656,8 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                 jump_group=_win_group,
                 jumpoint_name=_win_gateway,
                 client_secret=vm_pra_service.client_secret_for(
-                    getattr(payload, "pra_credential_ref", None)),
+                    getattr(payload, "pra_credential_ref", None),
+                    getattr(payload, "workgroup", None)),
                 ssh=win_ssh, rdp=win_rdp,
                 ssh_status=win_ssh_status, ssh_detail=win_ssh_detail,
             )

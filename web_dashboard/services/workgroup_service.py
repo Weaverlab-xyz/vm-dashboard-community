@@ -527,7 +527,17 @@ def set_bindings(db: Session, name: str, values: dict) -> dict:
             else:
                 current["ssh_key_secret"].pop(cloud, None)
     if "pra_credential_ref" in values:
-        current["pra_credential_ref"] = _ref(values["pra_credential_ref"], "pra_credential_ref")
+        ref = _ref(values["pra_credential_ref"], "pra_credential_ref")
+        if ref:
+            # A team vault resolves only for its own workstream; bound anywhere else it
+            # would resolve to nothing on every deploy.
+            from . import secret_vault_service
+            vault, owner = secret_vault_service.vault_of(ref)
+            if owner and owner != wg.name:
+                raise WorkgroupError(
+                    f"pra_credential_ref reads from vault '{vault}', which belongs to "
+                    f"workstream '{owner}'")
+        current["pra_credential_ref"] = ref
     empty = not current["ssh_key_secret"] and not current["pra_credential_ref"]
     wg.secret_bindings = None if empty else json.dumps(current, sort_keys=True)
     db.commit()

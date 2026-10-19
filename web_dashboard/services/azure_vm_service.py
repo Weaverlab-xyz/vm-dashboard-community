@@ -197,7 +197,8 @@ async def _acquire_aci(db, progress_job_id: str, req, loc: str, *,
             # skip this and quietly build its ACI with the configured default key.
             if getattr(req, "docker_deploy_key_ref", None):
                 from ..services import config_service as _cs
-                deploy_key = _cs.resolve_reference(req.docker_deploy_key_ref.strip())
+                deploy_key = _cs.resolve_reference(req.docker_deploy_key_ref.strip(),
+                                                   workgroup=getattr(req, "workgroup", None))
             else:
                 deploy_key = await _resolve_azure_aci_deploy_key()
         except Exception as key_err:
@@ -619,7 +620,8 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
             jump_group, jumpoint_name = vm_pra_service.resolve_target(
                 "azure", getattr(req, "jump_group", None), getattr(req, "jumpoint_name", None),
                 workgroup=getattr(req, "workgroup", None))
-            _client_secret = vm_pra_service.client_secret_for(getattr(req, "pra_credential_ref", None))
+            _client_secret = vm_pra_service.client_secret_for(getattr(req, "pra_credential_ref", None),
+                                                              getattr(req, "workgroup", None))
             if result.get("jumpoint_host_id"):
                 aci_note = f" (shared Gateway host: {result['jumpoint_host_id']})"
             elif result.get("jumpoint_error"):
@@ -697,7 +699,7 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
                 pra_enabled=_want_pra,
                 jump_group=_win_group,
                 jumpoint_name=_win_gateway,
-                client_secret=config_service.resolve_reference(_cred.strip()) if _cred else "",
+                client_secret=vm_pra_service.client_secret_for(_cred, getattr(req, "workgroup", None)),
                 ssh=win_ssh, rdp=win_rdp,
                 ssh_status=win_ssh_status, ssh_detail=win_ssh_detail,
             )
