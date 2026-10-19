@@ -223,24 +223,35 @@
                 </select>
               </label>
             </div>
+            <!-- The saved name is offered even when PRA does not list it (PRA
+                 unconfigured, or the item since renamed), so opening and saving the
+                 dialog never silently clears it. -->
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <label class="block">
-                <span class="block text-xs font-medium text-gray-600 mb-1">PRA jump group</span>
-                <input type="text" x-model="profile.jump_group" list="wg-pra-groups" placeholder="Global default"
-                       class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm"/>
-              </label>
-              <label class="block">
-                <span class="block text-xs font-medium text-gray-600 mb-1">PRA Gateway</span>
-                <input type="text" x-model="profile.jumpoint_name" list="wg-pra-gateways" placeholder="Global default"
-                       class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm"/>
-              </label>
+              <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">PRA jump group</label>
+                <select x-model="profile.jump_group"
+                        class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                  <option value="">Global default</option>
+                  <option x-show="profile.jump_group && !wsPraOpts.jump_groups.some(g => g.name === profile.jump_group)"
+                          :value="profile.jump_group" x-text="profile.jump_group"></option>
+                  <template x-for="g in wsPraOpts.jump_groups || []" :key="g.id">
+                    <option :value="g.name" x-text="g.name"></option>
+                  </template>
+                </select>
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
+                <select x-model="profile.jumpoint_name"
+                        class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                  <option value="">Global default</option>
+                  <option x-show="profile.jumpoint_name && !wsPraOpts.gateways.some(j => j.name === profile.jumpoint_name)"
+                          :value="profile.jumpoint_name" x-text="profile.jumpoint_name"></option>
+                  <template x-for="j in wsPraOpts.gateways || []" :key="j.id">
+                    <option :value="j.name" x-text="j.name"></option>
+                  </template>
+                </select>
+              </div>
             </div>
-            <datalist id="wg-pra-groups">
-              <template x-for="g in praPickers.jump_groups" :key="g.id"><option :value="g.name"></option></template>
-            </datalist>
-            <datalist id="wg-pra-gateways">
-              <template x-for="j in praPickers.jumpoints" :key="j.id"><option :value="j.name"></option></template>
-            </datalist>
             <p class="text-[11px] text-gray-400">
               Anyone in this workstream can change these. They hold no secrets; an SSH key or
               PRA credential for a workstream is set by an administrator.
@@ -296,7 +307,10 @@ function workgroupsPage() {
       {key: 'register_in_passwordsafe', label: 'Onboard into Password Safe'},
       {key: 'enable_rdp', label: 'RDP jump for Windows'},
     ],
-    praPickers: {jump_groups: [], jumpoints: []},
+    // PRA's jump groups and Gateways for the two dropdowns. `gateways` is filled from
+    // the payload's r.jumpoints on fetch, the way every picker state does it — see
+    // tests/test_pra_picker_bindings.py for why the two spellings must not drift.
+    wsPraOpts: {jump_groups: [], gateways: []},
 
     async init() {
       requireAuth();
@@ -363,11 +377,11 @@ function workgroupsPage() {
         // Only stewards may read it; anyone else still edits the rest of the form.
         this.profileError = 'Deploy defaults unavailable: ' + (e.message || e);
       }
-      if (!this.praPickers.jump_groups.length) {
+      if (!this.wsPraOpts.jump_groups.length) {
         try {
           const r = await API.get('/api/pra/pickers');
-          this.praPickers = {jump_groups: r.jump_groups || [], jumpoints: r.jumpoints || []};
-        } catch (e) { /* free text still works */ }
+          this.wsPraOpts = {jump_groups: r.jump_groups || [], gateways: r.jumpoints || []};
+        } catch (e) { /* the saved names are still offered, and Global default */ }
       }
     },
 

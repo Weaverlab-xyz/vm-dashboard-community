@@ -183,6 +183,8 @@ _MODALS = (
     ("web_dashboard/templates/databases/index.html", "options"),
     ("web_dashboard/templates/containers/index.html", "praOpts"),
     ("web_dashboard/templates/containers/index.html", "portainerDeployOpts"),
+    # A workstream's deploy defaults name a jump group and Gateway too.
+    ("web_dashboard/templates/rbac/_workgroups.html", "wsPraOpts"),
 )
 
 
