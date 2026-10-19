@@ -292,8 +292,18 @@ async def ensure_packages(timeout: int = _DEFAULT_TIMEOUT) -> list[dict]:
     return pkgs
 
 
+# A day. The API accepts up to a year, but the token is a bearer credential that
+# activates any host against the tenant; anything longer-lived should be minted per run.
+TOKEN_MIN_MINUTES = 30
+TOKEN_MAX_MINUTES = 1440
+
+
+def clamp_token_expiry(expiry_minutes: int) -> int:
+    return max(TOKEN_MIN_MINUTES, min(TOKEN_MAX_MINUTES, int(expiry_minutes)))
+
+
 async def get_installation_token(expiry_minutes: int = 480) -> str:
-    expiry = max(30, min(525600, expiry_minutes))
+    expiry = clamp_token_expiry(expiry_minutes)
     async with _client() as c:
         resp = await c.get("/btplatform/installationtoken", params={"expiry": expiry})
         if resp.status_code not in (200, 201):

@@ -1,9 +1,9 @@
 """
 Setup wizard API.
 
-POST /api/setup/complete   — initial setup, no auth required, errors if already done
+POST /api/setup/complete   — initial setup, needs the one-time X-Setup-Token, errors if already done
 PUT  /api/setup/config     — reconfigure, admin JWT required
-GET  /api/setup/status     — {complete: bool, configured_keys: list}
+GET  /api/setup/status     — {complete: bool, configured_keys: list (admin bearer only)}
 GET  /api/setup/config     — current config with secrets redacted (admin JWT if setup done)
 """
 import logging
@@ -418,44 +418,13 @@ class SetupPayload(BaseModel):
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _require_admin(request: Request) -> str:
-    """Verify the request carries a valid admin JWT. Raises 401/403 on failure.
+    """Raise 401/403 unless the request carries an administrator's credential.
 
     Returns the username, for the handful of callers that record who acted. Every other
-    call site ignores the return value, which is why this could start handing one back
-    without touching them.
+    call site ignores the return value. See ``auth.admin_username_from_request``.
     """
-    from jose import JWTError, jwt
-    from ..config import settings
-    from ..database import SessionLocal, User
-
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Authentication required")
-    token = auth[7:]
-    try:
-        payload = jwt.decode(
-            token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm]
-        )
-        username: str = payload.get("sub", "")
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-    db = SessionLocal()
-    try:
-        user = (
-            db.query(User)
-            .filter(User.username == username, User.is_active == True)
-            .first()
-        )
-        # is_effective_admin, the rule require_admin applies: the flag, an Entitle JIT grant,
-        # or the Administrator role. The accessor refusal mirrors require_admin's too -- this
-        # check decodes its own token rather than resolving through get_current_user, so
-        # the path allowlist that normally confines a POV accessor never ran.
-        if not user or user.accessor_env_id or not user.is_effective_admin:
-            raise HTTPException(status_code=403, detail="Admin access required")
-    finally:
-        db.close()
-    return username
+    from .auth import admin_username_from_request
+    return admin_username_from_request(request)
 
 
 def _upsert_admin(username: str, password: str) -> None:
@@ -736,10 +705,19 @@ async def _invalidate_data_caches() -> None:
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("/status")
-def setup_status():
+def setup_status(request: Request):
+    """``complete`` for anyone -- the wizard, the onboarding scripts and the login page
+    need it before anyone can sign in. ``configured_keys`` (a map of which integrations
+    this install has) only with an administrator's bearer; otherwise ``[]``."""
     from ..services import config_service
     complete = config_service.is_setup_complete()
-    configured = list(config_service.get_all_public().keys()) if complete else []
+    configured: list = []
+    if complete and request.headers.get("Authorization"):
+        try:
+            _require_admin(request)
+            configured = list(config_service.get_all_public().keys())
+        except HTTPException:
+            pass
     return {"complete": complete, "configured_keys": configured}
 
 
@@ -755,18 +733,21 @@ def get_config(request: Request):
 @router.post("/complete", status_code=201)
 def complete_setup(payload: SetupPayload, request: Request, background_tasks: BackgroundTasks):
     """
-    Initial wizard submission — no auth required.
+    Initial wizard submission. No login exists yet, so it needs the one-time setup token
+    instead (``X-Setup-Token``; services/setup_token).
     Returns 409 if setup has already been completed (use PUT /api/setup/config instead).
     """
-    from ..services import config_service
+    from ..services import config_service, setup_token
     if config_service.is_setup_complete():
         raise HTTPException(
             status_code=409,
             detail="Setup is already complete. Use PUT /api/setup/config to reconfigure.",
         )
+    setup_token.require(request)
     _upsert_admin(payload.admin.username, payload.admin.password)
     _apply_config(payload)
     config_service.mark_setup_complete()
+    setup_token.discard()
     background_tasks.add_task(_invalidate_data_caches)
     logger.info("Setup wizard completed by first-run submission.")
     return {"ok": True}
@@ -810,18 +791,20 @@ def import_config(payload: HeadlessImport, request: Request, background_tasks: B
     wizard models don't declare.
 
     - First run (setup NOT complete): admin_username/admin_password are required;
-      creates the admin, writes config, marks setup complete. No auth — same
-      trust model as POST /complete (a fresh stack stood up by the same operator).
+      creates the admin, writes config, marks setup complete. Needs the one-time setup
+      token (``X-Setup-Token``), like POST /complete.
     - Already complete: admin JWT required (Authorization: Bearer). Merges the
       config map only (admin + setup-complete flag untouched), so you can re-run
       to add another cloud.
     """
-    from ..services import config_service
+    from ..services import config_service, setup_token
 
     already = config_service.is_setup_complete()
     if already:
         _require_admin(request)
-    elif not payload.admin_username or not payload.admin_password:
+    else:
+        setup_token.require(request)
+    if not already and (not payload.admin_username or not payload.admin_password):
         raise HTTPException(
             status_code=400,
             detail="admin_username and admin_password are required for first-run import.",
@@ -886,6 +869,7 @@ def import_config(payload: HeadlessImport, request: Request, background_tasks: B
 
     if not already:
         config_service.mark_setup_complete()
+        setup_token.discard()
 
     # Flat, deduped list of region names merged across every cloud (keeps the
     # response shape a single-cloud import always had).
@@ -2231,6 +2215,7 @@ class NotificationsFeatureConfig(BaseModel):
     """
     enabled: bool = False
     notify_dry_run: bool = True
+    notifications_allow_private_targets: bool = False
     # Read from the policy rather than restated here. These two defaults must agree or
     # a fresh install silently drops events depending on which one wins, and restating
     # the list is how they came to disagree — adding `audit.chain_broken` to the policy

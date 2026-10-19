@@ -90,6 +90,7 @@ SECRET_KEYS: frozenset = frozenset(k for k, _ in SECRET_REGISTRY) | frozenset({
     # sign-in, POV and lab platforms
     "oidc_client_secret", "pov_accessor_rest_secret", "skytap_api_token",
     "first_run_admin_password",
+    "setup_token",
     # storage backends
     "storage_local_password", "storage_agent_password",
 })

@@ -401,7 +401,9 @@ Three ways to apply these to a running dashboard:
 (PowerShell `Onboard-Sandbox.ps1 -Cloud all`) provisions the cloud(s) **and** reads
 what each `setup-*.sh` produced, then POSTs it to the dashboard's setup API
 (`POST /api/setup/import`) — creating your admin and marking setup complete. You
-never open `/setup`; you just log in.
+never open `/setup`; you just log in. On a fresh dashboard it needs the one-time setup
+token (`--setup-token` / `-SetupToken`, or `SETUP_TOKEN` in your shell; it is
+`SETUP_TOKEN` in the dashboard's `.env`, else `/app/data/setup_token` in its container).
 
 **Setup wizard (Path A, first run, manual paste).** Open the dashboard, walk
 through `/setup`, and paste the matching values into Step 2 (AWS), Step 3 (Azure),

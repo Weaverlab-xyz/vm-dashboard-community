@@ -222,6 +222,11 @@ changed=0
 if [[ "$(read_env POSTGRES_PASSWORD)" == "REPLACE_ME_WITH_STRONG_PASSWORD" || -z "$(read_env POSTGRES_PASSWORD)" ]]; then
     set_env POSTGRES_PASSWORD "$(new_hex 16)"; ok "Generated POSTGRES_PASSWORD"; changed=1
 fi
+# The one-time token the setup wizard asks for (it stops whoever reaches a fresh
+# dashboard first from claiming it). Unused once setup is complete.
+if [[ -z "$(read_env SETUP_TOKEN)" ]]; then
+    set_env SETUP_TOKEN "$(new_hex 16)"; ok "Generated SETUP_TOKEN"; changed=1
+fi
 (( changed )) || ok "Bootstrap secrets already set"
 
 # ── 4b. Set the default job-worker count ────────────────────────────────
@@ -321,5 +326,6 @@ echo
 printf "%sNext steps:%s\n" "$C_STEP" "$C_RESET"
 echo "  - The browser setup wizard will open automatically on first launch."
 echo "    Complete it to create your admin account and enter cloud credentials."
+echo "    It asks for the setup token: $(read_env SETUP_TOKEN)  (SETUP_TOKEN in .env)"
 echo "  - See docs/onboarding/feature-test.md for the full feature-test checklist."
 echo "  - Stop the stack with:  $_compose_cmd -f $(basename "$COMPOSE_FILE") down"

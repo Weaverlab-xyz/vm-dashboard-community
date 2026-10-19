@@ -355,6 +355,10 @@ class Settings(BaseSettings):
     jwt_secret_key: str = ""
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 480  # 8 hours
+    # The longest a new Personal Access Token may live, in days; 0 = no cap (and "never
+    # expires" becomes allowed again). An app_config row of the same name overrides it.
+    # Tokens that already exist keep the expiry they were minted with.
+    pat_max_days: int = 365
     # The key that encrypts stored secrets (app_config values, connection and tenant
     # secrets, notification endpoints). Optional: unset, they stay under the key derived
     # from jwt_secret_key, as before. Set, it encrypts everything new, existing rows are
@@ -396,6 +400,12 @@ class Settings(BaseSettings):
     # (prod clusters with pre-existing users are unaffected either way).
     first_run_admin_username: str = "admin"
     first_run_admin_password: str = ""
+    # The one-time token first-run setup needs (services/setup_token). Empty: one is
+    # generated into setup_token_file, default <data dir>/setup_token. Set SETUP_TOKEN
+    # when something other than a person at the console runs setup, or when replicas do
+    # not share a data directory.
+    setup_token: str = ""
+    setup_token_file: str = ""
 
     # API Configuration
     api_host: str = "0.0.0.0"
@@ -1781,6 +1791,9 @@ class Settings(BaseSettings):
     #     than a channel.
     notifications_enabled: bool = False
     notify_dry_run: bool = True
+    # Webhook URLs resolving to RFC 1918 / CGNAT / ULA addresses are refused unless this
+    # is on (services/outbound_url). Loopback, link-local and metadata never are allowed.
+    notifications_allow_private_targets: bool = False
     notify_event_types: str = ("resource.expiring,resource.reaped,job.failed,"
                                "cost.budget_exceeded,secret.stale,config.drift,"
                                # A change that silently did not happen. Nothing else

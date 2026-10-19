@@ -49,7 +49,11 @@ EOF
 
 start() {  # start NAME PORT PROFILE FEATURES_JSON [ENV=VALUE...]
   local name="$1" port="$2" profile="$3" features="$4"; shift 4
+  # SETUP_TOKEN, not the generated file: every instance's database sits in $WORK, so
+  # they would all share one setup_token file there.
+  local setup_token="setup-$name-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   env "$@" JWT_SECRET_KEY="smoke-$name-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')" \
+      SETUP_TOKEN="$setup_token" \
       DATABASE_URL="sqlite:///$WORK/$name.db" \
       "$PY" -m uvicorn web_dashboard.main:app --port "$port" >"$WORK/$name.log" 2>&1 &
   PIDS+=($!)
@@ -58,6 +62,7 @@ start() {  # start NAME PORT PROFILE FEATURES_JSON [ENV=VALUE...]
     sleep 1
   done
   curl -sf -X POST "http://127.0.0.1:$port/api/setup/complete" -H 'content-type: application/json' \
+       -H "X-Setup-Token: $setup_token" \
        -d "{\"admin\":{\"username\":\"admin\",\"password\":\"$PASSWORD\"},\"profile\":{\"install_profile\":\"$profile\"},\"aws\":{},\"azure\":{},\"features\":$features}" \
        >/dev/null || { echo "setup failed on $name"; tail -30 "$WORK/$name.log"; exit 1; }
 }

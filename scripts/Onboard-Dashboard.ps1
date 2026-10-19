@@ -218,6 +218,15 @@ if ($envVars.FIRST_RUN_ADMIN_PASSWORD -eq "REPLACE_ME_WITH_ADMIN_PASSWORD" -or
     $changed = $true
 }
 
+# The one-time token the setup wizard asks for (it stops whoever reaches a fresh
+# dashboard first from claiming it). Unused once setup is complete.
+if (-not $envVars.SETUP_TOKEN) {
+    $envVars.SETUP_TOKEN = New-HexSecret -Bytes 16
+    Set-EnvValue -Path $envFile -Key "SETUP_TOKEN" -Value $envVars.SETUP_TOKEN
+    Write-Ok "Generated SETUP_TOKEN"
+    $changed = $true
+}
+
 if (-not $changed) { Write-Ok "All auto-generated secrets already set" }
 
 # ── 4b. Set the default job-worker count ───────────────────────────────
@@ -331,5 +340,6 @@ $adminUser = $envVars.FIRST_RUN_ADMIN_USERNAME
 if (-not $adminUser) { $adminUser = "admin" }
 Write-Host "  - Log in with username '$adminUser' — password is in .env as FIRST_RUN_ADMIN_PASSWORD"
 Write-Host "    (Change it via Settings after first login; the env var is ignored once users exist.)"
+Write-Host "  - The setup wizard asks for the setup token: $($envVars.SETUP_TOKEN)  (SETUP_TOKEN in .env)"
 Write-Host "  - See docs/onboarding/feature-test.md for the feature-test checklist"
 Write-Host "  - Stop the stack with:  docker compose -f $(Split-Path -Leaf $composeFile) down"

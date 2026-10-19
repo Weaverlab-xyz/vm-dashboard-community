@@ -25,6 +25,8 @@ from ..utils.clock import utcnow
 router = APIRouter(prefix="/api/tokens", tags=["tokens"])
 
 PAT_PREFIX = "vmcli_"
+# What an omitted ``expires_days`` means. It used to mean "never".
+DEFAULT_PAT_DAYS = 90
 
 
 def _generate_raw() -> str:
@@ -35,11 +37,42 @@ def hash_pat(raw: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def pat_max_days() -> int:
+    """The cap on a new PAT's lifetime in days, 0 for none (``pat_max_days``)."""
+    from ..config import settings
+    from ..services import config_service
+    raw = config_service.get("pat_max_days", "")
+    try:
+        return max(0, int(raw if str(raw).strip() != "" else settings.pat_max_days))
+    except (TypeError, ValueError):
+        return max(0, int(settings.pat_max_days))
+
+
+def pat_expiry(expires_days: Optional[int]) -> Optional[datetime]:
+    """When a PAT minted now should expire, or ``None`` for never; 422 past the cap.
+
+    ``None`` means the default (``DEFAULT_PAT_DAYS``, or the cap if that is shorter);
+    ``0`` means never, which only an install with no cap allows. One rule for the
+    self-service route here and the admin route in ``api/users``.
+    """
+    cap = pat_max_days()
+    days = min(DEFAULT_PAT_DAYS, cap or DEFAULT_PAT_DAYS) if expires_days is None else expires_days
+    if days < 0:
+        raise HTTPException(status_code=422, detail="expires_days cannot be negative.")
+    if cap and (days == 0 or days > cap):
+        raise HTTPException(
+            status_code=422,
+            detail=f"A Personal Access Token can live at most {cap} days on this install "
+                   f"(pat_max_days). Pass expires_days between 1 and {cap}.")
+    return None if days == 0 else utcnow() + timedelta(days=days)
+
+
 # ── Pydantic models ────────────────────────────────────────────────────────────
 
 class CreateTokenRequest(BaseModel):
     name: str
-    expires_days: Optional[int] = None  # None = never expires
+    # None = DEFAULT_PAT_DAYS; 0 = never, only where pat_max_days is 0. See pat_expiry.
+    expires_days: Optional[int] = None
 
 
 class TokenCreateResponse(BaseModel):
@@ -71,12 +104,8 @@ def create_token(
     Create a new PAT for the authenticated user.
     The raw token is returned **once** — it cannot be retrieved again.
     """
+    expires_at = pat_expiry(body.expires_days)
     raw = _generate_raw()
-    expires_at = (
-        utcnow() + timedelta(days=body.expires_days)
-        if body.expires_days
-        else None
-    )
     pat = PersonalAccessToken(
         user_id=current_user.id,
         name=body.name,

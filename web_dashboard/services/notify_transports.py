@@ -16,6 +16,7 @@ format appears it is one more function and one more dict entry.
 No DB access here, and no config reads beyond what ``notify_policy`` exposes, so the
 payload builders unit-test without a database or an event loop.
 """
+import asyncio
 import hashlib
 import hmac
 import json
@@ -25,7 +26,7 @@ import time
 
 import httpx
 
-from . import notify_policy
+from . import notify_policy, outbound_url
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +244,13 @@ async def post(url: str, fmt: str, payload: dict, *, secret: str = "",
     real acceptance. Never logs the URL or the secret — a Slack/Teams webhook URL is
     itself a bearer credential.
     """
+    # Re-checked at every send, not only when the URL was saved: a name can resolve
+    # somewhere else later, and rows saved before the check existed must not bypass it.
+    try:
+        await asyncio.to_thread(outbound_url.check_webhook_url, url,
+                                allow_private=notify_policy.allow_private_targets())
+    except outbound_url.OutboundURLRefused as exc:
+        raise NotifyError(str(exc)) from exc
     raw = serialize(payload)
     hdrs = headers_for(fmt, payload, raw, secret=secret,
                        event_type=event_type, delivery_id=delivery_id)

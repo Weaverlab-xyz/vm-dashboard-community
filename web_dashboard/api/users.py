@@ -15,7 +15,7 @@ from ..models.user import UserResponse
 from ..services import role_service
 from .auth import (PERMISSION_SCOPES, full_access_map, get_current_user, require_admin,
                    validate_permissions_payload)
-from .tokens import _generate_raw, hash_pat, TokenCreateResponse
+from .tokens import _generate_raw, hash_pat, pat_expiry, TokenCreateResponse
 from ..utils.clock import utcnow
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -489,7 +489,7 @@ def list_user_tokens(
 
 class AdminCreateTokenRequest(BaseModel):
     name: str
-    expires_days: Optional[int] = None
+    expires_days: Optional[int] = None  # same meaning as api/tokens; see pat_expiry
 
 
 @router.post("/{user_id}/tokens", response_model=TokenCreateResponse, status_code=201)
@@ -517,13 +517,8 @@ def create_user_token(
             status_code=400,
             detail="A service account cannot hold a Personal Access Token. Give it an "
                    "OAuth client (secret or SPIFFE JWT-SVID) under OAuth clients instead.")
-    from datetime import timedelta
+    expires_at = pat_expiry(body.expires_days)
     raw = _generate_raw()
-    expires_at = (
-        utcnow() + timedelta(days=body.expires_days)
-        if body.expires_days
-        else None
-    )
     pat = PersonalAccessToken(
         user_id=user_id,
         name=body.name,

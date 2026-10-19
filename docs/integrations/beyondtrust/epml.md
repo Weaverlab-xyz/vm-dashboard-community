@@ -186,14 +186,15 @@ is the matching playbook: it checks the agent is installed, refuses with an acti
 message if no token was bound, and skips `pbactivate` when the host is already
 activated.
 
-**Via the dashboard API:**
+**Via the dashboard API:** needs `epml:write`, and each call is recorded in the audit log
+(`epml_installation_token_issued`, with the lifetime).
 
 ```bash
 # Default expiry: 480 minutes (8 hours)
 curl -H "Authorization: Bearer $DASHBOARD_JWT" \
      http://localhost:8001/api/epml/token
 
-# Custom expiry (minutes, 30 – 525600)
+# Custom expiry (minutes, 30 – 1440; longer requests are capped at 1440)
 curl -H "Authorization: Bearer $DASHBOARD_JWT" \
      "http://localhost:8001/api/epml/token?expiry_minutes=1440"
 ```

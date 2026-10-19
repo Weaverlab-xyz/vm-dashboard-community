@@ -50,16 +50,22 @@ async def trigger_build(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=502, detail=str(e))
 
 
-@router.get("/token")
+# An installation token activates any host against the tenant, so minting one is a write,
+# and every mint is on the audit chain. Lifetime: see epml_service.TOKEN_MAX_MINUTES.
+@router.get("/token", dependencies=[Depends(require_permission("epml", "write"))])
 async def get_token(
     expiry_minutes: int = 480,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
+    expiry = epml_service.clamp_token_expiry(expiry_minutes)
     try:
-        token = await epml_service.get_installation_token(expiry_minutes)
-        return {"token": token}
+        token = await epml_service.get_installation_token(expiry)
     except EpmlError as e:
         raise HTTPException(status_code=502, detail=str(e))
+    job_service.log_audit(db, current_user.username, "epml_installation_token_issued",
+                          details={"expiry_minutes": expiry})
+    return {"token": token, "expiry_minutes": expiry}
 
 
 class SyncPackagesRequest(BaseModel):
