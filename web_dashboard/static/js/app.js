@@ -361,6 +361,9 @@ window.workstreamDefaultsState = function (formName, cloud) {
                 ssh: ((b.ssh_key_secret || {})[cloud]) || '',
                 pra: b.pra_credential_ref || '',
             };
+            // The page's SSH-key box previews the key a deploy will use, which is the
+            // bound one when there is one (the endpoint takes ?workgroup=).
+            if (typeof this.refreshKeyPreview === 'function') this.refreshKeyPreview();
             for (const [key, field] of Object.entries(FIELDS)) {
                 if (p[key] !== null && p[key] !== undefined && field in form) form[field] = p[key];
             }

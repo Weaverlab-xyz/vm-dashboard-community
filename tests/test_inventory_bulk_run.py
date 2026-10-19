@@ -205,11 +205,11 @@ def test_cluster_in_an_unsupported_cloud_is_refused():
     _expect_error(items, ["k8s:a"], "no Ansible runner for Kubernetes targets")
 
 
-def test_vm_on_a_non_key_cloud_still_runs_as_an_adhoc_ip_target():
-    """cloud only means something where an SSH key is stored; an OCI VM with an
-    address is still a perfectly good ad-hoc target."""
+def test_vm_on_a_key_cloud_carries_its_cloud():
+    """cloud drives SSH-key retrieval, so every cloud that stores a deploy keypair —
+    OCI included — keeps it; the runner then finds the VM's own key."""
     plan = inv.plan_bulk_run([_vm("job:9", "oci-01", cloud="oci", ip="10.1.1.1")], ["job:9"])
-    assert plan["targets"][0]["spec"] == {"target": "10.1.1.1", "cloud": ""}
+    assert plan["targets"][0]["spec"] == {"target": "10.1.1.1", "cloud": "oci"}
 
 
 # ── fan-out protection ────────────────────────────────────────────────────────

@@ -138,7 +138,7 @@ def test_the_cloud_selects_the_job_type():
 def test_an_unknown_cloud_matches_nothing():
     db = _db()
     _deploy(db, private_ip="10.99.2.4")
-    assert svc._find_cloud_deploy_meta(db, "oci", "10.99.2.4") == {}
+    assert svc._find_cloud_deploy_meta(db, "vmware", "10.99.2.4") == {}
     assert svc._find_cloud_deploy_meta(db, "", "10.99.2.4") == {}
     db.close()
 
@@ -161,6 +161,44 @@ def test_a_pending_deploy_is_not_a_source_of_truth():
     db.commit()
     assert svc._find_cloud_deploy_meta(db, "azure", "10.99.2.4") == {}
     db.close()
+
+
+def test_an_oci_deploy_is_a_source_of_truth_too():
+    db = _db()
+    _deploy(db, job_type="oci_deploy", public_ip="203.0.113.7")
+    assert svc._find_cloud_deploy_meta(db, "oci", "203.0.113.7")
+    db.close()
+
+
+# ── Which secret: the override wherever the deploy recorded it ────────────────
+
+def test_the_override_is_read_from_the_stored_request_too():
+    """A single Azure deploy and every GCP and OCI deploy keep the override only inside
+    the stored request. Reading the top level alone ran those VMs on the cloud default
+    key — which a workstream-bound key never matches."""
+    saved = svc._cfg
+    svc._cfg = lambda key: {"gcp_ssh_key_secret_name": "default-gcp",
+                            "oci_ssh_key_secret": "default-oci"}.get(key, "")
+    try:
+        nested = {"req": {"ssh_key_secret_override": "team-a/ssh"}}
+        assert svc._vm_build_key_secret("gcp", nested) == "team-a/ssh"
+        assert svc._vm_build_key_secret("oci", nested) == "team-a/ssh"
+        assert svc._vm_build_key_secret("aws", {"ssh_key_secret_override": "top",
+                                                "req": {"ssh_key_secret_override": "x"}}) == "top"
+        assert svc._vm_build_key_secret("gcp", {"req": {}}) == "default-gcp"
+        assert svc._vm_build_key_secret("oci", {}) == "default-oci"
+    finally:
+        svc._cfg = saved
+
+
+def test_oci_has_a_key_path_end_to_end():
+    import inspect
+    from web_dashboard.services import ansible_local_service, inventory_service
+    assert "oci" in svc._KEY_CLOUDS
+    assert 'if cloud == "oci":' in inspect.getsource(ansible_local_service.fetch_ssh_key)
+    spec = inventory_service._target_spec(
+        {"kind": "vm", "cloud": "oci", "ip": "10.1.1.1", "id": "job:9"})
+    assert spec == {"target": "10.1.1.1", "cloud": "oci"}, spec
 
 
 if __name__ == "__main__":

@@ -357,17 +357,22 @@ async def network_options(
 
 @router.get("/keyvault-ssh-key")
 async def get_keyvault_ssh_key(
+    workgroup: str = "",
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("azure", "read")),
 ):
     """Retrieve the SSH public key stored in Azure Key Vault.
 
     Prefers the unified `azure_ssh_keypair_secret_name` (JSON with
     public_key/private_key fields), falling back to legacy
-    `azure_ssh_key_secret_name`.
+    `azure_ssh_key_secret_name`. With ``workgroup``, the key bound to that workstream
+    (if any) wins — the form submits this key, and it must be the one the deploy uses.
     """
+    from .workgroups import bound_ssh_secret
     kv_url           = _cfg("azure_key_vault_url")
-    unified_secret   = _cfg("azure_ssh_keypair_secret_name")
-    legacy_secret    = _cfg("azure_ssh_key_secret_name")
+    bound            = bound_ssh_secret(db, current_user, "azure", workgroup)
+    unified_secret   = bound or _cfg("azure_ssh_keypair_secret_name")
+    legacy_secret    = "" if bound else _cfg("azure_ssh_key_secret_name")
     if not kv_url:
         raise HTTPException(
             status_code=503,

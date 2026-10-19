@@ -821,6 +821,23 @@ router.add_api_route("/power/stop", _power_endpoint("stop"), methods=["POST"],
 
 # ── Bulk Deploy (multi-select: one instance per selected image) ───────────────
 
+
+async def _validate_ssh_key_override(override: Optional[str]) -> None:
+    """A launch-time SSH key secret (typed, or filled from the workstream's binding) must
+    hold a public key, or the VM comes up unreachable. Checked here as the other clouds
+    check theirs — before this, a bad OCI secret surfaced only when the launch ran.
+    Raises HTTP 400."""
+    if not override:
+        return
+    try:
+        pub = await oci_service.get_ssh_public_key(override)
+    except Exception as e:  # noqa: BLE001 — any read failure is the operator's to fix
+        raise HTTPException(status_code=400,
+                            detail=f"SSH key secret '{override}' could not be read: {e}")
+    if not pub:
+        raise HTTPException(status_code=400,
+                            detail=f"SSH key secret '{override}' holds no public key.")
+
 @router.post("/bulk-deploy", response_model=OCIBulkDeployResponse)
 async def bulk_deploy_instances(
     req: OCIBulkDeployRequest,
@@ -851,6 +868,7 @@ async def bulk_deploy_instances(
     compartment = _compartment()
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
     enforce_secret_bindings("oci", req, workgroup, current_user)
+    await _validate_ssh_key_override(req.ssh_key_secret_override)
 
     names = [i.instance_name for i in req.items]
     for name in names:
@@ -1012,6 +1030,7 @@ async def deploy_instance(
     workgroup = _validate_workgroup(db, current_user, payload.workgroup)
     payload.workgroup = workgroup
     enforce_secret_bindings("oci", payload, workgroup, current_user)
+    await _validate_ssh_key_override(payload.ssh_key_secret_override)
 
     # ── Placement precheck (hard gate) ────────────────────────────────────────
     # Before the free-tier prompt on purpose, same as the build route: a shape that

@@ -699,6 +699,17 @@ How a deploy uses them:
 - **An administrator** may still name a different one for a single deploy.
 - **A workstream with nothing bound** behaves as before: the global default, or any
   override the deployer picks.
+- **The SSH key box** at the top of the AWS, Azure and GCP deploy forms shows the key the
+  deploy will use — the bound one, marked *bound to this workstream*, once you pick the
+  workstream.
+- **Config-Management runs** on the VM, post-deploy runs included, connect with the same
+  key, on all four clouds.
+- **An OCI override** is checked when the deploy is submitted, as on the other clouds: a
+  secret that can't be read or holds no public key is refused before anything launches.
+
+On AWS, Azure and GCP the editor offers each cloud's own secret list, the same one the
+deploy form's override offers. OCI has no listing, so its secret is typed (an OCID, or a
+name in the configured vault).
 
 Binding is administrator-only on purpose. A member who could bind a secret could point
 their team's deploys at any secret the dashboard's cloud identity can read. Every change is
@@ -736,8 +747,6 @@ Limits:
   reaches cloud VMs can't read it. Move it to a cloud backend from the Storage page.
 - An asset [scoped to another workstream](../operations/storage-management.md#scoping-an-asset-to-a-workstream)
   can't be added to the list; the editor only offers global assets and this workstream's own.
-- OCI VMs are run against as plain addresses, so they use the global Ansible SSH key, as
-  a Config-Management run on an OCI address does today.
 
 Changing the list is **administrator-only**, because each entry is code that runs on every
 VM the workstream's members deploy. Members can see the list. Every change is audited, and
