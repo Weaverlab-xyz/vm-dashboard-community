@@ -78,6 +78,9 @@ def _patch_run_path():
     """Stub everything /run touches before and after the permission gate, so the test
     exercises the real route rather than a re-implementation of it."""
     cm.ansible_local_service.get_configured_targets = lambda db: []
+    # These runs carry no db; the workstream asset scope is tested in
+    # test_storage_asset_scope.py.
+    cm._scope_check = lambda *a, **k: None
     cm.storage_service.active_backend = lambda: "s3"
     cm._cfg = lambda key: {"ansible_runner": "local"}.get(key, "")
     cm.job_service.create_job = lambda *a, **k: types.SimpleNamespace(id="job-1")

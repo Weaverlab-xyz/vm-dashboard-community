@@ -93,7 +93,10 @@ def filter_names(db: Session, user, names: Iterable[str],
 
 def check(db: Session, user, backend: Optional[str], name: str) -> None:
     """Raise :class:`AssetScopeDenied` unless ``user`` may use this asset."""
-    if not visible(user, scope_of(db, backend, name)):
+    accessible = _accessible(user)
+    if accessible is None:
+        return      # an administrator sees every asset; no lookup needed
+    if not _allowed(accessible, scope_of(db, backend, name)):
         raise AssetScopeDenied(f"Asset '{name}' not found.")
 
 
@@ -171,6 +174,9 @@ def check_replace(db: Session, user, backend: Optional[str], name: str) -> None:
     """Raise :class:`AssetScopeDenied` if an upload of ``name`` would overwrite an asset
     scoped to a workstream ``user`` is not in — the scope would stay, so that team's runs
     would execute the uploader's file."""
-    if not visible(user, scope_of(db, backend, name)):
+    accessible = _accessible(user)
+    if accessible is None:
+        return
+    if not _allowed(accessible, scope_of(db, backend, name)):
         raise AssetScopeDenied(
             f"An asset named '{name}' already exists and you cannot replace it.")

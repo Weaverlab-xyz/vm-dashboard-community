@@ -85,6 +85,8 @@ def _drive(payload, targets=None):
         "kind": "vm", "targets": targets if targets is not None else _targets("web-01")}
     # The trailing ansible_bulk_run audit is the one thing that would touch a real db.
     cm.job_service.log_audit = lambda *a, **k: None
+    # No db here either; the workstream asset scope is tested in test_storage_asset_scope.py.
+    cm._scope_check = lambda *a, **k: None
 
     captured = []
 
