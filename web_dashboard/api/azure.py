@@ -38,6 +38,7 @@ from ..models.azure import (
     AzureSSHKeyInfo,
     AzureVMInfo,
 )
+from ..models.vm_pra import VmPraRequest
 from ..models.schedule import SCHEDULE_FIELDS, ScheduleRequestMixin
 from ..services import (azure_service, azure_listing, change_window_service,
                         deploy_batch, job_service,
@@ -609,6 +610,7 @@ def _deploy_job_meta(db: Session) -> dict:
             # in its confirmation BEFORE queueing, which is the point of a warning that
             # does not block.
             "suspend_warning": _suspend_warning(j),
+            "pra_jump_id": j.metadata_dict.get("bt_shell_jump_id") or None,
         }
         for j in deploy_jobs if j.metadata_dict.get("vm_name")
     }
@@ -715,6 +717,7 @@ async def _fetch_vms(db: Session) -> list:
             "job_id": meta["id"] if meta else None,
             "deployed_by": _deployed_by(vm, meta, rancher),
             "suspend_warning": (meta or {}).get("suspend_warning"),
+            "pra_jump_id": (meta or {}).get("pra_jump_id"),
             # Overwrites the raw tag dict `**vm` spread in — the response model takes
             # the chip list, not the provider shape. See api/aws.py for the why.
             "tags": tag_policy.normalise(vm.get("tags"), "azure"),
@@ -1275,6 +1278,33 @@ class TagEditRequest(BaseModel):
     targets: List[TagTarget]
     add: dict = {}
     remove: List[str] = []
+
+
+@router.post("/instances/pra", status_code=202,
+             summary="Add, re-apply or remove a VM's PRA Shell Jump")
+def set_instance_pra(
+    payload: VmPraRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("azure", "write")),
+):
+    """Wire a VM this dashboard deployed into BeyondTrust PRA after the fact, or take it
+    out — the row action that makes PRA an opt-in rather than a deploy-form decision.
+    Queues a ``vm_pra`` job (see services/vm_pra_service); the jump's state is written
+    onto the deploy row, so Destroy removes it like a deploy-time one."""
+    from ..services import vm_pra_service
+    deploy_job = _find_deploy_job(db, "azure_deploy", "vm_name", payload.instance)
+    if not deploy_job:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No active deployment found for {payload.instance}.")
+    _assert_can_act(current_user, deploy_job.workgroup, f"VM '{payload.instance}'",
+                    "change its PRA access")
+    try:
+        job = vm_pra_service.queue(db, cloud="azure", deploy_job=deploy_job,
+                                   payload=payload, username=current_user.username)
+    except vm_pra_service.VmPraError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "job_id": job.id, "action": payload.action}
 
 
 @router.post("/instances/tags", summary="Add or remove tags across a selection")

@@ -295,6 +295,65 @@ window.secretPickerState = function () {
 //
 // `tabSlugs` is the list this VIEWER has; a page may narrow it in init() before calling
 // pickTab() (rbac drops the admin-only tabs for a non-admin).
+// ── Post-deploy PRA access on a cloud VM row ─────────────────────────────────
+//
+// Spread into a cloud page component (`...vmPraState('aws')`, after
+// `...secretPickerState()`) and render with the `vm_pra_modal` Jinja macro
+// (templates/partials/vm_pra_modal.html). `key` is whatever that cloud's
+// /instances/pra endpoint keys a row by — EC2 id, Azure VM name, GCE name, OCI OCID.
+window.vmPraState = function (cloud) {
+    return {
+        showVmPra: false,
+        vmPraBusy: false,
+        vmPraTarget: null,
+        vmPraForm: { jump_group: '', jumpoint_name: '', vmPraCredBackend: '', pra_credential_ref: '' },
+        vmPraOpts: { configured: true, jump_groups: [], gateways: [] },
+
+        async openVmPra(key, label, jumpId) {
+            this.vmPraTarget = { key, label: label || key, jumpId: jumpId || null };
+            this.vmPraForm = { jump_group: '', jumpoint_name: '', vmPraCredBackend: '', pra_credential_ref: '' };
+            this.vmPraOpts = { configured: true, jump_groups: [], gateways: [] };
+            this.showVmPra = true;
+            if (!this.secretBackends.length) this.loadSecretBackends();
+            try {
+                const r = await API.get('/api/pra/pickers');
+                this.vmPraOpts = {
+                    configured: !!r.configured,
+                    jump_groups: r.jump_groups || [],
+                    gateways: r.jumpoints || [],
+                };
+            } catch (e) {
+                toast(e.message || 'Could not load PRA options.', 'error');
+            }
+        },
+
+        async submitVmPra(action) {
+            const t = this.vmPraTarget;
+            if (!t) return;
+            if (action === 'remove'
+                && !confirm(`Remove "${t.label}" from PRA? This deletes its Shell Jump.`)) return;
+            this.vmPraBusy = true;
+            try {
+                const r = await API.post(`/api/${cloud}/instances/pra`, {
+                    instance: t.key,
+                    action,
+                    jump_group: this.vmPraForm.jump_group || null,
+                    jumpoint_name: this.vmPraForm.jumpoint_name || null,
+                    pra_credential_ref: this.vmPraForm.pra_credential_ref || null,
+                });
+                this.showVmPra = false;
+                toast(action === 'remove' ? 'PRA removal queued — opening the job…'
+                                          : 'PRA access queued — opening the job…', 'success');
+                if (r && r.job_id) window.location.href = '/jobs/' + r.job_id;
+            } catch (e) {
+                toast(e.message || 'PRA request failed.', 'error');
+            } finally {
+                this.vmPraBusy = false;
+            }
+        },
+    };
+};
+
 window.tabState = function (slugs) {
     return {
         tabSlugs: slugs,

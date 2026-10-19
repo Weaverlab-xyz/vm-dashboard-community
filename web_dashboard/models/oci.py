@@ -38,6 +38,9 @@ class OCIInstanceInfo(BaseModel):
     # on the page: the rule turns on WHICH address was wired, which the row's other
     # fields do not reveal. A warning, never a refusal.
     suspend_warning: Optional[str] = None
+    # The PRA Shell Jump on the deploy row, or None — decides whether the row offers
+    # "Add to PRA" or "Re-apply / Remove" (services/vm_pra_service).
+    pra_jump_id: Optional[str] = None
     # Tags as the page renders them, already classified and coloured by
     # services/tag_policy.normalise. The raw provider dict stays in the service
     # layer, where unmanaged-VM discovery and the workgroup lookup read it.
@@ -105,6 +108,9 @@ class OCIDeployRequest(ScheduleRequestMixin, BaseModel):
     register_in_passwordsafe: bool = False
     ssh_key_secret_override: Optional[str] = None   # OCI Vault secret (OCID/name) with a public_key
     # PRA per-launch overrides (fall back to oci_bt_* / bt_* config).
+    # PRA opt-in. None = the default (on, while PRA is enabled); False = no jump,
+    # added later from the VM's row if wanted (services/vm_pra_service).
+    enable_pra: Optional[bool] = None
     jump_group: Optional[str] = None
     jumpoint_name: Optional[str] = None
     count: int = Field(
@@ -157,6 +163,9 @@ class OCIBulkDeployRequest(ScheduleRequestMixin, BaseModel):
     register_in_entitle: bool = False
     register_in_passwordsafe: bool = False
     ssh_key_secret_override: Optional[str] = None
+    # PRA opt-in. None = the default (on, while PRA is enabled); False = no jump,
+    # added later from the VM's row if wanted (services/vm_pra_service).
+    enable_pra: Optional[bool] = None
     jump_group: Optional[str] = None
     jumpoint_name: Optional[str] = None
 

@@ -660,15 +660,19 @@ async def _run_deploy(
                     region=_aws_region, instance_id=instance_id, result=result)
 
         # ── Step 3: BeyondTrust PRA — Shell Jump (optional; SSH, so Linux only) ─
-        if _cfg_svc.get_bool("pra_enabled") and not is_windows:
+        from ..services import vm_pra_service
+        _want_pra = (_cfg_svc.get_bool("pra_enabled")
+                     and vm_pra_service.opted_in(_meta.get("enable_pra")))
+        if _want_pra and not is_windows:
             from ..services import terraform_pra_service
             try:
-                _client_secret = _cfg_svc.resolve_reference(pra_credential_ref.strip()) if pra_credential_ref else ""
+                _client_secret = vm_pra_service.client_secret_for(pra_credential_ref)
+                _group, _jumpoint = vm_pra_service.resolve_target("aws", jump_group, jumpoint_name)
                 bt_result = await terraform_pra_service.provision_jump(
                     vm_name=instance_name,
                     hostname=hostname,
-                    jump_group_name=(jump_group or "").strip() or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name,
-                    jumpoint_name=(jumpoint_name or "").strip() or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name,
+                    jump_group_name=_group,
+                    jumpoint_name=_jumpoint,
                     tag="AWS",
                     client_secret=_client_secret,
                 )
@@ -717,7 +721,7 @@ async def _run_deploy(
                 db, job_id, vm_name=instance_name, hostname=hostname,
                 username="Administrator", password=admin_password, result=result,
                 tag="AWS", register_in_passwordsafe=_psreg,
-                pra_enabled=_cfg_svc.get_bool("pra_enabled"),
+                pra_enabled=_want_pra,
                 jump_group=(jump_group or "").strip() or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name,
                 jumpoint_name=(jumpoint_name or "").strip() or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name,
                 client_secret=_cfg_svc.resolve_reference(pra_credential_ref.strip()) if pra_credential_ref else "",

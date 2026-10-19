@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/vm_pra_modal.html" import vm_pra_modal %}
 {% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
 {% from "partials/schedule_picker.html" import schedule_picker %}
 {% from "partials/secret_picker.html" import secret_picker %}
@@ -437,6 +438,13 @@
               <td class="px-4 py-3 text-gray-400 text-xs" x-text="timeAgo(inst.launch_time)"></td>
               <td class="px-4 py-3 text-right">
                 <div class="flex items-center justify-end gap-2">
+                  {% if pra_enabled %}
+                  <button @click="openVmPra(inst.instance_id, inst.name, inst.pra_jump_id)"
+                          x-show="inst.job_id && !(inst.platform === 'windows')" x-cloak
+                          class="text-xs text-teal-600 hover:underline"
+                          title="Add this VM to BeyondTrust PRA, re-apply its Shell Jump, or remove it"
+                          x-text="inst.pra_jump_id ? 'PRA ✓' : 'Add to PRA'"></button>
+                  {% endif %}
                   <button @click="openTagEditor([inst])"
                           class="text-xs text-blue-500 hover:underline"
                           title="Add or remove tags on this instance">Tags</button>
@@ -975,17 +983,6 @@
               <a href="/setup" class="underline font-medium">Open setup wizard → AWS Advanced</a> to set a secret name.
               Deployments to Linux instances will fail without an SSH public key.
             </div>
-            <div class="mt-2">
-              <label class="block text-xs font-medium text-gray-600 mb-1">Override secret (optional)</label>
-              <select x-model="deployForm.ssh_key_secret_override"
-                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                <option value="">Use configured default</option>
-                <template x-for="s in deployForm.sshKeySecrets" :key="s">
-                  <option :value="s" x-text="s"></option>
-                </template>
-              </select>
-              <p class="mt-1 text-xs text-gray-400">Any Secrets Manager secret. Must be JSON with a <code>public_key</code> — validated on launch.</p>
-            </div>
           </div>
 
           <!-- Subnet -->
@@ -1021,129 +1018,164 @@
                class="text-xs text-red-500 mt-1">Select at least one security group.</p>
           </div>
 
-          {% if entitle_enabled %}
-          <!-- Entitle registration opt-in -->
-          <div class="mb-4">
-            <label class="flex items-center gap-2 text-sm text-gray-700">
-              <input type="checkbox" x-model="deployForm.register_in_entitle"
-                     class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
-              Register in Entitle for just-in-time SSH access
+          {% if pra_enabled %}
+          <!-- PRA is an opt-in: on by default, untick to deploy without a jump. A Linux VM
+               can be added later from its row (services/vm_pra_service); Windows cannot. -->
+          <div class="space-y-3 mb-4">
+            <label class="flex items-start gap-2 text-sm text-gray-700">
+              <input type="checkbox" x-model="deployForm.enable_pra" class="mt-0.5 rounded text-blue-600">
+              <span>Add to BeyondTrust PRA <span class="text-gray-400 font-normal">(Shell Jump)</span>
+                <span class="block text-xs text-gray-400">Untick to deploy without a jump. A Linux VM can be
+                  added later from its row; a Windows server cannot.</span></span>
             </label>
-            <p class="mt-1 text-xs text-gray-400 ml-6">
-              Requires Entitle registration enabled; private instances also need a provisioned Entitle agent.
-            </p>
+            <details x-show="deployForm.enable_pra" x-cloak class="ml-6">
+              <summary class="cursor-pointer select-none text-xs text-gray-500">Jump group, Gateway and credential
+                <span class="text-gray-400">— the configured defaults unless changed</span></summary>
+              <div class="mt-2">
+              <!-- BeyondTrust PRA options (optional per-deploy overrides) -->
+              <div class="mb-4 space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+                <p class="text-xs font-semibold text-gray-600">BeyondTrust PRA options
+                  <span class="font-normal text-gray-400">— optional; fall back to the configured defaults.</span>
+                </p>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-xs font-medium text-gray-600 mb-1">Jump group</label>
+                    <select x-model="deployForm.jump_group" :disabled="!praPickers.jump_groups.length"
+                            class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                      <option value="">(configured default)</option>
+                      <template x-for="g in praPickers.jump_groups || []" :key="g.id">
+                        <option :value="g.name" x-text="g.name"></option>
+                      </template>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
+                    <select x-model="deployForm.jumpoint_name" :disabled="!praPickers.gateways.length"
+                            class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                      <option value="">(configured default)</option>
+                      <template x-for="j in praPickers.gateways || []" :key="j.id">
+                        <option :value="j.name" x-text="j.name"></option>
+                      </template>
+                    </select>
+                  </div>
+                </div>
+                <p x-show="praPickers.loaded && !praPickers.jump_groups.length && !praPickers.gateways.length" x-cloak
+                   class="text-xs text-gray-400">No PRA jump groups/Gateways returned — the shell jump falls back to the configured defaults.</p>
+                {{ secret_picker("deployForm", "praCredBackend", "pra_credential_ref",
+                                 "PRA credential", "Overrides bt_client_secret for this deploy's shell jump.") }}
+              </div>
+              </div>
+            </details>
           </div>
           {% endif %}
-          {% if password_safe_enabled %}
-          <!-- Password Safe registration opt-in -->
-          <div class="mb-4">
-            <label class="flex items-center gap-2 text-sm text-gray-700">
-              <input type="checkbox" x-model="deployForm.register_in_passwordsafe"
-                     class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
-              Onboard into Password Safe (managed system + account)
-            </label>
-            <p class="mt-1 text-xs text-gray-400 ml-6">
-              Requires Password Safe registration enabled. AWS uses the cloud-native AWS Systems Manager plugin by default (configurable in Settings → Integrations → BeyondTrust).
-              Windows AMIs onboard the Administrator as a password-managed account (needs a Windows functional account); Password Safe rotates it immediately and then owns it.
-            </p>
-          </div>
-          {% endif %}
-          {% if directories_enabled %}
-          <!-- Active Directory join (Windows AMIs only) -->
-          <div class="mb-4">
-            <label class="block text-sm font-medium text-gray-700 mb-1">Join Active Directory <span class="text-gray-400 font-normal">(Windows only)</span></label>
-            <select x-model="deployForm.ad_directory_id"
-                    @change="if (deployForm.ad_directory_id && deployForm.entra_join_mode === 'arc') deployForm.entra_join_mode = ''"
-                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-              <option value="">Don't join</option>
-              <template x-for="d in adDirs" :key="d.id">
-                <option :value="d.id" x-text="d.name + ' (' + d.provider_label + ')' + (d.entra_hybrid ? ' · Entra hybrid' : '')"></option>
-              </template>
-            </select>
-            <input x-show="deployForm.ad_directory_id" x-model="deployForm.ad_ou"
-                   class="mt-2 w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono"
-                   placeholder="OU (optional) — OU=Servers,DC=corp,DC=example,DC=com">
-            <p class="mt-1 text-xs text-gray-400">
-              Joined through Systems Manager after the password is captured; the instance
-              reboots. The SSM instance profile needs AmazonSSMDirectoryServiceAccess. Only
-              directories in this region are listed.
-            </p>
-          </div>
-          {% endif %}
-          {% if windows_ssh_enabled or directories_enabled %}
-          <!-- Entra ID: join through Azure Arc, or hybrid join through an on-prem AD -->
-          <div class="mb-4">
-            <label class="block text-sm font-medium text-gray-700 mb-1">Microsoft Entra ID <span class="text-gray-400 font-normal">(Windows only)</span></label>
-            <select x-model="deployForm.entra_join_mode"
-                    @change="if (deployForm.entra_join_mode === 'arc') deployForm.ad_directory_id = ''"
-                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-              <option value="">Don't join</option>
-              {% if windows_ssh_enabled %}
-              <option value="arc">Entra join through Azure Arc (Windows Server 2025+)</option>
-              {% endif %}
-              {% if directories_enabled %}
-              <option value="hybrid">Hybrid join, through the Active Directory picked above</option>
-              {% endif %}
-            </select>
-            <p class="mt-1 text-xs text-gray-400">
-              After the deploy, a follow-up job onboards the server to Azure Arc over OpenSSH and
-              installs AADLoginForWindows, so Entra users with Virtual Machine Administrator/User
-              Login can RDP in. Needs Windows Server 2025 or later with Desktop Experience and
-              outbound 443 to Azure. A server joins Entra ID or an AD domain, not both.
-    Hybrid join: the server joins the on-prem domain picked above, into its synced OU,
-    and Entra Connect brings it into Entra ID; a follow-up check watches for it.
-            </p>
-          </div>
-          {% endif %}
-          {% if windows_ssh_enabled %}
-          <!-- Windows: a Shell Jump over OpenSSH always; an RDP jump only on request -->
-          <div>
-            <label class="flex items-center gap-2 text-sm text-gray-700">
-              <input type="checkbox" x-model="deployForm.enable_rdp" class="rounded text-blue-600">
-              Also create an RDP jump for this VM <span class="text-gray-400 font-normal">(Windows only)</span>
-            </label>
-            <p class="mt-1 text-xs text-gray-400 ml-6">
-              Windows servers get a PRA Shell Jump over OpenSSH (port 22, PowerShell), switched
-              on at first boot. Tick this for a Remote RDP jump as well. If OpenSSH does not
-              come up, the server gets an RDP jump anyway and the job says why.
-            </p>
-          </div>
-          {% else %}
-          <p class="text-xs text-gray-400">Windows servers get a PRA Remote RDP jump (SSH for Windows is off in Settings).</p>
-          {% endif %}
-
-          <!-- BeyondTrust PRA options (optional per-deploy overrides) -->
-          <div class="mb-4 space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
-            <p class="text-xs font-semibold text-gray-600">BeyondTrust PRA options
-              <span class="font-normal text-gray-400">— optional; fall back to the configured defaults.</span>
-            </p>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label class="block text-xs font-medium text-gray-600 mb-1">Jump group</label>
-                <select x-model="deployForm.jump_group" :disabled="!praPickers.jump_groups.length"
-                        class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
-                  <option value="">(configured default)</option>
-                  <template x-for="g in praPickers.jump_groups || []" :key="g.id">
-                    <option :value="g.name" x-text="g.name"></option>
+          <details class="mb-4">
+            <summary class="cursor-pointer select-none text-sm font-medium text-gray-700">Advanced options
+              <span class="font-normal text-gray-400">— SSH key override, integrations, Windows identity</span></summary>
+            <div class="mt-3 space-y-4 border-l-2 border-gray-100 pl-3">
+              <div class="mt-2">
+                <label class="block text-xs font-medium text-gray-600 mb-1">SSH key secret override (optional)</label>
+                <select x-model="deployForm.ssh_key_secret_override"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <option value="">Use configured default</option>
+                  <template x-for="s in deployForm.sshKeySecrets" :key="s">
+                    <option :value="s" x-text="s"></option>
                   </template>
                 </select>
+                <p class="mt-1 text-xs text-gray-400">Any Secrets Manager secret. Must be JSON with a <code>public_key</code> — validated on launch.</p>
               </div>
-              <div>
-                <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
-                <select x-model="deployForm.jumpoint_name" :disabled="!praPickers.gateways.length"
-                        class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
-                  <option value="">(configured default)</option>
-                  <template x-for="j in praPickers.gateways || []" :key="j.id">
-                    <option :value="j.name" x-text="j.name"></option>
-                  </template>
-                </select>
-              </div>
+                    {% if entitle_enabled %}
+                    <!-- Entitle registration opt-in -->
+                    <div class="mb-4">
+                      <label class="flex items-center gap-2 text-sm text-gray-700">
+                        <input type="checkbox" x-model="deployForm.register_in_entitle"
+                               class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                        Register in Entitle for just-in-time SSH access
+                      </label>
+                      <p class="mt-1 text-xs text-gray-400 ml-6">
+                        Requires Entitle registration enabled; private instances also need a provisioned Entitle agent.
+                      </p>
+                    </div>
+                    {% endif %}
+                    {% if password_safe_enabled %}
+                    <!-- Password Safe registration opt-in -->
+                    <div class="mb-4">
+                      <label class="flex items-center gap-2 text-sm text-gray-700">
+                        <input type="checkbox" x-model="deployForm.register_in_passwordsafe"
+                               class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                        Onboard into Password Safe (managed system + account)
+                      </label>
+                      <p class="mt-1 text-xs text-gray-400 ml-6">
+                        Requires Password Safe registration enabled. AWS uses the cloud-native AWS Systems Manager plugin by default (configurable in Settings → Integrations → BeyondTrust).
+                        Windows AMIs onboard the Administrator as a password-managed account (needs a Windows functional account); Password Safe rotates it immediately and then owns it.
+                      </p>
+                    </div>
+                    {% endif %}
+                    {% if directories_enabled %}
+                    <!-- Active Directory join (Windows AMIs only) -->
+                    <div class="mb-4">
+                      <label class="block text-sm font-medium text-gray-700 mb-1">Join Active Directory <span class="text-gray-400 font-normal">(Windows only)</span></label>
+                      <select x-model="deployForm.ad_directory_id"
+                              @change="if (deployForm.ad_directory_id && deployForm.entra_join_mode === 'arc') deployForm.entra_join_mode = ''"
+                              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                        <option value="">Don't join</option>
+                        <template x-for="d in adDirs" :key="d.id">
+                          <option :value="d.id" x-text="d.name + ' (' + d.provider_label + ')' + (d.entra_hybrid ? ' · Entra hybrid' : '')"></option>
+                        </template>
+                      </select>
+                      <input x-show="deployForm.ad_directory_id" x-model="deployForm.ad_ou"
+                             class="mt-2 w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono"
+                             placeholder="OU (optional) — OU=Servers,DC=corp,DC=example,DC=com">
+                      <p class="mt-1 text-xs text-gray-400">
+                        Joined through Systems Manager after the password is captured; the instance
+                        reboots. The SSM instance profile needs AmazonSSMDirectoryServiceAccess. Only
+                        directories in this region are listed.
+                      </p>
+                    </div>
+                    {% endif %}
+                    {% if windows_ssh_enabled or directories_enabled %}
+                    <!-- Entra ID: join through Azure Arc, or hybrid join through an on-prem AD -->
+                    <div class="mb-4">
+                      <label class="block text-sm font-medium text-gray-700 mb-1">Microsoft Entra ID <span class="text-gray-400 font-normal">(Windows only)</span></label>
+                      <select x-model="deployForm.entra_join_mode"
+                              @change="if (deployForm.entra_join_mode === 'arc') deployForm.ad_directory_id = ''"
+                              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                        <option value="">Don't join</option>
+                        {% if windows_ssh_enabled %}
+                        <option value="arc">Entra join through Azure Arc (Windows Server 2025+)</option>
+                        {% endif %}
+                        {% if directories_enabled %}
+                        <option value="hybrid">Hybrid join, through the Active Directory picked above</option>
+                        {% endif %}
+                      </select>
+                      <p class="mt-1 text-xs text-gray-400">
+                        After the deploy, a follow-up job onboards the server to Azure Arc over OpenSSH and
+                        installs AADLoginForWindows, so Entra users with Virtual Machine Administrator/User
+                        Login can RDP in. Needs Windows Server 2025 or later with Desktop Experience and
+                        outbound 443 to Azure. A server joins Entra ID or an AD domain, not both.
+              Hybrid join: the server joins the on-prem domain picked above, into its synced OU,
+              and Entra Connect brings it into Entra ID; a follow-up check watches for it.
+                      </p>
+                    </div>
+                    {% endif %}
+                    {% if windows_ssh_enabled %}
+                    <!-- Windows: a Shell Jump over OpenSSH always; an RDP jump only on request -->
+                    <div>
+                      <label class="flex items-center gap-2 text-sm text-gray-700">
+                        <input type="checkbox" x-model="deployForm.enable_rdp" class="rounded text-blue-600">
+                        Also create an RDP jump for this VM <span class="text-gray-400 font-normal">(Windows only)</span>
+                      </label>
+                      <p class="mt-1 text-xs text-gray-400 ml-6">
+                        Windows servers get a PRA Shell Jump over OpenSSH (port 22, PowerShell), switched
+                        on at first boot. Tick this for a Remote RDP jump as well. If OpenSSH does not
+                        come up, the server gets an RDP jump anyway and the job says why.
+                      </p>
+                    </div>
+                    {% else %}
+                    <p class="text-xs text-gray-400">Windows servers get a PRA Remote RDP jump (SSH for Windows is off in Settings).</p>
+                    {% endif %}
             </div>
-            <p x-show="praPickers.loaded && !praPickers.jump_groups.length && !praPickers.gateways.length" x-cloak
-               class="text-xs text-gray-400">No PRA jump groups/Gateways returned — the shell jump falls back to the configured defaults.</p>
-            {{ secret_picker("deployForm", "praCredBackend", "pra_credential_ref",
-                             "PRA credential", "Overrides bt_client_secret for this deploy's shell jump.") }}
-          </div>
+          </details>
+
 
           <div class="mb-4">{{ schedule_picker() }}</div>
 
@@ -2143,6 +2175,8 @@
 
   {{ tag_editor("tag") }}
 
+  {{ vm_pra_modal() }}
+
 </div>
 {% endblock %}
 
@@ -2213,6 +2247,7 @@
       selectAll: false,
       ...bulkPowerState(),
       ...tagEditState(),
+      ...vmPraState('aws'),
       tagEditUrl: '/api/aws/instances/tags',
       bulkPowerUrl: '/api/aws/power/bulk',
       // The default `stop` sentence describes a power cut with unsaved work lost. An
@@ -2248,7 +2283,7 @@
         subnet_id: '',
         security_group_ids: [],
         workgroup: '',
-        jump_group: '', jumpoint_name: '',
+        enable_pra: true, jump_group: '', jumpoint_name: '',
         praCredBackend: '', pra_credential_ref: '',
         register_in_entitle: false,
         register_in_passwordsafe: false,
@@ -2332,7 +2367,7 @@
         ami_id: '', instance_name: '', instance_type: 't3.medium',
         region: '', subnet_id: '', security_group_ids: [], workgroup: '',
         protocols: ['modbus'], plc_port: null, hmi_port: 1881,
-        jump_group: '', jumpoint_name: '',
+        enable_pra: true, jump_group: '', jumpoint_name: '',
         runtime: 'k3s',
         register_in_passwordsafe: true, register_in_entitle: false,
         // The plant's DMZ broker, deployed alongside the cell when Entitle is ticked.
@@ -2342,7 +2377,7 @@
       },
       otTunnelForm: {
         name: '', hostname: '', protocol: 'modbus', remote_port: null,
-        jump_group: '', jumpoint_name: '',
+        enable_pra: true, jump_group: '', jumpoint_name: '',
         submitting: false, error: '', message: '',
       },
 
@@ -2897,7 +2932,7 @@
           security_group_ids: [],
           workgroup: this.availableWorkgroups.includes('default') ? 'default' :
                      (this.availableWorkgroups[0] || ''),
-          jump_group: '', jumpoint_name: '',
+          enable_pra: true, jump_group: '', jumpoint_name: '',
           // The secret_picker macro binds to both of these; without them here the
           // wholesale reset drops the keys and the picker starts on undefined.
           praCredBackend: '', pra_credential_ref: '',
@@ -3024,6 +3059,7 @@
             subnet_id: this.deployForm.subnet_id,
             security_group_ids: this.deployForm.security_group_ids,
             workgroup: this.deployForm.workgroup,
+            enable_pra: this.deployForm.enable_pra !== false,
             jump_group: this.deployForm.jump_group || null,
             jumpoint_name: this.deployForm.jumpoint_name || null,
             pra_credential_ref: this.deployForm.pra_credential_ref || null,

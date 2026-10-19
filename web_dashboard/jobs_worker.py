@@ -83,6 +83,7 @@ HANDLED_TYPES = (
     "aws_export_image", "gcp_export_image", "azure_export_image", "oci_export_image",
     "image_promote_aws", "image_promote_azure", "image_promote_gcp", "image_promote_oci",
     "ec2_deploy", "ec2_bulk_deploy", "ec2_destroy", "ec2_create_image", "ami_copy",
+    "vm_pra",
     "ec2_power", "azure_power", "gce_power", "oci_power", "suspend_sweep",
     "spend_sweep",
     "oci_deploy", "oci_bulk_deploy", "oci_destroy",
@@ -177,6 +178,8 @@ MEDIUM_TYPES = (
     "azure_deploy", "azure_bulk_deploy", "azure_destroy",
     "gce_deploy", "gce_bulk_deploy", "gce_destroy",
     "oci_deploy", "oci_bulk_deploy", "oci_destroy",
+    # The same short PRA Shell Jump terraform, on its own, against a VM that exists.
+    "vm_pra",
     # Drives one queued gce_deploy child (cloud SDK + the same short PRA terraforms
     # a gce_deploy runs), then two more short terraforms for the Web Jump + tunnel.
     "ot_cell_deploy",
@@ -486,6 +489,9 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
                 pra_credential_ref=meta.get("pra_credential_ref"),
                 vault_inject=meta.get("vault_inject", False),
                 vault_account_group_id=meta.get("vault_account_group_id"))
+        elif job_type == "vm_pra":
+            from .services import vm_pra_service
+            await vm_pra_service.run(db, job_id, meta)
         elif job_type == "k8s_api_tunnel":
             await k8s_service.run_api_tunnel(
                 db, cluster_id=meta["cluster_id"], job_id=job_id,

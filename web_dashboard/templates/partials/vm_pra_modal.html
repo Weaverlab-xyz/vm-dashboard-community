@@ -1,0 +1,71 @@
+{#
+  "PRA access" modal for a cloud VM row — add, re-apply or remove the VM's Shell Jump
+  after deploy (services/vm_pra_service). The Kubernetes "PRA tunnel" modal's shape,
+  so PRA is something an operator opts a VM into rather than a deploy-form decision.
+
+  Requires the page's Alpine component to spread window.secretPickerState() and
+  window.vmPraState('<cloud>'), and to open it with openVmPra(key, label, jumpId).
+
+  Usage:
+    {% from "partials/vm_pra_modal.html" import vm_pra_modal %}
+    {{ vm_pra_modal() }}
+#}
+{% from "partials/secret_picker.html" import secret_picker %}
+{% macro vm_pra_modal() %}
+<div x-show="showVmPra" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+     @click.self="showVmPra = false">
+  <div class="bg-white rounded-xl shadow-xl w-full max-w-lg">
+    <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+      <h3 class="font-semibold text-gray-800">PRA access<span x-show="vmPraTarget" class="text-gray-400 font-normal"> — <span x-text="vmPraTarget && vmPraTarget.label"></span></span></h3>
+      <button @click="showVmPra = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+    </div>
+    <div class="px-6 py-4 space-y-4">
+      <p class="text-xs text-gray-500">
+        Creates a BeyondTrust PRA Shell Jump to this VM, so you reach it over SSH through the
+        representative console. Blank fields use the configured defaults. Destroying the VM
+        removes the jump.
+      </p>
+      <p x-show="vmPraTarget && vmPraTarget.jumpId" x-cloak class="text-xs text-teal-800 bg-teal-50 border border-teal-200 rounded-lg px-3 py-2">
+        This VM has Shell Jump <span class="font-mono" x-text="vmPraTarget && vmPraTarget.jumpId"></span>.
+        Re-apply replaces it with one built from the options below.
+      </p>
+      <p x-show="!vmPraOpts.configured" x-cloak class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+        PRA is not configured (bt_api_host / bt_client_id / bt_client_secret). Set it on Settings — the dropdowns stay empty and the job will fail until then.
+      </p>
+      <div>
+        <label class="block text-xs font-medium text-gray-600 mb-1">Jump group</label>
+        <select x-model="vmPraForm.jump_group" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+          <option value="">(configured default)</option>
+          <template x-for="g in vmPraOpts.jump_groups" :key="g.id">
+            <option :value="g.name" x-text="g.name"></option>
+          </template>
+        </select>
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
+        <select x-model="vmPraForm.jumpoint_name" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+          <option value="">(configured default)</option>
+          <template x-for="j in vmPraOpts.gateways" :key="j.id">
+            <option :value="j.name" x-text="j.name"></option>
+          </template>
+        </select>
+      </div>
+      {{ secret_picker("vmPraForm", "vmPraCredBackend", "pra_credential_ref",
+                       "PRA credential",
+                       "Resolved to a bt_client_secret override for this jump's provisioning.") }}
+    </div>
+    <div class="px-6 py-4 border-t border-gray-100 flex items-center gap-3">
+      <button x-show="vmPraTarget && vmPraTarget.jumpId" x-cloak @click="submitVmPra('remove')" :disabled="vmPraBusy"
+              class="px-4 py-2 text-sm border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-50 rounded-lg">Remove from PRA</button>
+      <div class="flex justify-end gap-3 ml-auto">
+        <button @click="showVmPra = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+        <button @click="submitVmPra('register')" :disabled="vmPraBusy"
+                class="px-4 py-2 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
+          <span x-show="!vmPraBusy" x-text="vmPraTarget && vmPraTarget.jumpId ? 'Re-apply' : 'Add to PRA'"></span>
+          <span x-show="vmPraBusy" x-cloak>Working…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endmacro %}

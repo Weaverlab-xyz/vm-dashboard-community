@@ -184,13 +184,12 @@ async def _run_deploy(job_id: str, payload: OCIDeployRequest, compartment: str,
             "region":         _region(),
         }
 
-        # ── BeyondTrust PRA — Shell Jump (optional) ───────────────────────────
-        if _cfg_svc.get_bool("pra_enabled"):
-            from ..services import terraform_pra_service
-            jump_group = (payload.jump_group or _cfg_svc.get("oci_bt_jump_group_name")
-                          or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name)
-            jumpoint_name = (payload.jumpoint_name or _cfg_svc.get("oci_jumpoint_name")
-                             or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name)
+        # ── BeyondTrust PRA — Shell Jump (optional; opt-out per deploy) ───────
+        from ..services import vm_pra_service as _vps
+        if _cfg_svc.get_bool("pra_enabled") and _vps.opted_in(payload.enable_pra):
+            from ..services import terraform_pra_service, vm_pra_service
+            jump_group, jumpoint_name = vm_pra_service.resolve_target(
+                "oci", payload.jump_group, payload.jumpoint_name)
             job_service.update_progress(db, job_id, 90, f"Instance launched ({hostname}), provisioning Shell Jump…")
             try:
                 bt_result = await terraform_pra_service.provision_jump(
