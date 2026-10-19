@@ -425,6 +425,11 @@ class Settings(BaseSettings):
     # ProxyHeadersMiddleware rewrote the scheme from X-Forwarded-Proto, so a proxy
     # that isn't in trusted_proxy_hosts below would silently produce http:// callbacks
     # that the identity provider rejects. See services/public_url.py.
+    #
+    # It is ALSO the remote-agent signing audience. On a split-host install (the agent
+    # API on its own hostname behind a gateway) set it to the agent host and set
+    # ui_base_url (beside oidc_* below) to the browser host, or the OAuth callbacks
+    # follow it to a hostname that 404s everything but /api/agent/*.
     public_base_url: str = ""
     # Remote agents may attest through SPIRE instead of an enrolment code (opt-in;
     # docs/design/agent-and-human-identity.md). Ed25519 enrolment is unaffected.
@@ -1407,7 +1412,13 @@ class Settings(BaseSettings):
     # Workspace, JumpCloud, Ping, GitLab — and Entra, if you prefer it over the
     # azure_oauth_* path above. Additive: leaving these blank changes nothing.
     # Redirect URI to register with the provider:
-    #   <dashboard-base-url>/api/auth/oauth/oidc/callback
+    #   <ui-base-url>/api/auth/oauth/oidc/callback   (Entra: .../oauth/azure/callback)
+    #
+    # The origin a BROWSER reaches the UI at, used for both SSO callbacks. Blank =
+    # webauthn_origin when it is not loopback, else public_base_url, else the request.
+    # Only needs setting when public_base_url is the agent host (a split-host install)
+    # and webauthn_origin is not set. Never used for the agent audience.
+    ui_base_url: str = ""
     oidc_issuer: str = ""            # e.g. https://keycloak.example.com/realms/main
     oidc_client_id: str = ""
     oidc_client_secret: str = ""     # omit for a public client (PKCE is always sent)

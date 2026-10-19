@@ -89,9 +89,26 @@ URI** to:
 ```
 
 For example, `https://dashboard.example.com/api/auth/oauth/oidc/callback`. The
-OIDC settings panel prints the exact value derived from the dashboard's current
-origin — copy it from there to avoid typos. The URI must match **exactly**,
-including scheme, host and port.
+OIDC settings panel prints the exact value the server will send — copy it from
+there to avoid typos. The URI must match **exactly**, including scheme, host and
+port.
+
+`<dashboard-base-url>` is the origin a **browser** reaches the UI at. The server
+takes it from, in order:
+
+1. **UI base URL** (`UI_BASE_URL`, or the field on the OIDC panel);
+2. `WEBAUTHN_ORIGIN`, unless it is a localhost/loopback origin (the shipped default);
+3. `PUBLIC_BASE_URL`;
+4. the incoming request.
+
+On a single-host install nothing needs setting. On a **split-host** install —
+agents on their own hostname behind the gateway sidecar, with `PUBLIC_BASE_URL`
+set to that agent hostname because enrolment codes embed it — step 3 would send
+the IdP back to the agent hostname, which 404s every path but `/api/agent/*`.
+Setting `WEBAUTHN_ORIGIN` to the UI host (which a split-host install already
+needs for security keys) is enough; set `UI_BASE_URL` when it is not. Neither
+changes what agents sign against. The same origin is used for the Entra
+(`/api/auth/oauth/azure/callback`) callback.
 
 A **public client** (no secret) is fine — PKCE protects the code exchange. Leave
 the client secret blank in that case.
@@ -243,6 +260,11 @@ allowed scopes at the IdP (the dashboard always requests it).
 **Redirect fails at the provider (redirect_uri mismatch)** — the registered
 callback must match `<dashboard-base-url>/api/auth/oauth/oidc/callback` exactly,
 including scheme, host and port. Copy the value shown in the Settings panel.
+
+**The IdP redirects back to a 404 on the agent hostname** — `PUBLIC_BASE_URL` is
+the agent host and neither `UI_BASE_URL` nor a non-localhost `WEBAUTHN_ORIGIN` is
+set, so the callback was built from the agent host. Set **UI base URL** on the
+OIDC panel to the host users sign in on (see Step 1).
 
 **`error=not_authorized` after login** — the user isn't in any mapped group, or the
 IdP isn't actually emitting the groups claim. Check **RBAC → Groups** (`/rbac#groups`), confirm the app

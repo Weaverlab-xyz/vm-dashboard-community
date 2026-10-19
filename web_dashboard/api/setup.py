@@ -2019,6 +2019,9 @@ class OidcFeatureConfig(BaseModel):
     ``oidc_service.is_configured()`` checks, so a second source of truth would
     only be able to disagree with it."""
     enabled: bool = False
+    # The browser-facing origin both SSO callbacks are built from — services/public_url
+    # ui_configured(). Distinct from public_base_url, which is the agent audience.
+    ui_base_url: str = ""
     oidc_issuer: str = ""
     oidc_client_id: str = ""
     oidc_client_secret: str = ""

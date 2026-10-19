@@ -165,7 +165,8 @@ optional `UI_ALLOWED_CIDR` to restrict the UI to your own egress addresses.
 | `DATABASE_URL` | **secret.** `postgresql://user:pass@host:5432/db` |
 | `JWT_SECRET_KEY` | **secret, required.** 64 hex chars; generate once, never rotate casually |
 | `CONFIG_ENCRYPTION_KEY` | **secret, optional.** Encrypts stored secrets instead of a key derived from `JWT_SECRET_KEY`. Same value on app and worker |
-| `PUBLIC_BASE_URL` | `https://dash.example.com` — the origin users reach |
+| `PUBLIC_BASE_URL` | `https://dash.example.com` — the origin users reach; the **agent** host once agents use their own hostname |
+| `UI_BASE_URL` | optional. The browser origin the SSO callbacks use; blank = `WEBAUTHN_ORIGIN`, then `PUBLIC_BASE_URL`. Needed only on a split-host install whose `WEBAUTHN_ORIGIN` is unset |
 | `WEBAUTHN_RP_ID` | `dash.example.com` — bare domain, no scheme, no port |
 | `WEBAUTHN_ORIGIN` | `https://dash.example.com` — must match exactly |
 | `APP_ENV` | `production`. Cosmetic — it only colours the nav bar |

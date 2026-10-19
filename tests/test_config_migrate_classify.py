@@ -56,7 +56,7 @@ def test_unknown_keys_fail_open():
 
 
 def test_instance_identity_is_denied():
-    for key in ("setup_complete", "public_base_url", "trusted_proxy_hosts",
+    for key in ("setup_complete", "public_base_url", "ui_base_url", "trusted_proxy_hosts",
                 "agent_base_url", "webauthn_rp_id", "database_url", "jwt_secret_key"):
         assert classify.exclusion_reason(key, "v") == classify.INSTANCE_LOCAL, key
 
