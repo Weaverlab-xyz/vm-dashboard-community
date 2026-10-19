@@ -232,6 +232,52 @@ def delete_workgroup(
         _raise_from(exc)
 
 
+class WorkgroupProfile(BaseModel):
+    """A workstream's deploy defaults. Every field optional: on a PUT, a field left out is
+    unchanged and a field sent as null goes back to the global default."""
+    pra_enabled: Optional[bool] = None
+    jump_group: Optional[str] = Field(None, max_length=255)
+    jumpoint_name: Optional[str] = Field(None, max_length=255)
+    register_in_entitle: Optional[bool] = None
+    register_in_passwordsafe: Optional[bool] = None
+    enable_rdp: Optional[bool] = None
+    entra_join_mode: Optional[str] = Field(None, max_length=16)
+
+
+@router.get("/{name}/profile", response_model=WorkgroupProfile)
+def get_workgroup_profile(
+    name: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The workstream's deploy defaults — what the deploy forms pre-fill when it is
+    picked. Readable by anyone who may deploy into it (its members), its creator and an
+    administrator; a field it does not set is null, meaning the global default."""
+    wg = _require_steward(db, current_user, name)
+    return WorkgroupProfile(**workgroup_service.profile(wg.name, db))
+
+
+@router.put("/{name}/profile", response_model=WorkgroupProfile)
+def put_workgroup_profile(
+    name: str,
+    payload: WorkgroupProfile,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("workgroups", "write")),
+):
+    """Set the workstream's deploy defaults. Only the fields sent change; null clears one.
+    The keys are a fixed list (workgroup_service.PROFILE_KEYS) and hold no secrets, which
+    is why the same people who may edit the workstream may set them."""
+    wg = _require_steward(db, current_user, name)
+    values = payload.model_dump(exclude_unset=True)
+    try:
+        out = workgroup_service.set_profile(db, wg.name, values)
+    except WorkgroupError as exc:
+        _raise_from(exc)
+    _audit(db, current_user, "workstream_profile_update", workstream=wg.name,
+           fields=sorted(values))
+    return WorkgroupProfile(**out)
+
+
 @router.get("/{name}/members", response_model=List[str])
 def list_members(
     name: str,

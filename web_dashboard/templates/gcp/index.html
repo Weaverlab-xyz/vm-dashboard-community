@@ -468,7 +468,7 @@
         <!-- Workgroup -->
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">Workstream <span class="text-red-500">*</span></label>
-          <select x-model="deployForm.workgroup" required
+          <select x-model="deployForm.workgroup" @change="applyWorkstreamDefaults()" required
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
             <option value="">Select workstream…</option>
             <template x-for="w in availableWorkgroups" :key="w">
@@ -1871,6 +1871,7 @@ function gcpDashboard() {
     selectAll: false,
     ...bulkPowerState(),
     ...tagEditState(),
+    ...workstreamDefaultsState('deployForm'),
     ...vmPraState('gcp'),
     tagEditUrl: '/api/gcp/instances/tags',
     bulkPowerUrl: '/api/gcp/power/bulk',
@@ -2540,6 +2541,7 @@ function gcpDashboard() {
       this.sshKeyLoading = true;
       this.deployModal   = true;
       this.loadPraPickers();
+      this.applyWorkstreamDefaults();
       // The form above reset zone to the configured default, so re-scope the pickers to
       // its region too — otherwise a previous deploy in another zone leaves the
       // Subnetwork list pointing at that region and the pair mismatches (the mirror of

@@ -325,6 +325,106 @@ def validate_user_workgroups(db: Session, names: List[str]) -> None:
         raise WorkgroupError(f"Unknown workstream(s): {', '.join(unknown)}")
 
 
+# ── Deploy defaults (the workstream profile) ──────────────────────────────────
+#
+# What a workstream's VMs get unless the deploy form says otherwise: whether they go into
+# PRA and where, and the integration and Windows identity choices the form pre-fills.
+# Held on the workstream's own row (``workgroups.deploy_defaults``, JSON), so they go
+# when it does. Not app_config: its key is the primary key, so one key can hold one
+# value for the whole install, never one per workstream.
+#
+# An ALLOWLIST, not a pass-through: anyone in a workstream may edit it (api/workgroups.py
+# _require_steward), so nothing here may stand in for a global setting or a secret.
+# Binding a secret to a workstream needs an administrator and is not done here.
+
+PROFILE_KEYS = {
+    # key: (type, allowed values or None)
+    "pra_enabled": ("bool", None),
+    "jump_group": ("str", None),
+    "jumpoint_name": ("str", None),
+    "register_in_entitle": ("bool", None),
+    "register_in_passwordsafe": ("bool", None),
+    "enable_rdp": ("bool", None),
+    "entra_join_mode": ("str", ("", "arc", "hybrid")),
+}
+
+
+def _read_defaults(wg: Optional[Workgroup]) -> dict:
+    if wg is None or not wg.deploy_defaults:
+        return {}
+    try:
+        raw = json.loads(wg.deploy_defaults)
+    except (ValueError, TypeError):
+        return {}
+    # Only known keys of the right type survive a read, so a row edited by hand cannot
+    # smuggle a value past the checks set_profile makes.
+    out = {}
+    for key, (kind, allowed) in PROFILE_KEYS.items():
+        if key not in raw:
+            continue
+        v = raw[key]
+        if kind == "bool" and isinstance(v, bool):
+            out[key] = v
+        elif kind == "str" and isinstance(v, str) and (allowed is None or v in allowed):
+            out[key] = v
+    return out
+
+
+def profile(name: Optional[str], db: Optional[Session] = None) -> dict:
+    """A workstream's deploy defaults: ``{key: value}`` for each key it sets. A key it
+    leaves unset is absent, which every reader takes as "use the global default" — never
+    as False. Unknown or missing workstream → ``{}``.
+
+    Opens its own session when given none: the deploy runners ask this mid-job, where the
+    session they hold belongs to the job."""
+    wg_name = _normalize(name or "")
+    if not wg_name:
+        return {}
+    if db is not None:
+        return _read_defaults(get(db, wg_name))
+    from ..database import SessionLocal
+    own = SessionLocal()
+    try:
+        return _read_defaults(get(own, wg_name))
+    finally:
+        own.close()
+
+
+def set_profile(db: Session, name: str, values: dict) -> dict:
+    """Change the given keys of a workstream's defaults. ``None`` — or a blank name —
+    clears a key back to the global default; a key outside PROFILE_KEYS is refused and
+    nothing is written. Returns the new profile."""
+    wg = get(db, name)
+    if wg is None:
+        raise WorkgroupError(f"Workstream '{name}' not found.")
+    unknown = sorted(set(values) - set(PROFILE_KEYS))
+    if unknown:
+        raise WorkgroupError(f"Not a workstream default: {', '.join(unknown)}")
+    current = _read_defaults(wg)
+    for key, value in values.items():
+        kind, allowed = PROFILE_KEYS[key]
+        if value is None:
+            current.pop(key, None)
+        elif kind == "bool":
+            if not isinstance(value, bool):
+                raise WorkgroupError(f"'{key}' must be true, false or null")
+            current[key] = value
+        else:
+            text = str(value).strip()
+            if allowed is not None and text not in allowed:
+                raise WorkgroupError(
+                    f"'{key}' must be one of: {', '.join(repr(a) for a in allowed)}")
+            if len(text) > 255:
+                raise WorkgroupError(f"'{key}' is too long")
+            if not text and allowed is None:
+                current.pop(key, None)
+            else:
+                current[key] = text
+    wg.deploy_defaults = json.dumps(current, sort_keys=True) if current else None
+    db.commit()
+    return dict(current)
+
+
 # ── Seed ──────────────────────────────────────────────────────────────────────
 
 def seed_if_empty(db: Session) -> None:

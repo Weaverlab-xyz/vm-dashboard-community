@@ -634,16 +634,47 @@ stored state.
 
 ### PRA is an opt-in on the deploy form
 
-Each cloud's deploy form has one **Add to BeyondTrust PRA** checkbox, ticked by default and
-shown only while PRA is enabled. Its Jump Group, Gateway and credential overrides sit in a
+Each cloud's deploy form has one **Add to BeyondTrust PRA** checkbox, ticked by default (or
+as the VM's [workstream](#workstream-deploy-defaults) sets it) and shown only while PRA is
+enabled. Its Jump Group, Gateway and credential overrides sit in a
 collapsed section under it; leave them alone and the configured defaults apply. Untick it
 and the VM deploys with no jump (`enable_pra: false` on the request; a request that omits
-the field keeps the jump, so API callers and older clients are unchanged). On a Windows
+the field keeps the jump unless its workstream's default says otherwise, so API callers and
+older clients are unchanged). On a Windows
 server, unticking also skips the Windows jump wiring, and a Windows jump **cannot** be added
 later — see below.
 
 The gateway host is ensured either way. That keeps the VM wired to the same address it would
 have had with PRA on, so a jump added later points where a deploy-time one would.
+
+### Workstream deploy defaults
+
+A workstream can carry its own defaults for the cloud VMs deployed into it. Set them on
+**RBAC → Workstreams → Edit → Deploy defaults**; every field can say *Global default*,
+which is what an unset one means.
+
+| Default | What it does |
+|---|---|
+| Add new VMs to PRA | The default for the deploy form's **Add to BeyondTrust PRA** checkbox, and for an API request that leaves `enable_pra` out. |
+| PRA jump group, PRA Gateway | Where this workstream's jumps land, unless the deploy (or the row action) names one. |
+| Register in Entitle, Onboard into Password Safe | Pre-ticks those boxes on the deploy form. |
+| RDP jump for Windows, Microsoft Entra ID | Pre-fill the Windows choices on the deploy form. |
+
+Picking a workstream in a deploy form fills these in, and you can still change any of them
+for that one deploy. The server applies the PRA default and the jump target itself, so an
+API caller gets them too.
+
+Resolution, most specific first:
+- **PRA on or off:** the request's `enable_pra` → the workstream default → on.
+- **Jump group and Gateway:** the request → the workstream default → the per-cloud setting
+  → the global `bt_*` setting.
+
+Anyone who may edit the workstream (an administrator, a member, or its creator) may set
+these, and every change is audited. The list is fixed and holds no secrets on purpose: an
+SSH key secret or a PRA credential for a workstream is not something a member should be able
+to point at. The defaults are stored on the workstream itself and go when it is deleted.
+The API is `GET`/`PUT /api/workgroups/{name}/profile`; on a `PUT`, a field left out is
+unchanged and `null` sets it back to the global default.
 
 ### Adding PRA to a VM after deploy
 
@@ -670,8 +701,8 @@ API: `POST /api/{aws|azure|gcp|oci}/instances/pra` with
 
 ### Jump Group and Gateway resolution
 
-Jump Group / Gateway resolution: per-deploy form `jump_group` / `jumpoint_name` → the
-per-cloud override (`azure_bt_jump_group_name`/`azure_jumpoint_name`,
+Jump Group / Gateway resolution: per-deploy form `jump_group` / `jumpoint_name` → the VM's
+workstream default → the per-cloud override (`azure_bt_jump_group_name`/`azure_jumpoint_name`,
 `gcp_bt_jump_group_name`/`gcp_jumpoint_name`, `oci_bt_jump_group_name`/`oci_jumpoint_name`) →
 the `bt_*` defaults, each read from config and then from its environment setting. Deploys
 and the post-deploy action share this resolution (`vm_pra_service.resolve_target`), so both

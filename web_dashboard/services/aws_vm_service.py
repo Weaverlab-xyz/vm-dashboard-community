@@ -662,12 +662,13 @@ async def _run_deploy(
         # ── Step 3: BeyondTrust PRA — Shell Jump (optional; SSH, so Linux only) ─
         from ..services import vm_pra_service
         _want_pra = (_cfg_svc.get_bool("pra_enabled")
-                     and vm_pra_service.opted_in(_meta.get("enable_pra")))
+                     and vm_pra_service.opted_in(_meta.get("enable_pra"), workgroup))
         if _want_pra and not is_windows:
             from ..services import terraform_pra_service
             try:
                 _client_secret = vm_pra_service.client_secret_for(pra_credential_ref)
-                _group, _jumpoint = vm_pra_service.resolve_target("aws", jump_group, jumpoint_name)
+                _group, _jumpoint = vm_pra_service.resolve_target(
+                    "aws", jump_group, jumpoint_name, workgroup=workgroup)
                 bt_result = await terraform_pra_service.provision_jump(
                     vm_name=instance_name,
                     hostname=hostname,
@@ -717,13 +718,15 @@ async def _run_deploy(
         # ── Step 5w: Windows — Password Safe managed account + PRA Shell/RDP jump ─
         if is_windows:
             from ..services import windows_server_hook
+            _win_group, _win_gateway = vm_pra_service.resolve_target(
+                "aws", jump_group, jumpoint_name, workgroup=workgroup)
             await windows_server_hook.wire(
                 db, job_id, vm_name=instance_name, hostname=hostname,
                 username="Administrator", password=admin_password, result=result,
                 tag="AWS", register_in_passwordsafe=_psreg,
                 pra_enabled=_want_pra,
-                jump_group=(jump_group or "").strip() or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name,
-                jumpoint_name=(jumpoint_name or "").strip() or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name,
+                jump_group=_win_group,
+                jumpoint_name=_win_gateway,
                 client_secret=_cfg_svc.resolve_reference(pra_credential_ref.strip()) if pra_credential_ref else "",
                 ssh=win_ssh, rdp=win_rdp,
                 ssh_status=win_ssh_status, ssh_detail=win_ssh_detail,
