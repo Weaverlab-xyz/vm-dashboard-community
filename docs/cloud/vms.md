@@ -396,7 +396,10 @@ those sit the **Add to BeyondTrust PRA** checkbox (see
 **Advanced options** section holding everything that falls back to a configured default or
 is off by default: the SSH key secret override, Entitle and Password Safe registration,
 Active Directory and Entra ID join, the RDP jump, and the Gateway deploy key. Nothing was
-removed — expand Advanced to reach any of it. The bulk-deploy forms are unchanged.
+removed — expand Advanced to reach any of it.
+
+The bulk-deploy forms have the same **Add each VM to BeyondTrust PRA** checkbox. It starts
+at the picked workstream's default and applies to every VM in the batch.
 
 ### Deploying more than one VM
 
@@ -641,8 +644,13 @@ collapsed section under it; leave them alone and the configured defaults apply. 
 and the VM deploys with no jump (`enable_pra: false` on the request; a request that omits
 the field keeps the jump unless its workstream's default says otherwise, so API callers and
 older clients are unchanged). On a Windows
-server, unticking also skips the Windows jump wiring, and a Windows jump **cannot** be added
-later — see below.
+server, unticking also skips the Windows jump wiring; it can be added later from the row, as
+long as the deploy kept the administrator password or Password Safe manages the account —
+see below.
+
+PRA is on when **Settings** turns it on (`pra_enabled`), on every cloud. Azure used to read
+only the environment variable, so switching PRA off in Settings left Azure deploys still
+building jumps.
 
 The gateway host is ensured either way. That keeps the VM wired to the same address it would
 have had with PRA on, so a jump added later points where a deploy-time one would.
@@ -699,6 +707,17 @@ How a deploy uses them:
 - **An administrator** may still name a different one for a single deploy.
 - **A workstream with nothing bound** behaves as before: the global default, or any
   override the deployer picks.
+- **The SSH key box** at the top of the AWS, Azure and GCP deploy forms shows the key the
+  deploy will use — the bound one, marked *bound to this workstream*, once you pick the
+  workstream.
+- **Config-Management runs** on the VM, post-deploy runs included, connect with the same
+  key, on all four clouds.
+- **An OCI override** is checked when the deploy is submitted, as on the other clouds: a
+  secret that can't be read or holds no public key is refused before anything launches.
+
+On AWS, Azure and GCP the editor offers each cloud's own secret list, the same one the
+deploy form's override offers. OCI has no listing, so its secret is typed (an OCID, or a
+name in the configured vault).
 
 Binding is administrator-only on purpose. A member who could bind a secret could point
 their team's deploys at any secret the dashboard's cloud identity can read. Every change is
@@ -740,8 +759,6 @@ Limits:
   reaches cloud VMs can't read it. Move it to a cloud backend from the Storage page.
 - An asset [scoped to another workstream](../operations/storage-management.md#scoping-an-asset-to-a-workstream)
   can't be added to the list; the editor only offers global assets and this workstream's own.
-- OCI VMs are run against as plain addresses, so they use the global Ansible SSH key, as
-  a Config-Management run on an OCI address does today.
 
 Changing the list is **administrator-only**, because each entry is code that runs on every
 VM the workstream's members deploy. Members can see the list. Every change is audited, and
@@ -751,8 +768,8 @@ so is each deploy that queues runs. The API is `GET`/`PUT
 
 ### Adding PRA to a VM after deploy
 
-A Linux VM this dashboard deployed — on AWS, Azure, GCP or OCI — can be added to PRA at any
-time from its row: **Add to PRA** opens the same Jump Group / Gateway / credential choices.
+A VM this dashboard deployed — on AWS, Azure, GCP or OCI, Linux or Windows — can be added
+to PRA at any time from its row: **Add to PRA** opens the same Jump Group / Gateway / credential choices.
 Once it has a jump the button reads **PRA ✓**, and the dialog offers **Re-apply** (replace
 the jump with one built from new choices) and **Remove from PRA**. Each runs as a `vm_pra`
 job; open it from the toast to follow it.
@@ -763,8 +780,13 @@ job; open it from the toast to follow it.
   left with no jump rather than a record of one that no longer exists; run it again.
 - On GCP and Azure, adding a jump also records the shared gateway host against the VM, so
   the idle sweep keeps that gateway while the jump needs it.
-- **Windows servers are refused.** Their jumps are built from the administrator password set
-  at build time, which a later action cannot recover; decide on the deploy form.
+- **A Windows server** gets the jumps its deploy would have built, from the same code: a
+  Shell Jump over OpenSSH and/or an RDP jump, following the access recorded at deploy, each
+  with a PRA Vault account holding the administrator password the deploy stored. If
+  Password Safe manages the account, the jumps are created with no Vault account, as at
+  deploy. A server whose password was neither kept nor handed to Password Safe is refused.
+  Re-apply and **Remove from PRA** handle the RDP jump too, and **Destroy** removes it as
+  before.
 - The same ownership rule as Destroy applies: you need the cloud's `write` permission and
   access to the VM's workstream.
 

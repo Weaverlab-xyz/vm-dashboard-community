@@ -38,6 +38,7 @@ from ..services import gcp_service
 from .auth import require_admin, require_permission
 from ..services import vm_suspend_policy
 from ..services import tag_policy
+from ..services import vm_pra_service
 from . import unmanaged
 from . import tag_batch
 from .power_batch import queue_power_batch
@@ -372,7 +373,7 @@ async def _build_gcp_instances(db, project_id: str) -> list:
                 "extra": data,
                 "workgroup": (job.workgroup or data.get("workgroup") or "").lower() or None,
                 "suspend_warning": None if _ok else _why,
-                "pra_jump_id": data.get("bt_shell_jump_id") or None,
+                "pra_jump_id": vm_pra_service.jump_id(data),
             }
 
     instances = []
@@ -579,11 +580,15 @@ async def get_instance_admin_password(
 
 @router.get("/secrets/ssh-key", response_model=GCPSSHKeyDetail)
 async def get_configured_ssh_key(
+    workgroup: str = "",
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("gcp", "read")),
 ):
-    """Return a preview of the SSH public key from the configured Secret Manager secret."""
+    """Return a preview of the SSH public key from the configured Secret Manager secret,
+    or the one bound to ``workgroup`` when it has one."""
+    from .workgroups import bound_ssh_secret
     project_id = _gcp_project()
-    secret_name = _gcp_ssh_secret()
+    secret_name = bound_ssh_secret(db, current_user, "gcp", workgroup) or _gcp_ssh_secret()
     if not project_id or not secret_name:
         raise HTTPException(
             status_code=404,

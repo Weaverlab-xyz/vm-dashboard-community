@@ -49,6 +49,7 @@ from ..services.azure_service import AzureError
 from .auth import require_admin, require_permission
 from ..services import vm_suspend_policy
 from ..services import tag_policy
+from ..services import vm_pra_service
 from . import unmanaged
 from . import tag_batch
 from .power_batch import queue_power_batch
@@ -357,17 +358,22 @@ async def network_options(
 
 @router.get("/keyvault-ssh-key")
 async def get_keyvault_ssh_key(
+    workgroup: str = "",
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("azure", "read")),
 ):
     """Retrieve the SSH public key stored in Azure Key Vault.
 
     Prefers the unified `azure_ssh_keypair_secret_name` (JSON with
     public_key/private_key fields), falling back to legacy
-    `azure_ssh_key_secret_name`.
+    `azure_ssh_key_secret_name`. With ``workgroup``, the key bound to that workstream
+    (if any) wins — the form submits this key, and it must be the one the deploy uses.
     """
+    from .workgroups import bound_ssh_secret
     kv_url           = _cfg("azure_key_vault_url")
-    unified_secret   = _cfg("azure_ssh_keypair_secret_name")
-    legacy_secret    = _cfg("azure_ssh_key_secret_name")
+    bound            = bound_ssh_secret(db, current_user, "azure", workgroup)
+    unified_secret   = bound or _cfg("azure_ssh_keypair_secret_name")
+    legacy_secret    = "" if bound else _cfg("azure_ssh_key_secret_name")
     if not kv_url:
         raise HTTPException(
             status_code=503,
@@ -611,7 +617,7 @@ def _deploy_job_meta(db: Session) -> dict:
             # in its confirmation BEFORE queueing, which is the point of a warning that
             # does not block.
             "suspend_warning": _suspend_warning(j),
-            "pra_jump_id": j.metadata_dict.get("bt_shell_jump_id") or None,
+            "pra_jump_id": vm_pra_service.jump_id(j.metadata_dict),
         }
         for j in deploy_jobs if j.metadata_dict.get("vm_name")
     }

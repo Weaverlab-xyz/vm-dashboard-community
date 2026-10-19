@@ -285,6 +285,48 @@ def test_gcp_and_oci_carry_the_pra_credential_to_their_jumps():
             "services", f"{cloud}_vm_service.py"), f"{cloud}: the jump ignores the credential"
 
 
+# ── The deploy forms' key preview ─────────────────────────────────────────────
+
+def test_the_key_preview_names_the_bound_secret_only_to_those_who_may_see_it():
+    _bind("team-a", {"ssh_key_secret": {"aws": "team-a/ssh"}})
+    try:
+        db = SessionLocal()
+        try:
+            alice, bob, root = (db.query(User).filter(User.id == u.id).first()
+                                for u in (ALICE, BOB, ROOT))
+            assert api.bound_ssh_secret(db, alice, "aws", "team-a") == "team-a/ssh"
+            assert api.bound_ssh_secret(db, root, "aws", "team-a") == "team-a/ssh"
+            # An outsider falls back to the global key and learns nothing.
+            assert api.bound_ssh_secret(db, bob, "aws", "team-a") == ""
+            assert api.bound_ssh_secret(db, alice, "gcp", "team-a") == ""
+            assert api.bound_ssh_secret(db, alice, "aws", "") == ""
+        finally:
+            db.close()
+    finally:
+        _bind("team-a", {"ssh_key_secret": {"aws": None}})
+
+
+def test_the_preview_endpoints_take_a_workstream_never_a_secret_name():
+    for cloud, fname in (("aws", "get_configured_ssh_key"), ("azure", "get_keyvault_ssh_key"),
+                         ("gcp", "get_configured_ssh_key")):
+        src = _src("api", f"{cloud}.py")
+        i = src.index(f"async def {fname}(")
+        body = src[i:src.index("\n@router", i)]
+        assert f'bound_ssh_secret(db, current_user, "{cloud}", workgroup)' in body, cloud
+        sig = body[:body.index(")")]
+        assert "secret" not in sig.replace("secrets", ""), (
+            f"{cloud}: a preview that takes a secret name lets any reader read any key")
+
+
+def test_oci_deploy_routes_validate_the_override_after_the_bindings():
+    src = _src("api", "oci.py")
+    found = list(re.finditer(r'enforce_secret_bindings\("oci", (req|payload), workgroup', src))
+    assert len(found) == 2, "expected the single and bulk OCI deploy routes"
+    for m in found:
+        window = src[m.end():m.end() + 200]
+        assert f"await _validate_ssh_key_override({m.group(1)}.ssh_key_secret_override)" in window
+
+
 if __name__ == "__main__":
     import traceback
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

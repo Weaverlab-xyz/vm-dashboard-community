@@ -622,13 +622,13 @@
 
         {% if pra_enabled %}
         <!-- PRA is an opt-in: on by default, untick to deploy without a jump. A Linux VM
-             can be added later from its row (services/vm_pra_service); Windows cannot. -->
+             can be added later from its row (services/vm_pra_service). -->
         <div class="space-y-3">
           <label class="flex items-start gap-2 text-sm text-gray-700">
             <input type="checkbox" x-model="deployForm.enable_pra" class="mt-0.5 rounded text-blue-600">
             <span>Add to BeyondTrust PRA <span class="text-gray-400 font-normal">(Shell Jump)</span>
               <span class="block text-xs text-gray-400">Untick to deploy without a jump. A Linux VM can be
-                added later from its row; a Windows server cannot.</span></span>
+                added later from its row.</span></span>
           </label>
           <details x-show="deployForm.enable_pra" x-cloak class="ml-6">
             <summary class="cursor-pointer select-none text-xs text-gray-500">Jump group, Gateway and credential
@@ -759,7 +759,7 @@
 
         <div>
           <label class="block text-xs font-medium text-gray-600 mb-1">Workstream (shared)</label>
-          <select x-model="bulkModal.workgroup"
+          <select x-model="bulkModal.workgroup" @change="bulkPraDefault()"
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             <option value="">— select a workstream —</option>
             <template x-for="wg in availableWorkgroups" :key="wg">
@@ -818,6 +818,17 @@
           Assign public IP
         </label>
 
+        {% if pra_enabled %}
+        <!-- The batch's PRA opt-in. Starts at the workstream's default (bulkPraDefault),
+             and is sent explicitly, as the single form's is. -->
+        <label class="flex items-start gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="bulkModal.enable_pra" class="mt-0.5 rounded text-blue-600">
+          <span>Add each VM to BeyondTrust PRA
+            <span class="block text-xs text-gray-400">Untick to deploy the batch without jumps; any VM can
+              be added later from its row.</span></span>
+        </label>
+        {% endif %}
+
         <!-- Free-tier gate, evaluated over the WHOLE selection: N images means N
              instances of the shared shape, which is what trips the 2-instance cap. -->
         <div x-show="bulkFreeTierWarnings().length || bulkModal.serverGateTripped" x-cloak
@@ -873,7 +884,7 @@ function ociDashboard() {
     // from deployForm.count, which launches N copies of ONE image.
     selectedImages: [],
     bulkModal: {
-      open: false, items: [], names: [], workgroup: '',
+      open: false, enable_pra: true, items: [], names: [], workgroup: '',
       shape: 'VM.Standard.E2.1.Micro', ocpus: null, memory_gb: null,
       boot_volume_gb: 50, assign_public_ip: false, acknowledge_charges: false,
       submitting: false, error: '',
@@ -1633,6 +1644,7 @@ function ociDashboard() {
       const items = this.filteredImages().filter(i => this.selectedImages.includes(i.ocid));
       this.bulkModal = {
         open: true,
+        enable_pra: true,
         items,
         names: items.map(i => (i.display_name || '')
           .replace(/[^A-Za-z0-9-]/g, '-').slice(0, 60)),
@@ -1661,12 +1673,20 @@ function ociDashboard() {
       return true;
     },
 
+    // The bulk form's PRA box follows the picked workstream's default.
+    async bulkPraDefault() {
+      const wg = this.bulkModal.workgroup;
+      const on = await workstreamPraDefault(wg);
+      if (this.bulkModal.workgroup === wg) this.bulkModal.enable_pra = on;
+    },
+
     async submitBulkDeploy() {
       const m = this.bulkModal;
       m.submitting = true;
       m.error = '';
       try {
         const r = await API.post('/api/oci/bulk-deploy', {
+          enable_pra: m.enable_pra !== false,
           items: m.items.map((img, idx) => ({
             image_ocid: img.ocid,
             image_name: img.display_name || '',

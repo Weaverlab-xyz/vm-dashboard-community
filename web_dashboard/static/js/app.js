@@ -361,11 +361,27 @@ window.workstreamDefaultsState = function (formName, cloud) {
                 ssh: ((b.ssh_key_secret || {})[cloud]) || '',
                 pra: b.pra_credential_ref || '',
             };
+            // The page's SSH-key box previews the key a deploy will use, which is the
+            // bound one when there is one (the endpoint takes ?workgroup=).
+            if (typeof this.refreshKeyPreview === 'function') this.refreshKeyPreview();
             for (const [key, field] of Object.entries(FIELDS)) {
                 if (p[key] !== null && p[key] !== undefined && field in form) form[field] = p[key];
             }
         },
     };
+};
+
+// The PRA opt-in a workstream's deploys default to (its profile's pra_enabled, else on),
+// for the bulk deploy forms, which carry their own state rather than the single form's
+// workstreamDefaultsState. Never rejects: an unreadable profile means the default, on.
+window.workstreamPraDefault = async function (wg) {
+    if (!wg) return true;
+    try {
+        const p = await API.get('/api/workgroups/' + encodeURIComponent(wg) + '/profile');
+        return p.pra_enabled === false ? false : true;
+    } catch (e) {
+        return true;
+    }
 };
 
 // ── Post-deploy PRA access on a cloud VM row ─────────────────────────────────

@@ -537,20 +537,21 @@
           <div x-show="!deployModal.keyvaultLoading && deployModal.keyvaultError"
                class="text-xs text-red-500 py-2" x-text="deployModal.keyvaultError"></div>
           <div x-show="!deployModal.keyvaultLoading && !deployModal.keyvaultError && deployModal.sshPublicKey">
-            <p class="text-xs text-green-600 mb-1">Key retrieved from vault: <span class="font-mono font-medium" x-text="deployModal.keyvaultSecretName"></span></p>
+            <p class="text-xs text-green-600 mb-1">Key retrieved from vault: <span class="font-mono font-medium" x-text="deployModal.keyvaultSecretName"></span>
+              <span x-show="wsBound.ssh" class="ml-1">— bound to this workstream</span></p>
             <textarea x-model="deployModal.sshPublicKey" rows="2" readonly
                       class="w-full border border-gray-200 bg-gray-50 rounded-md px-3 py-2 text-xs font-mono resize-none text-gray-600 cursor-default"></textarea>
           </div>
         </div>
         {% if pra_enabled %}
         <!-- PRA is an opt-in: on by default, untick to deploy without a jump. A Linux VM
-             can be added later from its row (services/vm_pra_service); Windows cannot. -->
+             can be added later from its row (services/vm_pra_service). -->
         <div class="space-y-3">
           <label class="flex items-start gap-2 text-sm text-gray-700">
             <input type="checkbox" x-model="deployModal.enable_pra" class="mt-0.5 rounded text-blue-600">
             <span>Add to BeyondTrust PRA <span class="text-gray-400 font-normal">(Shell Jump)</span>
               <span class="block text-xs text-gray-400">Untick to deploy without a jump. A Linux VM can be
-                added later from its row; a Windows server cannot.</span></span>
+                added later from its row.</span></span>
           </label>
           <details x-show="deployModal.enable_pra" x-cloak class="ml-6">
             <summary class="cursor-pointer select-none text-xs text-gray-500">Jump group, Gateway and credential
@@ -770,7 +771,7 @@
         <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wide mb-1">Shared Settings</label>
         <div>
           <label class="block text-xs font-medium text-gray-700 mb-1">Workstream <span class="text-red-500">*</span></label>
-          <select x-model="bulkModal.workgroup" required
+          <select x-model="bulkModal.workgroup" @change="bulkPraDefault()" required
                   class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
             <option value="">Select workstream…</option>
             <template x-for="w in availableWorkgroups" :key="w">
@@ -880,6 +881,16 @@
           Windows VMs each get a generated admin password.
         </div>
 
+{% if pra_enabled %}
+        <!-- The batch's PRA opt-in. Starts at the workstream's default (bulkPraDefault),
+             and is sent explicitly, as the single form's is. -->
+        <label class="flex items-start gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="bulkModal.enable_pra" class="mt-0.5 rounded text-blue-600">
+          <span>Add each VM to BeyondTrust PRA
+            <span class="block text-xs text-gray-400">Untick to deploy the batch without jumps; any VM can
+              be added later from its row.</span></span>
+        </label>
+        {% endif %}
         {% if entitle_enabled %}
         <label class="flex items-center gap-2 text-sm text-gray-700">
           <input type="checkbox" x-model="bulkModal.register_in_entitle"
@@ -1854,7 +1865,7 @@ function azureDashboard() {
       enable_pra: true, skip_post_deploy: false, jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '', dockerKeyBackend: '', docker_deploy_key_ref: '', register_in_entitle: false, register_in_passwordsafe: false, ssh_key_secret_override: '', sshKeySecrets: [],
     },
     bulkModal: {
-      open: false, items: [], vmNames: [], vmSize: 'Standard_B2s',
+      open: false, enable_pra: true, items: [], vmNames: [], vmSize: 'Standard_B2s',
       location: '{{ default_location }}', subnetId: '', sshPublicKey: '',
       sshKeyMode: 'keyvault', keyvaultLoading: false, keyvaultError: '', keyvaultSecretName: '',
       submitting: false, workgroup: '',
@@ -2437,13 +2448,19 @@ function azureDashboard() {
       return null;
     },
 
+    // The form submits this key, so it must be the one the deploy uses: the picked
+    // workstream's bound key when it has one (applyWorkstreamDefaults calls back here).
+    refreshKeyPreview() { return this.fetchKeyvaultKey(); },
+
     async fetchKeyvaultKey() {
+      const wg = this.deployModal.workgroup || '';
       this.deployModal.keyvaultLoading = true;
       this.deployModal.keyvaultError = '';
       this.deployModal.sshPublicKey = '';
       this.deployModal.keyvaultSecretName = '';
       try {
-        const data = await API.get('/api/azure/keyvault-ssh-key');
+        const data = await API.get('/api/azure/keyvault-ssh-key?workgroup=' + encodeURIComponent(wg));
+        if ((this.deployModal.workgroup || '') !== wg) return;
         this.deployModal.sshPublicKey = data.ssh_public_key;
         this.deployModal.keyvaultSecretName = data.secret_name;
       } catch (e) {
@@ -2556,6 +2573,7 @@ function azureDashboard() {
       const selected = this.privateImages.filter(i => this.selectedImages.includes(i.resource_id));
       this.bulkModal = {
         open: true,
+        enable_pra: true,
         items: selected,
         // One VM per selected image, so a batch can mix Linux and Windows. Keep the
         // whole set — a single osType taken from selected[0] would be wrong for half
@@ -2584,6 +2602,7 @@ function azureDashboard() {
         ssh_key_secret_override: '',
         sshKeySecrets: [],
       };
+      this.bulkPraDefault();
       API.get('/api/azure/secrets/ssh-keys')
         .then(r => { this.bulkModal.sshKeySecrets = r?.secrets || []; })
         .catch(() => { this.bulkModal.sshKeySecrets = []; });
@@ -2619,6 +2638,13 @@ function azureDashboard() {
       }
     },
 
+    // The bulk form's PRA box follows the picked workstream's default.
+    async bulkPraDefault() {
+      const wg = this.bulkModal.workgroup;
+      const on = await workstreamPraDefault(wg);
+      if (this.bulkModal.workgroup === wg) this.bulkModal.enable_pra = on;
+    },
+
     async submitBulkDeploy() {
       const m = this.bulkModal;
       if (!m.subnetId) return toast('Please select a subnet', 'error');
@@ -2648,6 +2674,7 @@ function azureDashboard() {
       m.submitting = true;
       try {
         const result = await API.post('/api/azure/bulk-deploy', {
+          enable_pra: m.enable_pra !== false,
           items,
           image_id: firstImage?.resource_id,
           vm_size: m.vmSize,

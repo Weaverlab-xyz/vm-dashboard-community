@@ -279,9 +279,26 @@
               <template x-for="c in bindingClouds" :key="c.id">
                 <label class="block">
                   <span class="block text-xs font-medium text-gray-600 mb-1" x-text="c.label + ' SSH key secret'"></span>
-                  <input type="text" x-model="bindings.ssh[c.id]" :disabled="!isAdmin"
-                         :placeholder="isAdmin ? c.hint : 'Not bound'"
-                         class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono disabled:bg-gray-50"/>
+                  <!-- The cloud's own secret list (the same one the deploy form's override
+                       offers), so a binding is a name the deploy can actually read. OCI has
+                       no listing, and a list that failed to load falls back to typing. -->
+                  <template x-if="isAdmin && sshChoices[c.id]">
+                    <select x-model="bindings.ssh[c.id]"
+                            class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono">
+                      <option value="">Not bound</option>
+                      <template x-if="bindings.ssh[c.id] && !sshChoices[c.id].includes(bindings.ssh[c.id])">
+                        <option :value="bindings.ssh[c.id]" x-text="bindings.ssh[c.id] + ' (current)'"></option>
+                      </template>
+                      <template x-for="n in sshChoices[c.id]" :key="n">
+                        <option :value="n" x-text="n" :selected="n === bindings.ssh[c.id]"></option>
+                      </template>
+                    </select>
+                  </template>
+                  <template x-if="!(isAdmin && sshChoices[c.id])">
+                    <input type="text" x-model="bindings.ssh[c.id]" :disabled="!isAdmin"
+                           :placeholder="isAdmin ? c.hint : 'Not bound'"
+                           class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono disabled:bg-gray-50"/>
+                  </template>
                 </label>
               </template>
             </div>
@@ -423,11 +440,13 @@ function workgroupsPage() {
     runAssets: [],
     runToAdd: '',
     bindingClouds: [
-      {id: 'aws', label: 'AWS', hint: 'Secrets Manager secret name'},
-      {id: 'azure', label: 'Azure', hint: 'Key Vault secret name'},
-      {id: 'gcp', label: 'GCP', hint: 'Secret Manager secret name'},
-      {id: 'oci', label: 'OCI', hint: 'Vault secret OCID or name'},
+      {id: 'aws', label: 'AWS', hint: 'Secrets Manager secret name', list: '/api/aws/secrets/ssh-keys'},
+      {id: 'azure', label: 'Azure', hint: 'Key Vault secret name', list: '/api/azure/secrets/ssh-keys'},
+      {id: 'gcp', label: 'GCP', hint: 'Secret Manager secret name', list: '/api/gcp/secrets/ssh-keys'},
+      {id: 'oci', label: 'OCI', hint: 'Vault secret OCID or name', list: ''},
     ],
+    // Per cloud: the secret names its deploy form offers, or absent (type it instead).
+    sshChoices: {},
 
     async init() {
       requireAuth();
@@ -519,6 +538,16 @@ function workgroupsPage() {
         this.bindingsLoaded = JSON.stringify(this.bindingsPayload());
       } catch (e) {
         this.bindingsError = 'Bound secrets unavailable: ' + (e.message || e);
+      }
+      if (this.isAdmin) this.loadSshChoices();
+    },
+
+    loadSshChoices() {
+      for (const c of this.bindingClouds) {
+        if (!c.list || this.sshChoices[c.id]) continue;
+        API.get(c.list)
+          .then(r => { this.sshChoices = {...this.sshChoices, [c.id]: (r && r.secrets) || []}; })
+          .catch(() => { /* not configured: the field stays free text */ });
       }
     },
 
