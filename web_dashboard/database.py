@@ -1724,6 +1724,10 @@ class Workgroup(Base):
     # COLUMN in this tree's migration list before and the savepoint swallowed it
     # silently — see the `users.is_admin` note. NULL reads as False everywhere.
     require_change_window = Column(Boolean, nullable=True)
+    # The workstream's deploy defaults (services/workgroup_service.PROFILE_KEYS), as a
+    # JSON object holding only the keys it sets. NULL = sets none: every VM it deploys
+    # takes the global defaults, which is every workstream that predates the column.
+    deploy_defaults = Column(Text, nullable=True)
 
 
 class VMWorkgroupOverride(Base):
@@ -5418,6 +5422,9 @@ def init_db():
             # no DEFAULT for the PostgreSQL reason described on users.is_admin.
             "ALTER TABLE workgroups ADD COLUMN change_window_id VARCHAR(36)",
             "ALTER TABLE workgroups ADD COLUMN require_change_window BOOLEAN",
+            # A workstream's deploy defaults, a JSON object. NULL = none set, which is
+            # every existing workstream, so nothing changes until someone sets one.
+            "ALTER TABLE workgroups ADD COLUMN deploy_defaults TEXT",
 
             # Service accounts and their OAuth clients (services/service_accounts). A bare
             # BOOLEAN for the PostgreSQL reason on users.is_admin; NULL reads as "a person",

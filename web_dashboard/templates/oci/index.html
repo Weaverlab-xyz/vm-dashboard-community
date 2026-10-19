@@ -606,7 +606,7 @@
           </div>
           <div>
             <label class="block text-xs font-medium text-gray-600 mb-1">Workstream</label>
-            <select x-model="deployForm.workgroup"
+            <select x-model="deployForm.workgroup" @change="applyWorkstreamDefaults()"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <option value="">(select)</option>
               <template x-for="wg in availableWorkgroups" :key="wg">
@@ -881,6 +881,7 @@ function ociDashboard() {
     ...bulkPowerState(),
     ...tagEditState(),
     ...secretPickerState(),
+    ...workstreamDefaultsState('deployForm'),
     ...vmPraState('oci'),
     tagEditUrl: '/api/oci/instances/tags',
     bulkPowerUrl: '/api/oci/power/bulk',
@@ -1731,6 +1732,7 @@ function ociDashboard() {
       this.deployShapeNote = '';
       this.deployModal = true;
       this.loadPraPickers();
+      this.applyWorkstreamDefaults();
       // Narrow the shape list to what THIS image can boot before the operator
       // picks — blank AD, matching blankForm()'s "(first available)".
       this.onDeployPlacementChange();

@@ -295,6 +295,47 @@ window.secretPickerState = function () {
 //
 // `tabSlugs` is the list this VIEWER has; a page may narrow it in init() before calling
 // pickTab() (rbac drops the admin-only tabs for a non-admin).
+// ── Workstream deploy defaults on a deploy form ──────────────────────────────
+//
+// Spread into a cloud page component (`...workstreamDefaultsState('deployForm')`) and
+// call applyWorkstreamDefaults() when the form opens and when its workstream changes.
+// Copies the picked workstream's defaults (GET /api/workgroups/{name}/profile) onto the
+// fields this form has; a default the workstream leaves unset (null) is not touched, so
+// the page's own default stands. The server applies the same defaults again to a
+// request that leaves `enable_pra` out, so the form is a preview, not the authority.
+window.workstreamDefaultsState = function (formName) {
+    const FIELDS = {
+        pra_enabled: 'enable_pra',
+        register_in_entitle: 'register_in_entitle',
+        register_in_passwordsafe: 'register_in_passwordsafe',
+        enable_rdp: 'enable_rdp',
+        entra_join_mode: 'entra_join_mode',
+    };
+    return {
+        wsProfiles: {},
+
+        async applyWorkstreamDefaults() {
+            const form = this[formName];
+            const wg = form && form.workgroup;
+            if (!wg) return;
+            let p = this.wsProfiles[wg];
+            if (p === undefined) {
+                try {
+                    p = await API.get('/api/workgroups/' + encodeURIComponent(wg) + '/profile');
+                } catch (e) {
+                    p = {};   // not readable by this user: the page defaults stand
+                }
+                this.wsProfiles[wg] = p;
+            }
+            // The operator may have switched workstreams while the request was out.
+            if (this[formName] !== form || form.workgroup !== wg) return;
+            for (const [key, field] of Object.entries(FIELDS)) {
+                if (p[key] !== null && p[key] !== undefined && field in form) form[field] = p[key];
+            }
+        },
+    };
+};
+
 // ── Post-deploy PRA access on a cloud VM row ─────────────────────────────────
 //
 // Spread into a cloud page component (`...vmPraState('aws')`, after

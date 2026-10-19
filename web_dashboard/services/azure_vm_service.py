@@ -465,7 +465,8 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
     result = {}
     is_windows = req.os_type.lower() == "windows"
     from ..services import vm_pra_service
-    _want_pra = vm_pra_service.opted_in(getattr(req, "enable_pra", None))
+    _want_pra = vm_pra_service.opted_in(getattr(req, "enable_pra", None),
+                                        getattr(req, "workgroup", None))
     try:
         job_service.set_running(db, job_id)
 
@@ -607,7 +608,8 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
             # Azure-specific keys override the shared bt_* keys.
             from ..services import vm_pra_service
             jump_group, jumpoint_name = vm_pra_service.resolve_target(
-                "azure", getattr(req, "jump_group", None), getattr(req, "jumpoint_name", None))
+                "azure", getattr(req, "jump_group", None), getattr(req, "jumpoint_name", None),
+                workgroup=getattr(req, "workgroup", None))
             _client_secret = vm_pra_service.client_secret_for(getattr(req, "pra_credential_ref", None))
             if result.get("jumpoint_host_id"):
                 aci_note = f" (shared Gateway host: {result['jumpoint_host_id']})"
@@ -676,16 +678,16 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
         if is_windows:
             from ..services import windows_server_hook
             _cred = getattr(req, "pra_credential_ref", None)
+            _win_group, _win_gateway = vm_pra_service.resolve_target(
+                "azure", getattr(req, "jump_group", None), getattr(req, "jumpoint_name", None), workgroup=getattr(req, "workgroup", None))
             await windows_server_hook.wire(
                 db, job_id, vm_name=req.vm_name, hostname=hostname,
                 username=req.ssh_username, password=admin_password, result=result,
                 tag="Azure",
                 register_in_passwordsafe=bool(getattr(req, "register_in_passwordsafe", False)),
                 pra_enabled=bool(settings.pra_enabled) and _want_pra,
-                jump_group=((getattr(req, "jump_group", None) or "").strip()
-                            or _cfg("azure_bt_jump_group_name") or _cfg("bt_jump_group_name")),
-                jumpoint_name=((getattr(req, "jumpoint_name", None) or "").strip()
-                               or _cfg("azure_jumpoint_name") or _cfg("bt_jumpoint_name")),
+                jump_group=_win_group,
+                jumpoint_name=_win_gateway,
                 client_secret=config_service.resolve_reference(_cred.strip()) if _cred else "",
                 ssh=win_ssh, rdp=win_rdp,
                 ssh_status=win_ssh_status, ssh_detail=win_ssh_detail,

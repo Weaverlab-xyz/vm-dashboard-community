@@ -55,37 +55,46 @@ JUMP_KEYS = ("bt_shell_jump_id", "bt_jump_group_name", "bt_tf_state", "bt_error"
 
 
 def resolve_target(cloud: str, jump_group: Optional[str] = None,
-                   jumpoint_name: Optional[str] = None) -> tuple[str, str]:
+                   jumpoint_name: Optional[str] = None,
+                   workgroup: Optional[str] = None) -> tuple[str, str]:
     """The Jump Group and Gateway names a jump for ``cloud`` lands in.
 
-    An explicit value wins, then the cloud's own key (``gcp_bt_jump_group_name`` …), then
-    the shared ``bt_*`` key — each read from config with its env setting behind it, as
-    ``config.py`` documents them. Shared with the four deploy runners, so a jump added
-    later lands where a deploy-time one would.
+    An explicit value wins, then the VM's workstream default (its profile, see
+    ``workgroup_service.PROFILE_KEYS``), then the cloud's own key
+    (``gcp_bt_jump_group_name`` …), then the shared ``bt_*`` key — each config key with
+    its env setting behind it, as ``config.py`` documents them. Shared with the four
+    deploy runners, so a jump added later lands where a deploy-time one would.
     """
     from ..config import settings
-    from . import config_service
+    from . import config_service, workgroup_service
 
     def _key(name: str) -> str:
         return config_service.get(name) or getattr(settings, name, "") or ""
 
+    team = workgroup_service.profile(workgroup) if workgroup else {}
     prefix = CLOUDS[cloud]["prefix"]
-    group = ((jump_group or "").strip()
+    group = ((jump_group or "").strip() or team.get("jump_group")
              or (prefix and _key(f"{prefix}bt_jump_group_name")) or _key("bt_jump_group_name"))
-    jumpoint = ((jumpoint_name or "").strip()
+    jumpoint = ((jumpoint_name or "").strip() or team.get("jumpoint_name")
                 or (prefix and _key(f"{prefix}jumpoint_name")) or _key("bt_jumpoint_name"))
     return group, jumpoint
 
 
-def opted_in(enable_pra) -> bool:
-    """Whether a deploy asked for its jump. ``None`` — every request made before the
-    opt-in existed, and every form left alone — means yes, so PRA stays on by default
-    while ``pra_enabled`` is. Only an explicit False skips the jump.
+def opted_in(enable_pra, workgroup: Optional[str] = None) -> bool:
+    """Whether a deploy asked for its jump. An explicit True or False is the answer.
+    ``None`` — every request made before the opt-in existed, and any API caller that
+    leaves it out — takes the workstream's ``pra_enabled`` default, and with none set
+    means yes, so PRA stays on by default while ``pra_enabled`` is.
 
     Deliberately NOT applied to the Gateway: a VM that opts out still gets the shared
     host ensured, so it is wired to the same address it would have been, and a jump
     added later from its row points where a deploy-time one would have."""
-    return enable_pra is not False
+    if enable_pra is not None:
+        return bool(enable_pra)
+    if workgroup:
+        from . import workgroup_service
+        return workgroup_service.profile(workgroup).get("pra_enabled", True)
+    return True
 
 
 def client_secret_for(pra_credential_ref: Optional[str]) -> str:
@@ -193,7 +202,8 @@ async def attach(db: Session, deploy_job, *, jump_group: Optional[str] = None,
         # naming a jump that no longer exists — destroy would try to remove it again.
         job_service.update_metadata(db, deploy_job.id, {k: None for k in JUMP_KEYS})
 
-    group, jumpoint = resolve_target(cloud, jump_group, jumpoint_name)
+    group, jumpoint = resolve_target(cloud, jump_group, jumpoint_name,
+                                     workgroup=deploy_job.workgroup)
     hostname = _hostname(meta)
     await say(60, f"Creating a Shell Jump to {hostname} in '{group}' via '{jumpoint}'…")
     result = await terraform_pra_service.provision_jump(

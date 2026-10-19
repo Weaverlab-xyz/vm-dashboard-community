@@ -363,6 +363,10 @@ A scope says *what*, not *which*. Two mechanisms narrow the *which*:
   clearing that gate allows changes outside the window. Creating a workstream, updating
   one and every membership change are written to the audit log.
 
+  Its **deploy defaults** take the same authority as editing it, and are audited too. They
+  are a fixed list holding no secrets — see
+  [Workstream deploy defaults](../cloud/vms.md#workstream-deploy-defaults).
+
   **Workstreams were called workgroups** until this release. The new name avoids a clash
   with Password Safe, whose own *workgroups* (the container for managed systems) appear in
   the same Settings forms; a field labelled "Workgroup" in Settings now always means the
