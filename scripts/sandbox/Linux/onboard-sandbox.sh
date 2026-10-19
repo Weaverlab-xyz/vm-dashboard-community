@@ -51,8 +51,11 @@ require_cmd jq
 (( NO_PUSH )) || require_cmd curl
 
 # ── Resolve cloud list ──────────────────────────────────────────────────────
+# Every prompt below ends in `|| true`: with no terminal (CI, a pipe) `read` hits EOF and
+# fails, and under `set -e` that ended the script silently, before the check after it could
+# say what was missing. An empty answer falls through to that check, or to the default.
 if [[ -z "$CLOUDS" ]]; then
-  read -r -p "Which clouds to provision? [all] (comma list of aws,azure,gcp,oci): " CLOUDS
+  read -r -p "Which clouds to provision? [all] (comma list of aws,azure,gcp,oci): " CLOUDS || true
   CLOUDS="${CLOUDS:-all}"
 fi
 [[ "$CLOUDS" == "all" ]] && CLOUDS="aws,azure,gcp,oci"
@@ -101,8 +104,8 @@ post_import() {  # $1 = JSON payload, $2 = optional bearer token, $3 = optional 
 if [[ "$complete" == "true" ]]; then
   info "Dashboard is already set up — merging config (admin auth required)."
   if [[ -z "$TOKEN" ]]; then
-    [[ -n "$ADMIN_USER" ]] || read -r -p "Admin username: " ADMIN_USER
-    [[ -n "$ADMIN_PASS" ]] || { read -rs -p "Admin password: " ADMIN_PASS; echo; }
+    [[ -n "$ADMIN_USER" ]] || read -r -p "Admin username: " ADMIN_USER || true
+    [[ -n "$ADMIN_PASS" ]] || { read -rs -p "Admin password: " ADMIN_PASS || true; echo; }
     TOKEN="$(curl -fsS -X POST "$DASHBOARD_URL/api/auth/login" \
               --data-urlencode "username=$ADMIN_USER" \
               --data-urlencode "password=$ADMIN_PASS" | jq -r '.access_token // empty')"
@@ -112,10 +115,10 @@ if [[ "$complete" == "true" ]]; then
   resp="$(post_import "$payload" "$TOKEN")" || die "Import failed."
 else
   info "First-run setup — creating the admin and applying config."
-  [[ -n "$ADMIN_USER" ]] || { read -r -p "New admin username [admin]: " ADMIN_USER; ADMIN_USER="${ADMIN_USER:-admin}"; }
-  [[ -n "$ADMIN_PASS" ]] || { read -rs -p "New admin password: " ADMIN_PASS; echo; }
+  [[ -n "$ADMIN_USER" ]] || { read -r -p "New admin username [admin]: " ADMIN_USER || true; ADMIN_USER="${ADMIN_USER:-admin}"; }
+  [[ -n "$ADMIN_PASS" ]] || { read -rs -p "New admin password: " ADMIN_PASS || true; echo; }
   [[ -n "$ADMIN_PASS" ]] || die "Admin password is required for first-run setup."
-  [[ -n "$SETUP_TOKEN" ]] || { read -rs -p "Setup token (SETUP_TOKEN in the dashboard's .env, or: docker compose exec app cat /app/data/setup_token): " SETUP_TOKEN; echo; }
+  [[ -n "$SETUP_TOKEN" ]] || { read -rs -p "Setup token (SETUP_TOKEN in the dashboard's .env, or: docker compose exec app cat /app/data/setup_token): " SETUP_TOKEN || true; echo; }
   [[ -n "$SETUP_TOKEN" ]] || die "The setup token is required for first-run setup."
   payload="$(jq -n --argjson cfg "$CONFIG_JSON" --arg u "$ADMIN_USER" --arg p "$ADMIN_PASS" \
               '{admin_username:$u, admin_password:$p, config:$cfg}')"
