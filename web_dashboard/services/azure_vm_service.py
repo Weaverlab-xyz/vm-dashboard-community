@@ -694,6 +694,10 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
             )
 
         job_service.set_completed(db, job_id, result)
+        # The workstream's post-deploy runs (services/post_deploy_service): separate,
+        # delayed Config-Management jobs. Best-effort; never fails the deploy.
+        from ..services import post_deploy_service
+        post_deploy_service.queue_runs(db, job_id)
         await cache_service.invalidate(cache_service.key_global("azure_vms"))
 
     # `result` is passed on the failure paths too, not just to set_completed. A deploy

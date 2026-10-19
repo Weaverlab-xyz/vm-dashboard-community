@@ -668,6 +668,16 @@
           </details>
         </div>
         {% endif %}
+        <!-- The workstream's post-deploy runs (services/post_deploy_service), named so
+             the operator knows what will run on the VM, with a per-deploy way out. -->
+        <div x-show="wsRuns.length" x-cloak class="rounded-lg border border-gray-200 px-3 py-2">
+          <p class="text-xs text-gray-600">Runs after deploy:
+            <span class="font-mono" x-text="wsRuns.map(r => r.asset).join(', ')"></span></p>
+          <label class="mt-1 flex items-center gap-2 text-xs text-gray-600">
+            <input type="checkbox" x-model="deployForm.skip_post_deploy" class="rounded text-blue-600">
+            Skip them for this deploy
+          </label>
+        </div>
         <details>
           <summary class="cursor-pointer select-none text-sm font-medium text-gray-700">Advanced options
             <span class="font-normal text-gray-400">— SSH key override, integrations, Windows identity</span></summary>
@@ -935,7 +945,7 @@ function ociDashboard() {
       boot_volume_gb: 50, workgroup: '', acknowledge_charges: false,
       register_in_entitle: false, register_in_passwordsafe: false,
       ssh_key_secret_override: '',
-      enable_pra: true, jump_group: '', jumpoint_name: '',
+      enable_pra: true, skip_post_deploy: false, jump_group: '', jumpoint_name: '',
     },
 
     // The Always-Free AMD micro, but only where the region actually has it. E2
@@ -974,7 +984,7 @@ function ociDashboard() {
         boot_volume_gb: 50, workgroup: '', acknowledge_charges: false,
         register_in_entitle: false, register_in_passwordsafe: false,
         ssh_key_secret_override: '',
-        enable_pra: true, jump_group: '', jumpoint_name: '',
+        enable_pra: true, skip_post_deploy: false, jump_group: '', jumpoint_name: '',
       };
     },
 

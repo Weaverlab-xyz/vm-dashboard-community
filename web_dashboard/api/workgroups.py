@@ -329,6 +329,47 @@ def put_secret_bindings(
     return SecretBindings(**out)
 
 
+class PostDeployRun(BaseModel):
+    asset: str = Field(..., min_length=1, max_length=255)
+    # Blank = the active storage backend when the run is queued.
+    asset_backend: str = Field("", max_length=32)
+
+
+class PostDeployRuns(BaseModel):
+    runs: List[PostDeployRun] = []
+
+
+@router.get("/{name}/post-deploy-runs", response_model=PostDeployRuns)
+def get_post_deploy_runs(
+    name: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The assets run on every VM deployed into this workstream, in order — so the
+    deploy form can say what will run, and the people deploying can see it."""
+    wg = _require_steward(db, current_user, name)
+    return PostDeployRuns(runs=workgroup_service.post_deploy_runs(wg.name, db))
+
+
+@router.put("/{name}/post-deploy-runs", response_model=PostDeployRuns)
+def put_post_deploy_runs(
+    name: str,
+    payload: PostDeployRuns,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Administrator only: each entry is code that runs on every VM the workstream's
+    members deploy, so choosing it takes the same authority as binding its secrets."""
+    try:
+        out = workgroup_service.set_post_deploy_runs(
+            db, name, [r.model_dump() for r in payload.runs])
+    except WorkgroupError as exc:
+        _raise_from(exc)
+    _audit(db, current_user, "workstream_post_deploy_runs_update", workstream=name.lower(),
+           assets=[r["asset"] for r in out])
+    return PostDeployRuns(runs=out)
+
+
 @router.get("/{name}/members", response_model=List[str])
 def list_members(
     name: str,

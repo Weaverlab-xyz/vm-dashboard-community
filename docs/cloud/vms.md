@@ -706,6 +706,43 @@ audited. The API is `GET`/`PUT /api/workgroups/{name}/secret-bindings`; the `PUT
 `{"ssh_key_secret": {"aws": "..."}, "pra_credential_ref": "..."}`, changes only the clouds
 it names, and `null` unbinds.
 
+### Workstream post-deploy runs
+
+An administrator can give a workstream an ordered list of Config-Management assets
+(playbooks, scripts, `.rpm`/`.deb` packages) to run on **every cloud VM deployed into it**:
+an agent install, a hardening baseline. Set them on **RBAC → Workstreams → Edit →
+Post-deploy runs**, choosing from the assets on the Storage page.
+
+When a deploy into the workstream completes, each asset is queued as an ordinary
+Config-Management job:
+
+- **Ordinary jobs.** It is the same `ansible_local` job a run from the Config Management
+  page creates, aimed at the new VM's address, so it appears on /jobs and is cancellable
+  like any other run.
+- **Scheduled, not immediate.** The jobs are queued in list order, scheduled a few minutes
+  out so the VM's SSH (or a Windows server's OpenSSH) is up first.
+- **The VM's own key.** They use the SSH key the VM was deployed with, including a
+  [workstream-bound key](#workstream-secret-bindings).
+- **No secrets.** A post-deploy run carries no secret variables or managed accounts.
+- **Never fails the deploy.** The deploy is already done. If a run can't be queued, the
+  reason is recorded on the deploy job as `post_deploy_error`.
+
+The deploy form lists what will run, under **Runs after deploy**, with **Skip them for
+this deploy** (`skip_post_deploy: true` on the request).
+
+Limits:
+
+- An asset kept on the dashboard's **local** storage is skipped, because the runner that
+  reaches cloud VMs can't read it. Move it to a cloud backend from the Storage page.
+- OCI VMs are run against as plain addresses, so they use the global Ansible SSH key, as
+  a Config-Management run on an OCI address does today.
+
+Changing the list is **administrator-only**, because each entry is code that runs on every
+VM the workstream's members deploy. Members can see the list. Every change is audited, and
+so is each deploy that queues runs. The API is `GET`/`PUT
+/api/workgroups/{name}/post-deploy-runs` with `{"runs": [{"asset": "...",
+"asset_backend": ""}]}`, at most 10, in run order.
+
 ### Adding PRA to a VM after deploy
 
 A Linux VM this dashboard deployed — on AWS, Azure, GCP or OCI — can be added to PRA at any
