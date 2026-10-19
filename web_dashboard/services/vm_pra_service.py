@@ -301,7 +301,7 @@ async def _attach_windows(db: Session, deploy_job, meta: dict, *, cloud: str, gr
         vm_name=_vm_name(cloud, meta), hostname=hostname, username=username,
         password=password, ps_owned=ps_owned, result=result, tag=CLOUDS[cloud]["tag"],
         jump_group=group, jumpoint_name=jumpoint,
-        client_secret=client_secret_for(pra_credential_ref),
+        client_secret=client_secret_for(pra_credential_ref, deploy_job.workgroup),
         want_shell=want_shell, want_rdp=want_rdp, progress=say)
     updates.update({"bt_error": None, "bt_rdp_error": None, **result})
     job_service.update_metadata(db, deploy_job.id, updates)

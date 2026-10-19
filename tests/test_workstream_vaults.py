@@ -201,8 +201,11 @@ def test_every_per_deploy_resolution_passes_the_workstream():
         for m in re.finditer(r"resolve_reference\(", src):
             assert "workgroup=" in src[m.end():m.end() + 160], (
                 f"{cloud}: {src[m.start():m.start() + 120]!r} resolves without the workstream")
-    assert "client_secret_for(pra_credential_ref, deploy_job.workgroup)" in _src(
-        "services", "vm_pra_service.py")
+    pra = _src("services", "vm_pra_service.py")
+    # Every call, not the definition.
+    calls = re.findall(r"(?<!def )client_secret_for\(([^)]*)\)", pra)
+    assert calls and all("deploy_job.workgroup" in c for c in calls), (
+        f"Add to PRA resolves a credential without the VM's workstream: {calls}")
 
 
 if __name__ == "__main__":
