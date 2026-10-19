@@ -416,6 +416,7 @@ async def fetch_ssh_key(cloud: str, secret_name: str = "") -> str | None:
     "aws"   → AWS Secrets Manager (ansible_ssh_key_sm_name config key)
     "gcp"   → GCP Secret Manager  (gcp_ssh_key_secret_name config key)
     "azure" → Azure Key Vault     (ansible_aci_ssh_key_secret_name config key)
+    "oci"   → OCI Vault           (oci_ssh_key_secret — the deploy keypair)
     ""      → None
 
     All three paths handle either a raw PEM secret or a JSON
@@ -439,6 +440,13 @@ async def fetch_ssh_key(cloud: str, secret_name: str = "") -> str | None:
         from .azure_service import _ensure_creds
         cred, _ = await _ensure_creds()
         return await asyncio.to_thread(_fetch_azure_ssh_key_sync, cred, vault_url, secret_name)
+    if cloud == "oci":
+        # OCI has no separate Ansible key: the fallback is the deploy keypair itself.
+        secret_name = secret_name or _cfg("oci_ssh_key_secret")
+        if not secret_name:
+            return None
+        from . import oci_service
+        return _extract_private_key(await oci_service.get_secret(secret_name)) or None
     return None
 
 

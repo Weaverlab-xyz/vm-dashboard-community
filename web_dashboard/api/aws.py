@@ -590,10 +590,16 @@ def copy_community_ami(
 
 @router.get("/secrets/ssh-key", response_model=SSHKeySecretDetail)
 async def get_configured_ssh_key(
+    workgroup: str = "",
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("aws", "read")),
 ):
-    """Retrieve the configured SSH public key from Secrets Manager for preview in the deploy modal."""
-    secret_name = _ssh_key_secret()
+    """Retrieve the configured SSH public key from Secrets Manager for preview in the deploy modal.
+
+    With ``workgroup``, the key bound to that workstream (if any) is previewed instead —
+    the one its deploys will actually use."""
+    from .workgroups import bound_ssh_secret
+    secret_name = bound_ssh_secret(db, current_user, "aws", workgroup) or _ssh_key_secret()
     if not secret_name:
         raise HTTPException(
             status_code=404,

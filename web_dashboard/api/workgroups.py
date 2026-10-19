@@ -132,6 +132,24 @@ def _require_steward(db: Session, user: User, name: str):
                "neither. An administrator can.")
 
 
+def bound_ssh_secret(db: Session, user: User, cloud: str, workgroup: str) -> str:
+    """The SSH key secret bound to ``workgroup`` for ``cloud``, for the deploy forms'
+    key preview — or "" when none is bound or no workstream was named.
+
+    Takes a workstream, never a secret name: a preview endpoint that accepted any name
+    would let anyone with cloud read access read any secret's public half. The caller
+    must be able to see the workstream's bindings (the same rule as reading them); for
+    anyone else this is "", so the preview falls back to the global key and says nothing
+    about what another workstream binds."""
+    if not (workgroup or "").strip():
+        return ""
+    try:
+        wg = _require_steward(db, user, workgroup)
+    except HTTPException:
+        return ""
+    return workgroup_service.bindings(wg.name, db)["ssh_key_secret"].get(cloud) or ""
+
+
 def _audit(db: Session, actor: User, action: str, **details) -> None:
     from ..services import job_service
     job_service.log_audit(db, actor.username, action, details=details)

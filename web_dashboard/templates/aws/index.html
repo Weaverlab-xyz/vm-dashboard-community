@@ -972,7 +972,10 @@
             <div x-show="deployForm.sshKeyPreviewLoading" class="text-xs text-gray-400">Fetching key…</div>
             <div x-show="!deployForm.sshKeyPreviewLoading && deployForm.sshPublicKeyPreview"
                  class="rounded-lg border border-green-200 bg-green-50 px-3 py-2">
-              <p class="text-xs text-green-700 font-medium mb-1" x-text="'✓ ' + deployForm.sshKeyName"></p>
+              <p class="text-xs text-green-700 font-medium mb-1">
+                <span x-text="'✓ ' + deployForm.sshKeyName"></span>
+                <span x-show="wsBound.ssh" class="ml-1 font-normal text-green-600">— bound to this workstream</span>
+              </p>
               <textarea readonly rows="2"
                         class="w-full border-0 bg-transparent text-xs font-mono resize-none text-gray-600 cursor-default p-0"
                         x-text="deployForm.sshPublicKeyPreview"></textarea>
@@ -2561,7 +2564,20 @@
       // Network options are region-scoped — subnets, security groups and
       // instance types all differ per region — so this is cached per region and
       // refetched when the deploy region changes.
-      async loadNetworkOptsFor(region, force = false) {
+      // The key a deploy will use: the picked workstream's bound one, else the global one.
+    async refreshKeyPreview() {
+      const wg = this.deployForm.workgroup || '';
+      try {
+        const r = await API.get('/api/aws/secrets/ssh-key?workgroup=' + encodeURIComponent(wg));
+        if ((this.deployForm.workgroup || '') !== wg) return;
+        this.deployForm.sshKeyName = r?.name || '';
+        this.deployForm.sshPublicKeyPreview = r?.public_key || '';
+      } catch (e) {
+        this.deployForm.sshPublicKeyPreview = '';
+      }
+    },
+
+    async loadNetworkOptsFor(region, force = false) {
         if (!force && this.networkOpts.subnets && region === this.networkOptsRegion) return;
         this.loadingNetworkOpts = true;
         try {
@@ -2962,14 +2978,7 @@
         this.applyWorkstreamDefaults();
 
         const fetches = [this.loadNetworkOptsFor(this.deployForm.region)];
-        fetches.push(
-          API.get('/api/aws/secrets/ssh-key').then(r => {
-            this.deployForm.sshKeyName = r?.name || '';
-            this.deployForm.sshPublicKeyPreview = r?.public_key || '';
-          }).catch(() => {
-            this.deployForm.sshPublicKeyPreview = '';
-          })
-        );
+        fetches.push(this.refreshKeyPreview());
         fetches.push(
           API.get('/api/aws/secrets/ssh-keys').then(r => {
             this.deployForm.sshKeySecrets = r?.secrets || [];
@@ -3268,17 +3277,8 @@
         this.loadPraPickers();
 
         const fetches = [this.loadNetworkOptsFor(this.deployForm.region)];
-        // Fetch configured key preview if not already loaded from a prior modal open
-        if (!this.deployForm.sshKeyName) {
-          fetches.push(
-            API.get('/api/aws/secrets/ssh-key').then(r => {
-              this.deployForm.sshKeyName = r?.name || '';
-              this.deployForm.sshPublicKeyPreview = r?.public_key || '';
-            }).catch(() => {
-              this.deployForm.sshPublicKeyPreview = '';
-            })
-          );
-        }
+        // Fetch the key preview if not already loaded from a prior modal open
+        if (!this.deployForm.sshKeyName) fetches.push(this.refreshKeyPreview());
         // The override list is only fetched by openDeployModal, so without this the
         // new dropdown below renders empty.
         fetches.push(

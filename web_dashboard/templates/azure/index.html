@@ -537,7 +537,8 @@
           <div x-show="!deployModal.keyvaultLoading && deployModal.keyvaultError"
                class="text-xs text-red-500 py-2" x-text="deployModal.keyvaultError"></div>
           <div x-show="!deployModal.keyvaultLoading && !deployModal.keyvaultError && deployModal.sshPublicKey">
-            <p class="text-xs text-green-600 mb-1">Key retrieved from vault: <span class="font-mono font-medium" x-text="deployModal.keyvaultSecretName"></span></p>
+            <p class="text-xs text-green-600 mb-1">Key retrieved from vault: <span class="font-mono font-medium" x-text="deployModal.keyvaultSecretName"></span>
+              <span x-show="wsBound.ssh" class="ml-1">— bound to this workstream</span></p>
             <textarea x-model="deployModal.sshPublicKey" rows="2" readonly
                       class="w-full border border-gray-200 bg-gray-50 rounded-md px-3 py-2 text-xs font-mono resize-none text-gray-600 cursor-default"></textarea>
           </div>
@@ -2437,13 +2438,19 @@ function azureDashboard() {
       return null;
     },
 
+    // The form submits this key, so it must be the one the deploy uses: the picked
+    // workstream's bound key when it has one (applyWorkstreamDefaults calls back here).
+    refreshKeyPreview() { return this.fetchKeyvaultKey(); },
+
     async fetchKeyvaultKey() {
+      const wg = this.deployModal.workgroup || '';
       this.deployModal.keyvaultLoading = true;
       this.deployModal.keyvaultError = '';
       this.deployModal.sshPublicKey = '';
       this.deployModal.keyvaultSecretName = '';
       try {
-        const data = await API.get('/api/azure/keyvault-ssh-key');
+        const data = await API.get('/api/azure/keyvault-ssh-key?workgroup=' + encodeURIComponent(wg));
+        if ((this.deployModal.workgroup || '') !== wg) return;
         this.deployModal.sshPublicKey = data.ssh_public_key;
         this.deployModal.keyvaultSecretName = data.secret_name;
       } catch (e) {

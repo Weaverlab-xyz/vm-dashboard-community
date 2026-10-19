@@ -938,9 +938,10 @@ def _target_spec(item: dict):
                     "transport": agent_ansible_meta.transport_for_guest_os(
                         item.get("guest_os")),
                     "cloud": ""}
-        # `cloud` drives SSH-key retrieval and only means something for the three
-        # clouds that store one; anything else runs as a plain ad-hoc IP target.
-        return {"target": ip, "cloud": cloud if cloud in ("aws", "azure", "gcp") else ""}
+        # `cloud` drives SSH-key retrieval and only means something for the clouds that
+        # store one; anything else runs as a plain ad-hoc IP target.
+        return {"target": ip,
+                "cloud": cloud if cloud in ("aws", "azure", "gcp", "oci") else ""}
 
     if kind == "k8s":
         if cloud not in acr.K8S_TARGET_CLOUDS:

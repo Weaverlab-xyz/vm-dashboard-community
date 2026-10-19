@@ -47,12 +47,16 @@ def _cfg(key: str) -> str:
 # in that secret; a per-launch override is recorded on the deploy job metadata as
 # ``ssh_key_secret_override``. This is the key the VM actually trusts — the global
 # ``ansible_ssh_key_sm_name`` is only a fallback for externally-built hosts.
-_CLOUD_DEPLOY_JOB_TYPE = {"aws": "ec2_deploy", "azure": "azure_deploy", "gcp": "gce_deploy"}
+_CLOUD_DEPLOY_JOB_TYPE = {"aws": "ec2_deploy", "azure": "azure_deploy", "gcp": "gce_deploy",
+                          "oci": "oci_deploy"}
 _VM_BUILD_KEY_DEFAULT_CFG = {
     "aws":   "ec2_ssh_key_secret",
     "gcp":   "gcp_ssh_key_secret_name",
     "azure": "azure_ssh_keypair_secret_name",
+    "oci":   "oci_ssh_key_secret",
 }
+# The clouds whose VMs carry a dashboard-held keypair the runner can fetch.
+_KEY_CLOUDS = tuple(_CLOUD_DEPLOY_JOB_TYPE)
 def _find_cloud_deploy_meta(db, cloud: str, ip: str) -> dict:
     """Metadata of the most-recent, non-destroyed deploy job for the cloud VM at
     ``ip`` — mirrors how /cloud-targets enumerates targets. Empty dict when none
@@ -118,8 +122,14 @@ def _managed_name_hint(db, cloud: str, target: str,
 
 def _vm_build_key_secret(cloud: str, meta: dict) -> str:
     """The secret name holding the keypair the VM was built with: the per-launch
-    override recorded on the deploy job, else the cloud's configured deploy default."""
-    override = (meta.get("ssh_key_secret_override") or "").strip()
+    override recorded on the deploy job, else the cloud's configured deploy default.
+
+    The override sits at the top level of an AWS deploy (and an Azure bulk child) but
+    only inside the stored request everywhere else — a single Azure deploy and every
+    GCP and OCI deploy — so both places are read. Missing the nested one silently ran
+    those VMs on the cloud default key, which a workstream-bound key never matches."""
+    override = (meta.get("ssh_key_secret_override")
+                or (meta.get("req") or {}).get("ssh_key_secret_override") or "").strip()
     return override or _cfg(_VM_BUILD_KEY_DEFAULT_CFG.get(cloud, ""))
 
 
@@ -417,6 +427,7 @@ async def _run_job(
                 "aws":   "ec2-user",
                 "azure": "azureuser",
                 "gcp":   "gcp-user",
+                "oci":   "opc",
             }.get(key_cloud, "ec2-user")
             # A Windows server over OpenSSH logs on as the administrator its deploy
             # recorded, never the Linux image's user.
@@ -569,7 +580,7 @@ async def _run_job(
 
         # A Secrets-Management SSH-key secret (if supplied) overrides the key.
         ssh_key_pem = secret_ssh_pem
-        if ssh_key_pem is None and cloud in ("aws", "gcp", "azure"):
+        if ssh_key_pem is None and cloud in _KEY_CLOUDS:
             job_service.update_progress(db, job_id, 10, f"Retrieving SSH key for {cloud.upper()}…")
             try:
                 ssh_key_pem = await _resolve_cloud_ssh_key(db, cloud, target)
@@ -580,7 +591,7 @@ async def _run_job(
 
         # The local runner takes inline extra vars, so a Windows server's connection
         # rides there. The operator's own ansible_user still wins.
-        if cloud in ("aws", "gcp", "azure"):
+        if cloud in _KEY_CLOUDS:
             win = windows_target(_find_cloud_deploy_meta(db, cloud, target))
             if win:
                 from . import ansible_vm_cmd
