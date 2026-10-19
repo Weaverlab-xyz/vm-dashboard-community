@@ -368,7 +368,9 @@ A scope says *what*, not *which*. Two mechanisms narrow the *which*:
   [Workstream deploy defaults](../cloud/vms.md#workstream-deploy-defaults).
   Its **bound secrets** (an SSH key secret per cloud and a PRA credential) are
   **administrator-only** to change; members can see which are bound. See
-  [Workstream secret bindings](../cloud/vms.md#workstream-secret-bindings).
+  [Workstream secret bindings](../cloud/vms.md#workstream-secret-bindings). A registered vault can be
+  limited to a workstream by an administrator, so only that workstream's deploys read it —
+  see [Vaults](secrets-management.md#vaults-and-a-workstreams-own-vault).
   Its **post-deploy runs** (assets run on every VM deployed into it) are administrator-only
   to change too — see [Workstream post-deploy runs](../cloud/vms.md#workstream-post-deploy-runs).
   **Stored assets** can be limited to one workstream by an administrator; only its

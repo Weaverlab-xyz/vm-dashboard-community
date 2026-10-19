@@ -706,6 +706,10 @@ audited. The API is `GET`/`PUT /api/workgroups/{name}/secret-bindings`; the `PUT
 `{"ssh_key_secret": {"aws": "..."}, "pra_credential_ref": "..."}`, changes only the clouds
 it names, and `null` unbinds.
 
+The PRA credential can come from the workstream's
+[own vault](../access/secrets-management.md#vaults-and-a-workstreams-own-vault), which only
+that workstream's deploys can read.
+
 ### Workstream post-deploy runs
 
 An administrator can give a workstream an ordered list of Config-Management assets

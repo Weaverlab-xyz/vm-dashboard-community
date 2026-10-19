@@ -97,13 +97,15 @@ def opted_in(enable_pra, workgroup: Optional[str] = None) -> bool:
     return True
 
 
-def client_secret_for(pra_credential_ref: Optional[str]) -> str:
+def client_secret_for(pra_credential_ref: Optional[str],
+                      workgroup: Optional[str] = None) -> str:
     """The PRA API secret a per-deploy credential reference resolves to, or "" for the
-    configured default."""
+    configured default. ``workgroup`` is the VM's: a reference into a vault scoped to a
+    workstream (secret_vault_service) resolves only for that workstream's VMs."""
     if not (pra_credential_ref or "").strip():
         return ""
     from . import config_service
-    return config_service.resolve_reference(pra_credential_ref.strip())
+    return config_service.resolve_reference(pra_credential_ref.strip(), workgroup=workgroup)
 
 
 def is_windows(meta: dict) -> bool:
@@ -212,7 +214,7 @@ async def attach(db: Session, deploy_job, *, jump_group: Optional[str] = None,
         jump_group_name=group,
         jumpoint_name=jumpoint,
         tag=CLOUDS[cloud]["tag"],
-        client_secret=client_secret_for(pra_credential_ref),
+        client_secret=client_secret_for(pra_credential_ref, deploy_job.workgroup),
     )
     updates.update({
         "bt_shell_jump_id": result.get("shell_jump_id"),

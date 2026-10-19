@@ -344,6 +344,38 @@ file against the dashboard.
 
 ---
 
+## Vaults, and a workstream's own vault
+
+Besides the one configured store, an administrator can register more vaults on **Secrets →
+Backend → Vaults**: an id, a backend (Azure Key Vault, AWS Secrets Manager, GCP Secret
+Manager or Secrets Safe) and an endpoint (the Key Vault URL, the AWS region or the GCP
+project). A reference names one by putting its id first, like
+`azure_kv://team-a-kv/pra-client`; a reference whose first segment is not a registered
+vault reads from the configured store as before.
+
+A vault can be **limited to one workstream**. Such a vault resolves only for that
+workstream's cloud VM deploys and their **Add to PRA** actions — the PRA credential and the
+Gateway deploy key. Resolved for anyone else, including a global Settings key, a
+Config-Management secret variable or another workstream's deploy, it resolves to nothing,
+the same as a secret that can't be read, and a warning is logged. So a team's own vault holds
+that team's secrets and no one else's deploys can read them.
+
+- A workstream's **bound PRA credential**
+  ([Workstream secret bindings](../cloud/vms.md#workstream-secret-bindings)) can name a
+  reference into its own vault or an unlimited one; one into another workstream's vault is
+  refused when it's saved. Type the reference in the editor's **or a reference** field, since
+  the picker lists only the configured store.
+- **Changing a vault's workstream** applies immediately; resolved values are not cached
+  past it.
+- **A vault still bound** as a workstream's PRA credential can't be deleted.
+- A vault's **backend** can't change after it is registered, because references to it name
+  that backend.
+
+Managing vaults is administrator-only and audited (`secret_vault_update`,
+`secret_vault_delete`). The API is `GET /api/secrets/vaults`, `PUT
+/api/secrets/vaults/{id}` with `{"backend", "endpoint", "workgroup"}` (`null` for all
+workstreams), and `DELETE /api/secrets/vaults/{id}`.
+
 ## Tier 3 — Vault-backed cloud credentials (BeyondTrust)
 
 With the BeyondTrust integration enabled, the dashboard can retrieve AWS, Azure,
