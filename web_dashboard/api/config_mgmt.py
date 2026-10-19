@@ -32,7 +32,7 @@ from ..database import Job, User, get_db
 from ..services import config_mgmt_route_service as cmr
 from .auth import get_current_user, has_explicit_permission, require_permission
 from ..services import job_service
-from ..services import storage_service
+from ..services import asset_scope_service, storage_service
 from ..services.storage_service import StorageError
 from ..services import ansible_local_service
 from ..services import ansible_run_meta
@@ -51,24 +51,37 @@ router = APIRouter(prefix="/api/config-mgmt", tags=["config-mgmt"],
 
 # ── Asset / playbook listing ───────────────────────────────────────────────────
 
+def _scope_check(db: Session, user: User, backend: str, name: str) -> None:
+    """404 for an asset scoped to a workstream the user is not in, as /api/storage
+    answers (services/asset_scope_service)."""
+    try:
+        asset_scope_service.check(db, user, backend, name)
+    except asset_scope_service.AssetScopeDenied as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
 @router.get("/assets")
-async def list_assets(current_user: User = Depends(get_current_user)):
+async def list_assets(db: Session = Depends(get_db),
+                      current_user: User = Depends(get_current_user)):
     """List all available assets (.yml, .sh, .deb, .rpm) across every configured
     storage backend, each item tagged with the backend it lives on. Issue #16:
     operators can now keep playbooks on local filesystem AND on a cloud backend
     side-by-side — the UI uses the per-asset backend tag to warn when a local
     asset is paired with a cloud target."""
     try:
-        return await storage_service.list_all_assets()
+        return asset_scope_service.filter_items(
+            db, current_user, await storage_service.list_all_assets())
     except StorageError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
 
 @router.get("/playbooks")
-async def list_playbooks(current_user: User = Depends(get_current_user)):
+async def list_playbooks(db: Session = Depends(get_db),
+                         current_user: User = Depends(get_current_user)):
     """List playbook names (.yml/.yaml) from configured storage — back-compat alias."""
     try:
-        return await storage_service.list_playbooks()
+        return asset_scope_service.filter_names(
+            db, current_user, await storage_service.list_playbooks())
     except StorageError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -81,10 +94,15 @@ class UploadAssetRequest(BaseModel):
 @router.post("/upload", status_code=201, dependencies=[Depends(require_permission("config_mgmt", "write"))])
 async def upload_asset(
     req: UploadAssetRequest,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Upload a playbook (.yml/.yaml), script (.sh/.ps1), or package (.rpm/.deb/.exe/.msi)."""
     import base64
+    try:
+        asset_scope_service.check_replace(db, current_user, "", req.filename)
+    except asset_scope_service.AssetScopeDenied as e:
+        raise HTTPException(status_code=409, detail=str(e))
     try:
         data = base64.b64decode(req.content_b64)
     except Exception:
@@ -1108,6 +1126,10 @@ async def run_playbook(
     "portainer" is the same localhost path against the one configured Portainer, and
     takes no target_id.
     """
+    # Before anything else: an asset scoped to another workstream is "not found" to this
+    # user on every path below, and every /run-bulk child comes through here too.
+    _scope_check(db, current_user, payload.asset_backend, payload.asset)
+
     # Checked FIRST, and before the k8s/database split, because it is the reachability
     # question rather than the target-family one: an on-prem database bound to an agent is
     # target_kind="database" and still cannot use any runner the dashboard launches.
@@ -1335,6 +1357,9 @@ async def run_playbook_bulk(
     target failed.
     """
     from ..services import inventory_service
+
+    # Once for the batch, so a refused asset is one 404 rather than a failure per target.
+    _scope_check(db, current_user, payload.asset_backend, payload.asset)
 
     # Resolved from a FRESH collect(), not the page's cache: this enqueues work, so
     # it must not act on a resource that was destroyed since the page loaded. The

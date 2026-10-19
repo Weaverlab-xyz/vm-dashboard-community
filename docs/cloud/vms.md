@@ -734,6 +734,8 @@ Limits:
 
 - An asset kept on the dashboard's **local** storage is skipped, because the runner that
   reaches cloud VMs can't read it. Move it to a cloud backend from the Storage page.
+- An asset [scoped to another workstream](../operations/storage-management.md#scoping-an-asset-to-a-workstream)
+  can't be added to the list; the editor only offers global assets and this workstream's own.
 - OCI VMs are run against as plain addresses, so they use the global Ansible SSH key, as
   a Config-Management run on an OCI address does today.
 

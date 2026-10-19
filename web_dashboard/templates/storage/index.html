@@ -608,6 +608,7 @@
             <th class="pb-2 pr-4">Name</th>
             <th class="pb-2 pr-4">Backend</th>
             <th class="pb-2 pr-4">Type</th>
+            <th class="pb-2 pr-4" title="Who can see and run it. An administrator can limit an asset to one workstream.">Workstream</th>
             <th class="pb-2 pr-4 text-right">Size</th>
             <th class="pb-2 text-right">Actions</th>
           </tr>
@@ -629,6 +630,22 @@
               </td>
               <td class="py-2 pr-4">
                 <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-gray-100 text-gray-700" x-text="a.type"></span>
+              </td>
+              <!-- Asset scope (PUT /api/storage/scope, admin-only). Blank = every
+                   workstream; otherwise only that workstream's members see and run it. -->
+              <td class="py-2 pr-4">
+                <template x-if="isAdmin">
+                  <select :value="a.workgroup || ''" @change="setScope(a, $event.target.value)"
+                          class="border border-gray-300 rounded px-1.5 py-0.5 text-xs">
+                    <option value="">All</option>
+                    <template x-for="w in workstreams" :key="w">
+                      <option :value="w" x-text="w" :selected="w === a.workgroup"></option>
+                    </template>
+                  </select>
+                </template>
+                <template x-if="!isAdmin">
+                  <span class="text-xs text-gray-600" x-text="a.workgroup || 'All'"></span>
+                </template>
               </td>
               <td class="py-2 pr-4 text-right text-gray-500" x-text="formatBytes(a.size || 0)"></td>
               <td class="py-2 text-right whitespace-nowrap">
@@ -792,6 +809,8 @@ function storagePage(tabSlugs) {
     agentsError: '',
     assets: [],
     loadingAssets: false,
+    isAdmin: false,
+    workstreams: [],
     saving: false,
     testing: { s3: false, azure_blob: false, gcs: false, oci_object_storage: false, local: false, agent_local: false },
     migrate: { source: '', target: '', overwrite: false },
@@ -826,8 +845,9 @@ function storagePage(tabSlugs) {
       requireAuth();
       // Pick the tab before the loads so the page never renders with no panel.
       this.pickTab();
+      this.isAdmin = !!(Alpine.store('auth') && Alpine.store('auth').isAdmin);
       await Promise.all([this.loadBackends(), this.loadConfig(), this.loadAssets(),
-                         this.loadFeatureFlags(), this.loadAgents()]);
+                         this.loadFeatureFlags(), this.loadAgents(), this.loadWorkstreams()]);
       // Open the active backend's fields, and follow the radio from here on.
       this.openFields = this.cfg.storage_active_backend || '';
       this.$watch('cfg.storage_active_backend', v => { if (v) this.openFields = v; });
@@ -960,6 +980,29 @@ function storagePage(tabSlugs) {
         this.assets = [];
       } finally {
         this.loadingAssets = false;
+      }
+    },
+
+    async loadWorkstreams() {
+      if (!this.isAdmin) return;
+      try {
+        const r = await API.get('/api/groups/workgroups');
+        this.workstreams = (Array.isArray(r) ? r : (r.workgroups || []))
+          .map(w => (typeof w === 'string' ? w : w.name)).filter(Boolean);
+      } catch (e) { /* the column still shows each asset's current scope */ }
+    },
+
+    async setScope(asset, workgroup) {
+      try {
+        const r = await API.put('/api/storage/scope', {
+          backend: asset.backend, name: asset.name, workgroup: workgroup || null,
+        });
+        asset.workgroup = r.workgroup;
+        this.showToast(r.workgroup ? `${asset.name} is now limited to ${r.workgroup}`
+                                   : `${asset.name} is available to every workstream`);
+      } catch (e) {
+        this.showToast(e.message || 'Could not change the workstream', 'error');
+        await this.loadAssets();
       }
     },
 

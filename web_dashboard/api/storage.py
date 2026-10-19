@@ -16,6 +16,7 @@ to a self-contained `/storage` page that mirrors the shape of `/secrets`:
   PUT    /api/storage/upload/part/{n}  — stage one raw part of a chunked upload
   POST   /api/storage/upload/commit    — commit the staged parts into one object
   POST   /api/storage/upload/abort     — discard a chunked upload's staged parts
+  PUT    /api/storage/scope            — limit an asset to one workstream (admin)
 
 Storage today stores Ansible playbooks/scripts/packages, but is general-purpose.
 Future features that need a small object store can layer on top of it
@@ -29,12 +30,28 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import User, get_db
-from ..services import storage_chunked, storage_service
+from ..services import asset_scope_service, job_service, storage_chunked, storage_service
 from ..services.storage_service import BACKENDS, StorageError
 from .auth import get_current_user, require_admin, require_permission
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/storage", tags=["storage"])
+
+
+def _scope_check(db: Session, user: User, backend: str, name: str) -> None:
+    """404 for an asset scoped to a workstream the user is not in — the same answer as
+    an asset that does not exist (services/asset_scope_service)."""
+    try:
+        asset_scope_service.check(db, user, backend, name)
+    except asset_scope_service.AssetScopeDenied as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+def _replace_check(db: Session, user: User, backend: str, name: str) -> None:
+    try:
+        asset_scope_service.check_replace(db, user, backend, name)
+    except asset_scope_service.AssetScopeDenied as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 # Per-backend "configured?" required fields. Mirrors storage_service.
@@ -448,10 +465,12 @@ async def test_backend(
 
 @router.get("/list")
 async def list_active(
+        db: Session = Depends(get_db),
         current_user: User = Depends(require_permission("storage", "read"))):
     """List assets from the *active* backend."""
     try:
-        items = await storage_service.list_assets()
+        items = asset_scope_service.filter_items(
+            db, current_user, await storage_service.list_assets())
         return {"backend": storage_service.active_backend(), "items": items, "count": len(items)}
     except StorageError as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -460,11 +479,13 @@ async def list_active(
 @router.get("/list/{backend}")
 async def list_specific(
     backend: str,
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("storage", "read")),
 ):
     """List assets from a specific backend (used by the migrate UI's source picker)."""
     try:
-        items = await storage_service.list_assets_in(backend)
+        items = asset_scope_service.filter_items(
+            db, current_user, await storage_service.list_assets_in(backend), backend)
         return {"backend": backend, "items": items, "count": len(items)}
     except StorageError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -481,6 +502,7 @@ class MigrateRequest(BaseModel):
 @router.post("/migrate")
 async def migrate(
     req: MigrateRequest,
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
     """Copy every asset from `source` to `target`. The source remains
@@ -512,6 +534,7 @@ async def migrate(
         try:
             data = await storage_service.fetch_asset_in(req.source, name)
             await storage_service.upload_asset_to(req.target, name, data)
+            asset_scope_service.on_copy(db, name, req.source, req.target)
             copied.append(name)
         except StorageError as e:
             failed.append({"name": name, "error": str(e)})
@@ -539,6 +562,7 @@ class UploadAssetRequest(BaseModel):
 @router.post("/upload", status_code=201)
 async def upload_asset(
     req: UploadAssetRequest,
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("storage", "write")),
 ):
     """Upload an asset to the active backend. Open to any logged-in user —
@@ -547,6 +571,7 @@ async def upload_asset(
     .exe/.msi — the last two are Windows installers, and are what stages a POV's
     Password Safe Resource Broker bootstrapper."""
     import base64
+    _replace_check(db, current_user, "", req.filename)
     try:
         data = base64.b64decode(req.content_b64)
     except Exception:
@@ -620,6 +645,7 @@ def _upload_handle(request) -> str:
 @router.post("/upload/begin", status_code=201)
 async def begin_chunked_upload(
     req: BeginChunkedUploadRequest,
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("storage", "write")),
 ):
     """Open a chunked upload against the active backend.
@@ -633,6 +659,7 @@ async def begin_chunked_upload(
             status_code=400,
             detail="No active storage backend. Configure one on /storage and select it "
                    "as active.")
+    _replace_check(db, current_user, backend, req.filename)
     try:
         session = await storage_chunked.begin_upload(
             backend, req.filename, req.size, username=current_user.username)
@@ -728,13 +755,16 @@ async def abort_chunked_upload(
 @router.delete("/asset/{name:path}")
 async def delete_asset(
     name: str,
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("storage", "delete")),
 ):
     """Delete an asset from the active backend."""
+    _scope_check(db, current_user, "", name)
     try:
         await storage_service.delete_asset(name)
     except StorageError as e:
         raise HTTPException(status_code=502, detail=str(e))
+    asset_scope_service.on_delete(db, "", name)
     return {"ok": True, "deleted": name}
 
 
@@ -742,12 +772,14 @@ async def delete_asset(
 
 @router.get("/list-all")
 async def list_all(
+        db: Session = Depends(get_db),
         current_user: User = Depends(require_permission("storage", "read"))):
     """Aggregated asset list across every *configured* backend. Each item is
     tagged with the backend it lives on so the Storage page can render
     per-backend rows and the Config Mgmt page can warn when a local-only asset
     is paired with a cloud target."""
-    items = await storage_service.list_all_assets()
+    items = asset_scope_service.filter_items(
+        db, current_user, await storage_service.list_all_assets())
     return {"items": items, "count": len(items)}
 
 
@@ -762,6 +794,7 @@ class MoveRequest(BaseModel):
 @router.post("/move")
 async def move_asset(
     req: MoveRequest,
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
     """Move a single asset from one backend to another (copy + delete source).
@@ -773,6 +806,7 @@ async def move_asset(
         await storage_service.move_asset(req.name, req.from_backend, req.to_backend)
     except StorageError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    asset_scope_service.on_move(db, req.name, req.from_backend, req.to_backend)
     return {"ok": True, "moved": req.name, "from": req.from_backend, "to": req.to_backend}
 
 
@@ -782,11 +816,13 @@ async def move_asset(
 async def fetch_asset(
     backend: str,
     name: str,
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("storage", "read")),
 ):
     """Return the raw bytes of a stored asset as base64. Used by the Packer
     image builder forms to load a stored .sh script into the provisioner
     textarea instead of forcing the operator to copy-paste from elsewhere."""
+    _scope_check(db, current_user, backend, name)
     try:
         data = await storage_service.fetch_asset_in(backend, name)
     except StorageError as e:
@@ -806,15 +842,18 @@ async def fetch_asset(
 async def delete_asset_in(
     backend: str,
     name: str,
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("storage", "delete")),
 ):
     """Delete an asset from a *specific* backend (sibling of /asset/{name}
     which targets the active backend). Needed once the UI surfaces assets
     from multiple backends side by side."""
+    _scope_check(db, current_user, backend, name)
     try:
         await storage_service.delete_asset_in(backend, name)
     except StorageError as e:
         raise HTTPException(status_code=502, detail=str(e))
+    asset_scope_service.on_delete(db, backend, name)
     return {"ok": True, "deleted": name, "backend": backend}
 
 
@@ -832,6 +871,7 @@ class BulkDeleteRequest(BaseModel):
 @router.post("/bulk-delete")
 async def bulk_delete(
     req: BulkDeleteRequest,
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("storage", "delete")),
 ):
     """Delete many assets in one call. Each item names its source backend so
@@ -843,8 +883,14 @@ async def bulk_delete(
     deleted: list[dict] = []
     failed:  list[dict] = []
     for item in req.items:
+        if not asset_scope_service.visible(
+                current_user, asset_scope_service.scope_of(db, item.backend, item.name)):
+            failed.append({"name": item.name, "backend": item.backend,
+                           "error": f"Asset '{item.name}' not found."})
+            continue
         try:
             await storage_service.delete_asset_in(item.backend, item.name)
+            asset_scope_service.on_delete(db, item.backend, item.name)
             deleted.append({"name": item.name, "backend": item.backend})
         except StorageError as e:
             failed.append({"name": item.name, "backend": item.backend, "error": str(e)})
@@ -853,3 +899,31 @@ async def bulk_delete(
         "failed":  failed,
         "summary": f"{len(deleted)} deleted, {len(failed)} failed",
     }
+
+
+# ── PUT /api/storage/scope ───────────────────────────────────────────────────
+
+class ScopeRequest(BaseModel):
+    backend: str
+    name: str
+    workgroup: str | None = None
+
+
+@router.put("/scope")
+async def set_scope(
+    req: ScopeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Limit an asset to one workstream, or make it global again with a null
+    `workgroup`. Administrator-only: a member who could scope an asset could take a
+    global playbook away from every other team. See services/asset_scope_service."""
+    try:
+        wg = asset_scope_service.set_scope(
+            db, req.backend, req.name, req.workgroup, by=current_user.username)
+    except asset_scope_service.AssetScopeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    job_service.log_audit(db, current_user.username, "storage_asset_scope_update",
+                          details={"backend": req.backend, "name": req.name,
+                                   "workstream": wg})
+    return {"backend": req.backend, "name": req.name, "workgroup": wg}

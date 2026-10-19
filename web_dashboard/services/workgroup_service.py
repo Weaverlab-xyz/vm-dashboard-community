@@ -294,6 +294,15 @@ def delete(db: Session, name: str) -> None:
                 f"Cannot delete workstream '{canonical}': {refs} {label}(s) are tagged "
                 f"into it. Reassign or delete them on {page} first.")
 
+    # Stored assets scoped to it: deleting the workstream would leave them visible to
+    # no one but administrators, with nothing on the Storage page saying why.
+    from . import asset_scope_service
+    assets = asset_scope_service.count_for(db, canonical)
+    if assets:
+        raise WorkgroupError(
+            f"Cannot delete workstream '{canonical}': {assets} stored asset(s) are scoped "
+            f"to it. Make them global or scope them elsewhere on /storage first.")
+
     db.delete(wg)
     db.commit()
 
@@ -619,7 +628,15 @@ def set_post_deploy_runs(db: Session, name: str, runs) -> list:
             raise WorkgroupError(f"run {i + 1}: '{asset[:60]}' is not an asset name")
         if not isinstance(backend, str) or len(backend) > 32:
             raise WorkgroupError(f"run {i + 1}: bad storage backend")
-        clean.append({"asset": asset, "asset_backend": backend.strip()})
+        backend = backend.strip()
+        # A post-deploy run executes on every VM this workstream deploys, so it may only
+        # use an asset that is global or scoped to this workstream.
+        from . import asset_scope_service
+        owner = asset_scope_service.scope_of(db, backend, asset)
+        if owner and owner != wg.name:
+            raise WorkgroupError(
+                f"run {i + 1}: '{asset}' is scoped to workstream '{owner}', not this one")
+        clean.append({"asset": asset, "asset_backend": backend})
     wg.post_deploy_runs = json.dumps(clean) if clean else None
     db.commit()
     return clean

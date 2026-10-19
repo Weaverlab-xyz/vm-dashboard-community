@@ -371,6 +371,9 @@ A scope says *what*, not *which*. Two mechanisms narrow the *which*:
   [Workstream secret bindings](../cloud/vms.md#workstream-secret-bindings).
   Its **post-deploy runs** (assets run on every VM deployed into it) are administrator-only
   to change too — see [Workstream post-deploy runs](../cloud/vms.md#workstream-post-deploy-runs).
+  **Stored assets** can be limited to one workstream by an administrator; only its
+  members then see, run or replace them — see
+  [Scoping an asset to a workstream](../operations/storage-management.md#scoping-an-asset-to-a-workstream).
 
   **Workstreams were called workgroups** until this release. The new name avoids a clash
   with Password Safe, whose own *workgroups* (the container for managed systems) appear in
