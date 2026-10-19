@@ -9678,7 +9678,11 @@ function settingsPage() {
         const user = await API.get('/api/auth/me');
         if (user) {
           this.mfaRequired = user.mfa_required || false;
-          this.authProvider = user.auth_provider === 'azure_ad' ? 'Microsoft Azure AD' : 'Local (username/password)';
+          // Every provider the login paths write; anything else (local, sso_pending) is a
+          // password login. A two-way test here once labelled every OIDC user "Local".
+          this.authProvider = ({ azure_ad: 'Sign in with Microsoft (Entra ID)',
+                                 oidc: 'Single sign-on (OIDC)' })[user.auth_provider]
+                              || 'Local (username/password)';
         }
       } catch (e) {
         // non-critical

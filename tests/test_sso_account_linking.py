@@ -106,6 +106,39 @@ def test_a_new_identity_still_gets_a_new_account():
     assert db.query(User).filter(User.oauth_subject == "new-sub").one().email == "new@example.com"
 
 
+def test_a_mapped_groups_role_reaches_the_user():
+    """The Groups tab's Role confers its map at sign-in. It once did nothing: the lookup read
+    `role_id` off (workgroup, permissions) tuples, so an Administrator mapping produced a user
+    holding only the ticked sections and no admin flag."""
+    from web_dashboard.database import AccessRole
+    db = _db()
+    admin_role = AccessRole(id=str(uuid.uuid4()), slug=f"adm-{uuid.uuid4().hex[:6]}",
+                            name="Administrator", permissions='{"is_admin": true}')
+    reader = AccessRole(id=str(uuid.uuid4()), slug=f"rd-{uuid.uuid4().hex[:6]}",
+                        name="Reader", permissions='{"jobs": ["read"]}')
+    db.add_all([admin_role, reader])
+    db.add_all([OAuthGroupMapping(entra_group_id="POV.Admin", display_name="admins",
+                                  workgroup="default", role_id=admin_role.id),
+                OAuthGroupMapping(entra_group_id="g-readers", display_name="readers",
+                                  workgroup="default", role_id=reader.id)])
+    db.commit()
+
+    def sign_in(sub, groups):
+        resp = auth._complete_oauth_login(db, subject=sub, email=f"{sub}@example.com",
+                                          display_name=sub, groups=groups, provider="oidc")
+        assert "error=" not in resp.headers["location"], resp.headers
+        return db.query(User).filter(User.oauth_subject == sub).one()
+
+    boss = sign_in("role-admin-sub", ["POV.Admin"])
+    assert boss.is_effective_admin and not boss.is_admin, (
+        "the mapping's Administrator role did not make the user an admin")
+    reading = sign_in("role-reader-sub", ["g-readers"])
+    assert not reading.is_effective_admin
+    assert reading.session_permissions_dict.get("jobs") == ["read"], reading.session_permissions_dict
+    # Only the roles of mappings the user actually matched are applied.
+    assert "is_admin" not in reading.session_permissions_dict
+
+
 def test_oidc_verification_needs_the_email_claim_itself():
     yes = {"email": "a@x.example", "email_verified": True}
     assert oidc_service.email_is_verified(yes, "a@x.example")
