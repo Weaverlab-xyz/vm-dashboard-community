@@ -8,7 +8,12 @@ What these pin:
   idle sweep cannot reap the gateway from under the new jump;
 - re-apply removes the old jump before creating the new one, and clears the row's keys
   in between, so a failed create never leaves the row naming a deleted jump;
-- detach removes the jump and clears the keys; Windows and PRA-off are refused up front;
+- detach removes the jump and clears the keys; PRA-off, and a Windows server whose
+  password was neither kept nor handed to Password Safe, are refused up front;
+- a Windows server gets the jumps its deploy would have built (windows_server_hook.
+  wire_pra) from the password the deploy stored, or with no Vault account when Password
+  Safe holds the account, and re-apply and detach remove its RDP jump too;
+- every bulk form sends the opt-in, and Azure reads the PRA switch where the others do;
 - each cloud router has the route, and it is ownership-checked like Destroy.
 
 Uses a real temp SQLite database; Terraform and the gateway are stubbed.
@@ -162,17 +167,18 @@ def test_detach_without_a_jump_is_refused():
     db.close()
 
 
-def test_windows_and_pra_off_are_refused_before_any_terraform():
+def test_a_windows_server_with_no_credential_and_pra_off_are_refused_before_any_terraform():
     calls = _stub()
     db = SessionLocal()
+    # Windows, but the build-time password was not kept and Password Safe has no account.
     for meta in ({"os_type": "windows"}, {"admin_password_custody": "secret_manager"},
                  {"req": {"os_type": "Windows"}}):
         job = _deploy(db, **meta)
         try:
             _run(vps.attach(db, job, cloud="gcp"))
             raise AssertionError(f"Windows row {meta} should be refused")
-        except vps.VmPraError:
-            pass
+        except vps.VmPraError as e:
+            assert "password" in str(e)
     _stub(pra_on=False)
     try:
         _run(vps.attach(db, _deploy(db), cloud="gcp"))
@@ -271,13 +277,109 @@ def test_each_modal_offers_the_opt_in_and_folds_the_rest_away():
                        ("gcp", "deployForm"), ("oci", "deployForm")):
         src = _src("templates", cloud, "index.html")
         box = f'x-model="{obj}.enable_pra"'
-        assert src.count(box) == 1, cloud
+        # AWS's bulk form shares deployForm, so it carries a second box.
+        assert src.count(box) == (2 if cloud == "aws" else 1), cloud
         i = src.index(box)
         assert src.rfind("{% if pra_enabled %}", 0, i) > src.rfind("{% endif %}", 0, i), (
             f"{cloud}: the PRA checkbox must only render while PRA is enabled")
         adv = src.index("Advanced options", i)
         assert "ssh_key_secret_override" in src[adv:adv + 3000], (
             f"{cloud}: the SSH key override belongs under Advanced")
+
+
+# ── Windows after deploy ──────────────────────────────────────────────────────
+
+def _stub_windows(calls, password="P@ss-1"):
+    from web_dashboard.services import windows_admin_secret
+
+    async def provision_rdp_jump(**kw):
+        calls.provisioned.append({"rdp": True, **kw})
+        return {"rdp_jump_id": "rdp-1", "vault_account_id": "va-1",
+                "tf_state_json": '{"rdp": 1}', "jump_group_name": kw["jump_group_name"]}
+
+    async def remove_rdp_jump(tf_state_json, tenant=None):
+        calls.removed.append(tf_state_json)
+
+    terraform_pra_service.provision_rdp_jump = provision_rdp_jump
+    terraform_pra_service.remove_rdp_jump = remove_rdp_jump
+    windows_admin_secret.read = lambda backend, ref: password
+    vps.resolve_target = lambda cloud, jg=None, jp=None, workgroup=None: ("ops", "gw")
+
+
+def test_a_windows_server_gets_its_jumps_from_the_stored_password():
+    calls = _stub()
+    saved = vps.resolve_target
+    _stub_windows(calls)
+    db = SessionLocal()
+    try:
+        job = _deploy(db, job_type="ec2_deploy", instance_id="i-w", instance_name="win-1",
+                      region="us-east-1", os_type="windows", admin_username="Administrator",
+                      admin_password_custody="secret_manager", admin_password_backend="aws_sm",
+                      admin_password_ref="dash/win-1",
+                      windows_access={"ssh": True, "rdp": True}, windows_ssh_status="ok")
+        _run(vps.attach(db, job, cloud="aws"))
+        shell = [c for c in calls.provisioned if not c.get("rdp")]
+        rdp = [c for c in calls.provisioned if c.get("rdp")]
+        assert len(shell) == 1 and len(rdp) == 1
+        assert shell[0]["port"] == 22 and shell[0]["admin_password"] == "P@ss-1"
+        assert shell[0]["vault_account_name"] == "win-1-ssh-admin"
+        assert rdp[0]["rdp_username"] == "Administrator" and rdp[0]["admin_password"] == "P@ss-1"
+        meta = job_service.get_job(db, job.id).metadata_dict
+        assert meta["bt_rdp_tf_state"] == '{"rdp": 1}' and meta["bt_shell_jump_id"]
+        assert vps.state(meta)["attached"]
+
+        # Re-apply removes both before creating again; detach removes both and clears.
+        _run(vps.attach(db, job, cloud="aws"))
+        assert '{"rdp": 1}' in calls.removed
+        _run(vps.detach(db, job_service.get_job(db, job.id)))
+        meta = job_service.get_job(db, job.id).metadata_dict
+        assert not vps.jump_id(meta) and not meta.get("bt_rdp_tf_state")
+    finally:
+        vps.resolve_target = saved
+        db.close()
+
+
+def test_rdp_only_and_password_safe_custody():
+    calls = _stub()
+    saved = vps.resolve_target
+    _stub_windows(calls)
+    db = SessionLocal()
+    try:
+        # A row from before SSH support: no access record means an RDP-only build. With
+        # Password Safe holding the account there is no Vault account and no password.
+        job = _deploy(db, os_type="windows", admin_username="gcpadmin",
+                      admin_password_custody="passwordsafe_managed")
+        _run(vps.attach(db, job, cloud="gcp"))
+        assert len(calls.provisioned) == 1 and calls.provisioned[0].get("rdp")
+        assert calls.provisioned[0]["admin_password"] == ""
+        assert calls.provisioned[0]["vault_account_name"] == ""
+        meta = job_service.get_job(db, job.id).metadata_dict
+        assert vps.jump_id(meta) == "rdp-1", "an RDP-only server still reads as PRA ✓"
+    finally:
+        vps.resolve_target = saved
+        db.close()
+
+
+def test_every_bulk_form_sends_the_opt_in():
+    for cloud, expr in (("aws", "enable_pra: this.deployForm.enable_pra !== false"),
+                        ("azure", "enable_pra: m.enable_pra !== false"),
+                        ("gcp", "enable_pra: m.enable_pra !== false"),
+                        ("oci", "enable_pra: m.enable_pra !== false")):
+        src = _src("templates", cloud, "index.html")
+        i = src.index(f"/api/{cloud}/bulk-deploy")
+        assert expr in src[i:i + 2500], f"{cloud}: the bulk form drops the PRA opt-in"
+
+
+def test_azure_reads_the_pra_switch_where_the_other_clouds_do():
+    src = _src("services", "azure_vm_service.py")
+    assert "settings.pra_enabled" not in src, (
+        "Azure must read PRA from Settings (config_service), not the env setting alone")
+    assert 'config_service.get_bool("pra_enabled")' in src
+
+
+def test_rows_show_an_rdp_only_jump():
+    for cloud in ("aws", "azure", "gcp", "oci"):
+        assert "vm_pra_service.jump_id(" in _src("api", f"{cloud}.py"), cloud
 
 
 if __name__ == "__main__":

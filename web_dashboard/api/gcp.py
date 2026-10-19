@@ -38,6 +38,7 @@ from ..services import gcp_service
 from .auth import require_admin, require_permission
 from ..services import vm_suspend_policy
 from ..services import tag_policy
+from ..services import vm_pra_service
 from . import unmanaged
 from . import tag_batch
 from .power_batch import queue_power_batch
@@ -372,7 +373,7 @@ async def _build_gcp_instances(db, project_id: str) -> list:
                 "extra": data,
                 "workgroup": (job.workgroup or data.get("workgroup") or "").lower() or None,
                 "suspend_warning": None if _ok else _why,
-                "pra_jump_id": data.get("bt_shell_jump_id") or None,
+                "pra_jump_id": vm_pra_service.jump_id(data),
             }
 
     instances = []

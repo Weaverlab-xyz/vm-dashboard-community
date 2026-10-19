@@ -38,6 +38,15 @@ def _cfg(key: str, fallback: str = "") -> str:
     return config_service.get(key) or getattr(settings, key, fallback)
 
 
+def _pra_on() -> bool:
+    """The PRA feature switch, read the way the other three clouds' runners and
+    vm_pra_service read it: config_service first (Settings), env as its fallback.
+    This module used to read the env setting alone, so turning PRA off in Settings left
+    Azure deploys still building jumps."""
+    from ..services import config_service
+    return config_service.get_bool("pra_enabled")
+
+
 def _rg():
     return _cfg("azure_resource_group") or "vm-cli-rg"
 
@@ -465,8 +474,8 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
     result = {}
     is_windows = req.os_type.lower() == "windows"
     from ..services import vm_pra_service
-    _want_pra = vm_pra_service.opted_in(getattr(req, "enable_pra", None),
-                                        getattr(req, "workgroup", None))
+    _want_pra = _pra_on() and vm_pra_service.opted_in(getattr(req, "enable_pra", None),
+                                                      getattr(req, "workgroup", None))
     try:
         job_service.set_running(db, job_id)
 
@@ -480,7 +489,7 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
         # Step 1: BeyondTrust Gateway — the shared ref-counted VM host by default, or a
         # dedicated ACI container group when the operator asked for one (or supplied a
         # per-deploy key). See _aci_requested for why shared is the default.
-        if settings.pra_enabled:
+        if _pra_on():
             if aci is None:
                 aci = (await _acquire_aci(db, job_id, req, loc) if _aci_requested(req)
                        else await _acquire_shared_host(db, job_id, loc))
@@ -602,7 +611,7 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
                 await domain_join_service.join_azure(
                     db, job_id, row=ad_row, ou=getattr(req, "ad_ou", "") or "", rg=rg,
                     vm_name=req.vm_name, location=loc, result=result)
-        elif settings.pra_enabled and _want_pra:
+        elif _want_pra:
             from ..services import terraform_pra_service
             # Resolve from config_service (wizard/DB) first, then env-var defaults.
             # Azure-specific keys override the shared bt_* keys.
@@ -685,7 +694,7 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
                 username=req.ssh_username, password=admin_password, result=result,
                 tag="Azure",
                 register_in_passwordsafe=bool(getattr(req, "register_in_passwordsafe", False)),
-                pra_enabled=bool(settings.pra_enabled) and _want_pra,
+                pra_enabled=_want_pra,
                 jump_group=_win_group,
                 jumpoint_name=_win_gateway,
                 client_secret=config_service.resolve_reference(_cred.strip()) if _cred else "",
@@ -745,7 +754,7 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
         # mode="shared": one VM failing must not stop the container the rest still need.
         aci = (await _acquire_aci(db, first_job_id, req, loc,
                                   count=len(job_items), mode="shared")
-               if settings.pra_enabled else _AciRef("none"))
+               if _pra_on() else _AciRef("none"))
 
         # One Key Vault round trip for the batch, not one per VM.
         batch_ssh_public_key = await _effective_ssh_public_key(req)

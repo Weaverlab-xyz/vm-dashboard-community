@@ -562,13 +562,13 @@
 
         {% if pra_enabled %}
         <!-- PRA is an opt-in: on by default, untick to deploy without a jump. A Linux VM
-             can be added later from its row (services/vm_pra_service); Windows cannot. -->
+             can be added later from its row (services/vm_pra_service). -->
         <div class="space-y-3">
           <label class="flex items-start gap-2 text-sm text-gray-700">
             <input type="checkbox" x-model="deployForm.enable_pra" class="mt-0.5 rounded text-blue-600">
             <span>Add to BeyondTrust PRA <span class="text-gray-400 font-normal">(Shell Jump)</span>
               <span class="block text-xs text-gray-400">Untick to deploy without a jump. A Linux VM can be
-                added later from its row; a Windows server cannot.</span></span>
+                added later from its row.</span></span>
           </label>
           <details x-show="deployForm.enable_pra" x-cloak class="ml-6">
             <summary class="cursor-pointer select-none text-xs text-gray-500">Jump group, Gateway and credential
@@ -876,7 +876,7 @@
 
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">Workstream <span class="text-gray-400 font-normal">(shared)</span> *</label>
-          <select x-model="bulkModal.workgroup"
+          <select x-model="bulkModal.workgroup" @change="bulkPraDefault()"
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
             <option value="">— select a workstream —</option>
             <template x-for="wg in availableWorkgroups" :key="wg">
@@ -934,6 +934,16 @@
           </select>
         </div>
 
+{% if pra_enabled %}
+        <!-- The batch's PRA opt-in. Starts at the workstream's default (bulkPraDefault),
+             and is sent explicitly, as the single form's is. -->
+        <label class="flex items-start gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="bulkModal.enable_pra" class="mt-0.5 rounded text-blue-600">
+          <span>Add each VM to BeyondTrust PRA
+            <span class="block text-xs text-gray-400">Untick to deploy the batch without jumps; any VM can
+              be added later from its row.</span></span>
+        </label>
+        {% endif %}
         {% if entitle_enabled %}
         <label class="flex items-center gap-2 text-sm text-gray-700">
           <input type="checkbox" x-model="bulkModal.register_in_entitle"
@@ -1907,7 +1917,7 @@ function gcpDashboard() {
     // deployForm.count, which deploys N copies of ONE image.
     selectedImages: [],
     bulkModal: {
-      open: false, items: [], names: [], workgroup: '',
+      open: false, enable_pra: true, items: [], names: [], workgroup: '',
       machine_type: 'e2-medium', zone: '', subnetwork: '', disk_size_gb: 20,
       create_external_ip: false,
       register_in_entitle: false, register_in_passwordsafe: false,
@@ -2590,6 +2600,7 @@ function gcpDashboard() {
       const items = this.customImages.filter(i => this.selectedImages.includes(i.self_link));
       this.bulkModal = {
         open: true,
+        enable_pra: true,
         items,
         // Seed each name from its image, sanitised to RFC1035 so the server's
         // validate_name doesn't 400 on a default the user never typed.
@@ -2603,12 +2614,20 @@ function gcpDashboard() {
         ad_directory_id: '', ad_ou: '', entra_join_mode: '{{ 'arc' if windows_arc_entra_default else '' }}', enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
         submitting: false, error: '',
       };
+      this.bulkPraDefault();
       this.loadAdDirs();
       // The modal opens on the configured default zone, so the pickers have to be
       // scoped back to ITS region — a previous deploy may have left networkOpts on
       // another one. (Unconditional: `zones` is initialised to [], so the old
       // load-once guard never fired anyway.)
       await this.loadNetworkOpts(this.bulkModal.zone);
+    },
+
+    // The bulk form's PRA box follows the picked workstream's default.
+    async bulkPraDefault() {
+      const wg = this.bulkModal.workgroup;
+      const on = await workstreamPraDefault(wg);
+      if (this.bulkModal.workgroup === wg) this.bulkModal.enable_pra = on;
     },
 
     async submitBulkDeploy() {
@@ -2619,6 +2638,7 @@ function gcpDashboard() {
       m.error = '';
       try {
         const res = await API.post('/api/gcp/bulk-deploy', {
+          enable_pra: m.enable_pra !== false,
           items: m.items.map((img, idx) => ({
             image_self_link: img.self_link,
             image_name: img.name || '',

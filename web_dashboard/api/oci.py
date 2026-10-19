@@ -50,6 +50,7 @@ from ..services import (
 from .auth import require_permission
 from ..services import vm_suspend_policy
 from ..services import tag_policy
+from ..services import vm_pra_service
 from . import unmanaged
 from . import tag_batch
 from .power_batch import queue_power_batch
@@ -349,7 +350,7 @@ async def _build_oci_instances(db, compartment: str) -> list:
             "deployed_by": job.created_by,
             "workgroup": (job.workgroup or meta.get("workgroup") or "").lower() or None,
             "suspend_warning": None if _ok else _why,
-            "pra_jump_id": meta.get("bt_shell_jump_id") or None,
+            "pra_jump_id": vm_pra_service.jump_id(meta),
         }
     instances = await oci_service.describe_instances(compartment, ocids)
     for inst in instances:

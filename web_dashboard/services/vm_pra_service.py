@@ -19,9 +19,13 @@ records the host it ensured — otherwise the next idle sweep would reap the gat
 under the new jump. Detaching leaves that reference in place: the VM may have been wired
 to its private address because of that gateway, and it is released with the VM.
 
-Windows is refused for now. Its jumps (an OpenSSH Shell Jump with a PRA Vault account,
-or an RDP jump) are wired by ``windows_server_hook`` from the build-time admin password,
-which is not something a later action can recover.
+Windows. Its jumps — an OpenSSH Shell Jump with a PRA Vault account and/or an RDP jump
+with one — are built by ``windows_server_hook.wire_pra``, the same code the deploy uses,
+from what the deploy kept: the admin password it stored (``admin_password_backend`` /
+``_ref``), or none at all when Password Safe holds the account, and the access it
+recorded (``windows_access`` / ``windows_ssh_status``). A build whose password was not
+kept, and not handed to Password Safe, is refused. The RDP jump's keys sit beside the
+Shell Jump's, where ``windows_server_hook.teardown`` already removes them on destroy.
 
 Job type ``vm_pra``, metadata ``{cloud, deploy_job_id, action, jump_group?,
 jumpoint_name?, pra_credential_ref?}``.
@@ -52,6 +56,9 @@ CLOUDS = {
 
 # The metadata keys a Shell Jump owns on the deploy row. Cleared together on removal.
 JUMP_KEYS = ("bt_shell_jump_id", "bt_jump_group_name", "bt_tf_state", "bt_error")
+# ...and the ones a Windows server's jumps add: the RDP jump and both Vault accounts.
+WINDOWS_JUMP_KEYS = ("bt_rdp_jump_id", "bt_rdp_vault_account_id", "bt_rdp_tf_state",
+                     "bt_rdp_error", "bt_ssh_vault_account_id", "bt_ssh_vault_error")
 
 
 def resolve_target(cloud: str, jump_group: Optional[str] = None,
@@ -139,14 +146,40 @@ def _hostname(meta: dict) -> str:
     return meta.get("wired_address") or meta.get("private_ip") or meta.get("public_ip") or ""
 
 
+def jump_id(meta: dict) -> Optional[str]:
+    """The VM's PRA jump, if it has one: its Shell Jump, else (a Windows server reached
+    over RDP only) its RDP jump. What a row's "PRA ✓" reads."""
+    return meta.get("bt_shell_jump_id") or meta.get("bt_rdp_jump_id") or None
+
+
 def state(meta: dict) -> dict:
     """What a row shows about the VM's jump: ``{attached, jump_id, jump_group, error}``."""
     return {
-        "attached": bool(meta.get("bt_shell_jump_id")),
-        "jump_id": meta.get("bt_shell_jump_id") or None,
+        "attached": bool(jump_id(meta)),
+        "jump_id": jump_id(meta),
         "jump_group": meta.get("bt_jump_group_name") or None,
-        "error": meta.get("bt_error") or None,
+        "error": meta.get("bt_error") or meta.get("bt_rdp_error") or None,
     }
+
+
+def _windows_login(meta: dict) -> tuple[str, str, bool]:
+    """``(username, password, ps_owned)`` for a Windows server's jumps, from its deploy
+    row. Raises :class:`VmPraError` when neither a stored password nor Password Safe
+    custody is there to give the Vault accounts a credential."""
+    from . import windows_admin_secret, windows_server_hook as wsh
+    username = meta.get("admin_username") or (meta.get("req") or {}).get("ssh_username") or ""
+    if meta.get("admin_password_custody") == wsh.CUSTODY_PASSWORD_SAFE:
+        return username, "", True
+    backend, ref = meta.get("admin_password_backend"), meta.get("admin_password_ref")
+    if not (backend and ref):
+        raise VmPraError(
+            "This Windows server's administrator password was not kept after its deploy, "
+            "and Password Safe does not hold the account, so there is no credential to "
+            "give its PRA Vault account.")
+    try:
+        return username, windows_admin_secret.read(backend, ref), False
+    except Exception as exc:  # noqa: BLE001 — any backend error is the operator's to fix
+        raise VmPraError(f"The stored administrator password could not be read: {exc}")
 
 
 async def _quiet(pct: int, msg: str) -> None:
@@ -162,9 +195,13 @@ def check_attachable(cloud: str, meta: dict) -> None:
     if not config_service.get_bool("pra_enabled"):
         raise VmPraError("BeyondTrust PRA is not enabled in Settings.")
     if is_windows(meta):
-        raise VmPraError(
-            "PRA access for a Windows server is wired at deploy time, from its build-time "
-            "administrator password; it cannot be added afterwards yet.")
+        from . import windows_server_hook as wsh
+        if (meta.get("admin_password_custody") != wsh.CUSTODY_PASSWORD_SAFE
+                and not (meta.get("admin_password_backend") and meta.get("admin_password_ref"))):
+            raise VmPraError(
+                "This Windows server's administrator password was not kept after its "
+                "deploy, and Password Safe does not hold the account, so PRA cannot be "
+                "added to it afterwards.")
     if not _hostname(meta):
         raise VmPraError("The deploy recorded no address for this VM to point a jump at.")
 
@@ -195,16 +232,16 @@ async def attach(db: Session, deploy_job, *, jump_group: Optional[str] = None,
         logger.warning("vm-pra: gateway ensure failed (non-fatal): %s", exc)
         await say(30, f"Gateway host ensure failed (non-fatal): {exc}")
 
-    if meta.get("bt_tf_state"):
-        await say(40, f"Removing the existing Shell Jump {meta.get('bt_shell_jump_id')}…")
-        await terraform_pra_service.remove_jump(meta["bt_tf_state"])
-        # Recorded straight away: if the create below fails, the row must not go on
-        # naming a jump that no longer exists — destroy would try to remove it again.
-        job_service.update_metadata(db, deploy_job.id, {k: None for k in JUMP_KEYS})
+    await _remove_existing(db, deploy_job, meta, say)
 
     group, jumpoint = resolve_target(cloud, jump_group, jumpoint_name,
                                      workgroup=deploy_job.workgroup)
     hostname = _hostname(meta)
+    if is_windows(meta):
+        return await _attach_windows(db, deploy_job, meta, cloud=cloud, group=group,
+                                     jumpoint=jumpoint, hostname=hostname,
+                                     pra_credential_ref=pra_credential_ref,
+                                     updates=updates, say=say)
     await say(60, f"Creating a Shell Jump to {hostname} in '{group}' via '{jumpoint}'…")
     result = await terraform_pra_service.provision_jump(
         vm_name=_vm_name(cloud, meta),
@@ -224,23 +261,68 @@ async def attach(db: Session, deploy_job, *, jump_group: Optional[str] = None,
     return updates
 
 
-async def detach(db: Session, deploy_job, *, progress=None) -> dict:
-    """Remove the VM's Shell Jump and clear its keys from the deploy row."""
+async def _remove_existing(db: Session, deploy_job, meta: dict, say) -> None:
+    """Remove whatever jumps the row names — the Shell Jump, and a Windows server's RDP
+    jump — clearing each one's keys as soon as it is gone, so a failure further on never
+    leaves the row naming a jump that no longer exists (destroy would try to remove it
+    again)."""
     from . import job_service, terraform_pra_service
+    if meta.get("bt_tf_state"):
+        await say(40, f"Removing the existing Shell Jump {meta.get('bt_shell_jump_id')}…")
+        await terraform_pra_service.remove_jump(meta["bt_tf_state"])
+        job_service.update_metadata(db, deploy_job.id, {
+            **{k: None for k in JUMP_KEYS},
+            "bt_ssh_vault_account_id": None, "bt_ssh_vault_error": None})
+    if meta.get("bt_rdp_tf_state"):
+        await say(45, f"Removing the existing RDP jump {meta.get('bt_rdp_jump_id')}…")
+        await terraform_pra_service.remove_rdp_jump(meta["bt_rdp_tf_state"])
+        job_service.update_metadata(db, deploy_job.id, {k: None for k in WINDOWS_JUMP_KEYS
+                                                        if k.startswith("bt_rdp_")})
+
+
+async def _attach_windows(db: Session, deploy_job, meta: dict, *, cloud: str, group: str,
+                          jumpoint: str, hostname: str, pra_credential_ref, updates: dict,
+                          say) -> dict:
+    """A Windows server's jumps, built by the deploy's own code (windows_server_hook)."""
+    from . import job_service, windows_server_hook as wsh
+    username, password, ps_owned = _windows_login(meta)
+    access = meta.get("windows_access") or {}
+    # A row from before SSH support has no access record: it was an RDP-only build.
+    want_shell, want_rdp = wsh.plan_jumps(bool(access.get("ssh")),
+                                          bool(access.get("rdp", True)),
+                                          meta.get("windows_ssh_status") or "")
+    if not (group and jumpoint):
+        raise VmPraError("No PRA Jump Group / Gateway is configured for this cloud.")
+    await say(60, f"Creating PRA access to {hostname} in '{group}' via '{jumpoint}'…")
+    result: dict = {}
+    await wsh.wire_pra(
+        vm_name=_vm_name(cloud, meta), hostname=hostname, username=username,
+        password=password, ps_owned=ps_owned, result=result, tag=CLOUDS[cloud]["tag"],
+        jump_group=group, jumpoint_name=jumpoint,
+        client_secret=client_secret_for(pra_credential_ref),
+        want_shell=want_shell, want_rdp=want_rdp, progress=say)
+    updates.update({"bt_error": None, "bt_rdp_error": None, **result})
+    job_service.update_metadata(db, deploy_job.id, updates)
+    if not jump_id(updates):
+        raise VmPraError("; ".join(e for e in (updates.get("bt_error"),
+                                               updates.get("bt_rdp_error")) if e)
+                         or "PRA created no jump for this server.")
+    return updates
+
+
+async def detach(db: Session, deploy_job, *, progress=None) -> dict:
+    """Remove the VM's jumps and clear their keys from the deploy row."""
     say = progress or _quiet
     meta = deploy_job.metadata_dict or {}
-    jump_id = meta.get("bt_shell_jump_id")
-    if not jump_id:
-        raise VmPraError("This VM has no PRA Shell Jump to remove.")
-    if not meta.get("bt_tf_state"):
+    current = jump_id(meta)
+    if not current:
+        raise VmPraError("This VM has no PRA jump to remove.")
+    if not (meta.get("bt_tf_state") or meta.get("bt_rdp_tf_state")):
         raise VmPraError(
-            f"Shell Jump {jump_id} was provisioned before the Terraform migration and has "
+            f"Jump {current} was provisioned before the Terraform migration and has "
             "no state to destroy it with; remove it in PRA by hand.")
-    await say(40, f"Removing Shell Jump {jump_id}…")
-    await terraform_pra_service.remove_jump(meta["bt_tf_state"])
-    cleared = {k: None for k in JUMP_KEYS}
-    job_service.update_metadata(db, deploy_job.id, cleared)
-    return {"bt_shell_jump_removed": jump_id}
+    await _remove_existing(db, deploy_job, meta, say)
+    return {"bt_shell_jump_removed": current}
 
 
 def queue(db: Session, *, cloud: str, deploy_job, payload, username: str):
@@ -250,8 +332,8 @@ def queue(db: Session, *, cloud: str, deploy_job, payload, username: str):
     from . import job_service
     if payload.action == "register":
         check_attachable(cloud, deploy_job.metadata_dict or {})
-    elif not (deploy_job.metadata_dict or {}).get("bt_shell_jump_id"):
-        raise VmPraError("This VM has no PRA Shell Jump to remove.")
+    elif not jump_id(deploy_job.metadata_dict or {}):
+        raise VmPraError("This VM has no PRA jump to remove.")
     job = job_service.create_job(
         db, job_type="vm_pra", created_by=username,
         workgroup=deploy_job.workgroup,
@@ -291,6 +373,7 @@ async def run(db: Session, job_id: str, meta: dict) -> None:
                 jump_group=meta.get("jump_group"), jumpoint_name=meta.get("jumpoint_name"),
                 pra_credential_ref=meta.get("pra_credential_ref"), progress=_progress)
             out = {"bt_shell_jump_id": written.get("bt_shell_jump_id"),
+                   "bt_rdp_jump_id": written.get("bt_rdp_jump_id"),
                    "bt_jump_group_name": written.get("bt_jump_group_name")}
     except Exception as exc:
         job_service.set_failed(db, job_id, str(exc))
