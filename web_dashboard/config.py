@@ -1805,11 +1805,18 @@ class Settings(BaseSettings):
     # Webhook URLs resolving to RFC 1918 / CGNAT / ULA addresses are refused unless this
     # is on (services/outbound_url). Loopback, link-local and metadata never are allowed.
     notifications_allow_private_targets: bool = False
+    # Must equal notify_policy.DEFAULT_EVENT_TYPES (tests/test_notify_policy.py). This copy
+    # is what notify_policy.event_types() falls back to when nothing is stored, so an event
+    # listed only there ships switched off.
     notify_event_types: str = ("resource.expiring,resource.reaped,job.failed,"
                                "cost.budget_exceeded,secret.stale,config.drift,"
+                               "audit.chain_broken,"
+                               "vm.spend_warn,vm.spend_capped,vm.spend_unpriced,"
+                               "job.dead_lettered,"
                                # A change that silently did not happen. Nothing else
                                # reports it — the job did not fail, it was never run.
-                               "job.window_missed,job.awaiting_approval")
+                               "job.window_missed,job.awaiting_approval,"
+                               "pov.owner_changed")
     notify_min_severity: str = "warning"           # info | warning | critical
     notify_base_url: str = ""                      # absolute origin for deep links
     notify_http_timeout_s: int = 10

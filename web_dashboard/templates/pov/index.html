@@ -741,7 +741,14 @@
                 </template>
               </td>
               <td class="px-4 py-2 text-gray-600" x-text="e.template_name || e.template_id || '—'"></td>
-              <td class="px-4 py-2 text-gray-600" x-text="e.created_by || '—'"></td>
+              <td class="px-4 py-2">
+                <div class="space-y-0.5">
+                  <p class="text-gray-600" x-text="e.created_by || '—'"></p>
+                  <button @click="handOff(e)" :disabled="!actionable(e)"
+                          title="Make another SE the owner of this POV"
+                          class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed">hand off</button>
+                </div>
+              </td>
               <td class="px-4 py-2 text-right whitespace-nowrap">
                 {# Both buttons show while the runstate is stale or was never confirmed.
                    Gating on a remembered value is what hid Start from every POV the
@@ -2178,6 +2185,27 @@ function povPage(tabSlugs) {
         const data = await this.post(`/api/pov/managed/${env.id}/spend-cap`,
                                      { cap_usd: answer.trim() ? Number(answer) : null });
         this.notice = `${env.name}: ${data.spend.summary}`;
+        await this.load();
+      } catch (e) { this.error = e.message; }
+    },
+
+    // A prompt, like setSpendCap() above. The server refuses anyone who could not then
+    // open the POV (wrong workgroup, a picker that hides it, no POV role), so the only
+    // thing worth saying up front is what the CURRENT owner loses.
+    async handOff(env) {
+      const answer = window.prompt(
+        `Hand ${env.name} to which user? Enter their dashboard username.
+
+` +
+        `They become its owner. ${env.created_by || 'The current owner'} keeps access ` +
+        `only through a POV role that reaches every POV, or their POV access picker.`,
+        '');
+      if (answer === null || !answer.trim()) return;
+      this.error = ''; this.notice = '';
+      try {
+        const data = await this.post(`/api/pov/managed/${env.id}/owner`,
+                                     { username: answer.trim() });
+        this.notice = `${env.name}: now owned by ${data.environment.created_by}`;
         await this.load();
       } catch (e) { this.error = e.message; }
     },
