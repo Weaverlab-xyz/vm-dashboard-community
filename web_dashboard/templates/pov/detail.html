@@ -1729,7 +1729,25 @@
           { label: 'Spend', lines: spend },
           { label: 'Template', lines: [{ text: e.template_name || e.template_id || '—' }] },
           { label: 'Created by', lines: [{ text: e.created_by || '—' }] },
+          { label: 'Customer', lines: this.engagementLines(e.engagement) },
         ];
+      },
+
+      // services/pov_engagement, as the glance row reads it. A login USED, not just
+      // issued, and ticks the customer made themselves.
+      engagementLines(g) {
+        const e = g || {};
+        if (!e.logins_issued) return [{ text: 'no login issued', tone: 'muted' }];
+        const head = { active: { text: 'active', tone: 'ok' },
+                       signed_in: { text: 'signed in, nothing ticked' },
+                       not_signed_in: { text: 'never signed in', tone: 'warn' } }[e.state]
+                     || { text: '—', tone: 'muted' };
+        const out = [head, { text: e.logins_used + ' of ' + e.logins_issued + ' login(s) used', tone: 'muted' }];
+        if (e.idle_days !== null && e.idle_days !== undefined) {
+          out.push({ text: 'last seen ' + (e.idle_days === 0 ? 'today' : e.idle_days + 'd ago'),
+                     tone: e.idle_days >= 7 ? 'warn' : 'muted' });
+        }
+        return out;
       },
 
       stepFacts(s) {
