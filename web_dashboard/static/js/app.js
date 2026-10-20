@@ -15,6 +15,37 @@ document.addEventListener('alpine:init', () => {
         // localStorage is editable by whoever holds it, and the real control is the path
         // allowlist in api/auth.get_current_user, which consults nothing the client sends.
         accessorEnvId: localStorage.getItem('vm_cli_accessor_env') || '',
+        // The caller's EFFECTIVE permission map, as /api/auth/me reports it (role, own grid,
+        // group mappings and Entitle grants already merged). Held so the UI can show what a
+        // scope grants instead of hiding every scoped page behind isAdmin -- the APIs were
+        // granting `pov_templates`, `agents`, `audit`... to non-admins whom the nav never
+        // offered the page. DISPLAY ONLY, like isAdmin: it is editable localStorage, and
+        // every route enforces its own require_permission whatever this says.
+        permissions: (() => {
+            try { return JSON.parse(localStorage.getItem('vm_cli_permissions') || '{}') || {}; }
+            catch (e) { return {}; }
+        })(),
+
+        // Does the viewer hold `level` on `scope`? An administrator holds everything. An
+        // empty map holds nothing -- the server's rule since empty stopped meaning
+        // unrestricted (docs/access/permissions.md) -- so a stale or missing copy hides a
+        // link rather than showing one.
+        can(scope, level) {
+            if (this.isAdmin) return true;
+            const levels = (this.permissions || {})[scope];
+            return Array.isArray(levels) && levels.includes(level);
+        },
+
+        // Record what /api/auth/me said. One writer for both login paths and the refresh
+        // below, so isAdmin and the map can never come from two different answers.
+        applyProfile(me) {
+            if (!me) return;
+            this.isAdmin = !!me.is_admin;
+            this.permissions = (me.permissions && typeof me.permissions === 'object') ? me.permissions : {};
+            localStorage.setItem('vm_cli_is_admin', this.isAdmin ? 'true' : 'false');
+            localStorage.setItem('vm_cli_permissions', JSON.stringify(this.permissions));
+            localStorage.setItem('vm_cli_profile_at', String(Date.now()));
+        },
 
         get isAccessor() {
             return !!this.accessorEnvId;
@@ -42,11 +73,14 @@ document.addEventListener('alpine:init', () => {
             this.username = null;
             this.workgroups = [];
             this.isAdmin = false;
+            this.permissions = {};
             this.accessorEnvId = '';
             localStorage.removeItem('vm_cli_token');
             localStorage.removeItem('vm_cli_username');
             localStorage.removeItem('vm_cli_workgroups');
             localStorage.removeItem('vm_cli_is_admin');
+            localStorage.removeItem('vm_cli_permissions');
+            localStorage.removeItem('vm_cli_profile_at');
             localStorage.removeItem('vm_cli_accessor_env');
             // Per-page UI preferences, for the same reason as the persona cookies below:
             // per-BROWSER, so the next person to log in here would otherwise inherit this
@@ -1700,6 +1734,25 @@ function utcStamp(isoStr) {
     return d.toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
 }
 
+// Keep $store.auth's isAdmin and permission map current. Login writes them once, but an
+// admin's role edit reaches a local user IMMEDIATELY on the server, and a session that
+// began before the map was stored has none at all -- so the nav re-asks /api/auth/me when
+// its copy is missing or older than PROFILE_MAX_AGE_MS. Failure is silent and changes
+// nothing: the copy only decides which links are drawn, never what a route allows.
+const PROFILE_MAX_AGE_MS = 5 * 60 * 1000;
+
+async function refreshProfileIfStale() {
+    const auth = Alpine.store('auth');
+    if (!auth || !auth.isLoggedIn || auth.isAccessor) return;
+    const at = parseInt(localStorage.getItem('vm_cli_profile_at') || '0', 10) || 0;
+    if (Date.now() - at < PROFILE_MAX_AGE_MS) return;
+    try {
+        const res = await fetch('/api/auth/me', { headers: { 'Authorization': 'Bearer ' + auth.token } });
+        if (res.ok) auth.applyProfile(await res.json());
+    } catch (e) { /* offline or mid-deploy: keep the copy we have */ }
+}
+window.refreshProfileIfStale = refreshProfileIfStale;
+
 // The accessor's own page. One constant, so the redirect below and the page itself can
 // never disagree about where an accessor lives.
 const ACCESSOR_HOME = '/pov/access';
@@ -1800,6 +1853,9 @@ function responsiveNav() {
             // returns having done nothing — silently, leaving the pins in the attribute
             // and the list in shipped order.
             this.$nextTick(() => this.applyPins());
+            // The links' x-show reads $store.auth.can(), which is reactive: a refreshed map
+            // redraws them in place, so this needs no await and no re-render.
+            refreshProfileIfStale();
         },
     };
 }

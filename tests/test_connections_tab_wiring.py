@@ -274,17 +274,20 @@ def test_the_route_endpoints_reuse_the_connections_scope():
 def test_the_nav_offers_one_route_to_the_page_per_viewer():
     """Both links go to the same page now, so the Connections row renders only for the
     viewers the Agents row is not there for: with remote agents off it is absent entirely,
-    and when they are on it is admin-only while the connection list is governed by the
-    `connections` scope. Deleting the Connections row instead would leave a
-    directly-dialled vCenter, or a non-admin with connections permission, with no nav route
-    to the page at all."""
+    and when they are on, the Agents row shows to `agents:read` holders (admins included)
+    while the connection list is governed by the `connections` scope. The two conditions
+    are exact complements, so no viewer gets two links to one page and none gets zero.
+    Deleting the Connections row instead would leave a directly-dialled vCenter, or a
+    non-admin with connections permission, with no nav route to the page at all."""
     nav = _read(*_TPL, "_nav_links.html")
     conn = re.search(r"<a[^>]*data-nav=\"connections\"[^>]*>", nav, re.S)
     assert conn, "the Connections nav link is gone — a non-admin would have no route to it"
-    assert 'x-show="!$store.auth.isAdmin"' in conn.group(0), \
-        "an admin would see two nav links to the same page"
+    assert 'x-show="!$store.auth.can(\'agents\', \'read\')"' in conn.group(0), \
+        "a viewer who has the Agents link would see two nav links to the same page"
     agents = re.search(r"<a[^>]*data-nav=\"agents\"[^>]*>", nav, re.S)
     assert agents, "the Agents nav link is gone"
+    assert 'x-show="$store.auth.can(\'agents\', \'read\')"' in agents.group(0), \
+        "the Agents and Connections rows no longer test the same condition"
     assert "/connections" in agents.group(0), \
         "the Agents link must light up on /connections too — it is the same page"
 

@@ -162,8 +162,6 @@ _NAV_EXEMPT = {
     # the maintenance CALENDAR and the approval authority, whereas repeating your own job
     # is the same right as running it, which you already have.
     "schedules": "row-filtered by owner via can_audit_jobs",
-    # Its own nav entry, but it is the POV detail page's sibling under the `pov` scope.
-    "pov_templates": "has the `pov_templates` scope",
     # An outbound link to the operator's Entitle portal, not a page on this app. Gating it
     # would hide the one affordance a user without a permission has for asking for it.
     "request_access": "external link to the Entitle request portal",
@@ -182,6 +180,10 @@ _NAV_SCOPE = {
     # `"directories": "directories"` back here when it graduates.
     "costs": "costs", "config_mgmt": "config_mgmt", "inventory": "inventory",
     "agents": "agents", "audit": "audit",
+    # Was in _NAV_EXEMPT as "has the `pov_templates` scope" -- which is to say it was never
+    # exempt, it was mis-filed, and its link was isAdmin-only besides. tests/
+    # test_nav_scope_gates now holds each scoped link to $store.auth.can(<this scope>, ...).
+    "pov_templates": "pov_templates",
 }
 
 

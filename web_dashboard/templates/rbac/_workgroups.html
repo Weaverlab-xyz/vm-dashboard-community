@@ -100,7 +100,10 @@
                         class="text-xs text-blue-600 hover:text-blue-800 font-medium transition mr-2">
                   Edit
                 </button>
-                <button @click="deleteWorkgroup(w)"
+                <!-- Admin-only, matching DELETE /api/workgroups/{name} (require_admin). Edit
+                     beside it stays for `workgroups:write`; this button showed to that
+                     viewer too and could only ever answer 403. -->
+                <button x-show="isAdmin" @click="deleteWorkgroup(w)"
                         :disabled="w.is_default"
                         :class="w.is_default ? 'text-gray-300 cursor-not-allowed' : 'text-red-500 hover:text-red-700'"
                         class="text-xs font-medium transition">

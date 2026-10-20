@@ -413,6 +413,7 @@
 
         signOut() {
           ['vm_cli_token', 'vm_cli_username', 'vm_cli_workgroups', 'vm_cli_is_admin',
+           'vm_cli_permissions', 'vm_cli_profile_at',
            'vm_cli_accessor_env'].forEach(k => localStorage.removeItem(k));
           window.location.href = '/login';
         },
