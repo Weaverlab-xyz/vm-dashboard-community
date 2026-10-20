@@ -377,6 +377,53 @@ dnf() {
         f"and the fallback landing is a SUCCESS, not a tolerated failure: {p.stderr[:400]}"
 
 
+def _as_distro(block: str, os_release: str, prelude: str) -> subprocess.CompletedProcess:
+    """Run ``block`` as if ``/etc/os-release`` said ``os_release``.
+
+    The path is swapped in the rendered text for a file this test owns, because the real
+    one cannot be written here -- and the distro branch is the whole subject."""
+    with tempfile.NamedTemporaryFile("w", suffix=".os-release", delete=False,
+                                     newline="\n") as fh:
+        fh.write(os_release)
+        path = fh.name.replace("\\", "/")
+    try:
+        return _run_block(block.replace("/etc/os-release", path), prelude)
+    finally:
+        os.unlink(fh.name)
+
+
+def test_amazon_linux_installs_amazons_own_docker():
+    """The first AWS POV, found live: Amazon Linux's ID_LIKE carries fedora (and on AL2
+    rhel and centos), so it fell into the RHEL branch, which points dnf at Docker's
+    centos/2023 repository -- a directory that does not exist. Amazon Linux ships no
+    podman either, so the fallback lost too, the block exited 1 under `set -e` and the
+    control node sat at `enrolling` for fourteen minutes. Amazon carries Docker itself."""
+    for os_release in ('ID="amzn"\nID_LIKE="fedora"\nVERSION_ID="2023"\n',
+                       'ID="amzn"\nID_LIKE="centos rhel fedora"\nVERSION_ID="2"\n'):
+        _assert_amazon_docker(os_release)
+
+
+def _assert_amazon_docker(os_release: str) -> None:
+    p = _as_distro(_install(), os_release, _NO_RUNTIME + """
+dnf() {
+  for a in "$@"; do
+    case "$a" in
+      docker) echo "AMAZON-DOCKER" >&2; docker() { return 0; }; return 0 ;;
+      docker-ce|podman|podman-docker) echo "WRONG-PACKAGE $a" >&2; return 1 ;;
+    esac
+  done
+  return 0
+}
+yum() { dnf "$@"; }
+""")
+    assert "AMAZON-DOCKER" in p.stderr, \
+        f"Amazon Linux must install its own `docker` package: {p.stderr[:400]}"
+    assert "WRONG-PACKAGE" not in p.stderr, \
+        f"Amazon Linux must never be sent to Docker CE's repo or to podman: {p.stderr[:400]}"
+    assert "/etc/yum.repos.d/docker-ce.repo" not in p.stderr
+    assert p.returncode == 0, p.stderr[:400]
+
+
 def test_docker_ce_is_attempted_before_the_podman_fallback():
     """Ordering, asserted on the text because the branch that proves it behaviourally needs
     an `/etc/os-release` this test cannot write. Docker CE is what the agent's Engine API
