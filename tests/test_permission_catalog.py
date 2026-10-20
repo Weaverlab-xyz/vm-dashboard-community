@@ -184,6 +184,8 @@ _NAV_SCOPE = {
     # exempt, it was mis-filed, and its link was isAdmin-only besides. tests/
     # test_nav_scope_gates now holds each scoped link to $store.auth.can(<this scope>, ...).
     "pov_templates": "pov_templates",
+    # Its endpoints' only screen was the admin-only Settings drawer until /notifications.
+    "notifications": "notifications",
 }
 
 

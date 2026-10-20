@@ -15,6 +15,10 @@
                         the guests -- vmrest binds 127.0.0.1, so that agent lives on the
                         Windows host, whose Docker Desktop WSL2 VM reaches no vmnet.
 
+   plus Identity -- the agents' pinned signing audience and the dashboard's own SPIFFE
+   identity (remote_agents_enabled, /api/agents/audience and /api/spiffe-identity), the
+   read-and-repair view of two values configured in Settings.
+
    CONNECTIONS WAS ITS OWN PAGE AND IS NOT ANY MORE, because a connection is almost always
    a connection THROUGH an agent: the via_agent form holds no host and no username at all,
    only the name of an entry in that agent's own connections.yaml, and its Agent dropdown
@@ -63,6 +67,13 @@
    can never be the only one, because the Agents tab is on whenever this one is. #}
 {% if remote_agents_enabled and ansible_enabled %}
   {% set _ = tabs.append({'slug': 'config-routes', 'label': 'Config Routes'}) %}
+{% endif %}
+{# The agents' signing audience and the dashboard's own SPIFFE identity -- both `agents`
+   scope, both shown before this only in the admin-only Settings drawers. Behind
+   remote_agents_enabled like the Agents tab, so it too can never be the only tab, and
+   hidden from a viewer without agents:read (someone who came for Connections). #}
+{% if remote_agents_enabled %}
+  {% set _ = tabs.append({'slug': 'identity', 'label': 'Identity', 'show': "$store.auth.can('agents', 'read')"}) %}
 {% endif %}
 {# Neither on. /agents is deliberately reachable in that state -- the Agents panel is the
    only thing that tells an operator where the switch lives -- so fall back to it rather
@@ -134,6 +145,12 @@
   {% if 'config-routes' in tab_slugs %}
   <div x-show="activeTab === 'config-routes'" x-cloak role="tabpanel">
     {% include "agents/_config_routes.html" %}
+  </div>
+  {% endif %}
+
+  {% if 'identity' in tab_slugs %}
+  <div x-show="activeTab === 'identity'" x-cloak role="tabpanel">
+    {% include "agents/_identity.html" %}
   </div>
   {% endif %}
 

@@ -1,0 +1,122 @@
+{# The change-window calendar: list, add, edit, delete. Rendered in TWO places -- the
+   admin-only Settings → Integrations → Change Windows drawer, and the Schedules page,
+   which is how anyone holding change_windows:write reaches it. The component is
+   changeWindowsEditor() in static/js/app.js; the including element supplies
+   x-data="changeWindowsEditor()" and calls cw.load().
+
+   Listing is open to every signed-in user (GET /api/change-windows is
+   get_current_user -- every run form offers the windows by name). Writing is
+   change_windows:write on the route, so the write buttons show on
+   $store.auth.can('change_windows', 'write'), which is always true for an administrator.
+   The route is the control; this only spares a reader buttons that would 403. #}
+<div class="pt-2 border-t border-gray-100">
+  <div class="flex items-center justify-between mb-2">
+    <h4 class="text-sm font-semibold text-gray-700">Windows</h4>
+    <button type="button" x-show="$store.auth.can('change_windows', 'write')" @click="cw.startNew()"
+            class="text-xs bg-white border border-gray-300 hover:bg-gray-50
+                   font-medium px-2.5 py-1.5 rounded-lg">Add window</button>
+  </div>
+
+  <p x-show="cw.error && !cw.draft" x-cloak class="text-[11px] text-red-600 mb-2"
+     x-text="cw.error"></p>
+  <p x-show="!cw.loading && !cw.windows.length && !cw.draft" x-cloak
+     class="text-[11px] text-gray-500">
+    No change windows yet. Runs can still be booked for a specific time without
+    one.
+  </p>
+
+  <div class="space-y-2">
+    <template x-for="w in cw.windows" :key="w.id">
+      <div class="flex items-start justify-between gap-3 rounded-lg border
+                  border-gray-200 p-3">
+        <div class="min-w-0">
+          <p class="text-sm font-medium text-gray-800">
+            <span x-text="w.name"></span>
+            <span x-show="w.enabled === false" x-cloak
+                  class="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-gray-100
+                         text-gray-600">disabled</span>
+          </p>
+          <p class="text-[11px] text-gray-500" x-text="w.summary"></p>
+          <p x-show="w.description" x-cloak
+             class="text-[11px] text-gray-400" x-text="w.description"></p>
+        </div>
+        <div class="flex items-center gap-2 shrink-0">
+          <button type="button" x-show="$store.auth.can('change_windows', 'write')" @click="cw.edit(w)"
+                  class="text-xs text-blue-600 hover:underline">Edit</button>
+          <button type="button" x-show="$store.auth.can('change_windows', 'write')" @click="cw.remove(w)"
+                  class="text-xs text-red-600 hover:underline">Delete</button>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <!-- Add / edit form -->
+  {# x-if, not x-show: cw.draft is null until Add or Edit opens a window, and
+     x-show would still evaluate the bindings inside against it. #}
+  <template x-if="cw.draft">
+  <div class="mt-3 rounded-lg border border-blue-200 bg-blue-50/40 p-3 space-y-2">
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+      <div>
+        <label class="block text-[11px] text-gray-600 mb-1">Name</label>
+        <input type="text" x-model="cw.draft.name" placeholder="Prod Weekend"
+               class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5">
+      </div>
+      <div>
+        <label class="block text-[11px] text-gray-600 mb-1">Timezone (IANA)</label>
+        <input type="text" x-model="cw.draft.timezone" placeholder="UTC"
+               class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5">
+      </div>
+      <div>
+        <label class="block text-[11px] text-gray-600 mb-1">Starts (HH:MM)</label>
+        <input type="text" x-model="cw.draft.start_at_local" placeholder="02:00"
+               class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5">
+      </div>
+      <div>
+        <label class="block text-[11px] text-gray-600 mb-1">Length (minutes)</label>
+        <input type="number" min="1" x-model.number="cw.draft.duration_minutes"
+               class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5">
+      </div>
+    </div>
+
+    <div>
+      <label class="block text-[11px] text-gray-600 mb-1">Days</label>
+      <div class="flex gap-1">
+        <template x-for="(lbl, i) in cw.dayLabels" :key="i">
+          <button type="button" @click="cw.toggleDay(i)"
+                  :class="cw.dayOn(i)
+                            ? 'bg-blue-700 text-white border-blue-700'
+                            : 'bg-white text-gray-600 border-gray-300'"
+                  class="text-[11px] px-2 py-1 rounded border"
+                  x-text="lbl"></button>
+        </template>
+      </div>
+    </div>
+
+    <div>
+      <label class="block text-[11px] text-gray-600 mb-1">Description (optional)</label>
+      <input type="text" x-model="cw.draft.description"
+             class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5">
+    </div>
+
+    <label class="flex items-center gap-2">
+      <input type="checkbox" x-model="cw.draft.enabled"
+             class="rounded border-gray-300 text-blue-600">
+      <span class="text-[11px] text-gray-600">
+        Enabled — offered on run forms. Disabling retires a window without
+        touching changes already booked into it.
+      </span>
+    </label>
+
+    <p x-show="cw.error" x-cloak class="text-[11px] text-red-600"
+       x-text="cw.error"></p>
+
+    <div class="flex gap-2">
+      <button type="button" @click="cw.save()" :disabled="cw.saving"
+              class="text-xs bg-blue-700 hover:bg-blue-800 disabled:opacity-50
+                     text-white font-medium px-3 py-1.5 rounded-lg">Save</button>
+      <button type="button" @click="cw.cancel()"
+              class="text-xs text-gray-600 hover:underline px-2">Cancel</button>
+    </div>
+  </div>
+  </template>
+</div>

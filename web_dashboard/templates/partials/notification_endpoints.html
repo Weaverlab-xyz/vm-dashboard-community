@@ -1,0 +1,184 @@
+{# Notification endpoints and, for an administrator, the delivery log. Rendered in TWO
+   places -- the admin-only Settings → Integrations → Notifications drawer, and the
+   /notifications page, which is how anyone holding the `notifications` scope reaches it.
+   The component is notificationEndpoints() in static/js/app.js; the including element
+   supplies x-data="notificationEndpoints()" and calls loadNotifications().
+
+   notifications:read lists endpoints; Add, Test, Edit and Delete are notifications:write
+   on their routes, so those buttons show on $store.auth.can('notifications', 'write'),
+   always true for an administrator. The routes are the control. #}
+<!-- ── Endpoints ─────────────────────────────────────────────── -->
+<div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+  <div class="flex items-center justify-between mb-2">
+    <span class="text-sm font-medium text-gray-700">Endpoints</span>
+    <button type="button" x-show="$store.auth.can('notifications', 'write')" @click="newEndpoint()"
+            class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 font-medium">
+      Add endpoint
+    </button>
+  </div>
+
+  <p x-show="notif.error" x-cloak class="text-[11px] text-red-600 mb-2"
+     x-text="notif.error"></p>
+  <p x-show="!notif.loading && !notif.endpoints.length && !notif.draft" x-cloak
+     class="text-[11px] text-gray-500">
+    No endpoints yet. Nothing will be sent until you add one.
+  </p>
+
+  <div class="space-y-2">
+    <template x-for="ep in notif.endpoints" :key="ep.id">
+      <div class="rounded border border-gray-200 bg-white p-2">
+        <div class="flex items-center justify-between gap-2">
+          <div class="min-w-0">
+            <span class="text-sm font-medium text-gray-800" x-text="ep.name"></span>
+            <span class="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 font-mono"
+                  x-text="ep.fmt"></span>
+            <span x-show="!ep.enabled" x-cloak
+                  class="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-gray-200 text-gray-600">off</span>
+            <span class="block text-[11px] text-gray-400 font-mono truncate"
+                  x-text="ep.url_hint"></span>
+          </div>
+          <div x-show="$store.auth.can('notifications', 'write')" class="flex items-center gap-1 shrink-0">
+            <button type="button" @click="testEndpoint(ep)"
+                    :disabled="notif.testingId === ep.id"
+                    class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-50">
+              <span x-text="notif.testingId === ep.id ? 'Sending…' : 'Test'"></span>
+            </button>
+            <button type="button" @click="editEndpoint(ep)"
+                    class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50">Edit</button>
+            <button type="button" @click="deleteEndpoint(ep)"
+                    class="text-xs px-2 py-1 rounded border border-red-200 text-red-600 bg-white hover:bg-red-50">Delete</button>
+          </div>
+        </div>
+        <p x-show="ep.event_types" x-cloak class="text-[11px] text-gray-400 mt-1">
+          Only: <span class="font-mono" x-text="ep.event_types"></span>
+        </p>
+        <p x-show="ep.last_error" x-cloak
+           class="text-[11px] text-red-600 mt-1 font-mono break-all"
+           x-text="'Last error: ' + ep.last_error"></p>
+        <div x-show="notif.testResult && notif.testResult.id === ep.id" x-cloak
+             class="mt-1 text-[11px] font-mono break-all"
+             :class="notif.testResult?.ok ? 'text-green-700' : 'text-red-600'"
+             x-text="notif.testResult?.ok
+                       ? ('delivered (HTTP ' + notif.testResult.status_code + ')')
+                       : notif.testResult?.error"></div>
+      </div>
+    </template>
+  </div>
+
+  <!-- add / edit form -->
+  {# x-if, not x-show: notif.draft is null until Add or Edit opens an endpoint,
+     and x-show would still evaluate the bindings inside against it. #}
+  <template x-if="notif.draft">
+  <div class="mt-3 rounded border border-blue-200 bg-white p-3 space-y-2">
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+      <div class="col-span-2">
+        <label class="block text-[11px] font-medium text-gray-600 mb-1">Name</label>
+        <input type="text" x-model="notif.draft.name"
+               class="w-full border border-gray-300 rounded px-2 py-1 text-sm"
+               placeholder="platform-alerts">
+      </div>
+      <div>
+        <label class="block text-[11px] font-medium text-gray-600 mb-1">Format</label>
+        <select x-model="notif.draft.fmt"
+                class="w-full border border-gray-300 rounded px-2 py-1 text-sm">
+          <template x-for="f in notif.formats" :key="f">
+            <option :value="f" x-text="f"></option>
+          </template>
+        </select>
+      </div>
+    </div>
+
+    <div>
+      <label class="block text-[11px] font-medium text-gray-600 mb-1">Webhook URL</label>
+      <input type="text" x-model="notif.draft.url"
+             class="w-full border border-gray-300 rounded px-2 py-1 text-sm font-mono"
+             :placeholder="notif.draft.id ? (notif.draft.url_hint + '  (leave blank to keep)') : 'https://…'">
+      <p class="text-[11px] text-gray-400 mt-1"
+         x-show="notif.draft.fmt === 'teams'" x-cloak>
+        Teams: create a <strong>Power Automate Workflow</strong> from the "Post to a channel
+        when a webhook request is received" template and paste its URL. The old
+        <span class="font-mono">outlook.office.com</span> connector webhooks were
+        permanently switched off in May 2026 and will not work. Messages post as the
+        Flow bot; the name and icon can't be changed.
+      </p>
+      <p class="text-[11px] text-gray-400 mt-1"
+         x-show="notif.draft.fmt === 'slack'" x-cloak>
+        Slack: an Incoming Webhook URL from the Slack app that owns the channel.
+      </p>
+      <p class="text-[11px] text-gray-400 mt-1"
+         x-show="notif.draft.fmt === 'custom'" x-cloak>
+        Any endpoint that accepts JSON. The body is a stable, versioned envelope; set a
+        secret below to have it signed with HMAC-SHA256.
+      </p>
+    </div>
+
+    <div x-show="notif.draft.fmt === 'custom'" x-cloak>
+      <label class="block text-[11px] font-medium text-gray-600 mb-1">Signing secret</label>
+      <input type="password" x-model="notif.draft.secret" autocomplete="new-password"
+             class="w-full border border-gray-300 rounded px-2 py-1 text-sm font-mono"
+             :placeholder="notif.draft.has_secret ? '•••••••• (leave blank to keep)' : 'optional'">
+      <p class="text-[11px] text-gray-400 mt-1">
+        Sent as <span class="font-mono">X-Dashboard-Signature</span>. An
+        <span class="font-mono">aws_sm://</span> / <span class="font-mono">azure_kv://</span> /
+        <span class="font-mono">gcp_sm://</span> / <span class="font-mono">bt_safe://</span>
+        reference is resolved at send time.
+      </p>
+    </div>
+
+    <div>
+      <label class="block text-[11px] font-medium text-gray-600 mb-1">Only these events</label>
+      <input type="text" x-model="notif.draft.event_types"
+             class="w-full border border-gray-300 rounded px-2 py-1 text-sm font-mono"
+             placeholder="blank = everything enabled above">
+    </div>
+
+    <label class="flex items-center gap-2">
+      <input type="checkbox" x-model="notif.draft.enabled"
+             class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+      <span class="text-sm text-gray-700">Enabled</span>
+    </label>
+
+    <div class="flex justify-end gap-2 pt-1">
+      <button type="button" @click="notif.draft = null"
+              class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50">Cancel</button>
+      <button type="button" @click="saveEndpoint()" :disabled="notif.saving"
+              class="text-xs px-3 py-1 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">
+        <span x-text="notif.saving ? 'Saving…' : 'Save endpoint'"></span>
+      </button>
+    </div>
+  </div>
+  </template>
+</div>
+
+<!-- ── Delivery log ──────────────────────────────────────────── -->
+{# Administrators only: GET /api/notifications/deliveries is require_admin, because the log
+   carries every event's subject across workgroups. notificationEndpoints() does not even
+   ask for it otherwise. #}
+<div x-show="$store.auth.isAdmin" class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+  <div class="flex items-center justify-between mb-2">
+    <span class="text-sm font-medium text-gray-700">Recent deliveries</span>
+    <button type="button" @click="loadNotifications()"
+            class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 font-medium">
+      Refresh
+    </button>
+  </div>
+  <p class="text-[11px] text-gray-500 mb-2" x-text="notifSummaryLine()"></p>
+  <p x-show="!notif.deliveries.length" x-cloak class="text-[11px] text-gray-500">
+    Nothing recorded yet.
+  </p>
+  <div class="space-y-1 max-h-64 overflow-y-auto">
+    <template x-for="d in notif.deliveries" :key="d.id">
+      <div class="text-[11px] font-mono flex gap-2">
+        <span class="shrink-0 w-14"
+              :class="{'text-green-700': d.status === 'sent',
+                       'text-red-600': d.status === 'failed',
+                       'text-gray-400': d.status === 'dry_run' || d.status === 'suppressed',
+                       'text-amber-600': d.status === 'pending' || d.status === 'sending'}"
+              x-text="d.status"></span>
+        <span class="shrink-0 text-gray-400" x-text="d.channel"></span>
+        <span class="truncate text-gray-700"
+              x-text="d.subject + (d.error ? ' — ' + d.error : '')"></span>
+      </div>
+    </template>
+  </div>
+</div>

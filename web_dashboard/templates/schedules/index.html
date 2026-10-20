@@ -106,6 +106,24 @@
   </div>
 
   <p x-show="error" x-cloak class="text-sm text-red-600 mt-3" x-text="error"></p>
+
+  {# The windows themselves. Everyone sees them -- every run form offers them by name, and
+     GET /api/change-windows is open to any signed-in user -- and whoever holds
+     change_windows:write can define them here. That used to be possible only in the
+     admin-only Settings drawer, which keeps the approval settings and the grace period.
+     Its own component, nested, so this page's schedule list and the editor share nothing
+     but the page. #}
+  <div class="mt-10" x-data="changeWindowsEditor()" x-init="cw.load()">
+    <h2 class="text-lg font-semibold text-gray-900">Change windows</h2>
+    <p class="text-sm text-gray-500 mt-1 mb-3">
+      Recurring periods during which a booked change may <strong>start</strong>. A change
+      that has not started when its window closes is marked missed and never runs late.
+      <a href="/docs/operations/scheduling/change-windows" class="text-blue-600 hover:underline">More</a>.
+    </p>
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+      {% include "partials/change_windows_editor.html" %}
+    </div>
+  </div>
 </div>
 
 <script>

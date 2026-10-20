@@ -36,9 +36,9 @@
         <p class="text-sm font-semibold text-red-800 mb-1">Enrolment codes are blocked</p>
         <p class="text-sm text-red-700" x-text="audienceBlock"></p>
         <p class="text-xs text-red-600 mt-2">
-          Fix it in
-          <a href="/settings" class="underline">Settings → Integrations → Remote Agents</a>,
-          which shows the pinned audience and offers a reset.
+          The <a href="#identity" @click.prevent="select('identity')" class="underline">Identity tab</a>
+          shows the pinned audience and offers a reset; Public base URL is in
+          Settings → Integrations → Remote Agents.
         </p>
       </div>
       <button @click="audienceBlock = ''" class="text-red-400 hover:text-red-600 text-lg leading-none">&times;</button>
