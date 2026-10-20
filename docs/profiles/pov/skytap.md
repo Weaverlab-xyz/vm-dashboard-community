@@ -323,7 +323,10 @@ bootstrap whose code is spent.
 
 ## Building a template
 
-**POV → Templates** (`/pov/templates`), admin only.
+**POV → Templates** (`/pov/templates`), admin only — the **Build a template** and
+**Build history** tabs, which show while the page's platform toggle is on Skytap. A cloud has
+no template object to bake, so with the toggle on a cloud those tabs give way to
+**Templates**, where the cloud template is defined instead.
 
 A POV *is* a template instantiated whole, so until this page existed the whole feature was
 downstream of a catalogue that could only be authored by hand in Skytap's own console. That
