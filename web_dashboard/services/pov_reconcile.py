@@ -368,26 +368,41 @@ def _sweep_wake(db: Session, env: PovEnvironment, now: datetime, job_id: str) ->
     decision = pov_wake.due(env, now)
     if not decision:
         return 0
+    # Read before clear(), which drops the booking's metadata along with it.
+    demo_at = pov_wake._demo_at(env)
     pov_wake.clear(env)
     if decision == pov_wake.MISSED:
         _log(db, job_id, f"{env.name}: warm-up dropped, the demo it was for is over")
         return 0
-    if (env.runstate or "") == "running":
-        _log(db, job_id, f"{env.name}: warm-up due, already running")
-        return 0
     ok, _why = pov_env_service.may_act_on(env)
     if not ok:
         return 0
-    if pov_env_service.power_job_in_flight(db, env.id):
+    started = 0
+    if (env.runstate or "") == "running":
+        _log(db, job_id, f"{env.name}: warm-up due, already running")
+    elif pov_env_service.power_job_in_flight(db, env.id):
         _log(db, job_id, f"{env.name}: warm-up due, a power job is already running")
-        return 0
-    job = job_service.create_job(
-        db, job_type="pov_env_power", created_by=pov_wake.WAKE_ACTOR,
-        workgroup=env.workgroup,
-        metadata={"environment_id": env.id, "runstate": "running"})
-    logger.info("POV %s: warm-up -> running (job %s)", env.name, job.id)
-    _log(db, job_id, f"{env.name}: warming up for a demo (job {job.id})")
-    return 1
+    else:
+        job = job_service.create_job(
+            db, job_type="pov_env_power", created_by=pov_wake.WAKE_ACTOR,
+            workgroup=env.workgroup,
+            metadata={"environment_id": env.id, "runstate": "running"})
+        logger.info("POV %s: warm-up -> running (job %s)", env.name, job.id)
+        _log(db, job_id, f"{env.name}: warming up for a demo (job {job.id})")
+        started = 1
+    # Whichever way the lab got there, the SE is about to present it: book the ready
+    # check for just before the call, so the badge they open the page to is current.
+    # Best-effort -- a booking that fails must not undo the start above.
+    try:
+        from . import pov_ready
+        check = pov_ready.schedule_after_warmup(db, env, demo_at=demo_at)
+        if check:
+            _log(db, job_id, f"{env.name}: ready check booked for before the demo "
+                             f"(job {check})")
+    except Exception:  # noqa: BLE001
+        logger.warning("POV %s: could not book the warm-up's ready check", env.name,
+                       exc_info=True)
+    return started
 
 
 def _spend_config() -> tuple:

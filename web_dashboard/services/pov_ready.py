@@ -72,6 +72,63 @@ def last_run(env) -> dict:
     return run if isinstance(run, dict) else {}
 
 
+# How long before the demo a warm-up's ready check runs, and the least time it gives the
+# lab to come back after the start. See :func:`schedule_after_warmup`.
+WARMUP_CHECK_BEFORE = timedelta(minutes=5)
+WARMUP_CHECK_MIN_DELAY = timedelta(minutes=5)
+
+
+def _active_jobs(db, environment_id: str) -> list:
+    from ..database import Job
+    from . import job_service
+    rows = (db.query(Job)
+              .filter(Job.job_type == JOB_TYPE,
+                      Job.status.in_(job_service.ACTIVE_STATUSES)).all())
+    return [r for r in rows if r.metadata_dict.get("environment_id") == environment_id]
+
+
+def job_in_flight(db, environment_id: str, now: Optional[datetime] = None) -> str:
+    """A queued or running ready check for this POV that is due now, or "".
+
+    A check BOOKED for later (``scheduled_for`` in the future, as a warm-up books one) is
+    not in flight: counting it would grey out "Check now" until the booking ran.
+    """
+    now = now or utcnow()
+    return next((r.id for r in _active_jobs(db, environment_id)
+                 if r.scheduled_for is None or r.scheduled_for <= now), "")
+
+
+def booked_for(db, environment_id: str, now: Optional[datetime] = None) -> str:
+    """When the next booked ready check runs (ISO, UTC), or "" when none is booked."""
+    now = now or utcnow()
+    times = sorted(r.scheduled_for for r in _active_jobs(db, environment_id)
+                   if r.scheduled_for is not None and r.scheduled_for > now)
+    return _iso(times[0]) if times else ""
+
+
+def schedule_after_warmup(db, env, *, demo_at: Optional[datetime],
+                          now: Optional[datetime] = None) -> str:
+    """Book a ready check for a POV a warm-up just started. Returns its job id, or "".
+
+    It runs :data:`WARMUP_CHECK_BEFORE` the demo -- so the badge an SE opens the POV to is
+    a few minutes old, not from before the lab woke -- but never sooner than
+    :data:`WARMUP_CHECK_MIN_DELAY` from now, which is the lab's time to resume: a check
+    run straight after the start would read a lab still coming up and report it amber.
+    Nothing is booked when one is already queued or booked for this POV.
+    """
+    from . import job_service
+    now = now or utcnow()
+    if _active_jobs(db, env.id):
+        return ""
+    when = now + WARMUP_CHECK_MIN_DELAY
+    if demo_at is not None:
+        when = max(when, demo_at - WARMUP_CHECK_BEFORE)
+    job = job_service.create_job(db, job_type=JOB_TYPE, created_by="pov-warmup",
+                                 workgroup=env.workgroup, scheduled_for=when,
+                                 metadata={"environment_id": env.id})
+    return job.id
+
+
 def throttled(env, now: Optional[datetime] = None) -> int:
     """Seconds until another live run is allowed; 0 when it is."""
     started = _when((last_run(env) or {}).get("started_at"))

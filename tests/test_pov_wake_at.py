@@ -219,6 +219,50 @@ def test_the_row_carries_the_booking():
     assert out["wake"]["wake_at"].endswith("Z") and out["wake"]["demo_at"].endswith("Z")
 
 
+# ── the ready check it books ─────────────────────────────────────────────────
+
+def _ready_jobs(env_id):
+    from web_dashboard.services import pov_ready
+    db = d.SessionLocal()
+    try:
+        rows = db.query(d.Job).filter(d.Job.job_type == pov_ready.JOB_TYPE).all()
+        return [r for r in rows if r.metadata_dict.get("environment_id") == env_id]
+    finally:
+        db.close()
+
+
+def test_a_warm_up_books_a_ready_check_for_just_before_the_demo():
+    env_id = _env(wake_in=timedelta(minutes=-1), demo_in=timedelta(minutes=29))
+    _sweep()
+    jobs = _ready_jobs(env_id)
+    assert len(jobs) == 1, "no ready check was booked"
+    due = jobs[0].scheduled_for
+    target = _utcnow() + timedelta(minutes=24)        # demo minus five minutes
+    assert abs((due - target).total_seconds()) < 90, (due, target)
+    _sweep()
+    assert len(_ready_jobs(env_id)) == 1, "the booking was made twice"
+
+
+def test_a_short_lead_still_gives_the_lab_five_minutes():
+    env_id = _env(wake_in=timedelta(minutes=-1), demo_in=timedelta(minutes=2))
+    _sweep()
+    due = _ready_jobs(env_id)[0].scheduled_for
+    assert due >= _utcnow() + timedelta(minutes=4), "the check would read a lab still waking"
+
+
+def test_already_running_still_books_the_check_and_starts_nothing():
+    env_id = _env(runstate="running")
+    _sweep()
+    assert not _power_jobs(env_id)
+    assert len(_ready_jobs(env_id)) == 1
+
+
+def test_a_missed_booking_books_no_check():
+    env_id = _env(wake_in=timedelta(hours=-5), demo_in=timedelta(hours=-4))
+    _sweep()
+    assert not _ready_jobs(env_id)
+
+
 # ── the route ────────────────────────────────────────────────────────────────
 
 class _Operator:
