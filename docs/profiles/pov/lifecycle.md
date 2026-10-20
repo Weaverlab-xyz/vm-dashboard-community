@@ -4,6 +4,52 @@
 
 Part of [A POV Instance](README.md). Reconciling against the platform, and the auto-delete timer.
 
+## Before a demo
+
+The POV page's **Overview** tab opens with **Ready for demo**. It is one row per thing a
+demo leans on, and the worst row sets the badge, which also shows in the page header on
+**Setup** and **Overview**.
+
+| Row | Shown when | Not ready (red) | Needs attention (amber) |
+|---|---|---|---|
+| Environment | always | failed, destroying | still provisioning |
+| Power | always | gone from the platform | suspended or stopped. Start it before the call |
+| Setup | always | | a setup step is still to do |
+| Guest wiring | a guest has a wiring error | any guest with a wiring error | |
+| PRA tenant, Password Safe tenant | the POV uses it | its credential no longer gets a token | |
+| Entitle | the POV uses it and Health has rows | the sweep or an applied bundle failed | |
+| EPM for Linux | the site is configured | the site refuses or does not answer | no agent packages built |
+| PRA Gateway | the POV names one | missing, or no node connected | |
+| PRA sees Password Safe | both tenants are set | | PRA sees none of the accounts, or some are not linked to a Jump Item |
+| Share link | one is published | expired | expires before the demo ends |
+| Auto-delete | the POV has a timer | the deadline passed | deletes itself before the demo ends |
+| Spend cap | the POV has a cap | the cap was hit | past the warning percentage |
+| Instance integrations | after a full check | a configured integration did not answer | |
+
+**Opening the tab makes no calls.** Every row is read from what is already stored:
+- the reconcile's last runstate
+- the [Health](../../operations/health.md) page's rows for this POV's tenants
+- the last PRA to Password Safe count
+- the last full check
+
+A row nobody has checked yet reads *not checked*, which is grey and never outranks a real
+answer.
+
+**Check now** runs a job (`pov_env_ready_check`) that refreshes those inputs:
+- this platform's reconcile
+- the BeyondTrust tenants, PRA Gateways, Password Safe, Entitle and EPM-L health areas
+- the PRA to Password Safe check
+- PRA's live answer about the Gateway
+- the instance preflight
+
+It only reads. It writes nothing to a tenant, and the preflight never sends a test
+notification. A step that fails is named under the list and does not stop the rest. It can
+run once a minute.
+
+**Demo at** moves the window the share link and auto-delete date are judged against. Set
+it to the call's start time, and anything due to lapse before the call ends, two hours
+after the start, turns amber.
+
 ## Warming a POV up for a demo
 
 A suspended lab can take several minutes to resume. If you press **Start** when the

@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .collectors import (agents, bt_tenants, cloud_ops, directories, entitle, hypervisors,
-                         pra_gateways, ps_accounts, resources, workloads)
+from .collectors import (agents, bt_tenants, cloud_ops, directories, entitle, epml,
+                         hypervisors, pra_gateways, ps_accounts, resources, workloads)
 from .core import Collector
 
 COLLECTORS = (
@@ -58,6 +58,12 @@ COLLECTORS = (
         personas=("cloudops", "finops", "dba", "security", "idarch"),
         description="Whether just-in-time access is reconciling, and the virtual "
                     "applications and bundles the dashboard applied."),
+    Collector(
+        area="epml", label="EPM for Linux", collect=epml.collect,
+        interval_minutes=30, flags=("epml_enabled",),
+        personas=("devops", "sre", "security", "itops"),
+        description="Whether the EPM-L site answers, and agent packages are built for a "
+                    "Linux guest to enrol with."),
     Collector(
         area="workloads", label="Workload credentials", collect=workloads.collect,
         interval_minutes=30,
