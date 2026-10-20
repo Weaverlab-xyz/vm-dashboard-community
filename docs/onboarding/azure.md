@@ -5,6 +5,11 @@
 Part of the [Onboarding Guide](../ONBOARDING.md).
 
 
+> **Recommended once you are running: no client secret.** The steps below create a client
+> secret, which is the quick start and stays supported. Once the dashboard is up, add the
+> dashboard's own SPIFFE identity as a federated credential on the same app registration
+> and remove the secret: see [Workload identity](../access/workload-identity.md#dashboard-to-azure).
+
 The dashboard deploys Azure VMs into **your** Azure subscription using a
 service principal (SP) scoped to a single resource group.
 

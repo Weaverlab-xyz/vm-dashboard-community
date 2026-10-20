@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .collectors import (agents, bt_tenants, cloud_ops, directories, entitle, hypervisors,
-                         pra_gateways, ps_accounts, resources, workloads)
+from .collectors import (agents, bt_tenants, cloud_ops, directories, entitle, epml,
+                         hypervisors, pra_gateways, ps_accounts, resources, workloads)
 from .core import Collector
 
 COLLECTORS = (
@@ -59,6 +59,12 @@ COLLECTORS = (
         description="Whether just-in-time access is reconciling, and the virtual "
                     "applications and bundles the dashboard applied."),
     Collector(
+        area="epml", label="EPM for Linux", collect=epml.collect,
+        interval_minutes=30, flags=("epml_enabled",),
+        personas=("devops", "sre", "security", "itops"),
+        description="Whether the EPM-L site answers, and agent packages are built for a "
+                    "Linux guest to enrol with."),
+    Collector(
         area="workloads", label="Workload credentials", collect=workloads.collect,
         interval_minutes=30,
         flags=("workload_credentials_enabled", "password_safe_enabled", "spire_lab_enabled",
@@ -72,7 +78,9 @@ COLLECTORS = (
         area="remote_agents", label="Remote agents", collect=agents.collect,
         interval_minutes=5, flags=("remote_agents_enabled",),
         personas=("hypervisor", "itops", "ot", "netadmin", "iamops"),
-        description="Whether each agent is polling, and new enough for what is bound to it."),
+        description="Whether each agent is polling, new enough for what is bound to it, "
+                    "and whether it is SPIRE-attested or keeps a signing key on disk.",
+        note=agents.identity_note),
     Collector(
         area="directories", label="Directories", collect=directories.collect,
         interval_minutes=5, flags=("directories_enabled",),

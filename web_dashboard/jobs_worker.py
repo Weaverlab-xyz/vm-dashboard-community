@@ -64,7 +64,7 @@ HANDLED_TYPES = (
     "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
     "pov_env_provision", "pov_env_destroy", "pov_env_power", "pov_env_broker",
     "pov_env_wireup", "pov_env_jump_group_move", "pov_template_build",
-    "pov_env_reconcile", "pov_env_add_vms",
+    "pov_env_reconcile", "pov_env_add_vms", "pov_env_ready_check", "pov_env_seed",
     "clouddb_ps_register",
     "cloudfn_deploy", "cloudfn_update", "cloudfn_decommission",
     "cloudfn_entitle_register",
@@ -277,6 +277,13 @@ LIGHT_TYPES = (
     # updates. No local process, no streamed output — and it must never queue behind a
     # provision, because a stale runstate is what it exists to fix.
     "pov_env_reconcile",
+    # Reads only: one platform reconcile, the health areas a demo leans on, the PRA->PS
+    # link count, the Gateway's status and the preflight. Pressed minutes before a
+    # customer call, so it must not queue behind somebody else's provision.
+    "pov_env_ready_check",
+    # A handful of Password Safe request/check-in round trips in one session. No local
+    # process, no streamed output, and pressed minutes before a call.
+    "pov_env_seed",
 )
 
 # At most ONE in flight per type, whatever the tier allows. These write DEPLOYMENT-global
@@ -549,9 +556,11 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
         elif job_type in ("pov_env_provision", "pov_env_destroy", "pov_env_power",
                           "pov_env_broker", "pov_env_wireup",
                           "pov_env_jump_group_move", "pov_template_build",
-                          "pov_env_reconcile", "pov_env_add_vms"):
-            from .services import (pov_broker, pov_env_service, pov_reconcile,
-                                   pov_template_builder, pov_wireup)
+                          "pov_env_reconcile", "pov_env_add_vms",
+                          "pov_env_ready_check", "pov_env_seed"):
+            from .services import (pov_broker, pov_env_service, pov_ready,
+                                   pov_reconcile, pov_seed, pov_template_builder,
+                                   pov_wireup)
             handler = {
                 "pov_env_provision": pov_env_service.run_env_provision,
                 "pov_env_destroy": pov_env_service.run_env_destroy,
@@ -562,6 +571,8 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
                 "pov_env_jump_group_move": pov_wireup.run_env_jump_group_move,
                 "pov_template_build": pov_template_builder.run_template_build,
                 "pov_env_reconcile": pov_reconcile.run_reconcile,
+                "pov_env_ready_check": pov_ready.run_live,
+                "pov_env_seed": pov_seed.run_seed,
             }[job_type]
             await handler(job_id, meta)
         elif job_type == "clouddb_provision":

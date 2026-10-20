@@ -2119,6 +2119,19 @@ async def pov_detail_page(request: Request, env_id: str):
                                       {"request": request, "env_id": env_id})
 
 
+@app.get("/pov/{env_id}/report", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("pov_environments_enabled")])
+async def pov_report_page(request: Request, env_id: str):
+    """One POV's close-out report, laid out to print to PDF.
+
+    Like /pov/{env_id}, the id is not resolved here: the page reads
+    /api/pov/managed/{id}/summary with the browser's token, which carries the POV gates
+    and serves a destroyed POV as readily as a live one.
+    """
+    return templates.TemplateResponse(request, "pov/report.html",
+                                      {"request": request, "env_id": env_id})
+
+
 def _rbac_context(request: Request, initial_tab: str) -> dict:
     """The shared context for the RBAC page, which THREE routes render.
 

@@ -35,7 +35,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import User, get_db
-from ..services import (config_service, job_service, ps_api_service,
+from ..services import (cache_service, config_service, job_service, ps_api_service,
                         ps_attribute_catalog as pac)
 from .auth import require_admin
 
@@ -191,6 +191,13 @@ async def set_asset_attributes(
             target_vm=f"{kind}:{object_id}",
             details={"attribute_id": payload.attribute_id,
                      "type": type_row["name"], "value": value["value"]})
+
+    # /inventory reads attributes through a 15-minute cache, and the page reloads right
+    # after this returns — so without this the edit looked like it had not happened. Every
+    # workstream's key, since one record can be visible under several. Process-local like
+    # the cache itself: another gunicorn worker serves its own copy until its TTL.
+    if updated:
+        await cache_service.invalidate_prefix("ps_attributes")
 
     return {"count": len(updated), "updated": updated, "failed": failed,
             "type": type_row["name"], "value": value["value"],

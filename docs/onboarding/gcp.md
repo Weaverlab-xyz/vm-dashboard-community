@@ -5,6 +5,11 @@
 Part of the [Onboarding Guide](../ONBOARDING.md).
 
 
+> **Recommended once you are running: no JSON key.** The steps below download a
+> service-account key, which is the quick start and stays supported. Once the dashboard is
+> up, reach GCP through a workload identity pool that trusts the dashboard's own SPIFFE
+> identity and delete the key: see [Workload identity](../access/workload-identity.md#dashboard-to-gcp).
+
 The dashboard deploys Compute Engine instances into **your** GCP project using
 a service account. GCP is optional — AWS and Azure work without it.
 

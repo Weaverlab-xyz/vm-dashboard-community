@@ -179,11 +179,23 @@ def snapshot(db: Session, *, persona: str = "") -> dict:
             "last_run_at": run.last_run_at.isoformat() + "Z" if run and run.last_run_at else None,
             "last_error": run.last_error if run else None,
             "counts": counts, "items": items,
+            "note": _note(collector, items),
         })
         order.append((0 if persona and persona in collector.personas else 1, index))
     areas = [a for _o, a in sorted(zip(order, areas), key=lambda pair: pair[0])]
     totals = {s: sum(a["counts"][s] for a in areas) for s in core.STATUSES}
     return {"areas": areas, "counts": totals}
+
+
+def _note(collector: core.Collector, items: list) -> Optional[dict]:
+    """The area's informational line. A broken note is dropped, never the page."""
+    if collector.note is None:
+        return None
+    try:
+        return collector.note(items)
+    except Exception:                                  # noqa: BLE001
+        logger.warning("health: %s note failed", collector.area, exc_info=True)
+        return None
 
 
 def _loads(raw) -> list:

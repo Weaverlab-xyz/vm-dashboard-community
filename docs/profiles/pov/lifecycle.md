@@ -4,6 +4,94 @@
 
 Part of [A POV Instance](README.md). Reconciling against the platform, and the auto-delete timer.
 
+## Before a demo
+
+The POV page's **Overview** tab opens with **Ready for demo**. It is one row per thing a
+demo leans on, and the worst row sets the badge, which also shows in the page header on
+**Setup** and **Overview**.
+
+| Row | Shown when | Not ready (red) | Needs attention (amber) |
+|---|---|---|---|
+| Environment | always | failed, destroying | still provisioning |
+| Power | always | gone from the platform | suspended or stopped. Start it before the call |
+| Setup | always | | a setup step is still to do |
+| Guest wiring | a guest has a wiring error | any guest with a wiring error | |
+| PRA tenant, Password Safe tenant | the POV uses it | its credential no longer gets a token | |
+| Entitle | the POV uses it and Health has rows | the sweep or an applied bundle failed | |
+| EPM for Linux | the site is configured | the site refuses or does not answer | no agent packages built |
+| PRA Gateway | the POV names one | missing, or no node connected | |
+| PRA sees Password Safe | both tenants are set | | PRA sees none of the accounts, or some are not linked to a Jump Item |
+| Share link | one is published | expired | expires before the demo ends |
+| Auto-delete | the POV has a timer | the deadline passed | deletes itself before the demo ends |
+| Spend cap | the POV has a cap | the cap was hit | past the warning percentage |
+| Instance integrations | after a full check | a configured integration did not answer | |
+
+**Opening the tab makes no calls.** Every row is read from what is already stored:
+- the reconcile's last runstate
+- the [Health](../../operations/health.md) page's rows for this POV's tenants
+- the last PRA to Password Safe count
+- the last full check
+
+A row nobody has checked yet reads *not checked*, which is grey and never outranks a real
+answer.
+
+**Check now** runs a job (`pov_env_ready_check`) that refreshes those inputs:
+- this platform's reconcile
+- the BeyondTrust tenants, PRA Gateways, Password Safe, Entitle and EPM-L health areas
+- the PRA to Password Safe check
+- PRA's live answer about the Gateway
+- the instance preflight
+
+It only reads. It writes nothing to a tenant, and the preflight never sends a test
+notification. A step that fails is named under the list and does not stop the rest. It can
+run once a minute.
+
+**Demo at** moves the window the share link and auto-delete date are judged against. Set
+it to the call's start time, and anything due to lapse before the call ends, two hours
+after the start, turns amber.
+
+## Warming a POV up for a demo
+
+A suspended lab can take several minutes to resume. If you press **Start** when the
+customer joins, the first five minutes of the call are spent waiting for it. Use the
+**Sleeps** column on the POV list instead: its **warm up** control books a one-off start.
+
+You give it two things:
+
+- **When the demo starts**, as `YYYY-MM-DD HH:MM` in your browser's own timezone, so it
+  matches your calendar invite. The timezone is sent along with the time.
+- **How many minutes before to start it.** The default is 20, and the maximum is 240.
+
+The booking shows as `warm-up Thu 22 Oct 13:40` in the same column and on the POV page.
+**change warm-up** moves it, and a blank time cancels it.
+
+It is a booking, not a schedule. That makes a few things different from the
+[recurring suspend schedule](public-cloud.md#the-suspend-schedule):
+
+- **It only ever starts a lab.** That is why it also works on Skytap, which refuses a
+  recurring schedule because of its own idle timer: a single start has nothing to fight
+  the timer over. Nothing is suspended afterwards. The platform's idle timer, the
+  schedule or a person does that, exactly as after a press of **Start**.
+- **It fires at most once.** The first reconcile pass at or after the start time clears
+  it, whatever it found. That might be:
+  - it started the lab
+  - the lab was already running
+  - a power job was already in flight
+  - the demo started more than an hour ago, so nothing was started for a call that has
+    ended
+- **It is as precise as the reconcile pass**, which runs every ten minutes by default. A
+  20-minute lead therefore really means 10 to 20 minutes.
+
+The start is the same `pov_env_power` job **Start** creates, attributed to `pov-warmup`, so
+the `/jobs` row says why the lab woke up.
+
+Booking it warns you, without refusing, when the lab may not stay up for the whole call:
+
+- the lead is shorter than the reconcile interval
+- the platform's idle timer is shorter than the lead, so the lab could suspend itself again
+  before you connect
+- the POV's recurring schedule suspends it during the call or within two hours of its start
+
 ## Keeping the view true
 
 A POV's `runstate` is a **remembered** value, and for most of this feature's life it was

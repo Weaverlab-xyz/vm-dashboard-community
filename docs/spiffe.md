@@ -35,8 +35,13 @@ The designs behind these are
 [The dashboard as a SPIFFE workload](design/dashboard-workload-identity.md) and
 [A workload reaching Kubernetes with a short-lived token](design/workload-k8s-short-lived-token.md).
 
-Every one of these is **off by default**, and nothing changes for an install that does
-not turn one on. Ed25519 agent enrolment and stored cloud keys stay supported.
+Every one of these is **off by default, for compatibility**: nothing changes for an install
+that does not turn one on. They are, however, the **recommended** way to run: an identity
+proved at every start replaces a key, token or secret stored on disk, and pairing it with
+just-in-time privilege removes standing privilege too. See
+[Workload identity: the recommended credential model](access/workload-identity.md). Ed25519
+agent enrolment and stored cloud keys stay supported, as the quick start and for sites that
+cannot reach a SPIRE server.
 
 ## The dashboard's trust domain
 

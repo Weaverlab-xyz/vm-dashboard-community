@@ -65,6 +65,38 @@ with, and only one of them is fixed by running the demo. Every tick records who 
 which matters more once the customer can make their own, which is the
 [accessor](design/use-cases.md#slice-2--the-ephemeral-accessor) slice.
 
+### Sample activity before a demo
+
+A POV wired an hour ago has an empty request history, so the first Password Safe screen you
+show is a blank table. The **Sample activity** card at the top of the Use cases tab fills it
+in. **Password Safe check-outs** requests, releases and checks back in the credentials of
+up to five of this POV's onboarded accounts, so the request and release history show real
+activity.
+
+**This writes to the customer's tenant, and it is meant to.** So:
+
+- the button asks you to confirm first, naming what it writes
+- the request is written to the audit log as `pov_seed_requested`
+- every request's reason is tagged `[pov-seed:<pov>:<set>] Sample activity for a demo`, so
+  anyone reading the tenant can tell it apart from real use
+- check-in is the plain one, so **nothing is rotated**
+- the released credential is discarded the moment it is read, and is never logged or kept
+- it touches only the accounts this POV's wire-up onboarded
+
+It cannot be undone. Request and release history is the tenant's audit trail, and the
+dashboard will not edit it. The card shows when it last ran and how many requests Password
+Safe accepted. A run Password Safe refused completely fails its job with Password Safe's
+own message, for example `4031`, which means the API identity needs the Requestor role. It
+can run again after a minute.
+
+Some activity is deliberately not seeded:
+
+- **PRA sessions:** no API creates one, because a session needs a representative.
+- **Entitle requests:** the dashboard's request client uses the instance-wide Entitle
+  credentials, not this POV's tenant, and an auto-approved request is a real grant.
+- **EPM for Linux events:** there is no events API. To produce some, run a script on a guest
+  with a [guest step](ps-runbook.md#running-a-step-on-a-guest).
+
 ### Destroying a POV keeps this
 
 Everything else in a teardown is removed. This is not: the POV row itself is marked
@@ -286,6 +318,27 @@ identifier inside your appliances: no jump item ids, no managed account ids, no 
 ids, no tenant names, and none of the wiring errors written for you. That list is a
 projection built for them, not your view with fields removed.
 
+### Whether they are using it
+
+The POV list's **Customer** column, and the **Customer** fact on a POV's page, answer the
+question to ask before a check-in call: has the customer actually opened their login?
+
+| Shows | Means |
+|---|---|
+| `no login` | no customer login was ever issued for this POV |
+| `never signed in` (amber) | logins exist and nobody has used one |
+| `signed in` | somebody signed in and has not ticked anything yet |
+| `active` (green) | the customer ticked a use case themselves |
+
+Underneath is how long ago the customer last did anything, whether a sign-in or a tick. On
+the POV page it turns amber after a week.
+
+A sign-in is recorded when an accessor completes one: their password, plus the FIDO2 step
+if they have one. A token used all afternoon counts as one sign-in. The time is kept on the
+accessor record as well as on the login, so it survives the accessor being revoked and the
+POV being destroyed. Every dashboard account now records its last interactive sign-in in
+the same way, whether by password, password and FIDO2, or SSO.
+
 ### Where they come from
 
 Two ways, and the Access tab shows which for every row.
@@ -362,6 +415,45 @@ two separately, so a login nobody opened reads as exactly that.
 **Copy as Markdown** puts the whole thing on the clipboard — for a renewal note, a CRM, or an
 internal write-up. It is copied rather than downloaded because that is where it is going
 anyway.
+
+### The close-out report
+
+**Open report** on the Summary tab opens a page laid out for print. Use the browser's
+**Print / Save as PDF** to turn it into the document you send after a technical win. It
+lists:
+
+- what was covered and skipped, by area, with who marked each one and when
+- what was said, attributed to the customer or your team
+- every sign-off
+
+It works for a finished POV as well as a running one.
+
+The customer's name and the opportunity appear as the placeholders **«Customer name»** and
+**«Opportunity»**. Replace them in the PDF, or in the document you paste the report into.
+The page has no field to type them into, deliberately: this database is not approved to
+hold either. That is the same reason a POV has no customer field. The report also never
+shows an email address. A customer appears as *Customer*, followed by their generated
+login name.
+
+### Signing it off
+
+A sign-off records that somebody agreed the coverage is what was evaluated. There are two
+ways to give one:
+
+- **Sign off** on the Summary tab, for you or another SE
+- **Confirm what we covered** at the bottom of the customer's own page, for the customer
+
+Both need at least one use case marked as covered, and both are written to the audit log.
+
+A sign-off is a **snapshot**. If more is ticked after somebody signs, their sign-off is shown
+as *earlier version*, and the report says so too. It is never stretched over coverage it
+did not see. The customer's page then offers **Confirm** again. Pressing the button twice
+on the same coverage records one sign-off, not two.
+
+**Withdraw** marks a sign-off withdrawn. It is never deleted, and the report lists it struck
+through, because a record that could vanish is not worth asking a customer for. A sign-off
+carries no comment field. What the customer thought of each use case is already in their
+notes, in their own words.
 
 ---
 

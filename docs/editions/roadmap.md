@@ -234,15 +234,17 @@ the next things queued for QA.
 - **What is being added (additively):** an opt-in SPIRE server beside the dashboard and a
   SPIRE sidecar beside the agent, so an agent on a cloud VM holds no key at rest; and Dex as
   the single OIDC issuer for people: the only way people reach on-prem (k3s) clusters. Dex
-  for managed clusters is paused. The Ed25519 path and direct OIDC remain the defaults.
-- **Status:** In progress. Built, but not yet run against a live host:
-  - agent attestation (`/api/agent/attest`), **Migrate to SPIRE** and central credential
-    storage for attested agents;
-  - the on-prem Dex kubeconfig;
-  - the dashboard's own SPIFFE identity, which builds on the same SPIRE server: cloud
-    federation for AWS, Azure and GCP, k3s, agent file-share credentials, the ECS and
-    Cloud Run runners collecting credentials from the dashboard, and federation with
-    Workload Lab trust domains.
+  for managed clusters is paused. The Ed25519 path and direct OIDC remain the defaults,
+  for compatibility; SPIRE attestation and the dashboard's own identity are the
+  [recommended](../access/workload-identity.md) setup.
+- **Status:** In progress.
+  - **Proven live:** agent attestation (`/api/agent/attest`) and **Migrate to SPIRE**
+    (2026-10-13), POV control nodes attesting (2026-10-14), and the dashboard's SPIFFE
+    identity federated to AWS (2026-10-15).
+  - **Built, not yet run against a live host:** central credential storage for attested
+    agents; the on-prem Dex kubeconfig; the dashboard's identity federated to Azure, GCP and
+    k3s; agent file-share credentials; the ECS and Cloud Run runners collecting credentials
+    from the dashboard; and federation with Workload Lab trust domains.
 
   Still to build: Dex as the dashboard's SSO provider, and a Dex overlay for the dashboard
   host. See [design/agent-and-human-identity.md](../design/agent-and-human-identity.md) and

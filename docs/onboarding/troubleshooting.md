@@ -169,7 +169,8 @@ key that decrypts everything (including any vault credentials), so it must be
 present at startup from the host. See [Protect and back up the JWT
 key](after-first-run.md#protect-and-back-up-the-jwt-key) above and
 [why](../access/secrets-management.md#why-the-jwt-root-key-cannot-be-migrated). (Removing the
-on-disk key via cloud workload identity is a SaaS-edition feature.)
+on-disk key via cloud workload identity is a SaaS-edition feature. Your cloud keys are a
+different matter: [workload identity](../access/workload-identity.md) can replace them today.)
 
 **Protect it:** back it up somewhere safe (password manager, encrypted drive), and
 don't commit it to git (it's in `.gitignore`).

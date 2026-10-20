@@ -30,8 +30,8 @@ free and unmetered; everything on that one bills.
 |---|---|
 | Static secrets as a `wlc://` secrets backend (list / read / create / update / delete, staleness metadata) | **Implemented, verified live** |
 | Migrating the database's own secrets into it in one step | **Implemented** — see [Emptying the database](#emptying-the-database-wc-as-the-secrets-backend); not yet run live |
-| [Dynamic AWS credentials](dynamic-credentials.md) for the dashboard's own cloud calls | **Implemented** — not yet exercised against a live dynamic secret |
-| [Splitting AWS into an everyday and a provisioning lease](dynamic-credentials.md#the-optional-two-lease-split) | **Implemented** — opt-in, not yet exercised live |
+| [Dynamic AWS credentials](dynamic-credentials.md) for the dashboard's own cloud calls | **Implemented, verified live** |
+| [Splitting AWS into an everyday and a provisioning lease](dynamic-credentials.md#the-optional-two-lease-split) | **Implemented, verified live** — opt-in |
 | [Dynamic Azure credentials](dynamic-credentials.md#how-azure-differs) | **Implemented** — not yet exercised against a live dynamic secret |
 | Authenticating to WC with a **workload identity** instead of a stored PAT | **Implemented** — Azure run end to end 2026-09-15; GCP and AWS client paths unit-tested, not yet pointed at a live registration |
 | In-cluster workload identity (a pod federating its ServiceAccount token) | **Implemented** — the `file` platform reads the projected token; not yet run live |
@@ -57,9 +57,16 @@ Turning WC on is what *unlocks* retiring **your** static credentials. It never
 retires them for anyone else, and never as a side effect of an upgrade. See
 [Secrets management](../access/secrets-management.md) for the wider tiered model.
 
-**GCP is absent on purpose.** WC mints AWS and Azure credentials only, so a GCP
-deployment stays on the static tier. A mixed install — say AWS dynamic, Azure
-dynamic, GCP static — is the normal case, not a gap.
+The **recommended** pairing is WC for jobs only, with the dashboard's SPIFFE identity as
+the everyday read credential (`wlc_aws_everyday_source` / `wlc_azure_everyday_source` =
+`federation`): nothing stored, and write privilege only while a job runs. See
+[Workload identity](../access/workload-identity.md).
+
+**GCP is absent on purpose.** WC mints AWS and Azure credentials only. GCP still needs
+no stored key: the dashboard's SPIFFE identity covers reads, and an Entitle grant covers
+writes ([Workload identity](../access/workload-identity.md#dashboard-to-gcp)). Without
+those, a GCP deployment stays on the static tier. A mixed install is the normal case,
+not a gap.
 
 ### Be clear about what this buys
 

@@ -3207,7 +3207,12 @@ def _sync_proxmox(conn, payload, policy, emit, checkins=None):
         row = {"vm_id": str(vm.get("vmid")), "name": vm.get("name"),
                "power_state": vm.get("status"), "vcpus": vm.get("maxcpu"),
                "mem_mib": int((vm.get("maxmem") or 0) / (1024 * 1024)),
-               "scope": vm.get("node"), "vm_type": vm.get("type")}
+               "scope": vm.get("node"), "vm_type": vm.get("type"),
+               # ALWAYS present, even empty. The dashboard computes a `set_tags` edit as
+               # the complete desired set from this field, and a row without it is how it
+               # tells an agent too old to report tags from a guest that has none — a row
+               # that left it out made every edit overwrite the guest's existing tags.
+               "tags": _proxmox_tag_list(vm.get("tags"))}
         # QEMU guests only, and only running ones: the guest agent is a qemu feature, so an
         # LXC container has no such endpoint and a stopped VM's answers 500.
         if (want_guest and vm.get("type") == "qemu"
@@ -3220,6 +3225,14 @@ def _sync_proxmox(conn, payload, policy, emit, checkins=None):
     emit(f"read {len(out)} guest(s) from Proxmox at {host}")
     return {"vms": out, "next_cursor": "", "complete": True, "scanned": len(out),
             "enumerated": True}
+
+
+def _proxmox_tag_list(raw) -> list:
+    """Proxmox's tag field as a list. The API joins with `;`; a hand-edited config may
+    use `,` or spaces, which PVE also accepts."""
+    if isinstance(raw, (list, tuple)):
+        return [str(t).strip() for t in raw if str(t).strip()]
+    return [t for t in re.split(r"[;,\s]+", str(raw or "")) if t]
 
 
 def _proxmox_guest_ips(conn, host: str, port: int, header: dict, node, vmid) -> list:

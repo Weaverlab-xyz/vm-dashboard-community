@@ -385,6 +385,30 @@ def test_the_status_read_takes_one_session_and_no_credential():
         assert not path.startswith(("Requests", "Credentials"))
 
 
+def test_the_demo_request_cycle_checks_every_account_back_in_and_returns_no_secret():
+    """services/pov_seed's one write into a customer's tenant: request, release, plain
+    check-in, per account, in one session. The credential must not leave the function."""
+    tenant = ps.tenant_creds("https://ps.test", "id", "secret")
+    client = _install(FakeClient(status={}))
+    out = _run(ps.request_cycle(tenant, [(1, 77), (2, 78)], reason="[pov-seed:x] demo"))
+    assert [o["ok"] for o in out] == [True, True]
+    assert TOKEN not in json.dumps(out), "the released credential leaked into the result"
+    assert sum(1 for _, p in client.calls if p.endswith("/Checkin")) == 2
+    bodies = [b for p, b in client.posts if p == "Requests"]
+    assert [b["SystemID"] for b in bodies] == [77, 78]
+    assert all(b["Reason"] == "[pov-seed:x] demo" for b in bodies)
+    assert ("POST", "Auth/SignAppIn") in client.calls and \
+        client.calls.count(("POST", "Auth/SignAppIn")) == 1, "one session for the batch"
+
+
+def test_one_refused_account_does_not_stop_the_demo_cycle():
+    tenant = ps.tenant_creds("https://ps.test", "id", "secret")
+    _install(FakeClient(status={"Requests": 403}))
+    out = _run(ps.request_cycle(tenant, [(1, 77), (2, 78)], reason="r"))
+    assert [o["ok"] for o in out] == [False, False]
+    assert "4031" in out[0]["detail"]
+
+
 def test_rotate_on_check_in_is_never_requested():
     # A static assertion because the consequence is silent, and truer under synced
     # accounts than before: a credential change on EITHER member of a synced pair

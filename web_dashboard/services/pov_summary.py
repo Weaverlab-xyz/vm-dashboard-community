@@ -29,7 +29,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from ..database import PovAccessor, PovEnvironment, PovUseCaseProgress
-from . import pov_use_cases
+from . import pov_signoff, pov_use_cases
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +177,7 @@ def build(db: Session, env: PovEnvironment) -> dict:
                 .filter(PovAccessor.environment_id == env.id)
                 .order_by(PovAccessor.created_at).all())
 
-    return {
+    result = {
         "environment": {
             "id": env.id,
             "name": env.name,
@@ -206,6 +206,11 @@ def build(db: Session, env: PovEnvironment) -> dict:
                 1 for e in notes if e["by_kind"] == pov_use_cases.KIND_ACCESSOR),
         },
     }
+    # Who agreed this is what was evaluated, withdrawn sign-offs included. Each says
+    # whether it is for THIS coverage or an earlier one -- see services/pov_signoff.
+    result["signoffs"] = pov_signoff.describe_all(
+        db, env, pov_signoff.fingerprint(pov_signoff.snapshot(result)))
+    return result
 
 
 def _by_group(catalog: dict) -> list:

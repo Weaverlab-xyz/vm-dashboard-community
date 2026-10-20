@@ -311,6 +311,12 @@ class User(Base):
     # No DEFAULT in the retrofit ALTER for the PostgreSQL reason on `is_admin`; NULL reads
     # as False everywhere, which is every existing row.
     is_service_account = Column(Boolean, default=False, nullable=True)
+    # When this account last completed an interactive sign-in: password (and the FIDO2
+    # step when MFA applies) or SSO. Stamped when the session token is issued, never per
+    # request -- a token used all afternoon is one login. NULL = never signed in since this
+    # column existed. Read by services/pov_engagement to answer "has the customer actually
+    # opened their POV login?", which a login being ISSUED does not.
+    last_login_at = Column(DateTime, nullable=True)
 
     fido2_credentials = relationship("Fido2Credential", back_populates="user", cascade="all, delete-orphan")
     personal_access_tokens = relationship("PersonalAccessToken", back_populates="user", cascade="all, delete-orphan")
@@ -3833,6 +3839,13 @@ class PovEnvironment(Base):
     # last three things. NULL means "never evaluated": the first pass records the time and
     # acts on nothing, because an unbounded window has crossed every boundary there is.
     schedule_last_checked_at = Column(DateTime, nullable=True)
+    # A ONE-OFF start, for a demo: "have it running by 14:00 Thursday". Naive UTC, the
+    # moment to start the lab (the demo time minus a lead), not the demo time itself --
+    # that is kept in extra_data["wake"] for display. NULL = nothing booked. Cleared by the
+    # sweep the first time it is evaluated at or after this moment, whether or not that
+    # pass had to act, so a booking fires at most once. Unlike the recurring schedule it
+    # also applies on a platform with its own idle timer: it only ever STARTS a lab.
+    wake_at = Column(DateTime, nullable=True)
 
 
     # The spend cap. NULL throughout = no cap, which is what every existing row backfills
@@ -4067,6 +4080,38 @@ class PovUseCaseProgress(Base):
                                        name="uq_pov_use_case_progress_env_card"),)
 
 
+class PovSignoff(Base):
+    """Somebody confirming what a POV covered: the close of a technical evaluation.
+
+    The checklist says what was ticked; this says that a named person -- the SE, or the
+    customer through their accessor login -- looked at that list and agreed it was what
+    they evaluated. It is evidence, so it is never deleted: a withdrawn sign-off keeps its
+    row with ``revoked_at`` set, and the report shows both.
+
+    ``coverage_json`` is a SNAPSHOT of what was covered at the moment of signing, and
+    ``summary_hash`` its fingerprint (``services/pov_signoff``). A checklist ticked further
+    after somebody signed is then visible as such -- the sign-off is "for an earlier
+    version" -- rather than silently stretching to cover work it never saw.
+
+    **No free-text column, and no customer field.** The same rule ``PovEnvironment``
+    states: this database is not approved to hold a company name, and a comment box on a
+    sign-off is exactly where one gets typed. ``signed_by`` is a dashboard username, which
+    for an accessor is the generated ``pov_<slug>_<random>`` login, never their email.
+    """
+    __tablename__ = "pov_signoffs"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    environment_id = Column(String(36), index=True, nullable=False)
+    signed_by = Column(String(100), nullable=False)
+    # se | accessor -- pov_use_cases.KIND_SE / KIND_ACCESSOR, as on the progress rows.
+    signed_by_kind = Column(String(16), nullable=False, default="se")
+    signed_at = Column(DateTime, default=utcnow, nullable=False)
+    coverage_json = Column(Text, nullable=False)
+    summary_hash = Column(String(64), nullable=False)
+    revoked_at = Column(DateTime, nullable=True)
+    revoked_by = Column(String(100), nullable=True)
+
+
 class PovAccessor(Base):
     """One prospect's ephemeral login into one POV.
 
@@ -4111,6 +4156,11 @@ class PovAccessor(Base):
     created_by = Column(String(100), nullable=True)
     revoked_at = Column(DateTime, nullable=True)
     revoke_reason = Column(String(255), nullable=True)
+    # The accessor's own last sign-in, copied here from the login (api/auth._stamp_login).
+    # Kept on THIS row rather than read off `users` because revoking an accessor deletes
+    # its user, and "did the customer ever open it?" is exactly what a finished POV's
+    # record needs to answer. NULL = never signed in.
+    last_login_at = Column(DateTime, nullable=True)
 
 
 class PovVendorUser(Base):
@@ -5372,6 +5422,11 @@ def init_db():
             "ALTER TABLE pov_environments ADD COLUMN pra_vendor_policy_id VARCHAR(36)",
             "ALTER TABLE pov_environments ADD COLUMN pra_vendor_group_id VARCHAR(36)",
             "ALTER TABLE pov_environments ADD COLUMN pra_vendor_expires_at TIMESTAMP",
+            # The one-off demo warm-up. NULL = nothing booked, which every existing row is.
+            "ALTER TABLE pov_environments ADD COLUMN wake_at TIMESTAMP",
+            # When each accessor last signed in. NULL = never, which every existing row
+            # reads as -- correctly, since nothing recorded it before.
+            "ALTER TABLE pov_accessors ADD COLUMN last_login_at TIMESTAMP",
             # `workload_cloud_credentials` needs no entry either, for the same two reasons
             # create_all covers: new table, and empty means no workload has been given a
             # dynamic cloud credential yet. Explicitly NOT backfilled from
@@ -5471,6 +5526,8 @@ def init_db():
             # which is every existing row. `oauth_clients` itself is new, so create_all
             # builds it.
             "ALTER TABLE users ADD COLUMN is_service_account BOOLEAN",
+            # When the account last signed in interactively. NULL = not since this shipped.
+            "ALTER TABLE users ADD COLUMN last_login_at TIMESTAMP",
             "ALTER TABLE agent_cells ADD COLUMN oauth_client_id VARCHAR(36)",
             # OAuth clients that authenticate with a SPIFFE JWT-SVID instead of a secret
             # (services/spiffe_assertion). NULL auth_method reads as "secret", which is

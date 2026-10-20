@@ -74,13 +74,16 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         pov_accessor_entitle, pov_cell_roles, pov_gateway,
                         pov_platform_cache,
                         pov_reconcile,
-                        pov_cloud_cost, pov_entitle_agent, pov_guest_step,
+                        pov_cloud_cost, pov_engagement, pov_entitle_agent,
+                        pov_guest_step,
                         pov_ot_adapter,
-                        pov_pra_ps_link, pov_ps_config, pov_resource_broker,
+                        pov_pra_ps_link, pov_ps_config, pov_ready,
+                        pov_resource_broker, pov_seed,
                         pov_setup_steps,
-                        suspend_schedule, pov_share, spend_policy, pov_summary,
+                        suspend_schedule, pov_share, pov_signoff, spend_policy,
+                        pov_summary,
                         pov_use_case_scope, pov_use_cases, pov_vendor_access,
-                        pov_wireup)
+                        pov_wake, pov_wireup)
 from . import pov_gates
 from .auth import (get_current_user, has_explicit_permission, has_permission,
                    pov_env_scope, require_permission, require_pov_env_access,
@@ -612,7 +615,10 @@ def list_managed(db: Session = Depends(get_db),
     # call for a single environment; this list is the one caller where the per-row cost is
     # multiplied by the inventory AND by every SE loading the page at once.
     brokers = pov_broker.describe_many(db, rows)
-    return {"environments": [_serialize(e, broker=brokers.get(e.id))
+    # Batched for the same reason: three queries for the page, whatever its length.
+    engagement = pov_engagement.describe_many(db, rows)
+    return {"environments": [{**_serialize(e, broker=brokers.get(e.id)),
+                              "engagement": engagement.get(e.id, {})}
                              for e in rows]}
 
 
@@ -641,7 +647,74 @@ def get_managed(env_id: str, db: Session = Depends(get_db),
         raise HTTPException(status_code=404, detail="No such POV environment")
     vms = (db.query(PovEnvironmentVM)
              .filter(PovEnvironmentVM.environment_id == env.id).all())
-    return {"environment": _serialize(env, vms, broker=pov_broker.describe(db, env))}
+    out = _serialize(env, vms, broker=pov_broker.describe(db, env))
+    out["engagement"] = pov_engagement.describe(db, env)
+    return {"environment": out}
+
+
+@router.get("/managed/{env_id}/ready")
+def get_ready(env_id: str, demo_at: str = Query(""),
+              db: Session = Depends(get_db),
+              current_user: User = Depends(get_current_user)):
+    """Is this POV ready to demo? Served from what is stored, so it never waits on a tenant.
+
+    ``demo_at`` (ISO 8601; an offset is honoured, none means UTC) moves the window a share
+    link or auto-delete date is judged against. The live refresh is ``POST .../ready/run``.
+    """
+    env = _env_or_404(db, env_id)
+    vms = (db.query(PovEnvironmentVM)
+             .filter(PovEnvironmentVM.environment_id == env.id).all())
+    row = _serialize(env, vms, broker=pov_broker.describe(db, env))
+    health, areas = pov_ready.health_inputs(db, env)
+    when = None
+    if demo_at.strip():
+        from ..services.health import core as health_core
+        when = health_core.parse_when(demo_at.strip())
+        if when is None:
+            raise HTTPException(status_code=400, detail="demo_at is not an ISO 8601 time")
+    out = pov_ready.describe(row, health, areas, pov_ready.last_run(env), demo_at=when)
+    out["retry_in_seconds"] = pov_ready.throttled(env)
+    out["running"] = _ready_job_in_flight(db, env.id)
+    return {"ready": out}
+
+
+def _ready_job_in_flight(db: Session, environment_id: str) -> str:
+    """The id of a queued or running ready check for this POV, or ""."""
+    from ..database import Job
+    rows = (db.query(Job)
+              .filter(Job.job_type == pov_ready.JOB_TYPE,
+                      Job.status.in_(job_service.ACTIVE_STATUSES)).all())
+    return next((r.id for r in rows
+                 if r.metadata_dict.get("environment_id") == environment_id), "")
+
+
+@router.post("/managed/{env_id}/ready/run", status_code=202, dependencies=_POV_WRITE_OWN)
+def run_ready(env_id: str, db: Session = Depends(get_db),
+              current_user: User = Depends(get_current_user)):
+    """Refresh every input the ready check reads, as a job.
+
+    A job rather than an inline await: it reads a PRA appliance, Password Safe, Entitle and
+    the platform, and the slowest of those is a customer's network. The page polls the job
+    and re-reads ``GET .../ready`` when it ends. Refused while one is already in flight, and
+    within ``RUN_MIN_SECONDS`` of the last, so a mashed button is one run.
+    """
+    env = _env_or_404(db, env_id)
+    if env.status == pov_env_service.STATUS_DESTROYED:
+        raise HTTPException(status_code=409, detail="this POV has been destroyed")
+    running = _ready_job_in_flight(db, env.id)
+    if running:
+        return {"job_id": running, "already_running": True}
+    wait = pov_ready.throttled(env)
+    if wait:
+        raise HTTPException(status_code=429,
+                            detail=f"checked moments ago; try again in {wait}s",
+                            headers={"Retry-After": str(wait)})
+    job = job_service.create_job(
+        db, job_type=pov_ready.JOB_TYPE,
+        created_by=getattr(current_user, "username", None),
+        workgroup=env.workgroup,
+        metadata={"environment_id": env.id})
+    return {"job_id": job.id, "already_running": False}
 
 
 @router.post("/managed/reconcile", dependencies=_POV_WRITE)
@@ -2035,6 +2108,62 @@ def set_schedule(env_id: str, payload: ScheduleRequest,
     return {"schedule": suspend_schedule.describe(env)}
 
 
+class WakeRequest(BaseModel):
+    """A one-off warm-up before a demo. ``demo_at_local`` blank cancels the booking.
+
+    ``demo_at_local`` is the demo's start, ``YYYY-MM-DDTHH:MM`` in ``timezone`` (IANA,
+    the browser's own zone by default); ``lead_minutes`` is how long before it to start.
+    """
+    demo_at_local: str = ""
+    timezone: str = ""
+    lead_minutes: int | None = None
+
+
+@router.post("/managed/{env_id}/wake-at", dependencies=_POV_WRITE_OWN)
+def set_wake_at(env_id: str, payload: WakeRequest,
+                db: Session = Depends(get_db),
+                current_user: User = Depends(get_current_user)):
+    """Book, or cancel, a one-off start before a demo.
+
+    Allowed on every platform, including one with its own idle timer that refuses the
+    recurring schedule above: this only ever STARTS a lab, so it has nothing to fight
+    over. The booking is acted on by the reconcile pass (``pov_reconcile._sweep_wake``),
+    which queues the same ``pov_env_power`` job the Start button does.
+
+    Returns ``warnings``: reasons the lab may not be running for the whole call -- a lead
+    shorter than the reconcile interval, an idle timer shorter than the lead, a recurring
+    suspend that lands mid-call. Warnings, not refusals: each has a legitimate reading.
+    """
+    env = _env_or_404(db, env_id)
+    actor = getattr(current_user, "username", "") or ""
+    if not (payload.demo_at_local or "").strip():
+        pov_wake.clear(env)
+        db.commit()
+        logger.info("POV %s: warm-up cancelled by %s", env.name, actor)
+        return {"wake": pov_wake.describe(env), "warnings": []}
+
+    ok, why = pov_env_service.may_act_on(env)
+    if not ok:
+        raise HTTPException(status_code=409, detail=why)
+    if not env.platform_environment_id:
+        raise HTTPException(status_code=409,
+                            detail="this environment was never created on the platform")
+    try:
+        wake_at, demo_at, lead = pov_wake.plan(payload.demo_at_local, payload.timezone,
+                                               payload.lead_minutes)
+    except (pov_wake.WakeError, suspend_schedule.ScheduleError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    pov_wake.book(env, wake_at, demo_at, lead, by=actor, tz_name=payload.timezone)
+    db.commit()
+    logger.info("POV %s: warm-up booked by %s for %s (start %s)", env.name, actor,
+                demo_at.isoformat(), wake_at.isoformat())
+    return {"wake": pov_wake.describe(env),
+            "warnings": pov_wake.warnings(
+                env, wake_at, demo_at, interval_s=pov_reconcile.interval_seconds(),
+                idle_suspend=lab_platforms.supports(env.platform, "idle_suspend"))}
+
+
 class SpendCapRequest(BaseModel):
     """A spend cap in US dollars. Blank or zero clears it."""
     cap_usd: float | None = None
@@ -2177,6 +2306,70 @@ def get_summary(env_id: str, db: Session = Depends(get_db),
     if env is None:
         raise HTTPException(status_code=404, detail="No such POV environment")
     return pov_summary.build(db, env)
+
+
+@router.post("/managed/{env_id}/signoff", dependencies=_POV_WRITE_OWN)
+def sign_off(env_id: str, db: Session = Depends(get_db),
+             current_user: User = Depends(get_current_user)):
+    """The SE's sign-off on what this POV covered. Works on a destroyed POV too.
+
+    The customer's own is ``POST /api/pov/accessor/self/signoff``. Both write the same row
+    shape, told apart by ``signed_by_kind``, and both are audited.
+    """
+    env = _env_or_404(db, env_id)
+    actor = getattr(current_user, "username", "") or ""
+    try:
+        out = pov_signoff.record(db, env, by=actor, by_kind=pov_use_cases.KIND_SE)
+    except pov_signoff.SignoffError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    job_service.log_audit(db, actor, "pov_signoff", target_vm=env.name,
+                          details={"environment_id": env.id, "signoff_id": out["id"],
+                                   "kind": pov_use_cases.KIND_SE})
+    return {"signoff": out}
+
+
+@router.delete("/managed/{env_id}/signoff/{signoff_id}", dependencies=_POV_WRITE_OWN)
+def withdraw_sign_off(env_id: str, signoff_id: str, db: Session = Depends(get_db),
+                      current_user: User = Depends(get_current_user)):
+    """Withdraw a sign-off, the SE's or the customer's. The row is kept, marked withdrawn:
+    a sign-off that could be deleted would not be worth asking for."""
+    env = _env_or_404(db, env_id)
+    actor = getattr(current_user, "username", "") or ""
+    try:
+        out = pov_signoff.revoke(db, env, signoff_id, by=actor)
+    except pov_signoff.NotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    job_service.log_audit(db, actor, "pov_signoff_withdrawn", target_vm=env.name,
+                          details={"environment_id": env.id, "signoff_id": signoff_id})
+    return {"signoff": out}
+
+
+@router.get("/managed/{env_id}/seeds")
+def list_seeds(env_id: str, db: Session = Depends(get_db),
+               current_user: User = Depends(get_current_user)):
+    """The sample-activity sets this POV can run, and what each did last. No calls."""
+    return pov_seed.describe(db, _env_or_404(db, env_id))
+
+
+@router.post("/managed/{env_id}/seeds/{seed_id}", status_code=202,
+             dependencies=_POV_WRITE_OWN)
+def run_seed(env_id: str, seed_id: str, db: Session = Depends(get_db),
+             current_user: User = Depends(get_current_user)):
+    """Queue one sample-activity set. It WRITES to this POV's tenant, so it is audited.
+
+    A run already in flight is returned rather than duplicated; see services/pov_seed for
+    what each set writes and what it can never do.
+    """
+    env = _env_or_404(db, env_id)
+    actor = getattr(current_user, "username", "") or ""
+    try:
+        job_id = pov_seed.enqueue(db, env, seed_id, by=actor)
+    except pov_seed.SeedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    job_service.log_audit(db, actor, "pov_seed_requested", target_vm=env.name,
+                          details={"environment_id": env.id, "seed": seed_id,
+                                   "job_id": job_id})
+    return {"job_id": job_id}
 
 
 @router.delete("/managed/{env_id}", status_code=202, dependencies=_POV_DELETE_OWN)

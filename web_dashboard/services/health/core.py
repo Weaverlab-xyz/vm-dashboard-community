@@ -90,6 +90,11 @@ class Collector:
     ``flags`` is ANY-of: the area is collected (and shown) when at least one of these
     feature flags is on, and an empty tuple means always. ``personas`` only orders the
     page -- a persona never hides an area, the rule ``services/personas`` is built on.
+
+    ``note`` is an optional area-wide line, computed from the STORED items (as the
+    snapshot serialises them) so the page still reads stored results only. It returns
+    ``{"text": ..., "href": ..., "link": ...}`` or None, and never changes a status: it
+    is for a recommendation that is not a failure.
     """
     area: str
     label: str
@@ -98,4 +103,5 @@ class Collector:
     flags: tuple = ()
     personas: tuple = ()
     description: str = ""
+    note: Optional[Callable[[list], Optional[dict]]] = None
     extra: dict = field(default_factory=dict)
