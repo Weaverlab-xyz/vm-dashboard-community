@@ -367,6 +367,39 @@ Two more have no scope for narrower reasons:
   `resource_expiry_allow_never` setting. See [Auto-delete Timer](../operations/auto-delete-timer.md).
 - **The Dashboard home page**, which is an aggregate of things you already have access to.
 
+## What the menu shows
+
+A page whose data a scope grants appears in the menu for **anyone who holds that scope**,
+not only for administrators. Granting the scope through a role or a group mapping is
+enough; nobody has to know a URL.
+
+| Menu link | Shown to |
+|---|---|
+| **Templates** (POV) | `pov_templates` **write**. `read` alone is what lets a POV Presenter pick a template when building a POV, so it does not open the builder. |
+| **Agents** | `agents` read |
+| **Audit** | `audit` read |
+| **Storage** | `storage` read |
+| **Costs** | `costs` read |
+| **Images** | `images` read |
+| **Health**, **Secrets**, **RBAC**, **Desktops** | administrators only. Their routes are administrator-only too (see [above](#scopes-that-are-deliberately-not-grantable)). |
+
+The menu is a convenience, never the control: every route still checks its own permission,
+so a hidden link never means a reachable page and a shown one never means more than the
+scope allows. The browser learns your permissions when you sign in and re-checks them every
+few minutes, so a role an administrator changes reaches the menu without signing out. A
+group mapping's grants still change only at your next sign-in, because that is when they
+are applied.
+
+Within a page, buttons follow the same rule. **Register in Entitle** on a cloud function
+shows for `cloud_function` write. A workstream's **Delete** is for administrators only,
+because deleting one is.
+
+Some scoped features can still only be reached by administrators, because their only screen
+is inside **Settings → Integrations**: notification endpoints (`notifications`), change
+windows (`change_windows`), the agent signing audience and the SPIFFE identity check
+(`agents`), and the DB-Ops service (`cloud_database`). Their routes accept the scope, but
+the page does not yet offer them anywhere else.
+
 ## Objects, not just areas
 
 A scope says *what*, not *which*. Two mechanisms narrow the *which*:

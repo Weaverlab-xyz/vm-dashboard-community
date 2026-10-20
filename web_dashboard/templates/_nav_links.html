@@ -28,10 +28,13 @@
    row into it with no indication of where they are. #}
 <a data-nav="pov" href="/pov" class="px-2 py-2 rounded-md text-sm font-semibold {{ nav_hover }}
    {% if request.url.path == '/pov' or (request.url.path.startswith('/pov/') and not request.url.path.startswith('/pov/templates')) %}{{ nav_active }}{% endif %}">POV</a>
-{# The template builder. Admin-only, unlike POV itself: it writes to the lab platform
-   account — baking templates and creating scratch environments that bill — while the POV
-   page's own actions are scoped to a POV somebody already provisioned. #}
-<a x-show="$store.auth.isAdmin" data-nav="pov_templates" href="/pov/templates"
+{# The template builder, for whoever may WRITE templates: it bakes templates and creates
+   scratch environments on the lab platform account, which bill. Keyed on `write`, not
+   `read`, because `read` is what lets a POV Presenter PICK a template when building a POV
+   -- every presenter holds it, and this page would be a wall of buttons that 403 for
+   them. The routes enforce `pov_templates` (explicit write/delete) whatever this shows;
+   $store.auth.can() answers true for an administrator. #}
+<a x-show="$store.auth.can('pov_templates', 'write')" data-nav="pov_templates" href="/pov/templates"
    class="px-2 py-2 rounded-md text-sm font-semibold {{ nav_hover }}
    {% if request.url.path.startswith('/pov/templates') %}{{ nav_active }}{% endif %}">Templates</a>
 {% endif %}
@@ -64,12 +67,13 @@
 {# Hypervisor connections are a TAB of Remote Agents now, not a page — a connection is
    nearly always a connection through an agent. So this is the SAME destination as the
    Agents link in the admin section below, and it renders only for the viewers that link
-   is not there for: with remote agents off it is absent entirely, and when they are on it
-   is admin-only while this list is governed by the `connections` scope. Deleting this row
+   is not there for: with remote agents off it is absent entirely, and when they are on the
+   Agents link is shown to `agents:read` holders while this list is governed by the
+   `connections` scope. Deleting this row
    instead would leave a directly-dialled vCenter, or a non-admin with connections
    permission, with no nav route to the page at all. /connections opens it on that tab. #}
 {% if proxmox_enabled or vsphere_enabled or hyperv_enabled or nutanix_enabled or xcpng_enabled or vmware_enabled %}
-<a {% if remote_agents_enabled %}x-show="!$store.auth.isAdmin"{% endif %}
+<a {% if remote_agents_enabled %}x-show="!$store.auth.can('agents', 'read')"{% endif %}
    data-nav="connections" href="/connections" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/connections' %}{{ nav_active }}{% endif %}">Connections</a>
 {% endif %}
@@ -95,11 +99,11 @@
    {% if request.url.path == '/containers' %}{{ nav_active }}{% endif %}">Containers</a>
 {% endif %}
 {% if cloud_pages %}
-<a x-show="$store.auth.isAdmin" data-nav="images" href="/images"
+<a x-show="$store.auth.can('images', 'read')" data-nav="images" href="/images"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/images') %}{{ nav_active }}{% endif %}">Images</a>
 {% endif %}
-<a x-show="$store.auth.isAdmin" data-nav="storage" href="/storage"
+<a x-show="$store.auth.can('storage', 'read')" data-nav="storage" href="/storage"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/storage') %}{{ nav_active }}{% endif %}">Storage</a>
 {% if vdesktops_enabled %}
@@ -133,7 +137,7 @@
    {% if request.url.path.startswith('/k8s') %}{{ nav_active }}{% endif %}">Kubernetes</a>
 {% endif %}
 {% if cost_explorer_enabled %}
-<a x-show="$store.auth.isAdmin" data-nav="costs" href="/costs"
+<a x-show="$store.auth.can('costs', 'read')" data-nav="costs" href="/costs"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/costs') %}{{ nav_active }}{% endif %}">Costs</a>
 {% endif %}
@@ -164,18 +168,25 @@
    {% if request.url.path.startswith('/schedules') %}{{ nav_active }}{% endif %}">Schedules</a>
 
 {# ── Admin ────────────────────────────────────────────────────────── #}
+{# Two kinds of gate below, and which one a link uses is not a matter of taste: a link
+   whose routes take a grantable scope shows on $store.auth.can(scope, level), so a role or
+   group mapping that grants the scope also grants the way in. $store.auth.isAdmin is kept
+   ONLY where the routes are require_admin too -- Health, Secrets (vault administration),
+   RBAC (identity) -- see tests/test_permission_catalog._NAV_EXEMPT. Hiding a scoped page
+   behind isAdmin is what left `agents`, `audit`, `storage` and `pov_templates` grantable
+   by the API and unreachable from the nav. #}
 {# Agents AND their hypervisor connections — one page, two tabs. /connections lights this
    link too, because it is the same page on its other tab and leaving an admin who arrived
    from a Settings panel with no lit link reads as "you are nowhere". #}
 {% if remote_agents_enabled %}
-<a x-show="$store.auth.isAdmin" data-nav="agents" href="/agents"
+<a x-show="$store.auth.can('agents', 'read')" data-nav="agents" href="/agents"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/agents') or request.url.path == '/connections' %}{{ nav_active }}{% endif %}">Agents</a>
 {% endif %}
 <a x-show="$store.auth.isAdmin" data-nav="health" href="/health"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/health' %}{{ nav_active }}{% endif %}">Health</a>
-<a x-show="$store.auth.isAdmin" data-nav="audit" href="/audit"
+<a x-show="$store.auth.can('audit', 'read')" data-nav="audit" href="/audit"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/audit') %}{{ nav_active }}{% endif %}">Audit</a>
 <a x-show="$store.auth.isAdmin" data-nav="secrets" href="/secrets"

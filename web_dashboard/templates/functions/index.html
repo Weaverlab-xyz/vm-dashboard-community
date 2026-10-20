@@ -102,7 +102,10 @@
                       class="text-gray-600 hover:underline disabled:text-gray-300 disabled:no-underline text-xs mr-3">
                 Endpoint
               </button>
-              <button x-show="$store.auth.isAdmin && isAdapter(fn)"
+              <!-- cloud_function:write, which POST .../entitle-register enforces -- not
+                   isAdmin, which hid a grantable action. "Endpoint" above stays admin-only:
+                   invoke-info hands out credentials and is require_admin. -->
+              <button x-show="$store.auth.can('cloud_function', 'write') && isAdapter(fn)"
                       @click="toggleEntitle(fn)" :disabled="fn.status !== 'available'"
                       class="text-gray-600 hover:underline disabled:text-gray-300 disabled:no-underline text-xs mr-3"
                       x-text="fn.entitle_integration_id ? 'Deregister' : 'Register in Entitle'"></button>
