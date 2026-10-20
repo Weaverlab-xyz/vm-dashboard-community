@@ -78,6 +78,10 @@ EVENT_SEVERITY = {
     # `notify_min_severity`'s default floor of `warning`, which means this event would
     # ship switched on and silently never deliver — the worst of both.
     "job.awaiting_approval": "warning",
+    # A POV changed hands. Warning rather than info for the same floor reason as
+    # `job.awaiting_approval`: the person it now belongs to has to find out, and an
+    # `info` event ships switched on and never delivers under the default floor.
+    "pov.owner_changed":     "warning",
     "notification.test":     "info",
 }
 
@@ -88,7 +92,7 @@ DEFAULT_EVENT_TYPES = (
     "resource.expiring,resource.reaped,job.failed,"
     "cost.budget_exceeded,secret.stale,config.drift,audit.chain_broken,"
     "vm.spend_warn,vm.spend_capped,vm.spend_unpriced,job.dead_lettered,"
-    "job.window_missed,job.awaiting_approval"
+    "job.window_missed,job.awaiting_approval,pov.owner_changed"
 )
 
 SEVERITY_ORDER = ("info", "warning", "critical")

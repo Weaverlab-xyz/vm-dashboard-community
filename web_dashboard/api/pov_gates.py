@@ -44,6 +44,48 @@ def may_on_env(user: User, db: Session, env_id: str, level: str) -> bool:
     return pov_env_service.owned_by(pov_env_service.get(db, env_id), user)
 
 
+def handoff_refusal(db: Session, env, target: User | None) -> str:
+    """Why ``target`` may NOT be handed this POV, or "" when they may.
+
+    The point is that the new owner can actually run what they were handed. Setting
+    ``created_by`` is all a handoff does, so every way that column alone would leave them
+    looking at a 404 or a 403 is refused here, before the write, rather than discovered by
+    them on the first click:
+
+      * they must be a person who signs in: active, not a service account, not an accessor
+        (an accessor is CONFINED to one POV's /self surface; owning one is meaningless);
+      * they must be able to create POVs, which is the `pov:write` / `pov_own:write` pair
+        :func:`may_create` already defines -- the same bar a presenter cleared to own the
+        POVs they made;
+      * their POV access picker must not hide it. An own-only user is fine (``created_by``
+        is what their scope reads); a narrowed user whose picker omits this POV is not;
+      * when the POV carries a workgroup, they must be in it, so job rows stamped with it
+        stay inside the team that owns them.
+    """
+    if target is None or not getattr(target, "is_active", False):
+        return "no active user by that name"
+    if getattr(target, "is_service_account", False):
+        return "a service account cannot own a POV"
+    if getattr(target, "accessor_env_id", None):
+        return "a POV accessor login cannot own a POV"
+    if env.created_by and env.created_by == target.username:
+        return "that user already owns this POV"
+    if not may_create(target):
+        return ("that user cannot run POVs: they need 'pov:write', or 'pov_own:write' "
+                "(the POV Presenter role)")
+    from .auth import pov_env_scope, pov_owns_only
+    if not pov_owns_only(target):
+        scope = pov_env_scope(target, db)
+        if scope is not None and env.id not in scope:
+            return ("that user's POV access is narrowed to other POVs; add this one to "
+                    "their picker first")
+    wg = (env.workgroup or "").strip().lower()
+    if wg and not getattr(target, "is_effective_admin", False):
+        if wg not in {w.lower() for w in (target.workgroups_list or [])}:
+            return f"that user is not in this POV's workgroup ({env.workgroup})"
+    return ""
+
+
 def _refuse(level: str):
     raise HTTPException(
         status_code=403,

@@ -107,6 +107,17 @@ def test_the_default_event_list_is_all_known_events():
         notify_policy.parse_event_types(notify_policy.DEFAULT_EVENT_TYPES)
 
 
+def test_the_settings_default_event_list_matches_the_policy_default():
+    """``notify_policy.event_types()`` falls back to ``settings.notify_event_types`` when
+    nothing is stored, so THAT copy is the one a fresh install runs on. It had drifted:
+    the spend-cap events and ``job.dead_lettered`` were in the policy default and the panel
+    default and still shipped switched off."""
+    from web_dashboard.config import Settings
+    shipped = Settings.model_fields["notify_event_types"].default
+    assert notify_policy.parse_event_types(shipped) == \
+        notify_policy.parse_event_types(notify_policy.DEFAULT_EVENT_TYPES)
+
+
 # ── the endpoints API ────────────────────────────────────────────────────────
 
 def test_the_endpoint_routes_are_exposed():

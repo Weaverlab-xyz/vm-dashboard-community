@@ -29,6 +29,21 @@ satisfy.
 created, plus any added to their POV access picker. A **POV Manager** sees and manages every
 POV. See [Permissions → Roles](../../access/permissions.md#roles) and [who a presenter sees](../../access/permissions.md#a-named-person-who-should-also-be-a-real-user).
 
+**Handing a POV to another SE.** The **Created by** column on the POV list has a
+`hand off` control. Type the new owner's dashboard username and they become the owner,
+exactly as if they had created it. The dashboard refuses the handoff, and changes nothing,
+when the new owner could not then open the POV. That covers four cases:
+
+- they hold no POV role
+- their POV access picker leaves this POV out
+- they are not in the POV's workgroup
+- the account is an accessor or a service account
+
+The previous owner keeps access only through a role that reaches every POV, or through
+their picker. A Presenter who hands their POV on stops seeing it. Each handoff is written
+to the audit log as `pov_owner_changed`. It also sends a `pov.owner_changed` notification
+(warning severity), which is on by default.
+
 And it needs somewhere to put the many tenants the first paragraph of this page is about.
 That is [the tenant registry](standing-one-up.md#the-tenant-registry). The platform registry lives in
 `services/lab_platforms.py`, and `GET /api/pov/platforms` reports what each one can do so

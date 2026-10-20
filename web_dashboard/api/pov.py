@@ -1846,6 +1846,62 @@ def reveal_share_password(env_id: str, db: Session = Depends(get_db),
     return {"password": password}
 
 
+# ── ownership handoff ────────────────────────────────────────────────────────
+
+
+class OwnerRequest(BaseModel):
+    username: str
+
+
+@router.post("/managed/{env_id}/owner", dependencies=_POV_WRITE_OWN)
+def set_owner(env_id: str, payload: OwnerRequest,
+              db: Session = Depends(get_db),
+              current_user: User = Depends(get_current_user)):
+    """Hand this POV to another SE: an SE going on leave, or a deal changing hands.
+
+    ``created_by`` was write-once before this, so the only way to move a POV was to have
+    the new SE recreate it. It is the column ``pov_own`` reads (``owned_by``), which is why
+    nothing else changes here: the new owner's own-POV access follows from it, and the old
+    owner's does too -- they keep reaching it only through ``pov:write`` or their picker.
+
+    Every refusal is checked BEFORE the write (``pov_gates.handoff_refusal``), so a handoff
+    can never land a POV on somebody who then gets a 404 opening it.
+    """
+    env = _env_or_404(db, env_id)
+    if env.status == pov_env_service.STATUS_DESTROYED:
+        raise HTTPException(status_code=409, detail="this POV has been destroyed")
+    username = (payload.username or "").strip()
+    target = db.query(User).filter(User.username == username).first() if username else None
+    reason = pov_gates.handoff_refusal(db, env, target)
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
+
+    previous = env.created_by or ""
+    actor = getattr(current_user, "username", "") or ""
+    env.created_by = target.username
+    db.commit()
+    job_service.log_audit(
+        db, actor, "pov_owner_changed", target_vm=env.name,
+        details={"environment_id": env.id, "from": previous, "to": target.username})
+    logger.info("POV %s: owner %s -> %s by %s", env.name, previous or "-",
+                target.username, actor)
+
+    from ..services import notification_service, notify_policy
+    from ..utils.clock import utcnow
+    notification_service.emit_safe(db, notify_policy.NotificationEvent(
+        event_type="pov.owner_changed",
+        title=f"POV {env.name} handed to {target.username}",
+        body=f"{actor or 'someone'} moved {env.name} from {previous or 'nobody'} "
+             f"to {target.username}.",
+        resource_id=f"pov:{env.id}", resource_kind="pov", resource_name=env.name,
+        workgroup=env.workgroup or "", url=f"/pov/{env.id}",
+        # A POV can be handed back and forth; each move is its own notification.
+        dedupe_bucket=f"{target.username}:{utcnow().isoformat(timespec='seconds')}",
+        fields={"from": previous, "to": target.username, "by": actor}))
+    db.refresh(env)
+    return {"environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+
 class ExpiryRequest(BaseModel):
     """Move a POV's auto-delete timer.
 
