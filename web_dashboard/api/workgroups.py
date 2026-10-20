@@ -5,6 +5,7 @@ Workgroups scope RBAC and cloud-resource visibility (via AWS `Workgroup` tag,
 Azure/GCP `workgroup` tag/label). Names are canonical lowercase; the
 ``display_name`` field preserves the original casing for UI rendering.
 """
+import logging
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -15,6 +16,8 @@ from ..database import User, get_db
 from ..services import workgroup_service
 from ..services.workgroup_service import WorkgroupError
 from .auth import get_current_user, has_explicit_permission, require_admin, require_permission
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/workgroups", tags=["workgroups"])
 
@@ -475,8 +478,14 @@ async def apply_ps_attributes(
     if payload.smart_rule_id:
         try:
             out["smart_rule"] = await ps_api_service.process_smart_rule(payload.smart_rule_id)
-        except ps_api_service.PSApiError as exc:
-            out["smart_rule"] = {"smart_rule_id": payload.smart_rule_id, "error": str(exc)}
+        except ps_api_service.PSApiError:
+            # Logged, not returned: process_smart_rule's message quotes the tenant's
+            # response body (CodeQL py/stack-trace-exposure).
+            logger.warning(
+                "Smart Rule %s re-run failed after a workstream apply",
+                payload.smart_rule_id, exc_info=True)
+            out["smart_rule"] = {"smart_rule_id": payload.smart_rule_id,
+                                 "error": "Password Safe refused the re-run — see the dashboard log"}
     _audit(db, current_user, "workstream_ps_attributes_apply", workstream=wg.name,
            offset=out["offset"], systems=[t["managed_system_id"] for t in out["targets"]],
            states={t["managed_system_id"]: t["state"] for t in out["targets"]},
