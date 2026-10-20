@@ -924,10 +924,16 @@
                     The customer worked the checklist themselves.
                   </p>
                 </div>
-                <button @click="copySummary()"
-                        class="px-3 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50 shrink-0">
-                  Copy as Markdown
-                </button>
+                <div class="flex flex-wrap gap-2 justify-end shrink-0">
+                  <a :href="'/pov/' + envId + '/report'" target="_blank" rel="noopener"
+                     class="px-3 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50">
+                    Open report
+                  </a>
+                  <button @click="copySummary()"
+                          class="px-3 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50">
+                    Copy as Markdown
+                  </button>
+                </div>
               </div>
               <p x-show="notice" class="text-xs text-green-700 mt-2" x-text="notice"></p>
             </div>
@@ -977,6 +983,41 @@
                   </p>
                 </div>
               </template>
+            </div>
+
+            <!-- Sign-off: who agreed this is what was evaluated. Never deleted -- a
+                 withdrawn one stays listed, and one made before more was ticked says so. -->
+            <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+              <div class="flex items-start justify-between gap-4">
+                <div>
+                  <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Sign-off</h2>
+                  <p class="text-sm text-gray-500 mt-1">
+                    Record that this coverage is what was evaluated. The customer can
+                    confirm it from their own page too.
+                  </p>
+                </div>
+                <button @click="signOff()" :disabled="signoffBusy || !summary_.covered.length"
+                        :title="summary_.covered.length ? '' : 'Nothing is marked as covered yet'"
+                        class="px-3 py-2 rounded-lg text-sm bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                        x-text="signoffBusy ? 'Signing…' : 'Sign off'"></button>
+              </div>
+              <ul x-show="summary_.signoffs.length" class="mt-3 divide-y divide-gray-100">
+                <template x-for="o in summary_.signoffs" :key="o.id">
+                  <li class="flex items-center justify-between gap-3 py-2 text-sm">
+                    <span :class="o.revoked ? 'text-gray-400 line-through' : 'text-gray-800'">
+                      <span x-text="o.signed_by_kind === 'accessor' ? 'Customer (' + o.signed_by + ')' : o.signed_by"></span>
+                      <span class="text-gray-400" x-text="' · ' + (o.signed_at || '').slice(0, 10)"></span>
+                      <span class="text-gray-400" x-text="' · ' + (o.coverage.done || 0) + ' of ' + (o.coverage.total || 0)"></span>
+                    </span>
+                    <span class="flex items-center gap-2 shrink-0">
+                      <span x-show="!o.revoked && !o.current" class="text-xs text-amber-700">earlier version</span>
+                      <span x-show="o.revoked" class="text-xs text-gray-400">withdrawn</span>
+                      <button x-show="!o.revoked" @click="withdrawSignoff(o)" :disabled="signoffBusy"
+                              class="text-xs text-blue-600 underline disabled:opacity-40">withdraw</button>
+                    </span>
+                  </li>
+                </template>
+              </ul>
             </div>
 
             <div x-show="!summary_.covered.length && !summary_.skipped.length && !summary_.notes.length"
@@ -2344,6 +2385,41 @@
           n => !s.covered.some(c => c.id === n.id) && !s.skipped.some(k => k.id === n.id));
         section('Commented on, no verdict', orphans);
         return lines.join('\n');
+      },
+
+      signoffBusy: false,
+
+      async signOff() {
+        this.error = ''; this.notice = '';
+        this.signoffBusy = true;
+        try {
+          const res = await this.apiFetch(`/api/pov/managed/${this.envId}/signoff`, { method: 'POST' });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.detail || `Could not sign off (${res.status}).`);
+          await this.loadSummary();
+          this.notice = 'Signed off.';
+        } catch (e) {
+          this.error = e.message;
+        } finally {
+          this.signoffBusy = false;
+        }
+      },
+
+      async withdrawSignoff(o) {
+        if (!confirm('Withdraw this sign-off? It stays on the record, marked withdrawn.')) return;
+        this.error = ''; this.notice = '';
+        this.signoffBusy = true;
+        try {
+          const res = await this.apiFetch(`/api/pov/managed/${this.envId}/signoff/${o.id}`,
+                                          { method: 'DELETE' });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.detail || `Could not withdraw it (${res.status}).`);
+          await this.loadSummary();
+        } catch (e) {
+          this.error = e.message;
+        } finally {
+          this.signoffBusy = false;
+        }
       },
 
       copySummary() {

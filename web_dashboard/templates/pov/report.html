@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ theme.title_prefix }}Evaluation report</title>
+  <link rel="icon" href="{{ theme.favicon }}">
+  <script defer src="{{ static_url('js/vendor/alpine-3.17.4.min.js') }}"></script>
+  {#
+    The close-out report for one POV: what was covered, what was skipped, what was said,
+    and who signed it off. Printed to PDF from the browser ("Print / Save as PDF").
+
+    Standalone, like /pov/access, and for a similar reason: it is a document, not a page
+    of the dashboard, so it carries no nav and its own styles. The styles are INLINE
+    rather than Tailwind on purpose -- tailwind.css is a committed build, and a print
+    layout is the last place a class with no rule should go unnoticed.
+
+    Three rules, each of which is a test (tests/test_pov_signoff.py):
+      * no input of any kind. The customer's name and the opportunity are literal
+        placeholders the SE replaces in the PDF or the document they paste it into,
+        because this database is not approved to hold either -- see PovEnvironment;
+      * no email address: every name here is a dashboard username;
+      * everything a person typed is rendered with x-text.
+
+    app.js is not loaded: this page needs a token and one fetch, the same reasoning as
+    pov/access.html.
+  #}
+  <style>
+    :root { color-scheme: light; }
+    body { margin: 0; background: #f3f4f6; color: #111827;
+           font: 14px/1.5 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    .sheet { max-width: 820px; margin: 24px auto; background: #fff; padding: 40px 48px;
+             border: 1px solid #e5e7eb; border-radius: 8px; }
+    .bar { max-width: 820px; margin: 16px auto 0; display: flex; gap: 8px;
+           justify-content: flex-end; }
+    .bar button, .bar a { font: inherit; font-size: 13px; padding: 6px 12px;
+                          border-radius: 6px; border: 1px solid #d1d5db; background: #fff;
+                          color: #374151; text-decoration: none; cursor: pointer; }
+    .bar button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: #4b5563;
+         margin: 28px 0 8px; border-bottom: 1px solid #e5e7eb; padding-bottom: 4px; }
+    .muted { color: #6b7280; }
+    .small { font-size: 12px; }
+    .placeholder { background: #fef3c7; padding: 0 4px; border-radius: 3px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #f3f4f6;
+             vertical-align: top; }
+    th { color: #6b7280; font-weight: 600; font-size: 12px; }
+    .facts { display: grid; grid-template-columns: 160px 1fr; gap: 4px 12px; margin-top: 16px; }
+    .facts dt { color: #6b7280; }
+    .facts dd { margin: 0; }
+    .note { border-left: 3px solid #e5e7eb; padding: 4px 12px; margin: 8px 0; }
+    .note.customer { border-color: #8b5cf6; }
+    .note p { margin: 0; }
+    .tag { font-size: 11px; padding: 1px 6px; border-radius: 9999px; border: 1px solid #d1d5db;
+           color: #4b5563; white-space: nowrap; }
+    .tag.stale { border-color: #f59e0b; color: #92400e; }
+    .tag.gone { border-color: #d1d5db; color: #9ca3af; text-decoration: line-through; }
+    .error { max-width: 820px; margin: 24px auto; padding: 16px; background: #fef2f2;
+             border: 1px solid #fecaca; border-radius: 8px; color: #b91c1c; }
+    @media print {
+      body { background: #fff; }
+      .bar { display: none; }
+      .sheet { margin: 0; border: 0; padding: 0; max-width: none; }
+      .placeholder { background: none; }
+      h2 { break-after: avoid; }
+      tr, .note { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <div x-data='povReport({{ env_id|tojson }})' x-init="load()">
+
+    <div class="bar">
+      <a :href="'/pov/' + envId + '#summary'">Back to the POV</a>
+      <button type="button" class="primary" @click="window.print()" :disabled="!s">
+        Print / Save as PDF
+      </button>
+    </div>
+
+    <p x-show="error" class="error" x-text="error"></p>
+    <p x-show="!s && !error" class="sheet muted">Loading…</p>
+
+    <template x-if="s">
+      <div class="sheet">
+        <p class="muted small">Technical evaluation summary</p>
+        <h1><span class="placeholder">«Customer name»</span></h1>
+        <p class="muted"><span class="placeholder">«Opportunity»</span></p>
+
+        <dl class="facts">
+          <dt>Evaluation</dt><dd x-text="s.environment.name"></dd>
+          <dt>Products</dt>
+          <dd x-text="s.environment.products.length ? s.environment.products.join(', ') : 'None wired'"></dd>
+          <dt>Started</dt><dd x-text="day(s.environment.created_at)"></dd>
+          <dt>Status</dt>
+          <dd x-text="s.environment.finished ? 'Finished' : 'In progress'"></dd>
+          <dt>Prepared by</dt><dd x-text="s.environment.created_by || '—'"></dd>
+          <dt>Coverage</dt>
+          <dd x-text="s.coverage.done + ' of ' + s.coverage.total + ' in-scope use cases covered'
+                      + (s.coverage.skipped ? ', ' + s.coverage.skipped + ' skipped' : '')"></dd>
+        </dl>
+
+        <template x-if="s.by_group.length">
+          <div>
+            <h2>By area</h2>
+            <table>
+              <thead><tr><th>Area</th><th>Covered</th><th>Skipped</th></tr></thead>
+              <tbody>
+                <template x-for="g in s.by_group" :key="g.group">
+                  <tr>
+                    <td x-text="g.label"></td>
+                    <td x-text="g.done + ' / ' + g.in_scope"></td>
+                    <td x-text="g.skipped || '—'"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </template>
+
+        <template x-if="s.covered.length">
+          <div>
+            <h2>What was covered</h2>
+            <table>
+              <thead><tr><th>Use case</th><th>Area</th><th>Marked by</th><th>When</th></tr></thead>
+              <tbody>
+                <template x-for="c in s.covered" :key="'c-' + c.id">
+                  <tr>
+                    <td x-text="c.title"></td>
+                    <td x-text="c.group_label"></td>
+                    <td x-text="who(c.by, c.by_kind)"></td>
+                    <td x-text="day(c.at)"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </template>
+
+        <template x-if="s.skipped.length">
+          <div>
+            <h2>Shown but not taken forward</h2>
+            <table>
+              <thead><tr><th>Use case</th><th>Area</th><th>Marked by</th></tr></thead>
+              <tbody>
+                <template x-for="c in s.skipped" :key="'k-' + c.id">
+                  <tr>
+                    <td x-text="c.title"></td>
+                    <td x-text="c.group_label"></td>
+                    <td x-text="who(c.by, c.by_kind)"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </template>
+
+        <template x-if="s.notes.length">
+          <div>
+            <h2>What was said</h2>
+            <template x-for="n in s.notes" :key="'n-' + n.id">
+              <div class="note" :class="n.by_kind === 'accessor' ? 'customer' : ''">
+                <p><strong x-text="n.title"></strong></p>
+                <p x-text="n.note"></p>
+                <p class="muted small" x-text="who(n.by, n.by_kind) + ' · ' + day(n.at)"></p>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <h2>Sign-off</h2>
+        <p x-show="!s.signoffs.length" class="muted">
+          Nobody has signed this evaluation off yet.
+        </p>
+        <template x-if="s.signoffs.length">
+          <table>
+            <thead><tr><th>Signed by</th><th>On</th><th>Covering</th><th></th></tr></thead>
+            <tbody>
+              <template x-for="o in s.signoffs" :key="o.id">
+                <tr>
+                  <td x-text="who(o.signed_by, o.signed_by_kind)"></td>
+                  <td x-text="day(o.signed_at)"></td>
+                  <td x-text="(o.coverage.done || 0) + ' of ' + (o.coverage.total || 0)"></td>
+                  <td>
+                    <span x-show="o.revoked" class="tag gone">withdrawn</span>
+                    <span x-show="!o.revoked && !o.current" class="tag stale">earlier version</span>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </template>
+
+        <p class="muted small" style="margin-top:32px"
+           x-text="'Generated ' + day(new Date().toISOString()) + ' from the evaluation record.'"></p>
+      </div>
+    </template>
+  </div>
+
+  <script>
+    function povReport(envId) {
+      return {
+        envId: envId,
+        s: null,
+        error: '',
+
+        async load() {
+          const token = localStorage.getItem('vm_cli_token');
+          if (!token) { window.location.href = '/login'; return; }
+          try {
+            const res = await fetch(`/api/pov/managed/${encodeURIComponent(this.envId)}/summary`,
+                                    { headers: { 'Authorization': 'Bearer ' + token } });
+            if (res.status === 401) { window.location.href = '/login'; return; }
+            if (!res.ok) {
+              this.error = res.status === 404 ? 'No such POV environment.'
+                                              : `Could not load this report (${res.status}).`;
+              return;
+            }
+            this.s = await res.json();
+          } catch (e) {
+            this.error = 'Could not load this report.';
+          }
+        },
+
+        // The customer is never named here: their login is a generated username, and the
+        // report says what they ARE, which is the claim the evidence supports.
+        who(by, kind) {
+          if (kind === 'accessor') return 'Customer' + (by ? ' (' + by + ')' : '');
+          return by || 'The evaluation team';
+        },
+
+        day(iso) {
+          if (!iso) return '—';
+          const t = new Date(/Z|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + 'Z');
+          return Number.isNaN(t.getTime()) ? '—'
+            : t.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+        },
+      };
+    }
+  </script>
+</body>
+</html>

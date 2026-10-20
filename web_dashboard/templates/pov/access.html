@@ -262,6 +262,32 @@
           </div>
         </template>
 
+        <!-- The customer's sign-off: "this list is what we evaluated". Recorded against
+             this login's username, never an email, and never with free text -- what they
+             thought of each card is already in the notes above, in their own words. -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+          <div class="flex items-start justify-between gap-4">
+            <div>
+              <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Confirm what we covered</h2>
+              <p class="text-sm text-gray-500 mt-1" x-show="!signoff.id">
+                When the list above is what you evaluated, confirm it. Your contact gets
+                a record of what you agreed was covered.
+              </p>
+              <p class="text-sm text-gray-500 mt-1" x-show="signoff.id && signoff.current"
+                 x-text="'You confirmed this on ' + signoffDay(signoff.signed_at) + '.'"></p>
+              <p class="text-sm text-gray-500 mt-1" x-show="signoff.id && !signoff.current"
+                 x-text="'You confirmed an earlier version on ' + signoffDay(signoff.signed_at) + '. More has been covered since.'"></p>
+            </div>
+            <button x-show="!signoff.id || !signoff.current" @click="confirmCovered()"
+                    :disabled="confirming || !summary.done"
+                    :title="summary.done ? '' : 'Tick at least one use case first'"
+                    class="shrink-0 px-3 py-2 text-sm font-medium rounded-md bg-blue-600 text-white
+                           hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
+              <span x-text="confirming ? 'Confirming…' : 'Confirm'"></span>
+            </button>
+          </div>
+        </div>
+
       </div>
     </template>
   </div>
@@ -283,6 +309,8 @@
         waking: false,
         busy: '',
         saveError: '',
+        signoff: {},
+        confirming: false,
 
         async init() {
           const token = localStorage.getItem('vm_cli_token');
@@ -303,6 +331,7 @@
               this.share = data.share || {};
               this.wired = data.wired || [];
               this.wake = data.wake || this.wake;
+              this.signoff = data.signoff || {};
             }
           } catch (e) {
             this.error = 'Could not load your evaluation.';
@@ -405,6 +434,26 @@
           } finally {
             this.revealing = false;
           }
+        },
+
+        async confirmCovered() {
+          this.confirming = true;
+          this.saveError = '';
+          try {
+            const data = await this.post('/api/pov/accessor/self/signoff', {});
+            if (data) this.signoff = data.signoff || {};
+          } catch (e) {
+            this.saveError = e.message;
+          } finally {
+            this.confirming = false;
+          }
+        },
+
+        signoffDay(iso) {
+          const t = iso ? new Date(iso) : null;
+          return t && !Number.isNaN(t.getTime())
+            ? t.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+            : '';
         },
 
         copy(text) {

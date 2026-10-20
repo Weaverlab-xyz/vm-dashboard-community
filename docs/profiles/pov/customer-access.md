@@ -363,6 +363,45 @@ two separately, so a login nobody opened reads as exactly that.
 internal write-up. It is copied rather than downloaded because that is where it is going
 anyway.
 
+### The close-out report
+
+**Open report** on the Summary tab opens a page laid out for print. Use the browser's
+**Print / Save as PDF** to turn it into the document you send after a technical win. It
+lists:
+
+- what was covered and skipped, by area, with who marked each one and when
+- what was said, attributed to the customer or your team
+- every sign-off
+
+It works for a finished POV as well as a running one.
+
+The customer's name and the opportunity appear as the placeholders **«Customer name»** and
+**«Opportunity»**. Replace them in the PDF, or in the document you paste the report into.
+The page has no field to type them into, deliberately: this database is not approved to
+hold either. That is the same reason a POV has no customer field. The report also never
+shows an email address. A customer appears as *Customer*, followed by their generated
+login name.
+
+### Signing it off
+
+A sign-off records that somebody agreed the coverage is what was evaluated. There are two
+ways to give one:
+
+- **Sign off** on the Summary tab, for you or another SE
+- **Confirm what we covered** at the bottom of the customer's own page, for the customer
+
+Both need at least one use case marked as covered, and both are written to the audit log.
+
+A sign-off is a **snapshot**. If more is ticked after somebody signs, their sign-off is shown
+as *earlier version*, and the report says so too. It is never stretched over coverage it
+did not see. The customer's page then offers **Confirm** again. Pressing the button twice
+on the same coverage records one sign-off, not two.
+
+**Withdraw** marks a sign-off withdrawn. It is never deleted, and the report lists it struck
+through, because a record that could vanish is not worth asking a customer for. A sign-off
+carries no comment field. What the customer thought of each use case is already in their
+notes, in their own words.
+
 ---
 
 

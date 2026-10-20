@@ -79,7 +79,8 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         pov_pra_ps_link, pov_ps_config, pov_ready,
                         pov_resource_broker,
                         pov_setup_steps,
-                        suspend_schedule, pov_share, spend_policy, pov_summary,
+                        suspend_schedule, pov_share, pov_signoff, spend_policy,
+                        pov_summary,
                         pov_use_case_scope, pov_use_cases, pov_vendor_access,
                         pov_wake, pov_wireup)
 from . import pov_gates
@@ -2299,6 +2300,42 @@ def get_summary(env_id: str, db: Session = Depends(get_db),
     if env is None:
         raise HTTPException(status_code=404, detail="No such POV environment")
     return pov_summary.build(db, env)
+
+
+@router.post("/managed/{env_id}/signoff", dependencies=_POV_WRITE_OWN)
+def sign_off(env_id: str, db: Session = Depends(get_db),
+             current_user: User = Depends(get_current_user)):
+    """The SE's sign-off on what this POV covered. Works on a destroyed POV too.
+
+    The customer's own is ``POST /api/pov/accessor/self/signoff``. Both write the same row
+    shape, told apart by ``signed_by_kind``, and both are audited.
+    """
+    env = _env_or_404(db, env_id)
+    actor = getattr(current_user, "username", "") or ""
+    try:
+        out = pov_signoff.record(db, env, by=actor, by_kind=pov_use_cases.KIND_SE)
+    except pov_signoff.SignoffError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    job_service.log_audit(db, actor, "pov_signoff", target_vm=env.name,
+                          details={"environment_id": env.id, "signoff_id": out["id"],
+                                   "kind": pov_use_cases.KIND_SE})
+    return {"signoff": out}
+
+
+@router.delete("/managed/{env_id}/signoff/{signoff_id}", dependencies=_POV_WRITE_OWN)
+def withdraw_sign_off(env_id: str, signoff_id: str, db: Session = Depends(get_db),
+                      current_user: User = Depends(get_current_user)):
+    """Withdraw a sign-off, the SE's or the customer's. The row is kept, marked withdrawn:
+    a sign-off that could be deleted would not be worth asking for."""
+    env = _env_or_404(db, env_id)
+    actor = getattr(current_user, "username", "") or ""
+    try:
+        out = pov_signoff.revoke(db, env, signoff_id, by=actor)
+    except pov_signoff.NotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    job_service.log_audit(db, actor, "pov_signoff_withdrawn", target_vm=env.name,
+                          details={"environment_id": env.id, "signoff_id": signoff_id})
+    return {"signoff": out}
 
 
 @router.delete("/managed/{env_id}", status_code=202, dependencies=_POV_DELETE_OWN)
