@@ -635,6 +635,13 @@ class Settings(BaseSettings):
     # No fallback to the OT / cloud-DB pravault FA keys: those accounts are on the "PRA
     # Vault Username Password" platform, which writes a password field and never a key.
     passwordsafe_vault_sync_functional_account: str = ""
+    # Power-state attributes (services/ps_power_attrs). When a VM is started or stopped,
+    # apply one attribute and remove the other on its managed system and linked asset, so
+    # a Smart Rule can act on power state. Both are AttributeIDs picked from the tenant's
+    # own vocabulary — nothing is created — and either may be blank to stamp one direction.
+    passwordsafe_power_attributes_enabled: bool = False
+    passwordsafe_power_attr_online: str = ""
+    passwordsafe_power_attr_offline: str = ""
     bt_api_host: str = ""        # PRA host, used by terraform_pra_service
     bt_client_id: str = ""
     bt_client_secret: str = ""

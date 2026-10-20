@@ -87,6 +87,9 @@ async def _run_power_op(job_id: str, connection_id: str, vmid: str, name: str, o
         job_service.update_progress(db, job_id, 10, f"{op.capitalize()}ing {label}…")
         result = await hyperv_service.power_op(conn_in_task(db, "hyperv", connection_id), vmid, name, op)
         job_service.set_completed(db, job_id, result)
+        # Password Safe follows the change once the job is terminal — never raises.
+        from ..services import ps_power_attrs
+        await ps_power_attrs.after_hypervisor_power(db, job_id, op, connection_id, vmid)
     except Exception as e:
         job_service.set_failed(db, job_id, str(e))
     finally:

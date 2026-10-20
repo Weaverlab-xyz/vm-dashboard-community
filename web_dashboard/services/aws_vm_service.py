@@ -58,6 +58,10 @@ async def _run_power(job_id: str, action: str, instance_id: str, region: str) ->
         await aws_service.power_instance(region, instance_id, action)
         job_service.set_completed(db, job_id, {"instance_id": instance_id, "region": region, "action": action})
         await cache_service.invalidate(cache_service.key_global("aws_instances"))
+        # After the job is terminal: Password Safe follows a power change that HAPPENED.
+        # Sealed inside — see ps_power_attrs._never_raises.
+        from . import ps_power_attrs
+        await ps_power_attrs.after_cloud_power(db, job_id, action)
     except Exception as exc:
         logger.error("%s power (%s) failed for job %s: %s", "EC2", action, job_id, exc)
         job_service.set_failed(db, job_id, str(exc))

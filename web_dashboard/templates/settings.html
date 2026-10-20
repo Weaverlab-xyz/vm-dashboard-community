@@ -1655,6 +1655,76 @@
                   platform and are <strong>not</strong> used as a fallback.
                 </p>
               </div>
+              <!-- Power-state attributes (services/ps_power_attrs.py). Its own small x-data so the
+                   vocabulary loader is not a settingsPage method another panel could shadow. -->
+              <div class="pt-2 border-t border-gray-100 space-y-3"
+                   x-data="{ vocab: [], vocabState: '', vocabError: '',
+                             async loadVocab() {
+                               this.vocabState = 'loading'; this.vocabError = '';
+                               try {
+                                 const r = await API.get('/api/password-safe/attribute-vocabulary');
+                                 this.vocab = (r.types || []).filter(t => !t.read_only);
+                                 this.vocabState = 'ok';
+                               } catch (e) { this.vocabState = 'error'; this.vocabError = e.message || String(e); }
+                             } }"
+                   x-init="$watch('panelCfg.passwordsafe_power_attributes_enabled', on => { if (on && !vocabState) loadVocab(); });
+                           if (panelCfg.passwordsafe_power_attributes_enabled) loadVocab();">
+                <label class="flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" x-model="panelCfg.passwordsafe_power_attributes_enabled" class="rounded text-blue-600">
+                  Set a power-state attribute when a VM is started or stopped
+                </label>
+                <!-- Two literal x-model bindings, not one looped select: tests/test_beyondtrust_split.py
+                     finds a panel's keys by `x-model="panelCfg.<key>"`. The saved id is kept as an
+                     option before the list loads, so an unloaded vocabulary cannot blank it on save. -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3" x-show="panelCfg.passwordsafe_power_attributes_enabled">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">On start, apply</label>
+                    <select x-model="panelCfg.passwordsafe_power_attr_online"
+                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                      <option value="">(nothing)</option>
+                      <template x-if="panelCfg.passwordsafe_power_attr_online && !vocab.some(t => t.values.some(v => v.attribute_id === panelCfg.passwordsafe_power_attr_online))">
+                        <option :value="panelCfg.passwordsafe_power_attr_online" x-text="'Attribute id ' + panelCfg.passwordsafe_power_attr_online"></option>
+                      </template>
+                      <template x-for="t in vocab" :key="t.type_id">
+                        <optgroup :label="t.name">
+                          <template x-for="v in t.values" :key="v.attribute_id">
+                            <option :value="v.attribute_id" x-text="t.name + ' = ' + v.value"
+                                    :selected="v.attribute_id === panelCfg.passwordsafe_power_attr_online"></option>
+                          </template>
+                        </optgroup>
+                      </template>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">On stop, apply</label>
+                    <select x-model="panelCfg.passwordsafe_power_attr_offline"
+                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                      <option value="">(nothing)</option>
+                      <template x-if="panelCfg.passwordsafe_power_attr_offline && !vocab.some(t => t.values.some(v => v.attribute_id === panelCfg.passwordsafe_power_attr_offline))">
+                        <option :value="panelCfg.passwordsafe_power_attr_offline" x-text="'Attribute id ' + panelCfg.passwordsafe_power_attr_offline"></option>
+                      </template>
+                      <template x-for="t in vocab" :key="t.type_id">
+                        <optgroup :label="t.name">
+                          <template x-for="v in t.values" :key="v.attribute_id">
+                            <option :value="v.attribute_id" x-text="t.name + ' = ' + v.value"
+                                    :selected="v.attribute_id === panelCfg.passwordsafe_power_attr_offline"></option>
+                          </template>
+                        </optgroup>
+                      </template>
+                    </select>
+                  </div>
+                </div>
+                <p class="text-xs text-red-600" x-show="panelCfg.passwordsafe_power_attributes_enabled && vocabState === 'error'"
+                   x-text="'Could not read the attribute list: ' + vocabError"></p>
+                <p class="text-xs text-gray-400" x-show="panelCfg.passwordsafe_power_attributes_enabled">
+                  After a start or stop completes, whether it was single, bulk, scheduled or a POV suspend/resume, the
+                  chosen value is applied to the VM's Password Safe managed system and its linked asset, and the
+                  other value is removed. VMs the dashboard onboarded are found by their recorded system id;
+                  others are matched by IP, and an IP that matches more than one system is skipped rather than
+                  guessed. Values must already exist in Password Safe. Create an attribute type such as
+                  <em>Power State</em> with <em>Online</em> and <em>Offline</em> there first. Reboots change nothing.
+                </p>
+              </div>
               <!-- OT demo cell → PRA checkout (docs/profiles/demo/ot-demo-cell.md) -->
               <div class="pt-2 border-t border-gray-100 space-y-3">
                 <label class="flex items-center gap-2 text-sm text-gray-700">

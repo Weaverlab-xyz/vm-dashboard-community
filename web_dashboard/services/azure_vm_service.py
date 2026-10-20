@@ -66,6 +66,10 @@ async def _run_power(job_id: str, action: str, vm_name: str, resource_group: str
         await azure_service.power_vm(resource_group, vm_name, action)
         job_service.set_completed(db, job_id, {"vm_name": vm_name, "resource_group": resource_group, "action": action})
         await cache_service.invalidate(cache_service.key_global("azure_vms"))
+        # After the job is terminal: Password Safe follows a power change that HAPPENED.
+        # Sealed inside — see ps_power_attrs._never_raises.
+        from . import ps_power_attrs
+        await ps_power_attrs.after_cloud_power(db, job_id, action)
     except Exception as exc:
         logger.error("%s power (%s) failed for job %s: %s", "Azure VM", action, job_id, exc)
         job_service.set_failed(db, job_id, str(exc))

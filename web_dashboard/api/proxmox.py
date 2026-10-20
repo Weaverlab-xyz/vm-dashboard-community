@@ -519,6 +519,9 @@ async def _run_power_op(job_id: str, connection_id: str, node: str, vmid: int, v
         result = await proxmox_service.power_op(
             conn_in_task(db, "proxmox", connection_id), node, vmid, vm_type, op)
         job_service.set_completed(db, job_id, result)
+        # Password Safe follows the change once the job is terminal — never raises.
+        from ..services import ps_power_attrs
+        await ps_power_attrs.after_hypervisor_power(db, job_id, op, connection_id, vmid)
     except Exception as e:
         job_service.set_failed(db, job_id, str(e))
     finally:

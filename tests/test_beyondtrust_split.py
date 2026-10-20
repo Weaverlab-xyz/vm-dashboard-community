@@ -160,6 +160,8 @@ ot_ps_checkout_converge ot_aws_require_private_subnet ot_purdue_firewall_enabled
 ot_entitle_egress_cidrs ot_dmz_egress_open_ports ot_config_runner_source_cidr
 passwordsafe_vault_sync_enabled passwordsafe_vault_sync_converge
 passwordsafe_vault_sync_platform passwordsafe_vault_sync_functional_account
+passwordsafe_power_attributes_enabled passwordsafe_power_attr_online
+passwordsafe_power_attr_offline
 windows_ssh_enabled windows_rdp_default
 """.split())
 
@@ -175,6 +177,10 @@ windows_ssh_enabled windows_rdp_default
 # cloud-DB one. Those functional accounts are on the "PRA Vault Username Password"
 # platform; borrowing one here would land the mirror on a plugin that writes a password
 # field and never a key, and register successfully while syncing nothing into PRA.
+
+# ADDED since the split, deliberately: the three `passwordsafe_power_attr*` keys
+# (services/ps_power_attrs) — a start or stop applies an Online/Offline attribute to the
+# VM's Password Safe records. Password Safe AttributeIDs, so they live on its panel.
 
 # ADDED since the split, deliberately: the three `clouddb_ps_functional_account_mode_*`
 # per-CLOUD overrides (aws/azure/gcp), because the per-engine keys cannot express the
