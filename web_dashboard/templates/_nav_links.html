@@ -189,6 +189,15 @@
 <a x-show="$store.auth.can('audit', 'read')" data-nav="audit" href="/audit"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/audit') %}{{ nav_active }}{% endif %}">Audit</a>
+{# Notification endpoints. Their only screen used to be the admin-only Settings drawer, so
+   `notifications` was a scope the API granted and the page never offered. Behind the
+   feature flag like the other feature links: with it off nothing is sent, and an
+   administrator turning it on is the step that comes first. #}
+{% if notifications_enabled %}
+<a x-show="$store.auth.can('notifications', 'read')" data-nav="notifications" href="/notifications"
+   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+   {% if request.url.path.startswith('/notifications') %}{{ nav_active }}{% endif %}">Notifications</a>
+{% endif %}
 <a x-show="$store.auth.isAdmin" data-nav="secrets" href="/secrets"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/secrets') %}{{ nav_active }}{% endif %}">Secrets</a>

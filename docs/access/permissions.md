@@ -206,7 +206,7 @@ The rest are one per navigation section:
 | `agents` | read, write, delete | the remote-agent operator API. The agent-facing protocol authenticates by signature and is unaffected |
 | `audit` | read | the audit log, so it can be handed to whoever reads it without making them an admin |
 | `gateways` | read, write, delete | PRA Gateways — deploy, list and tear down |
-| `notifications` | read, write | outbound webhook endpoints and delivery history |
+| `notifications` | read, write | outbound webhook endpoints, on the **Notifications** page. The delivery log is administrators only |
 | `epml` | read, write | EPM for Linux package builds |
 | `ot` | read, write, delete | the OT demo cell and its protocol tunnels. Building a cell also needs the cloud's own `write` |
 | `change_windows` | write, use | `write` defines change windows and recurring schedules; `use` approves a booked change. No `read`: every run form reads windows. Both levels need an **explicit** grant — see [If a user reports a 403](#if-a-user-reports-a-403) |
@@ -381,6 +381,7 @@ enough; nobody has to know a URL.
 | **Storage** | `storage` read |
 | **Costs** | `costs` read |
 | **Images** | `images` read |
+| **Notifications** | `notifications` read, while the feature is on |
 | **Health**, **Secrets**, **RBAC**, **Desktops** | administrators only. Their routes are administrator-only too (see [above](#scopes-that-are-deliberately-not-grantable)). |
 
 The menu is a convenience, never the control: every route still checks its own permission,
@@ -394,11 +395,17 @@ Within a page, buttons follow the same rule. **Register in Entitle** on a cloud 
 shows for `cloud_function` write. A workstream's **Delete** is for administrators only,
 because deleting one is.
 
-Some scoped features can still only be reached by administrators, because their only screen
-is inside **Settings → Integrations**: notification endpoints (`notifications`), change
-windows (`change_windows`), the agent signing audience and the SPIFFE identity check
-(`agents`), and the DB-Ops service (`cloud_database`). Their routes accept the scope, but
-the page does not yet offer them anywhere else.
+**Settings → Integrations** is administrators only, because it configures the instance.
+Features with a scope of their own therefore have a screen outside it, and the Settings
+drawer keeps only the instance settings:
+
+| Feature | Where | Needs |
+|---|---|---|
+| Notification endpoints | **Notifications** page (`/notifications`) | `notifications` read to list them, write to add, test, edit or delete one. The delivery log and the delivery settings stay in Settings. |
+| Change windows | **Schedules** page, *Change windows* | anyone can see them, because every run form offers them; `change_windows` write adds, edits or deletes one. The approval settings and the grace period stay in Settings. |
+| The agents' signing audience, and the dashboard's SPIFFE identity | **Agents** page, *Identity* tab | `agents` read to see them; write to reset the audience or check the issuer. Public base URL and the SPIFFE audiences stay in Settings. |
+| Password Safe DB-Ops services | **Databases** page, *Password Safe DB-Ops services* | `cloud_database` read to see them; Deploy and Sync invokers need `cloud_database` write **and** `cloud_function` write, because they deploy a function. The invoker list stays in Settings. |
+| Rancher and Portainer node firewalls | **Containers** page, *Show firewall sources* | `containers` read |
 
 ## Objects, not just areas
 

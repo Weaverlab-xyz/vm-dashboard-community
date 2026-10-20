@@ -72,7 +72,10 @@ every `expiry_sweep` every 30 minutes, and a 30-VM bulk deploy would be 30 messa
 Each endpoint is a URL plus a **format**. Transport is always HTTP POST; the format picks
 the body, because Slack and Teams reject anything that isn't their own shape.
 
-Add them under **Settings → Notifications → Endpoints**. URLs and signing secrets are
+Add them on the **Notifications** page (`/notifications`), which anyone holding the
+`notifications` permission can open: `read` lists the endpoints, `write` adds, tests, edits
+and deletes them. Administrators see the same list in **Settings → Notifications**, beside
+the delivery settings and the delivery log, which stay administrator-only. URLs and signing secrets are
 Fernet-encrypted at rest with the same key as every other stored secret, and are never
 returned by the API — the UI shows a scheme+host hint.
 

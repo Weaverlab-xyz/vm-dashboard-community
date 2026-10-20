@@ -995,7 +995,10 @@
            record with a name people pick by, not a setting. The two settings that ARE
            settings (approval, grace) sit above the table. -->
       <template x-if="panel?.key === 'change_windows' && !panelLoading">
-        <div class="space-y-4" x-init="cw.load()">
+        {# The windows editor is shared with the Schedules page, which is where anyone holding
+           change_windows:write manages them -- this drawer is admin-only. See
+           changeWindowsEditor() in static/js/app.js. #}
+        <div class="space-y-4" x-data="changeWindowsEditor()" x-init="cw.load()">
           <p class="text-sm text-gray-500">
             A change window is a recurring period during which changes may <strong>start</strong>.
             Define one here and every run form can book a job into it by name.
@@ -1051,116 +1054,7 @@
             </p>
           </div>
 
-          <!-- The windows themselves -->
-          <div class="pt-2 border-t border-gray-100">
-            <div class="flex items-center justify-between mb-2">
-              <h4 class="text-sm font-semibold text-gray-700">Windows</h4>
-              <button type="button" @click="cw.startNew()"
-                      class="text-xs bg-white border border-gray-300 hover:bg-gray-50
-                             font-medium px-2.5 py-1.5 rounded-lg">Add window</button>
-            </div>
-
-            <p x-show="!cw.loading && !cw.windows.length && !cw.draft" x-cloak
-               class="text-[11px] text-gray-500">
-              No change windows yet. Runs can still be booked for a specific time without
-              one.
-            </p>
-
-            <div class="space-y-2">
-              <template x-for="w in cw.windows" :key="w.id">
-                <div class="flex items-start justify-between gap-3 rounded-lg border
-                            border-gray-200 p-3">
-                  <div class="min-w-0">
-                    <p class="text-sm font-medium text-gray-800">
-                      <span x-text="w.name"></span>
-                      <span x-show="w.enabled === false" x-cloak
-                            class="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-gray-100
-                                   text-gray-600">disabled</span>
-                    </p>
-                    <p class="text-[11px] text-gray-500" x-text="w.summary"></p>
-                    <p x-show="w.description" x-cloak
-                       class="text-[11px] text-gray-400" x-text="w.description"></p>
-                  </div>
-                  <div class="flex items-center gap-2 shrink-0">
-                    <button type="button" @click="cw.edit(w)"
-                            class="text-xs text-blue-600 hover:underline">Edit</button>
-                    <button type="button" @click="cw.remove(w)"
-                            class="text-xs text-red-600 hover:underline">Delete</button>
-                  </div>
-                </div>
-              </template>
-            </div>
-
-            <!-- Add / edit form -->
-            {# x-if, not x-show: cw.draft is null until Add or Edit opens a window, and
-               x-show would still evaluate the bindings inside against it. #}
-            <template x-if="cw.draft">
-            <div class="mt-3 rounded-lg border border-blue-200 bg-blue-50/40 p-3 space-y-2">
-              <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                <div>
-                  <label class="block text-[11px] text-gray-600 mb-1">Name</label>
-                  <input type="text" x-model="cw.draft.name" placeholder="Prod Weekend"
-                         class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5">
-                </div>
-                <div>
-                  <label class="block text-[11px] text-gray-600 mb-1">Timezone (IANA)</label>
-                  <input type="text" x-model="cw.draft.timezone" placeholder="UTC"
-                         class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5">
-                </div>
-                <div>
-                  <label class="block text-[11px] text-gray-600 mb-1">Starts (HH:MM)</label>
-                  <input type="text" x-model="cw.draft.start_at_local" placeholder="02:00"
-                         class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5">
-                </div>
-                <div>
-                  <label class="block text-[11px] text-gray-600 mb-1">Length (minutes)</label>
-                  <input type="number" min="1" x-model.number="cw.draft.duration_minutes"
-                         class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5">
-                </div>
-              </div>
-
-              <div>
-                <label class="block text-[11px] text-gray-600 mb-1">Days</label>
-                <div class="flex gap-1">
-                  <template x-for="(lbl, i) in cw.dayLabels" :key="i">
-                    <button type="button" @click="cw.toggleDay(i)"
-                            :class="cw.dayOn(i)
-                                      ? 'bg-blue-700 text-white border-blue-700'
-                                      : 'bg-white text-gray-600 border-gray-300'"
-                            class="text-[11px] px-2 py-1 rounded border"
-                            x-text="lbl"></button>
-                  </template>
-                </div>
-              </div>
-
-              <div>
-                <label class="block text-[11px] text-gray-600 mb-1">Description (optional)</label>
-                <input type="text" x-model="cw.draft.description"
-                       class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5">
-              </div>
-
-              <label class="flex items-center gap-2">
-                <input type="checkbox" x-model="cw.draft.enabled"
-                       class="rounded border-gray-300 text-blue-600">
-                <span class="text-[11px] text-gray-600">
-                  Enabled — offered on run forms. Disabling retires a window without
-                  touching changes already booked into it.
-                </span>
-              </label>
-
-              <p x-show="cw.error" x-cloak class="text-[11px] text-red-600"
-                 x-text="cw.error"></p>
-
-              <div class="flex gap-2">
-                <button type="button" @click="cw.save()" :disabled="cw.saving"
-                        class="text-xs bg-blue-700 hover:bg-blue-800 disabled:opacity-50
-                               text-white font-medium px-3 py-1.5 rounded-lg">Save</button>
-                <button type="button" @click="cw.cancel()"
-                        class="text-xs text-gray-600 hover:underline px-2">Cancel</button>
-              </div>
-            </div>
-            </template>
-          </div>
+          {% include "partials/change_windows_editor.html" %}
         </div>
       </template>
 
@@ -1287,7 +1181,10 @@
       </template>
 
       <template x-if="panel?.key === 'notifications' && !panelLoading">
-        <div class="space-y-4">
+        {# Endpoints and the delivery log are shared with the /notifications page, which is
+           where anyone holding the `notifications` scope manages endpoints -- this drawer is
+           admin-only. See notificationEndpoints() in static/js/app.js. #}
+        <div class="space-y-4" x-data="notificationEndpoints()" x-init="loadNotifications()">
           <p class="text-sm text-gray-500">
             Push dashboard events to Slack, Microsoft Teams, or any HTTP endpoint. Delivery
             is <strong>outbound only</strong> — nothing here opens an inbound webhook.
@@ -1417,178 +1314,7 @@
             </p>
           </div>
 
-          <!-- ── Endpoints ─────────────────────────────────────────────── -->
-          <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
-            <div class="flex items-center justify-between mb-2">
-              <span class="text-sm font-medium text-gray-700">Endpoints</span>
-              <button type="button" @click="newEndpoint()"
-                      class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 font-medium">
-                Add endpoint
-              </button>
-            </div>
-
-            <p x-show="notif.error" x-cloak class="text-[11px] text-red-600 mb-2"
-               x-text="notif.error"></p>
-            <p x-show="!notif.loading && !notif.endpoints.length && !notif.draft" x-cloak
-               class="text-[11px] text-gray-500">
-              No endpoints yet. Nothing will be sent until you add one.
-            </p>
-
-            <div class="space-y-2">
-              <template x-for="ep in notif.endpoints" :key="ep.id">
-                <div class="rounded border border-gray-200 bg-white p-2">
-                  <div class="flex items-center justify-between gap-2">
-                    <div class="min-w-0">
-                      <span class="text-sm font-medium text-gray-800" x-text="ep.name"></span>
-                      <span class="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 font-mono"
-                            x-text="ep.fmt"></span>
-                      <span x-show="!ep.enabled" x-cloak
-                            class="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-gray-200 text-gray-600">off</span>
-                      <span class="block text-[11px] text-gray-400 font-mono truncate"
-                            x-text="ep.url_hint"></span>
-                    </div>
-                    <div class="flex items-center gap-1 shrink-0">
-                      <button type="button" @click="testEndpoint(ep)"
-                              :disabled="notif.testingId === ep.id"
-                              class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-50">
-                        <span x-text="notif.testingId === ep.id ? 'Sending…' : 'Test'"></span>
-                      </button>
-                      <button type="button" @click="editEndpoint(ep)"
-                              class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50">Edit</button>
-                      <button type="button" @click="deleteEndpoint(ep)"
-                              class="text-xs px-2 py-1 rounded border border-red-200 text-red-600 bg-white hover:bg-red-50">Delete</button>
-                    </div>
-                  </div>
-                  <p x-show="ep.event_types" x-cloak class="text-[11px] text-gray-400 mt-1">
-                    Only: <span class="font-mono" x-text="ep.event_types"></span>
-                  </p>
-                  <p x-show="ep.last_error" x-cloak
-                     class="text-[11px] text-red-600 mt-1 font-mono break-all"
-                     x-text="'Last error: ' + ep.last_error"></p>
-                  <div x-show="notif.testResult && notif.testResult.id === ep.id" x-cloak
-                       class="mt-1 text-[11px] font-mono break-all"
-                       :class="notif.testResult?.ok ? 'text-green-700' : 'text-red-600'"
-                       x-text="notif.testResult?.ok
-                                 ? ('delivered (HTTP ' + notif.testResult.status_code + ')')
-                                 : notif.testResult?.error"></div>
-                </div>
-              </template>
-            </div>
-
-            <!-- add / edit form -->
-            {# x-if, not x-show: notif.draft is null until Add or Edit opens an endpoint,
-               and x-show would still evaluate the bindings inside against it. #}
-            <template x-if="notif.draft">
-            <div class="mt-3 rounded border border-blue-200 bg-white p-3 space-y-2">
-              <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                <div class="col-span-2">
-                  <label class="block text-[11px] font-medium text-gray-600 mb-1">Name</label>
-                  <input type="text" x-model="notif.draft.name"
-                         class="w-full border border-gray-300 rounded px-2 py-1 text-sm"
-                         placeholder="platform-alerts">
-                </div>
-                <div>
-                  <label class="block text-[11px] font-medium text-gray-600 mb-1">Format</label>
-                  <select x-model="notif.draft.fmt"
-                          class="w-full border border-gray-300 rounded px-2 py-1 text-sm">
-                    <template x-for="f in notif.formats" :key="f">
-                      <option :value="f" x-text="f"></option>
-                    </template>
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label class="block text-[11px] font-medium text-gray-600 mb-1">Webhook URL</label>
-                <input type="text" x-model="notif.draft.url"
-                       class="w-full border border-gray-300 rounded px-2 py-1 text-sm font-mono"
-                       :placeholder="notif.draft.id ? (notif.draft.url_hint + '  (leave blank to keep)') : 'https://…'">
-                <p class="text-[11px] text-gray-400 mt-1"
-                   x-show="notif.draft.fmt === 'teams'" x-cloak>
-                  Teams: create a <strong>Power Automate Workflow</strong> from the "Post to a channel
-                  when a webhook request is received" template and paste its URL. The old
-                  <span class="font-mono">outlook.office.com</span> connector webhooks were
-                  permanently switched off in May 2026 and will not work. Messages post as the
-                  Flow bot; the name and icon can't be changed.
-                </p>
-                <p class="text-[11px] text-gray-400 mt-1"
-                   x-show="notif.draft.fmt === 'slack'" x-cloak>
-                  Slack: an Incoming Webhook URL from the Slack app that owns the channel.
-                </p>
-                <p class="text-[11px] text-gray-400 mt-1"
-                   x-show="notif.draft.fmt === 'custom'" x-cloak>
-                  Any endpoint that accepts JSON. The body is a stable, versioned envelope; set a
-                  secret below to have it signed with HMAC-SHA256.
-                </p>
-              </div>
-
-              <div x-show="notif.draft.fmt === 'custom'" x-cloak>
-                <label class="block text-[11px] font-medium text-gray-600 mb-1">Signing secret</label>
-                <input type="password" x-model="notif.draft.secret" autocomplete="new-password"
-                       class="w-full border border-gray-300 rounded px-2 py-1 text-sm font-mono"
-                       :placeholder="notif.draft.has_secret ? '•••••••• (leave blank to keep)' : 'optional'">
-                <p class="text-[11px] text-gray-400 mt-1">
-                  Sent as <span class="font-mono">X-Dashboard-Signature</span>. An
-                  <span class="font-mono">aws_sm://</span> / <span class="font-mono">azure_kv://</span> /
-                  <span class="font-mono">gcp_sm://</span> / <span class="font-mono">bt_safe://</span>
-                  reference is resolved at send time.
-                </p>
-              </div>
-
-              <div>
-                <label class="block text-[11px] font-medium text-gray-600 mb-1">Only these events</label>
-                <input type="text" x-model="notif.draft.event_types"
-                       class="w-full border border-gray-300 rounded px-2 py-1 text-sm font-mono"
-                       placeholder="blank = everything enabled above">
-              </div>
-
-              <label class="flex items-center gap-2">
-                <input type="checkbox" x-model="notif.draft.enabled"
-                       class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
-                <span class="text-sm text-gray-700">Enabled</span>
-              </label>
-
-              <div class="flex justify-end gap-2 pt-1">
-                <button type="button" @click="notif.draft = null"
-                        class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50">Cancel</button>
-                <button type="button" @click="saveEndpoint()" :disabled="notif.saving"
-                        class="text-xs px-3 py-1 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">
-                  <span x-text="notif.saving ? 'Saving…' : 'Save endpoint'"></span>
-                </button>
-              </div>
-            </div>
-            </template>
-          </div>
-
-          <!-- ── Delivery log ──────────────────────────────────────────── -->
-          <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
-            <div class="flex items-center justify-between mb-2">
-              <span class="text-sm font-medium text-gray-700">Recent deliveries</span>
-              <button type="button" @click="loadNotifications()"
-                      class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 font-medium">
-                Refresh
-              </button>
-            </div>
-            <p class="text-[11px] text-gray-500 mb-2" x-text="notifSummaryLine()"></p>
-            <p x-show="!notif.deliveries.length" x-cloak class="text-[11px] text-gray-500">
-              Nothing recorded yet.
-            </p>
-            <div class="space-y-1 max-h-64 overflow-y-auto">
-              <template x-for="d in notif.deliveries" :key="d.id">
-                <div class="text-[11px] font-mono flex gap-2">
-                  <span class="shrink-0 w-14"
-                        :class="{'text-green-700': d.status === 'sent',
-                                 'text-red-600': d.status === 'failed',
-                                 'text-gray-400': d.status === 'dry_run' || d.status === 'suppressed',
-                                 'text-amber-600': d.status === 'pending' || d.status === 'sending'}"
-                        x-text="d.status"></span>
-                  <span class="shrink-0 text-gray-400" x-text="d.channel"></span>
-                  <span class="truncate text-gray-700"
-                        x-text="d.subject + (d.error ? ' — ' + d.error : '')"></span>
-                </div>
-              </template>
-            </div>
-          </div>
+          {% include "partials/notification_endpoints.html" %}
 
           <p class="text-[11px] text-amber-600">
             Delivery is at-least-once: a worker killed mid-send retries when the row is
@@ -9204,130 +8930,6 @@ function settingsPage() {
     workerStatus: null,      // what the job worker resolved its limits to (Job Worker panel)
     workerStatusLoading: false,
 
-    // ── Notifications panel ──────────────────────────────────────────────
-    // Endpoints are rows in their own table, not panel config keys, so they load and
-    // save through /api/notifications rather than the generic feature-panel plumbing.
-    notif: {
-      endpoints: [], formats: [], knownEvents: [], summary: null,
-      deliveries: [], loading: false, error: '',
-      draft: null,           // the endpoint being added/edited, or null
-      saving: false, testingId: '',
-      testResult: null,      // { id, ok, error, status_code }
-    },
-
-    // Change windows. Self-contained — every method below uses only `this` (the `cw`
-    // object) plus the page-global API/toast helpers, so it needs nothing from the root
-    // component and can be read in one place. The two approval settings and the grace
-    // period are ordinary config keys and ride `panelCfg` like every other setting.
-    cw: {
-      windows: [], loading: false, saving: false, error: '',
-      draft: null,           // the window being added/edited, or null
-      dayLabels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
-
-      async load() {
-        this.loading = true;
-        this.error = '';
-        try {
-          // Not enabled_only: an administrator managing the calendar needs to see the
-          // retired ones, which is the whole difference between disabling and deleting.
-          const r = await API.get('/api/change-windows');
-          this.windows = (r && r.windows) || [];
-        } catch (e) {
-          this.error = e.message || 'Could not load change windows.';
-        } finally {
-          this.loading = false;
-        }
-      },
-
-      blank() {
-        return { id: '', name: '', start_at_local: '02:00', duration_minutes: 240,
-                 // Blank resolves to UTC server-side rather than to the server's local
-                 // zone, which is an accident of the container image.
-                 timezone: '', schedule_days: '1111111', description: '',
-                 enabled: true };
-      },
-
-      startNew() { this.error = ''; this.draft = this.blank(); },
-
-      edit(w) {
-        this.error = '';
-        this.draft = {
-          id: w.id, name: w.name || '',
-          start_at_local: w.start_at_local || '02:00',
-          duration_minutes: w.duration_minutes || 240,
-          // "UTC" is what describe() renders for an unset zone; send it back as blank
-          // so a round-trip through this form does not turn an unset zone into a pinned
-          // one. They behave identically, but the stored value should not drift.
-          timezone: (w.timezone === 'UTC' ? '' : (w.timezone || '')),
-          schedule_days: w.schedule_days || '1111111',
-          description: w.description || '',
-          enabled: w.enabled !== false,
-        };
-      },
-
-      cancel() { this.draft = null; this.error = ''; },
-
-      dayOn(i) {
-        return this.draft && this.draft.schedule_days.charAt(i) === '1';
-      },
-
-      toggleDay(i) {
-        if (!this.draft) return;
-        const chars = this.draft.schedule_days.split('');
-        chars[i] = chars[i] === '1' ? '0' : '1';
-        this.draft.schedule_days = chars.join('');
-      },
-
-      async save() {
-        if (!this.draft) return;
-        this.saving = true;
-        this.error = '';
-        const body = {
-          name: this.draft.name,
-          start_at_local: this.draft.start_at_local,
-          duration_minutes: this.draft.duration_minutes,
-          timezone: this.draft.timezone,
-          schedule_days: this.draft.schedule_days,
-          description: this.draft.description,
-          enabled: this.draft.enabled,
-        };
-        try {
-          if (this.draft.id) {
-            await API.put(`/api/change-windows/${this.draft.id}`, body);
-          } else {
-            await API.post('/api/change-windows', body);
-          }
-          this.draft = null;
-          await this.load();
-          toast('Change window saved.', 'success');
-        } catch (e) {
-          // The server's refusals here are the ones that teach the feature — a zero
-          // length window, an unknown timezone, a day mask with nothing selected — so
-          // they are shown verbatim rather than replaced with something generic.
-          this.error = e.message || 'Could not save this change window.';
-        } finally {
-          this.saving = false;
-        }
-      },
-
-      async remove(w) {
-        if (!confirm(`Delete the change window "${w.name}"?\n\n`
-                     + 'Changes already booked into it keep their times and still run; '
-                     + 'they just lose the name. To stop it being offered on run forms '
-                     + 'without deleting it, edit it and clear Enabled.')) return;
-        this.error = '';
-        try {
-          await API.del(`/api/change-windows/${w.id}`);
-          await this.load();
-          toast('Change window deleted.', 'success');
-        } catch (e) {
-          // Includes the refusal when changes are still booked into it.
-          this.error = e.message || 'Could not delete this change window.';
-          toast(this.error, 'error');
-        }
-      },
-    },
-
     // Cross-cloud per-region config sets — the Multi-region panel. One state block
     // per cloud, each loaded from / saved to /api/setup/regions/{cloud}. The generic
     // editor markup is driven by the server-provided fields + fallbacks.
@@ -10012,11 +9614,6 @@ function settingsPage() {
           this.workerStatus = null;
           await this.loadWorkerStatus();
         }
-        // Notifications: endpoints and the delivery log live outside the feature-panel
-        // config, so they load alongside it.
-        if (intg.key === 'notifications') {
-          await this.loadNotifications();
-        }
       } catch (e) {
         this.panelError = 'Failed to load configuration: ' + e.message;
       } finally {
@@ -10140,10 +9737,9 @@ function settingsPage() {
       return lines.join('\n');
     },
 
-    // ── Notifications ────────────────────────────────────────────────────
-    // Endpoints and deliveries are their own resources, so none of this goes through
-    // the generic feature-panel save. The API never returns a URL or a secret — only
-    // a scheme+host hint and a has_secret flag.
+    // Notification endpoints and change windows used to be methods here; they are
+    // notificationEndpoints() / changeWindowsEditor() in static/js/app.js now, shared with
+    // the pages that non-admins holding those scopes use.
 
     // `tab` lands a cross-link on one tab of a tabbed panel. openPanel clears panelTab
     // before its first await, so setting it straight after survives the reset, and the
@@ -10153,106 +9749,6 @@ function settingsPage() {
       if (!intg) return;
       this.openPanel(intg);
       this.panelTab = tab;
-    },
-
-    async loadNotifications() {
-      this.notif.loading = true;
-      this.notif.error = '';
-      this.notif.draft = null;
-      this.notif.testResult = null;
-      try {
-        const [eps, sum, del] = await Promise.all([
-          API.get('/api/notifications/endpoints'),
-          API.get('/api/notifications/summary').catch(() => null),
-          API.get('/api/notifications/deliveries?page_size=20').catch(() => null),
-        ]);
-        this.notif.endpoints = eps.endpoints || [];
-        this.notif.formats = eps.formats || [];
-        this.notif.knownEvents = eps.known_events || [];
-        this.notif.summary = sum;
-        this.notif.deliveries = (del && del.deliveries) || [];
-      } catch (e) {
-        this.notif.error = 'Could not load notification endpoints: ' + e.message;
-      } finally {
-        this.notif.loading = false;
-      }
-    },
-
-    newEndpoint() {
-      this.notif.draft = { id: '', name: '', url: '', fmt: 'custom', secret: '',
-                           event_types: '', enabled: true };
-    },
-
-    editEndpoint(ep) {
-      // url and secret start blank on an edit: the server never sends them back, and a
-      // blank means "leave it alone" on save. Typing in either field replaces it.
-      this.notif.draft = { id: ep.id, name: ep.name, url: '', fmt: ep.fmt, secret: '',
-                           event_types: ep.event_types || '', enabled: ep.enabled,
-                           url_hint: ep.url_hint, has_secret: ep.has_secret };
-    },
-
-    async saveEndpoint() {
-      const d = this.notif.draft;
-      if (!d) return;
-      this.notif.saving = true;
-      try {
-        if (d.id) {
-          const body = { name: d.name, fmt: d.fmt, event_types: d.event_types,
-                         enabled: d.enabled };
-          if (d.url) body.url = d.url;         // omitted = keep the stored URL
-          if (d.secret) body.secret = d.secret;
-          await API.patch(`/api/notifications/endpoints/${d.id}`, body);
-        } else {
-          await API.post('/api/notifications/endpoints', {
-            name: d.name, url: d.url, fmt: d.fmt, secret: d.secret,
-            event_types: d.event_types, enabled: d.enabled });
-        }
-        this.notif.draft = null;
-        await this.loadNotifications();
-        toast('Endpoint saved.', 'success');
-      } catch (e) {
-        toast('Could not save the endpoint: ' + e.message, 'error');
-      } finally {
-        this.notif.saving = false;
-      }
-    },
-
-    async deleteEndpoint(ep) {
-      if (!confirm(`Delete the notification endpoint "${ep.name}"? Queued deliveries to it will fail.`)) return;
-      try {
-        await API.delete(`/api/notifications/endpoints/${ep.id}`);
-        await this.loadNotifications();
-        toast('Endpoint deleted.', 'success');
-      } catch (e) {
-        toast('Could not delete the endpoint: ' + e.message, 'error');
-      }
-    },
-
-    async testEndpoint(ep) {
-      this.notif.testingId = ep.id;
-      this.notif.testResult = null;
-      try {
-        const r = await API.post(`/api/notifications/endpoints/${ep.id}/test`, {});
-        this.notif.testResult = { id: ep.id, ...r };
-        // Reload so last_success_at / last_error reflect the attempt.
-        const eps = await API.get('/api/notifications/endpoints');
-        this.notif.endpoints = eps.endpoints || [];
-      } catch (e) {
-        this.notif.testResult = { id: ep.id, ok: false, error: e.message };
-      } finally {
-        this.notif.testingId = '';
-      }
-    },
-
-    notifSummaryLine() {
-      const s = this.notif.summary;
-      if (!s) return 'No delivery activity recorded yet.';
-      const parts = [];
-      for (const k of ['sent', 'pending', 'failed', 'dry_run', 'suppressed']) {
-        if (s[k]) parts.push(`${s[k]} ${k.replace('_', '-')}`);
-      }
-      const head = parts.length ? parts.join(', ') : 'nothing sent';
-      return `Last ${s.window_hours}h: ${head}.`;
     },
 
     // Per-cloud runner backends fall back to the legacy global ansible_runner /

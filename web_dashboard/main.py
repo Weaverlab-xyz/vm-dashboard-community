@@ -1783,6 +1783,14 @@ async def schedules_page(request: Request):
     return templates.TemplateResponse(request, "schedules/index.html", {"request": request})
 
 
+@app.get("/notifications", response_class=HTMLResponse, include_in_schema=False)
+async def notifications_page(request: Request):
+    """Notification endpoints, for whoever holds the `notifications` scope. The only other
+    screen for them is the admin-only Settings drawer. Same shape as /schedules: the shell
+    renders for anyone and /api/notifications enforces the scope."""
+    return templates.TemplateResponse(request, "notifications/index.html", {"request": request})
+
+
 @app.get("/health", response_class=HTMLResponse, include_in_schema=False)
 async def health_page(request: Request):
     """Health across the estate. Admin-only, enforced by the API the page reads, the same

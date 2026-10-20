@@ -93,7 +93,9 @@ validator refuses the global form at the click rather than letting a rotation di
 > `data-api` stays off rather than building an address the plugin refuses.
 
 > **The dashboard deploys the Cloud Run service.** Settings → Password Safe → *Databases* tab →
-> *GCP (Cloud SQL plugins)* → *Cloud Run channel* has a **Deploy** button per region (job `clouddb_dbops_deploy`). What the
+> *GCP (Cloud SQL plugins)* → *Cloud Run channel* has a **Deploy** button per region (job `clouddb_dbops_deploy`).
+> The same per-region list, with **Deploy** and **Sync invokers**, is *Password Safe DB-Ops services* on the
+> Databases page, for anyone holding `cloud_database:write` and `cloud_function:write`. What the
 > dashboard cannot build is the plugin repository's .NET image — and it does not need to.
 > The plugin depends on an HTTP contract, not on an implementation language, so the
 > dashboard ships its own service (`fnworkloads/ps_dbops.py`) through the same Cloud

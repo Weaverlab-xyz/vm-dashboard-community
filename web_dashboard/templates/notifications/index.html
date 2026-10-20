@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Notifications{% endblock %}
+
+{# Notification endpoints, for whoever holds the `notifications` scope.
+
+   Before this page the only screen for endpoints was the Settings → Integrations →
+   Notifications drawer, which is admin-only because the rest of that drawer is instance
+   configuration (dry run, private targets, event filter, intervals). The endpoint routes
+   take the scope -- notifications:read lists, notifications:write adds, edits, tests and
+   deletes -- so a role granting it granted an API and no way to use it. The editor is
+   shared with that drawer (partials/notification_endpoints.html + notificationEndpoints()
+   in static/js/app.js); what stays admin-only is the drawer's settings and the delivery
+   log, whose route is require_admin.
+
+   Like /schedules the shell renders for anyone who reaches the URL and the API scopes what
+   they see: someone without the scope gets the API's refusal in place, not a 404. #}
+
+{% block content %}
+<div class="max-w-4xl mx-auto py-8 px-4"
+     x-data="notificationEndpoints()" x-init="requireAuth(); loadNotifications()">
+
+  <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-6">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Notifications</h1>
+      <p class="text-sm text-gray-500 mt-1">
+        Where dashboard events are pushed: Slack, Microsoft Teams, or any HTTP endpoint.
+        Delivery is outbound only.
+        <a href="/docs/operations/notifications" class="text-blue-600 hover:underline">Feature guide</a>.
+      </p>
+    </div>
+    <div class="flex items-center gap-2">
+      <a x-show="$store.auth.isAdmin" x-cloak href="/settings#integrations"
+         class="text-sm bg-white border border-gray-300 hover:bg-gray-50 px-3 py-2
+                rounded-lg shadow-sm font-medium transition">Delivery settings</a>
+      <button @click="loadNotifications()" :disabled="notif.loading"
+              class="text-sm bg-white border border-gray-300 hover:bg-gray-50 px-3 py-2
+                     rounded-lg shadow-sm font-medium transition">Refresh</button>
+    </div>
+  </div>
+
+  {# The feature switch and dry run are an administrator's settings; anyone who can see the
+     endpoints is told when nothing will actually reach them, because "my endpoint never
+     fires" is otherwise indistinguishable from a broken endpoint. #}
+  {% if not notifications_enabled %}
+  <div class="rounded-xl border border-amber-200 bg-amber-50 p-4 mb-6 text-sm text-amber-800">
+    Notifications are <strong>off</strong> on this instance. Endpoints can be added and
+    tested, but no event is sent until an administrator turns the feature on in
+    Settings → Integrations → Notifications.
+  </div>
+  {% endif %}
+  <div x-show="notif.summary && notif.summary.enabled && notif.summary.dry_run" x-cloak
+       class="rounded-xl border border-amber-200 bg-amber-50 p-4 mb-6 text-sm text-amber-800">
+    <strong>Dry run</strong> is on: events are recorded but not sent. <em>Test</em> still
+    sends a real message. An administrator turns dry run off in Settings → Integrations →
+    Notifications.
+  </div>
+
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4 space-y-4">
+    {% include "partials/notification_endpoints.html" %}
+  </div>
+
+  <p class="text-xs text-gray-500 mt-4" x-show="!$store.auth.can('notifications', 'write')" x-cloak>
+    You can see these endpoints but not change them; that takes the
+    <span class="font-mono">notifications</span> permission at the write level.
+  </p>
+</div>
+{% endblock %}

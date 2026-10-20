@@ -223,6 +223,74 @@
     </div>
   </div>
 
+  {# The DB-Ops services: the per-region Cloud Run service the Password Safe GCP Cloud SQL
+     plugin's cloud-run channel calls (docs/design/ps-dbops-cloud-run.md). Its routes take
+     cloud_database -- status is read, Deploy and Sync invokers are write, and both of those
+     also check cloud_function:write because they apply a function -- yet the only screen
+     was the Password Safe drawer in the admin-only Settings → Integrations. This is that
+     list for whoever holds the scope. The drawer keeps the settings (invoker list, ingress,
+     audience override), which are instance configuration.
+
+     Collapsed and loaded on first open: most visits to this page are about databases, not
+     the service that rotates their credentials. Its own component, nested, so it shares
+     nothing with databasesPage() but the page. #}
+  {% if password_safe_enabled and cloud_functions_enabled %}
+  <details class="mt-6 bg-white rounded-xl shadow-sm border border-gray-200"
+           x-data="dbopsServices()" @toggle="$el.open && !loaded && load()">
+    <summary class="px-4 py-3 cursor-pointer text-sm font-semibold text-gray-700">
+      Password Safe DB-Ops services
+      <span class="font-normal text-gray-400">&mdash; the Cloud Run channel, one per GCP region</span>
+    </summary>
+    <div class="px-4 pb-4">
+      <p class="text-xs text-gray-500 mb-3">
+        Password Safe's GCP Cloud SQL plugins reach a SQL Server instance through this
+        service, because Cloud SQL for SQL Server has no IAM database authentication. It
+        sits inside the VPC, keeps one warm instance (a few dollars a month) and is callable
+        only by the invoker service accounts configured in Settings.
+      </p>
+      <div class="border border-gray-200 rounded-lg divide-y divide-gray-100">
+        <div class="flex items-center justify-between px-3 py-2 bg-gray-50">
+          <span class="text-xs font-medium text-gray-600"
+                x-text="status ? (status.invokers + ' invoker(s) configured') : 'Regions'"></span>
+          <button type="button" @click="load()" :disabled="loading"
+                  class="text-xs text-blue-600 hover:text-blue-800 disabled:text-gray-400">
+            <span x-text="loading ? 'Loading…' : 'Refresh'"></span>
+          </button>
+        </div>
+        <p x-show="error" x-cloak class="px-3 py-2 text-xs text-red-600" x-text="error"></p>
+        <p x-show="status && !(status.regions || []).length" x-cloak class="px-3 py-2 text-xs text-gray-400">
+          No GCP region is configured.
+        </p>
+        <template x-for="r in (status?.regions || [])" :key="r.region">
+          <div class="px-3 py-2 flex items-center justify-between gap-3">
+            <div class="min-w-0">
+              <p class="text-sm font-mono text-gray-700" x-text="r.region"></p>
+              <p class="text-xs truncate"
+                 :class="r.audience_source === 'deployed' ? 'text-green-600' : (r.audience_source === 'config' ? 'text-amber-600' : 'text-gray-400')"
+                 x-text="r.audience ? (r.audience + (r.audience_source === 'config' ? ' (from the Settings override)' : '')) : (r.reason || 'no service')"></p>
+              <p x-show="r.invokers_drifted" class="text-xs text-amber-600"
+                 x-text="r.deployed_invokers === 0 ? 'No principal holds roles/run.invoker — every call is refused with 403 and an empty body. Sync invokers once the list in Settings is right.' : ('The ' + r.deployed_invokers + ' invoker(s) applied to this service differ from the configured list — Sync invokers.')"></p>
+            </div>
+            <div x-show="canWrite()" class="shrink-0 flex items-center gap-2">
+              <button type="button" x-show="r.status === 'available'"
+                      @click="syncInvokers(r.region)" :disabled="busy === r.region"
+                      class="px-2 py-1 text-xs rounded border hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                      :class="r.invokers_drifted ? 'border-amber-400 text-amber-700' : 'border-gray-300'">
+                <span x-text="busy === r.region ? 'Working…' : 'Sync invokers'"></span>
+              </button>
+              <button type="button" @click="deploy(r.region)"
+                      :disabled="busy === r.region || !r.deployable" :title="r.reason || ''"
+                      class="px-2 py-1 text-xs rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">
+                <span x-text="busy === r.region ? 'Deploying…' : (r.status === 'available' ? 'Deployed' : 'Deploy')"></span>
+              </button>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </details>
+  {% endif %}
+
   <!-- Retag modal (admin only) -- the ONLY way a database that predates the workgroup
        column gets one. Those rows are NULL, and NULL means creator-scoped. -->
   <div x-show="retagTarget" x-cloak
@@ -1570,6 +1638,69 @@ function databasesPage() {
     },
 
     flash(m, t) { this.toast = m; this.toastType = t || 'success'; setTimeout(() => { this.toast = ''; }, 4500); },
+  };
+}
+
+// The DB-Ops services section. Same three routes the Settings → Password Safe drawer
+// calls; the buttons show only when the viewer could pass BOTH checks those routes make
+// (cloud_database:write on the route, cloud_function:write inside it), so a holder of
+// one alone is not offered a button that 403s. The routes stay the control.
+function dbopsServices() {
+  return {
+    status: null, loaded: false, loading: false, error: '', busy: '',
+
+    canWrite() {
+      const auth = this.$store.auth;
+      return auth.can('cloud_database', 'write') && auth.can('cloud_function', 'write');
+    },
+
+    async load() {
+      this.loading = true;
+      this.error = '';
+      try {
+        this.status = await API.get('/api/databases/dbops/status');
+      } catch (e) {
+        this.status = null;
+        this.error = 'Could not load the DB-Ops services: ' + e.message;
+      } finally {
+        this.loaded = true;
+        this.loading = false;
+      }
+    },
+
+    async deploy(region) {
+      if (!confirm(
+        `Deploy the DB-Ops service to ${region}?\n\n` +
+        'It is a Cloud Run service inside the VPC, deployed with a warm instance that ' +
+        'bills continuously (a few dollars a month). Only the invoker service accounts ' +
+        'configured in Settings will be able to call it.')) return;
+      this.busy = region;
+      try {
+        const r = await API.post('/api/databases/dbops/deploy', { region });
+        toast(`Deploying the DB-Ops service in ${region} — job ${r.job_id}.`, 'success');
+        await this.load();
+      } catch (e) {
+        toast('Could not deploy the DB-Ops service: ' + e.message, 'error');
+      } finally {
+        this.busy = '';
+      }
+    },
+
+    async syncInvokers(region) {
+      this.busy = region;
+      try {
+        const r = await API.post('/api/databases/dbops/invokers', { region });
+        toast(r.changed
+          ? `Applying ${r.invokers} invoker(s) to the ${region} DB-Ops service — job ${r.job_id}.`
+          : `The ${region} DB-Ops service already holds exactly those invokers — nothing to do.`,
+          'success');
+        await this.load();
+      } catch (e) {
+        toast('Could not sync the DB-Ops invokers: ' + e.message, 'error');
+      } finally {
+        this.busy = '';
+      }
+    },
   };
 }
 </script>

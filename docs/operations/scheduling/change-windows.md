@@ -139,7 +139,9 @@ window or none of it does.
 
 ## Defining a window
 
-**Settings → Change Windows → Add window.**
+**Schedules → Change windows → Add window**, for anyone holding `change_windows:write`.
+Administrators have the same editor in **Settings → Change Windows**, beside the approval
+settings.
 
 | Field | Notes |
 |---|---|

@@ -1,0 +1,231 @@
+{# The Identity tab of the Remote Agents page (agents/index.html): the agents' pinned
+   signing audience, and the dashboard's own SPIFFE identity.
+
+   Both answer to the `agents` scope -- GET /api/agents/audience and GET /api/spiffe-identity
+   are agents:read, DELETE /api/agents/audience and POST /api/spiffe-identity/check-issuer
+   are agents:write -- but until this tab they were shown only inside Settings →
+   Integrations, which is admin-only because it is instance configuration. A role granting
+   `agents` reached the Agents page (PR #1144) and still could not see why enrolment codes
+   were refused. The Settings drawers keep their copies beside the fields that configure
+   these values (Public base URL, the SPIFFE audiences); this tab is the read-and-repair
+   view. Write buttons show on $store.auth.can('agents', 'write'); the routes are the
+   control.
+
+   Self-contained like the other tab partials -- markup and factory in this one file (see
+   the hub's note on why). #}
+
+<div x-data="agentIdentityPanel()"
+     @agents-tab-shown.window="$event.detail === 'identity' && load()">
+
+  <div x-show="noAccess" x-cloak
+       class="bg-white rounded-xl shadow-sm border border-gray-200 p-8 text-center">
+    <h2 class="text-base font-semibold text-gray-700 mb-2">You cannot see the agents' identity</h2>
+    <p class="text-sm text-gray-500 max-w-xl mx-auto">
+      This tab needs the <span class="font-mono">agents</span> permission.
+    </p>
+  </div>
+
+  <div x-show="!noAccess" x-cloak class="space-y-6">
+
+    <!-- ── Signing audience ─────────────────────────────────────────────── -->
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+      <div class="flex items-center justify-between mb-2">
+        <h2 class="text-base font-semibold text-gray-700">Signing audience</h2>
+        <button type="button" @click="load()" :disabled="loading"
+                class="text-xs text-blue-600 hover:text-blue-800 disabled:text-gray-400">
+          <span x-text="loading ? 'Loading…' : 'Refresh'"></span>
+        </button>
+      </div>
+      <p class="text-sm text-gray-500 mb-4">
+        The address every agent signs its requests against. It is pinned by the first
+        enrolment code and never moves on its own, so a corrected Public base URL leaves
+        enrolled agents working and refuses new codes until the two agree.
+      </p>
+
+      <p x-show="audienceUnavailable" x-cloak class="text-sm text-gray-500"
+         x-text="audienceUnavailable"></p>
+
+      <template x-if="audience">
+        <div class="text-sm space-y-1">
+          <div x-show="audience.pinned">
+            <span class="text-gray-500">Pinned to:</span>
+            <span class="ml-1 font-mono text-gray-800" x-text="audience.pinned"></span>
+          </div>
+          <p class="text-gray-500" x-show="!audience.pinned">
+            Not pinned yet. The next enrolment code pins it permanently to
+            <span class="font-mono text-gray-700" x-text="audience.effective"></span>.
+          </p>
+          <div x-show="audience.pinned && audience.public_base_url !== audience.pinned">
+            <span class="text-gray-500">Public base URL says:</span>
+            <span class="ml-1 font-mono text-gray-800"
+                  x-text="audience.public_base_url || '(unset — derived per request)'"></span>
+          </div>
+          <div>
+            <span class="text-gray-500">Enrolled agents signing against it:</span>
+            <span class="ml-1 font-mono text-gray-800" x-text="audience.agents_enrolled"></span>
+          </div>
+
+          <div x-show="audience.conflict"
+               class="mt-2 rounded border border-red-200 bg-red-50 px-3 py-2">
+            <p class="text-xs text-red-800">
+              <strong>New enrolment codes are refused</strong> until this is resolved.
+              <span x-text="audience.conflict"></span>
+            </p>
+          </div>
+          <template x-for="w in (audience.warnings || [])" :key="w">
+            <div class="mt-2 rounded border border-amber-200 bg-amber-50 px-3 py-2">
+              <p class="text-xs text-amber-800" x-text="w"></p>
+            </div>
+          </template>
+
+          <div x-show="audience.pinned && $store.auth.can('agents', 'write')" class="pt-2">
+            <button type="button" @click="resetAudience()" :disabled="resetting"
+                    class="text-xs px-3 py-1.5 rounded-lg border border-red-300 text-red-700 hover:bg-red-50 transition disabled:opacity-50">
+              <span x-text="resetting ? 'Resetting…' : 'Reset signing audience'"></span>
+            </button>
+            <p class="text-xs text-gray-400 mt-1">
+              Clears the pin so the next enrolment code re-pins it from Public base URL.
+              <strong class="text-gray-500">Every enrolled agent stops authenticating</strong>
+              and has to be re-enrolled with a fresh code.
+            </p>
+          </div>
+          <p x-show="$store.auth.isAdmin" x-cloak class="text-xs text-gray-400 pt-2">
+            Public base URL is set in
+            <a href="/settings#integrations" class="text-blue-600 hover:underline">Settings → Integrations → Remote Agents</a>.
+          </p>
+        </div>
+      </template>
+    </div>
+
+    <!-- ── The dashboard's own SPIFFE identity ──────────────────────────── -->
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+      <h2 class="text-base font-semibold text-gray-700 mb-2">The dashboard's SPIFFE identity</h2>
+      <p class="text-sm text-gray-500 mb-4">
+        Short-lived tokens the dashboard presents to a cloud instead of a stored key, and the
+        issuer the cloud fetches its keys from.
+        <a href="/docs/design/dashboard-workload-identity" class="text-blue-600 hover:underline">How it works</a>.
+      </p>
+
+      <p x-show="spiffeError" x-cloak class="text-sm text-red-700" x-text="spiffeError"></p>
+
+      <template x-if="spiffe && !spiffe.enabled">
+        <p class="text-sm text-gray-500">
+          Off on this instance. An administrator turns it on in Settings → Integrations →
+          Remote Agents.
+        </p>
+      </template>
+
+      <template x-if="spiffe && spiffe.enabled">
+        <div class="text-sm space-y-1">
+          <div>
+            <span class="text-gray-500">Issuer:</span>
+            <span class="ml-1 font-mono text-gray-800" x-text="spiffe.issuer || '—'"></span>
+          </div>
+          <p x-show="spiffe.error" class="text-red-700" x-text="spiffe.error"></p>
+          <template x-for="entry in Object.entries(spiffe.sources || {})" :key="'src-' + entry[0]">
+            <div>
+              <span class="font-medium text-gray-700" x-text="entry[0].toUpperCase()"></span>
+              <span class="text-gray-500">uses</span>
+              <span :class="entry[1] === 'SPIFFE federation' ? 'text-green-700' : 'text-gray-700'"
+                    x-text="entry[1]"></span>
+            </div>
+          </template>
+          <template x-for="entry in Object.entries(spiffe.tokens || {})" :key="entry[0]">
+            <div class="text-xs">
+              <span class="font-mono text-gray-800" x-text="entry[1].path"></span>
+              <span x-show="entry[1].present && !entry[1].error" class="text-green-700"
+                    x-text="'valid until ' + new Date(entry[1].expires_at * 1000).toLocaleTimeString()"></span>
+              <span x-show="entry[1].error" class="text-red-700" x-text="entry[1].error"></span>
+            </div>
+          </template>
+
+          <!-- Fetches discovery and keys from the issuer's public URL the way a cloud does,
+               so a private name or an untrusted certificate shows up here rather than as a
+               403 from every cloud. agents:write: it makes outbound requests on demand. -->
+          <div x-show="$store.auth.can('agents', 'write')" class="pt-2 text-xs">
+            <button type="button" @click="checkIssuer()" :disabled="issuerCheck.running"
+                    class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-2.5 py-1 rounded-lg disabled:opacity-50"
+                    x-text="issuerCheck.running ? 'Checking…' : 'Check the issuer is reachable'"></button>
+            <template x-for="c in (issuerCheck.result ? issuerCheck.result.checks : [])" :key="c.name">
+              <div class="mt-1">
+                <span :class="c.ok ? 'text-green-700' : 'text-red-700'" x-text="c.ok ? '✓' : '✗'"></span>
+                <span class="font-medium text-gray-700" x-text="c.name"></span>
+                <span class="text-gray-500" x-text="c.detail"></span>
+              </div>
+            </template>
+            <p x-show="issuerCheck.error" class="mt-1 text-red-700" x-text="issuerCheck.error"></p>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+</div>
+
+<script>
+function agentIdentityPanel() {
+  return {
+    audience: null, spiffe: null,
+    loading: false, resetting: false, noAccess: false,
+    audienceUnavailable: '', spiffeError: '',
+    issuerCheck: { running: false, result: null, error: '' },
+
+    init() { this.load(); },
+
+    // Two reads, each failing on its own: the audience router is behind the remote-agents
+    // flag (off = 404 "not enabled") while the SPIFFE status is not, and a 403 on either
+    // means the viewer lacks `agents` -- which both share, so one 403 is the whole answer.
+    // Matched on the message, as the Agents tab does (isDenied/isFeatureOff there): the
+    // API helper throws an Error carrying the detail string and no status.
+    async load() {
+      this.loading = true;
+      const [aud, sp] = await Promise.allSettled([
+        API.get('/api/agents/audience'),
+        API.get('/api/spiffe-identity'),
+      ]);
+      const msg = r => (r.status === 'rejected' && r.reason && r.reason.message) || '';
+      const forbidden = r => /^Requires '[\w.:]+' permission/.test(msg(r));
+      this.noAccess = forbidden(aud) || forbidden(sp);
+      this.audience = aud.status === 'fulfilled' ? aud.value : null;
+      this.audienceUnavailable = aud.status === 'fulfilled' ? ''
+        : (/not enabled/i.test(msg(aud))
+            ? 'Remote agents are off, so there is no signing audience.'
+            : 'Could not load the signing audience: ' + msg(aud));
+      this.spiffe = sp.status === 'fulfilled' ? sp.value : null;
+      this.spiffeError = sp.status === 'fulfilled' ? ''
+        : 'Could not load the SPIFFE identity status: ' + msg(sp);
+      this.loading = false;
+    },
+
+    // Destructive in a way the button does not show: no agent row changes, but every
+    // enrolled agent starts failing authentication -- so the count goes in the confirm.
+    async resetAudience() {
+      const a = this.audience || {};
+      const n = a.agents_enrolled || 0;
+      const affected = n
+        ? `\n\n${n} enrolled agent(s) will stop authenticating and must be re-enrolled with a fresh code.`
+        : '';
+      if (!confirm(`Reset the signing audience?\n\nIt is pinned to ${a.pinned}. The next enrolment code will pin it again — from Public base URL if one is set, otherwise from the origin the browser is on.${affected}`)) return;
+      this.resetting = true;
+      try {
+        const r = await API.delete('/api/agents/audience');
+        this.audience = r;
+        toast(r.detail || 'Signing audience reset.', 'success');
+      } catch (e) {
+        toast('Could not reset the signing audience: ' + e.message, 'error');
+      } finally {
+        this.resetting = false;
+      }
+    },
+
+    async checkIssuer() {
+      this.issuerCheck = { running: true, result: null, error: '' };
+      try {
+        const result = await API.post('/api/spiffe-identity/check-issuer', {});
+        this.issuerCheck = { running: false, result, error: '' };
+      } catch (e) {
+        this.issuerCheck = { running: false, result: null, error: e.message };
+      }
+    },
+  };
+}
+</script>

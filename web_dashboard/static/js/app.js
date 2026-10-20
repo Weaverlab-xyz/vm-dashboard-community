@@ -1295,6 +1295,261 @@ function scheduleTitle(job) {
     }
 }
 
+// ── Change windows and notification endpoints ────────────────────────────────
+//
+// Two editors that each render in TWO places: inside Settings → Integrations for an
+// administrator configuring the feature, and on a page of their own (/schedules,
+// /notifications) for anyone holding the scope. Their routes take a grantable scope
+// (`change_windows:write`, `notifications:read/write`), but Settings → Integrations is
+// admin-only -- correctly, it is instance configuration -- so while these lived only in
+// its drawers a role granting the scope granted the API and no way to use it. Shared here
+// so the two places cannot drift; the markup is templates/partials/change_windows_editor
+// .html and notification_endpoints.html. Buttons that write show on $store.auth.can(), and
+// every route still enforces its own permission whatever the page draws.
+
+// Self-contained -- every method uses only `this` (the `cw` object) plus the page-global
+// API/toast helpers. The two approval settings and the grace period are ordinary config
+// keys and stay in the Settings drawer, riding `panelCfg` like every other setting.
+function changeWindowsEditor() {
+    return {
+        cw: {
+            windows: [], loading: false, saving: false, error: '',
+            draft: null,           // the window being added/edited, or null
+            dayLabels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+
+            async load() {
+                this.loading = true;
+                this.error = '';
+                try {
+                    // Not enabled_only: whoever manages the calendar needs to see the
+                    // retired ones, which is the whole difference between disabling and
+                    // deleting.
+                    const r = await API.get('/api/change-windows');
+                    this.windows = (r && r.windows) || [];
+                } catch (e) {
+                    this.error = e.message || 'Could not load change windows.';
+                } finally {
+                    this.loading = false;
+                }
+            },
+
+            blank() {
+                return { id: '', name: '', start_at_local: '02:00', duration_minutes: 240,
+                         // Blank resolves to UTC server-side rather than to the server's
+                         // local zone, which is an accident of the container image.
+                         timezone: '', schedule_days: '1111111', description: '',
+                         enabled: true };
+            },
+
+            startNew() { this.error = ''; this.draft = this.blank(); },
+
+            edit(w) {
+                this.error = '';
+                this.draft = {
+                    id: w.id, name: w.name || '',
+                    start_at_local: w.start_at_local || '02:00',
+                    duration_minutes: w.duration_minutes || 240,
+                    // "UTC" is what describe() renders for an unset zone; send it back as
+                    // blank so a round-trip through this form does not turn an unset zone
+                    // into a pinned one. They behave identically, but the stored value
+                    // should not drift.
+                    timezone: (w.timezone === 'UTC' ? '' : (w.timezone || '')),
+                    schedule_days: w.schedule_days || '1111111',
+                    description: w.description || '',
+                    enabled: w.enabled !== false,
+                };
+            },
+
+            cancel() { this.draft = null; this.error = ''; },
+
+            dayOn(i) {
+                return !!this.draft && this.draft.schedule_days.charAt(i) === '1';
+            },
+
+            toggleDay(i) {
+                if (!this.draft) return;
+                const chars = this.draft.schedule_days.split('');
+                chars[i] = chars[i] === '1' ? '0' : '1';
+                this.draft.schedule_days = chars.join('');
+            },
+
+            async save() {
+                if (!this.draft) return;
+                this.saving = true;
+                this.error = '';
+                const body = {
+                    name: this.draft.name,
+                    start_at_local: this.draft.start_at_local,
+                    duration_minutes: this.draft.duration_minutes,
+                    timezone: this.draft.timezone,
+                    schedule_days: this.draft.schedule_days,
+                    description: this.draft.description,
+                    enabled: this.draft.enabled,
+                };
+                try {
+                    if (this.draft.id) {
+                        await API.put(`/api/change-windows/${this.draft.id}`, body);
+                    } else {
+                        await API.post('/api/change-windows', body);
+                    }
+                    this.draft = null;
+                    await this.load();
+                    toast('Change window saved.', 'success');
+                } catch (e) {
+                    // The server's refusals here are the ones that teach the feature -- a
+                    // zero length window, an unknown timezone, a day mask with nothing
+                    // selected -- so they are shown verbatim rather than replaced.
+                    this.error = e.message || 'Could not save this change window.';
+                } finally {
+                    this.saving = false;
+                }
+            },
+
+            async remove(w) {
+                if (!confirm(`Delete the change window "${w.name}"?\n\n`
+                             + 'Changes already booked into it keep their times and still run; '
+                             + 'they just lose the name. To stop it being offered on run forms '
+                             + 'without deleting it, edit it and clear Enabled.')) return;
+                this.error = '';
+                try {
+                    await API.del(`/api/change-windows/${w.id}`);
+                    await this.load();
+                    toast('Change window deleted.', 'success');
+                } catch (e) {
+                    // Includes the refusal when changes are still booked into it.
+                    this.error = e.message || 'Could not delete this change window.';
+                    toast(this.error, 'error');
+                }
+            },
+        },
+    };
+}
+window.changeWindowsEditor = changeWindowsEditor;
+
+// Endpoints and deliveries are their own resources, so none of this goes through the
+// generic feature-panel save. The API never returns a URL or a secret -- only a
+// scheme+host hint and a has_secret flag. The delivery log is require_admin (it carries
+// every event's subject, across workgroups), so it is fetched only for an administrator:
+// asking for it otherwise is a 403 per page load that the page would only swallow.
+function notificationEndpoints() {
+    return {
+        notif: {
+            endpoints: [], formats: [], knownEvents: [], summary: null,
+            deliveries: [], loading: false, error: '',
+            draft: null,           // the endpoint being added/edited, or null
+            saving: false, testingId: '',
+            testResult: null,      // { id, ok, error, status_code }
+        },
+
+        _isAdmin() {
+            return !!(this.$store && this.$store.auth && this.$store.auth.isAdmin);
+        },
+
+        async loadNotifications() {
+            this.notif.loading = true;
+            this.notif.error = '';
+            this.notif.draft = null;
+            this.notif.testResult = null;
+            try {
+                const [eps, sum, del] = await Promise.all([
+                    API.get('/api/notifications/endpoints'),
+                    API.get('/api/notifications/summary').catch(() => null),
+                    this._isAdmin()
+                        ? API.get('/api/notifications/deliveries?page_size=20').catch(() => null)
+                        : Promise.resolve(null),
+                ]);
+                this.notif.endpoints = eps.endpoints || [];
+                this.notif.formats = eps.formats || [];
+                this.notif.knownEvents = eps.known_events || [];
+                this.notif.summary = sum;
+                this.notif.deliveries = (del && del.deliveries) || [];
+            } catch (e) {
+                this.notif.error = 'Could not load notification endpoints: ' + e.message;
+            } finally {
+                this.notif.loading = false;
+            }
+        },
+
+        newEndpoint() {
+            this.notif.draft = { id: '', name: '', url: '', fmt: 'custom', secret: '',
+                                 event_types: '', enabled: true };
+        },
+
+        editEndpoint(ep) {
+            // url and secret start blank on an edit: the server never sends them back, and
+            // a blank means "leave it alone" on save. Typing in either field replaces it.
+            this.notif.draft = { id: ep.id, name: ep.name, url: '', fmt: ep.fmt, secret: '',
+                                 event_types: ep.event_types || '', enabled: ep.enabled,
+                                 url_hint: ep.url_hint, has_secret: ep.has_secret };
+        },
+
+        async saveEndpoint() {
+            const d = this.notif.draft;
+            if (!d) return;
+            this.notif.saving = true;
+            try {
+                if (d.id) {
+                    const body = { name: d.name, fmt: d.fmt, event_types: d.event_types,
+                                   enabled: d.enabled };
+                    if (d.url) body.url = d.url;         // omitted = keep the stored URL
+                    if (d.secret) body.secret = d.secret;
+                    await API.patch(`/api/notifications/endpoints/${d.id}`, body);
+                } else {
+                    await API.post('/api/notifications/endpoints', {
+                        name: d.name, url: d.url, fmt: d.fmt, secret: d.secret,
+                        event_types: d.event_types, enabled: d.enabled });
+                }
+                this.notif.draft = null;
+                await this.loadNotifications();
+                toast('Endpoint saved.', 'success');
+            } catch (e) {
+                toast('Could not save the endpoint: ' + e.message, 'error');
+            } finally {
+                this.notif.saving = false;
+            }
+        },
+
+        async deleteEndpoint(ep) {
+            if (!confirm(`Delete the notification endpoint "${ep.name}"? Queued deliveries to it will fail.`)) return;
+            try {
+                await API.delete(`/api/notifications/endpoints/${ep.id}`);
+                await this.loadNotifications();
+                toast('Endpoint deleted.', 'success');
+            } catch (e) {
+                toast('Could not delete the endpoint: ' + e.message, 'error');
+            }
+        },
+
+        async testEndpoint(ep) {
+            this.notif.testingId = ep.id;
+            this.notif.testResult = null;
+            try {
+                const r = await API.post(`/api/notifications/endpoints/${ep.id}/test`, {});
+                this.notif.testResult = { id: ep.id, ...r };
+                // Reload so last_success_at / last_error reflect the attempt.
+                const eps = await API.get('/api/notifications/endpoints');
+                this.notif.endpoints = eps.endpoints || [];
+            } catch (e) {
+                this.notif.testResult = { id: ep.id, ok: false, error: e.message };
+            } finally {
+                this.notif.testingId = '';
+            }
+        },
+
+        notifSummaryLine() {
+            const s = this.notif.summary;
+            if (!s) return 'No delivery activity recorded yet.';
+            const parts = [];
+            for (const k of ['sent', 'pending', 'failed', 'dry_run', 'suppressed']) {
+                if (s[k]) parts.push(`${s[k]} ${k.replace('_', '-')}`);
+            }
+            const head = parts.length ? parts.join(', ') : 'nothing sent';
+            return `Last ${s.window_hours}h: ${head}.`;
+        },
+    };
+}
+window.notificationEndpoints = notificationEndpoints;
+
 // Colours for a `user`-class tag chip, indexed by the `tone` the server computed in
 // services/tag_policy.tone_of. The hash lives in Python so one tag key is one colour on
 // every page; this is a pure lookup table and MUST stay the same length as

@@ -158,7 +158,8 @@ request ever arrived. Correcting Public base URL afterwards appears to work and 
 nothing, because the pin wins.
 
 So the panel shows the pinned audience read-only, beside — and clearly distinct from — the
-Public base URL field:
+Public base URL field. The same readout, with the same reset, is the **Identity** tab of the
+Agents page, for anyone holding `agents:read`, who cannot open Settings:
 
 - **Pinned to** — the audience itself, and the number of enrolled agents signing against it.
 - **A warning** when it is the same origin you are browsing (right for a single-hostname
@@ -166,8 +167,8 @@ Public base URL field:
   code is about to decide it, or when it is `http://`.
 - **Reset signing audience** — clears the pin so the next enrolment code pins it again from
   Public base URL. This is the only mutation offered: there is no way to *set* the audience
-  from an API, because a settable audience is the write-once rule with extra steps. Admin
-  only, the same gate as minting a code.
+  from an API, because a settable audience is the write-once rule with extra steps. It needs
+  `agents:write`, the same gate as minting a code.
 
   It **invalidates every enrolled agent.** Each signs against the audience it was handed at
   enrolment, so all of them start getting 401s — which an agent reads as "revoked" and stops

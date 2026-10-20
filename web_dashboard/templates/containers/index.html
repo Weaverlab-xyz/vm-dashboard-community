@@ -470,6 +470,10 @@
               <span x-show="!portainerFirewallPending">Re-apply the node firewall</span>
               <span x-show="portainerFirewallPending" x-cloak>Re-applying…</span>
             </button>
+            <button @click="toggleFirewallView('portainer')" :disabled="portainerFirewallViewLoading"
+                    title="Show which sources the node's ingress rule admits, and why"
+                    class="px-3 py-1.5 text-xs font-medium text-gray-700 border border-gray-300 hover:bg-gray-50 disabled:opacity-50 rounded-lg transition"
+                    x-text="portainerFirewallView ? 'Hide firewall sources' : (portainerFirewallViewLoading ? 'Loading…' : 'Show firewall sources')"></button>
           </div>
           <p x-show="portainerTokenNote" x-cloak class="mt-2 text-xs text-green-700"
              x-text="portainerTokenNote"></p>
@@ -481,6 +485,17 @@
           <p x-show="portainerFirewallError" x-cloak
              class="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2"
              x-text="portainerFirewallError"></p>
+          <!-- What the node's ingress rule admits, read-only (GET, containers:read). It
+               was shown only in the admin-only Settings drawer, so whoever could press
+               Re-apply here could not see what it would apply. -->
+          <template x-if="portainerFirewallView">
+            <div class="mt-2 rounded-lg border border-gray-200 bg-gray-50 p-2 text-xs space-y-0.5">
+              <template x-for="row in firewallRows(portainerFirewallView)" :key="row[0]">
+                <p><span class="text-gray-500" x-text="row[0] + ':'"></span>
+                   <span class="font-mono text-gray-700 break-all" x-text="row[1]"></span></p>
+              </template>
+            </div>
+          </template>
           <p x-show="portainerNodeDataDiskEnabled" x-cloak class="mt-2 text-xs text-blue-700">
             Durable state is on: <code x-text="portainerNodeDataDiskName"></code> survives a teardown,
             so the next deploy comes back with its users, environments and settings. The disk keeps
@@ -1606,12 +1621,27 @@
             <span x-show="!rancherFirewallPending">Re-apply the node firewall</span>
             <span x-show="rancherFirewallPending" x-cloak>Re-applying…</span>
           </button>
+          <button @click="toggleFirewallView('rancher')" :disabled="rancherFirewallViewLoading"
+                  title="Show which sources the node's ingress rule admits, and why"
+                  class="px-3 py-1.5 text-xs font-medium text-gray-700 border border-gray-300 hover:bg-gray-50 disabled:opacity-50 rounded-lg transition"
+                  x-text="rancherFirewallView ? 'Hide firewall sources' : (rancherFirewallViewLoading ? 'Loading…' : 'Show firewall sources')"></button>
         </div>
         <p x-show="rancherFirewallNote" x-cloak class="mt-2 text-xs text-green-700"
            x-text="rancherFirewallNote"></p>
         <p x-show="rancherFirewallError" x-cloak
            class="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2"
            x-text="rancherFirewallError"></p>
+        <!-- What the node's ingress rule admits, read-only (GET, containers:read). It
+             was shown only in the admin-only Settings drawer, so whoever could press
+             Re-apply here could not see what it would apply. -->
+        <template x-if="rancherFirewallView">
+          <div class="mt-2 rounded-lg border border-gray-200 bg-gray-50 p-2 text-xs space-y-0.5">
+            <template x-for="row in firewallRows(rancherFirewallView)" :key="row[0]">
+              <p><span class="text-gray-500" x-text="row[0] + ':'"></span>
+                 <span class="font-mono text-gray-700 break-all" x-text="row[1]"></span></p>
+            </template>
+          </div>
+        </template>
 
         <!-- ── Entitle registration state ───────────────────────────────────
              Three genuinely different situations, and the remedy differs in each, so
@@ -2144,6 +2174,7 @@ function containersDashboard() {
     rancherError: null,
     rancherDeploying: false,
     rancherFirewallPending: false,
+    rancherFirewallView: null, rancherFirewallViewLoading: false,
     rancherFirewallNote: '',
     rancherFirewallError: '',
     // Deploy-time cloud + region + PRA picks (parity with DB/VM deploys)
@@ -2208,6 +2239,7 @@ function containersDashboard() {
     // flags: the two buttons sit in one row and a shared note would attribute one
     // click's outcome to the other.
     portainerFirewallPending: false,
+    portainerFirewallView: null, portainerFirewallViewLoading: false,
     portainerFirewallNote: '',
     portainerFirewallError: '',
     // Only ever used when there is NO managed node — a managed one dictates its own
@@ -2774,6 +2806,50 @@ function containersDashboard() {
     // adding a CIDR in Settings writes config, and nothing re-applies the cloud rule
     // until a redeploy or a cluster event. The Entitle-labelled button below does the
     // same merge, but only exists once an integration does.
+
+    // ── The node's ingress rule, read-only ─────────────────────────────────
+    // The breakdown Settings shows an administrator (GET …/firewall, containers:read),
+    // here for whoever runs the node. Toggled, and fetched on every open: the set moves
+    // with the dashboard's egress, a cluster event or a Re-apply, so a cached copy lies.
+    async toggleFirewallView(kind) {
+      const key = kind + 'FirewallView';
+      if (this[key]) { this[key] = null; return; }
+      const url = kind === 'rancher' ? '/api/containers/rancher/firewall'
+                                     : '/api/containers/portainer/node/firewall';
+      this[key + 'Loading'] = true;
+      try {
+        this[key] = await API.get(url);
+      } catch (e) {
+        toast('Could not read the node firewall: ' + e.message, 'error');
+      } finally {
+        this[key + 'Loading'] = false;
+      }
+    },
+
+    // [label, value] rows over the shape both nodes' firewall_status() share. The pool
+    // is counted, never listed, and left out of the merged list for the same reason
+    // (Azure Container Apps without a NAT gateway publishes ~400 addresses).
+    firewallRows(fw) {
+      if (!fw) return [];
+      const pool = fw.dashboard_egress_pool || {};
+      const poolSet = pool.cidrs || [];
+      const rows = [['State', fw.opened ? 'open to the sources below'
+                                        : 'CLOSED — no source can reach the node']];
+      rows.push(['Dashboard egress', fw.dashboard_egress_ip || '(not detected)']);
+      if ((fw.manual_cidrs || []).length) rows.push(['Configured sources', summarizeCidrs(fw.manual_cidrs)]);
+      if ((fw.cluster_egress_ips || []).length) {
+        rows.push(['Provisioned clusters', fw.cluster_egress_ips.map(c => c.name + ' → ' + c.ip).join(', ')]);
+      }
+      if ((fw.gateway_cidrs || []).length) rows.push(['Web-Jump Gateways', fw.gateway_cidrs.join(', ')]);
+      if ((fw.entitle_cidrs || []).length) rows.push(['Entitle egress', summarizeCidrs(fw.entitle_cidrs)]);
+      if ((fw.adapter_cidrs || []).length) rows.push(['Entitle adapter', fw.adapter_cidrs.join(', ')]);
+      if (fw.runner_source_cidr) rows.push(['Runner connector', fw.runner_source_cidr]);
+      if (pool.count) rows.push(['Hosting platform outbound pool', pool.count + ' addresses']);
+      if (pool.error) rows.push(['Outbound pool', pool.error]);
+      const merged = (fw.merged || []).filter(c => !poolSet.includes(c));
+      rows.push(['Merged allow-list', merged.length ? summarizeCidrs(merged, 12) : 'none']);
+      return rows;
+    },
 
     async reapplyRancherFirewall() {
       this.rancherFirewallPending = true;
