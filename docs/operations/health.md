@@ -28,11 +28,25 @@ be bookmarked. **Only failing and degraded** hides the healthy rows in every tab
 | **Password Safe accounts** | every account the dashboard onboarded still exists and is rotating: database accounts, Kubernetes tokens, directory administrators, lab and workload accounts | 60 min | Password Safe is on |
 | **Entitle** | the just-in-time reconciliation sweep is running, has no failing cloud leg and no orphaned grants, and the virtual applications and persona bundles the dashboard applied are not *failed* | 15 min | Entitle is on |
 | **Workload credentials** | the credentials the dashboard hands to workloads. Each Workload Credentials lease the dashboard runs on: failing while its issue attempts fail (with when it retries), degraded when it expired and was not renewed. Each Kubernetes ServiceAccount token in Password Safe: failing when the vault holds the placeholder rather than a working token, or the PRA Vault mirror is unlinked; degraded when there is no mirror (one Password Safe read per cluster). Each SPIRE lab: admin SVID expired (failing) or inside a day (degraded), no trust bundle, the k3s link or federation failed. Each agent cell: its agent's token revoked or expired (failing) or inside a day (degraded). Integration tokens used in the last 30 days that expire within a week, by name only | 30 min | Workload Credentials, Password Safe, SPIRE lab, agent cells or the MCP server is on |
-| **Remote agents** | each agent is polling, and is new enough for the directories bound to it | 5 min | Remote agents are on |
+| **Remote agents** | each agent is polling, is new enough for the directories bound to it, and whether it is SPIRE-attested or keeps a signing key on disk (see [below](#remote-agent-identity)) | 5 min | Remote agents are on |
 | **Directories** | the [Directory health](../directories/health.md) page's results, shown here too. That page keeps its own schedule | 5 min | Directories is on |
 
 On an estate instance with no BeyondTrust tenant rows, the tenant and Gateway areas check
 the PRA and Password Safe settings the instance already uses.
+
+### Remote agent identity
+
+Each agent row has an **Identity** line: *SPIRE-attested* (its signing key lives only in
+the agent's memory) or *long-lived signing key on disk* (`identity.json`, from an
+enrolment code). Above the list, a blue note counts them, for example *2 of 3 agent(s)
+still keep a long-lived signing key on disk; 1 are SPIRE-attested*. Revoked agents are
+not counted.
+
+This is a recommendation, not a check: both kinds are supported, so the Identity line is
+always healthy and the note never makes the area degraded or failing. To move an agent
+over, use **Migrate to SPIRE** on the Agents page; see
+[Attesting an agent through SPIRE](../remote-agents/spire-attestation.md). The note links
+to the workload identity guide when this build includes it.
 
 ## Resources
 
@@ -81,7 +95,7 @@ Thresholds:
   account has never rotated. Failing when it is over a week late, or the account no
   longer exists.
 - **Entitle sweep:** degraded when it has missed three runs or is switched off.
-- **Remote agents:** an agent is failing when it is offline.
+- **Remote agents:** an agent is failing when it is offline. A signing key on disk never changes its status.
 - **Cloud APIs:** failing when every read for a provider is failing, degraded when some
   are. The message is the provider's own, for example an expired client secret.
 - **Auto-delete:** failing when a deletion failed in the last pass, degraded when
@@ -106,5 +120,6 @@ directories. No area is ever hidden by a focus.
 It never lists accounts, groups, roles, grants or privilege. A Password Safe row names
 the resource whose account it is and says whether it is rotating, never the account or
 its credential. The integration tokens row names tokens, never who owns them, and
-ignores tokens nobody uses. Identity posture is BeyondTrust Identity Security Insights' data, and the
-dashboard does not collect a second copy of it.
+ignores tokens nobody uses. Who holds what access is BeyondTrust Identity Security Insights' data, and the
+dashboard does not collect a second copy of it. How the dashboard's own remote agents
+authenticate is shown, as a recommendation (see [Remote agent identity](#remote-agent-identity)).

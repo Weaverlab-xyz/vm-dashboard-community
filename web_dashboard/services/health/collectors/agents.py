@@ -5,13 +5,64 @@ the same answer the Agents page shows. The version check is about the work: an a
 that on-prem directories or hypervisor connections are bound to is only useful if it can
 run that work, and an old build fails such jobs with messages that read like dashboard
 bugs.
+
+The identity check is a recommendation, never a failure: an agent that enrolled with a
+code keeps a long-lived Ed25519 signing key in ``identity.json`` (``auth_mode`` NULL or
+"ed25519"), one attested by SPIRE holds its key only in memory ("spiffe"). Both are
+supported, so both are OK; :func:`identity_note` adds the fleet count above the list.
 """
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from .. import core
 from ....utils.clock import utcnow
+
+# The anchor is the "### Remote agents" heading. Linked only once the page is in this
+# build's docs/, so the note never points at a 404.
+DOCS_HREF = "/docs/access/workload-identity#remote-agents"
+_DOCS_PAGE = Path(__file__).resolve().parents[4] / "docs" / "access" / "workload-identity.md"
+
+
+def identity_mode(agent) -> str:
+    """"spiffe" for a SPIRE-attested agent, else "ed25519" (NULL is the enrolment default)."""
+    return "spiffe" if (getattr(agent, "auth_mode", None) or "").lower() == "spiffe" else "ed25519"
+
+
+def identity_check(agent) -> dict:
+    mode = identity_mode(agent)
+    if mode == "spiffe":
+        detail = "SPIRE-attested: its signing key lives only in the agent's memory."
+    else:
+        detail = ("Long-lived signing key on disk (identity.json). SPIRE attestation is "
+                  "recommended; see Migrate to SPIRE on the Agents page.")
+    # Always OK: a key on disk is supported, so it must not turn the page amber or red.
+    # ``mode`` rides along in the stored check so identity_note can count it.
+    return dict(core.check("identity", "Identity", core.OK, detail), mode=mode)
+
+
+def identity_note(items: list) -> dict | None:
+    """The fleet line: how many agents still keep a signing key on disk.
+
+    ``items`` are the stored rows as the snapshot serialises them. Revoked agents are
+    never collected, so they are not counted.
+    """
+    modes = [c.get("mode") for it in items for c in it.get("checks") or []
+             if c.get("key") == "identity"]
+    if not modes:
+        return None
+    on_disk, attested = modes.count("ed25519"), modes.count("spiffe")
+    if on_disk:
+        text = (f"{on_disk} of {len(modes)} agent(s) still keep a long-lived signing key "
+                f"on disk; {attested} are SPIRE-attested. Attestation is recommended, not "
+                f"required, so this does not change any status.")
+    else:
+        text = f"All {attested} agent(s) are SPIRE-attested: no signing key on disk."
+    note = {"text": text, "href": "", "link": ""}
+    if _DOCS_PAGE.is_file():
+        note.update(href=DOCS_HREF, link="Workload identity for remote agents")
+    return note
 
 
 def agent_checks(agent, *, state: str, directories: int, can_directory: bool,
@@ -35,6 +86,7 @@ def agent_checks(agent, *, state: str, directories: int, can_directory: bool,
                                  f"{version} cannot reach them. {hint}"))
     else:
         checks.append(core.check("version", "Version", core.OK, f"Version {version}."))
+    checks.append(identity_check(agent))
     return checks
 
 

@@ -11,6 +11,8 @@ What these pin:
 - the snapshot orders by the active persona without hiding anything;
 - each first-area check at its thresholds: tenant credentials, Gateways and their hosts,
   Password Safe rotation, the Entitle sweep and applied apps, remote agents;
+- an agent's identity (signing key on disk vs SPIRE-attested) is counted in an area note
+  and never changes a status;
 - the API is administrator-only and its GET reads stored rows only;
 - no collector reads identities.
 
@@ -340,6 +342,99 @@ def test_agent_checks():
     old = agents.agent_checks(agent, state="online", directories=2, can_directory=False,
                               hint="Upgrade it.", now=NOW)
     assert core.overall(old) == "warn" and "Upgrade it." in old[1]["detail"]
+
+
+def _agent(auth_mode, **kw):
+    return SimpleNamespace(last_seen_at=NOW - timedelta(minutes=1), agent_version="2.7.0",
+                           auth_mode=auth_mode, **kw)
+
+
+def test_agent_identity_is_a_recommendation_never_a_failure():
+    for mode, want in ((None, "ed25519"), ("ed25519", "ed25519"), ("spiffe", "spiffe"),
+                       ("SPIFFE", "spiffe")):
+        checks = agents.agent_checks(_agent(mode), state="online", directories=0,
+                                     can_directory=True, hint="", now=NOW)
+        ident = [c for c in checks if c["key"] == "identity"]
+        assert len(ident) == 1 and ident[0]["mode"] == want, (mode, ident)
+        # A key on disk is supported: the agent stays Healthy.
+        assert ident[0]["status"] == core.OK and core.overall(checks) == core.OK, mode
+    on_disk = agents.identity_check(_agent(None))
+    assert "on disk" in on_disk["detail"] and "SPIRE" in on_disk["detail"]
+
+
+def _stored(oid, mode):
+    return core.Item(object_id=oid, name=oid, kind="Remote agent",
+                     checks=[core.check("online", "Online", core.OK, ""),
+                             agents.identity_check(_agent(mode))])
+
+
+def test_identity_note_counts_the_fleet():
+    assert agents.identity_note([]) is None
+    # An area whose items carry no identity check has nothing to say.
+    assert agents.identity_note([{"checks": [{"key": "online", "status": "ok"}]}]) is None
+    mixed = [{"checks": _stored(str(i), m).checks} for i, m in
+             enumerate((None, "ed25519", "spiffe"))]
+    note = agents.identity_note(mixed)
+    assert note["text"].startswith("2 of 3 agent(s) still keep"), note
+    assert "1 are SPIRE-attested" in note["text"], note
+    allspire = agents.identity_note([{"checks": _stored("a", "spiffe").checks}])
+    assert allspire["text"].startswith("All 1 agent(s) are SPIRE-attested"), allspire
+
+
+def test_identity_note_links_the_docs_only_when_the_page_exists():
+    items = [{"checks": _stored("a", None).checks}]
+    real = agents._DOCS_PAGE
+    try:
+        agents._DOCS_PAGE = real.with_name("no-such-page.md")
+        assert agents.identity_note(items)["href"] == ""
+        agents._DOCS_PAGE = real
+        if real.is_file():
+            note = agents.identity_note(items)
+            assert note["href"] == agents.DOCS_HREF and note["link"]
+            # The fragment is the slug of this heading; renaming it strands the link.
+            assert "\n### Remote agents\n" in real.read_text(encoding="utf-8")
+    finally:
+        agents._DOCS_PAGE = real
+    page, _, frag = agents.DOCS_HREF.partition("#")
+    assert page == "/docs/access/workload-identity" and frag == "remote-agents"
+
+
+def test_the_identity_note_reaches_the_snapshot_without_changing_counts():
+    db = SessionLocal()
+    _clear(db)
+    runner.store(db, "remote_agents", [_stored("a", None), _stored("b", None),
+                                       _stored("c", "spiffe")])
+    with _Flags("remote_agents_enabled"):
+        snap = runner.snapshot(db)
+    area = [a for a in snap["areas"] if a["area"] == "remote_agents"][0]
+    assert area["counts"] == {"ok": 3, "warn": 0, "fail": 0, "unknown": 0}
+    assert snap["counts"]["fail"] == 0 and snap["counts"]["warn"] == 0
+    assert area["note"]["text"].startswith("2 of 3"), area["note"]
+    # Areas without a note say so, and a note that raises is dropped, not the page.
+    assert all(a["note"] is None for a in snap["areas"] if a["area"] != "remote_agents")
+    broken = core.Collector(area="remote_agents", label="x", collect=None,
+                            interval_minutes=5, note=lambda items: 1 / 0)
+    assert runner._note(broken, area["items"]) is None
+    db.close()
+
+
+def test_the_agents_collector_counts_only_active_agents():
+    from web_dashboard.database import RemoteAgent
+    db = SessionLocal()
+    db.query(RemoteAgent).delete()
+    for name, mode, active in (("keyed", None, True), ("attested", "spiffe", True),
+                               ("revoked", None, False)):
+        db.add(RemoteAgent(id=str(uuid.uuid4()), name=name, auth_mode=mode,
+                           is_active=active, agent_version="2.7.0",
+                           public_key="x" * 44, last_seen_at=utcnow()))
+    db.commit()
+    items = asyncio.run(agents.collect(db))
+    assert sorted(i.name for i in items) == ["attested", "keyed"]
+    note = agents.identity_note([{"checks": i.checks} for i in items])
+    assert note["text"].startswith("1 of 2"), note
+    db.query(RemoteAgent).delete()
+    db.commit()
+    db.close()
 
 
 # ── the API and the boundary ──────────────────────────────────────────────────
