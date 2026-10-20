@@ -470,6 +470,19 @@ else
         echo "this guest's /etc/os-release names no VERSION_CODENAME and Docker's apt repository is per-release; trying the distro's own container tools." >&2
       fi
       ;;
+    *" amzn "*)
+      # Amazon Linux, BEFORE the RHEL family: AL2023's ID_LIKE is "fedora" and AL2's is
+      # "centos rhel fedora", so the branch below would point dnf at Docker's
+      # centos/2023 repository -- which does not exist -- and the podman fallback after
+      # this `case` fails too, because Amazon Linux ships no podman. Both attempts lost,
+      # the block exits 1 and an AWS control node sits at `enrolling` forever. Amazon
+      # carries Docker itself, as the `docker` package, on both releases.
+      if command -v dnf >/dev/null 2>&1; then
+        dnf -y install docker || true
+      else
+        yum -y install docker || amazon-linux-extras install -y docker || true
+      fi
+      ;;
     *" rhel "*|*" centos "*|*" fedora "*)
       # ID before ID_LIKE: an AlmaLinux guest's ID_LIKE is "rhel centos fedora", so a
       # family match that looked for fedora first would send it to the wrong repo.
