@@ -438,6 +438,33 @@ def test_every_load_bearing_key_the_estate_writes_is_protected():
         "\n  ".join(sorted(missing)))
 
 
+# Keys a cloud service reads back INLINE (`tags.get("...")`), not through one of the
+# named constants above — which is how `container-image` went unprotected. `purpose` is
+# the one deliberate exception; tag_policy.PROTECTED_KEYS records why.
+_INLINE_READ = re.compile(r'''(?:tags|labels|freeform_tags)\.get\(\s*["']([^"']+)["']''')
+_INLINE_READERS = ("aws_service.py", "azure_service.py", "gcp_service.py", "oci_service.py")
+_DELIBERATELY_EDITABLE = {"purpose"}
+
+
+def test_every_key_a_cloud_service_reads_back_is_protected():
+    protected = {k.lower() for k in tp.PROTECTED_KEYS}
+    missing = set()
+    for filename in _INLINE_READERS:
+        with open(os.path.join(_SERVICES, filename), encoding="utf-8") as fh:
+            for key in _INLINE_READ.findall(fh.read()):
+                if key.lower() not in protected | _DELIBERATELY_EDITABLE:
+                    missing.add(f"{filename}: {key}")
+    assert not missing, (
+        "tag keys a cloud service reads back but the editor does not protect:\n  " +
+        "\n  ".join(sorted(missing)))
+
+
+def test_the_inline_scan_actually_finds_something():
+    with open(os.path.join(_SERVICES, "azure_service.py"), encoding="utf-8") as fh:
+        found = set(_INLINE_READ.findall(fh.read()))
+    assert {"purpose", "container-image"} <= found, found
+
+
 def test_the_scan_actually_finds_something():
     """A regex that silently matches nothing would make the test above pass forever."""
     found = _keys_written_by("unmanaged_vms.py", ("MANAGED_TAGS", "WORKGROUP_TAG_KEYS"))

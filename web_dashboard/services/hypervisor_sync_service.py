@@ -356,7 +356,12 @@ def _upsert(db: Session, connection_id: str, vms: list, started: datetime) -> No
             row.ip_addresses = "[]"
         row.scope = vm.get("scope")
         row.vm_type = vm.get("vm_type")
-        row.tags = json.dumps(vm.get("tags") or [])
+        # NULL when the agent did not report the field at all, not "[]". An agent built
+        # before it sent tags looks exactly like a guest with none, and `set_tags` sends
+        # the COMPLETE desired set computed from this column — so "[]" for "unknown" made
+        # every agent-brokered edit erase the guest's existing tags. list_vms surfaces the
+        # difference as `tags_known`, and api/proxmox._queue_tag_jobs refuses on it.
+        row.tags = json.dumps(vm["tags"] or []) if "tags" in vm else None
         row.guest_os = vm.get("guest_os")
         row.synced_at = max(started, utcnow())
     db.commit()
@@ -421,6 +426,7 @@ def list_vms(db: Session, connection_id: str = "") -> list:
             "ip_addresses": json.loads(row.ip_addresses or "[]"),
             "scope": row.scope or "", "vm_type": row.vm_type or "",
             "tags": json.loads(row.tags or "[]"),
+            "tags_known": row.tags is not None,
             "guest_os": row.guest_os or "",
             "synced_at": row.synced_at.isoformat() if row.synced_at else None,
         })
