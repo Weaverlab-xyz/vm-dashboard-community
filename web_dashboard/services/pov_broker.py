@@ -1254,13 +1254,17 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
     # Imported in the function body, not at module scope: `pov_gateway` reaches this module
     # and `pov_guest_step` reaches `pov_gateway`, so a top-level import here would close a
     # real cycle. Same reason the other two are local.
-    from . import pov_entitle_agent, pov_guest_step, pov_resource_broker
-    # Unions, not replacements. The three grants answer different questions — where the
-    # Resource Broker goes, where the Entitle agent goes, and which guests an SE wants to
-    # configure — and a POV can want all three at once. `render_policy` de-duplicates the
-    # SSH list against the WinRM one, so an address in both keeps only its WinRM ports.
+    from . import (pov_entitle_agent, pov_guest_step, pov_resource_broker,
+                   pov_windows_functional)
+    # Unions, not replacements. The grants answer different questions — where the
+    # Resource Broker goes, where the Entitle agent goes, which guests an SE wants to
+    # configure, and (on AWS with a Password Safe tenant) every Windows guest that needs
+    # the functional account — and a POV can want all of them at once. `render_policy`
+    # de-duplicates the SSH list against the WinRM one, so an address in both keeps only
+    # its WinRM ports.
     win_targets = sorted(set(pov_resource_broker.windows_targets(db, env))
-                         | set(pov_guest_step.windows_targets(db, env)))
+                         | set(pov_guest_step.windows_targets(db, env))
+                         | set(pov_windows_functional.windows_targets(db, env)))
     ssh_targets = sorted(set(pov_entitle_agent.linux_targets(db, env))
                          | set(pov_guest_step.linux_targets(db, env)))
     # Recorded so a guest named AFTER this render is refused with "press Broker" instead of

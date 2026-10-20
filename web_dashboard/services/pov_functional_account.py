@@ -279,7 +279,14 @@ async def ensure(db: Session, env: PovEnvironment, family: str, *, api=None) -> 
             f"platform's name in that tenant, or create the account by hand and name it "
             f"on the tenant.") from None
 
-    username, password = await pov_wide_credential(db, env, fam)
+    from . import pov_windows_functional
+    if fam == "windows" and pov_windows_functional.applies(env):
+        # Each AWS Windows guest has its own EC2-generated Administrator password, so no
+        # login the guests already hold can agree. The dashboard's own local account does:
+        # the wire-up has created it, with one password, on every guest it onboards.
+        username, password = pov_windows_functional.credential(env)
+    else:
+        username, password = await pov_wide_credential(db, env, fam)
     label = display_name(env, fam)
     try:
         account_id = await ps_api_service.create_functional_account_on_platform(
