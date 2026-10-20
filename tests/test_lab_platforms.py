@@ -246,10 +246,21 @@ def test_a_platform_that_claims_stored_credentials_actually_has_them():
     provision job, minutes in, against an environment that already exists. Claiming False
     while having one is the quieter half: the Resource Broker install would ask an
     operator to paste a credential the dashboard already holds.
+
+    One shape is allowed past the quieter half: a platform that holds a login for SOME
+    guests only -- AWS, for a Windows VM launched with the POV's own key. It stays False
+    (every other guest still takes a typed login) and declares ``holds_login``, which
+    ``pov_resource_broker`` asks per VM before it ever asks an operator.
     """
     for name in lp.VALID_PLATFORMS:
-        fn = getattr(lp.adapter(name), "stored_credentials", None)
+        mod = lp.adapter(name)
+        fn = getattr(mod, "stored_credentials", None)
         claims = lp.supports(name, "stored_credentials")
+        if not claims and callable(fn):
+            assert callable(getattr(mod, "holds_login", None)), (
+                f"{name}: capabilities say stored_credentials=False but the adapter has "
+                f"stored_credentials() and no holds_login() to say which guests it covers")
+            continue
         assert claims == callable(fn), (
             f"{name}: capabilities say stored_credentials={claims} but the adapter "
             f"{'has' if callable(fn) else 'has no'} stored_credentials()")
