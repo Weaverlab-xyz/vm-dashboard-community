@@ -72,7 +72,9 @@ COLLECTORS = (
         area="remote_agents", label="Remote agents", collect=agents.collect,
         interval_minutes=5, flags=("remote_agents_enabled",),
         personas=("hypervisor", "itops", "ot", "netadmin", "iamops"),
-        description="Whether each agent is polling, and new enough for what is bound to it."),
+        description="Whether each agent is polling, new enough for what is bound to it, "
+                    "and whether it is SPIRE-attested or keeps a signing key on disk.",
+        note=agents.identity_note),
     Collector(
         area="directories", label="Directories", collect=directories.collect,
         interval_minutes=5, flags=("directories_enabled",),

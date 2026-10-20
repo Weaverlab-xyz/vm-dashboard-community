@@ -4,8 +4,11 @@
 {# Health across the estate (services/health). Backed by GET /api/estate-health, which
    reads stored results only, and POST /api/estate-health/{area}/run for Check now.
    Areas that list the active persona come first; none is ever hidden by it.
-   Administrator-only, enforced by the API. Infrastructure only: identity posture is
-   Identity Security Insights' data and is deliberately not shown. #}
+   Administrator-only, enforced by the API. Infrastructure only: who holds what access
+   (accounts, groups, privilege) is Identity Security Insights' data and is deliberately
+   not shown. How the dashboard's OWN infrastructure authenticates is shown where it is
+   a recommendation, e.g. remote agents that still keep a signing key on disk rather
+   than being SPIRE-attested; such a note (area.note) never changes a status. #}
 
 {% block content %}
 <div class="max-w-6xl mx-auto py-8 px-4" x-data="estateHealthPage()">
@@ -89,6 +92,11 @@
                     class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-2.5 py-1 rounded-lg disabled:opacity-50"
                     x-text="busy[a.area] ? 'Checking…' : 'Check now'"></button>
           </div>
+        </div>
+        <div x-show="a.note" class="px-4 py-2 text-sm bg-blue-50 text-blue-800 border-b border-blue-100">
+          <span x-text="a.note ? a.note.text : ''"></span>
+          <a x-show="a.note && a.note.href" :href="a.note ? a.note.href : '#'"
+             class="ml-1 font-medium underline" x-text="a.note ? a.note.link : ''"></a>
         </div>
         <div x-show="a.last_error" class="px-4 py-2 text-sm bg-amber-50 text-amber-800 border-b border-amber-100"
              x-text="a.last_error + ' The results below are from the run before.'"></div>
