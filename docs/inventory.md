@@ -128,6 +128,12 @@ writable Password Safe record, so it never promises more than it can do.
 * Every change is written to the [audit log](access/audit-log.md) as `attributes.assign` or
   `attributes.remove`, one entry per record.
 
+### Attributes from a workstream
+
+A workstream can set attributes that every system it onboards carries, such as
+`Workstream = team-a`, so a Smart Rule can follow the dashboard's workstreams. See
+[Password Safe → Workstream attributes](integrations/beyondtrust/password-safe.md#workstream-attributes).
+
 ### Re-running a Smart Rule
 
 Changing an attribute does not re-evaluate the Smart Rules that use it. **Re-run a Smart

@@ -1007,6 +1007,7 @@ async def reassign_instance_workgroup(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"GCE label update failed: {exc}")
 
+    previous = job.workgroup if job is not None else None
     if job is not None:
         job.workgroup = canonical
         meta = job.metadata_dict
@@ -1017,7 +1018,12 @@ async def reassign_instance_workgroup(
         db.commit()
 
     await cache_service.invalidate_prefix(CACHE_KEY_INSTANCES)
-    return {"instance_name": instance_name, "workgroup": canonical, "job_id": job.id if job else None}
+    # The VM's Password Safe system follows it: the old workstream's attributes off, the
+    # new one's on. Reported, never raised — the tag rewrite above already happened.
+    from ..services import ps_workstream_attrs
+    ps_report = await ps_workstream_attrs.on_reassign(db, job, previous)
+    return {"instance_name": instance_name, "workgroup": canonical, "job_id": job.id if job else None,
+            "ps_attributes": ps_report}
 
 
 @router.post("/instances/{instance_name}/create-image", response_model=GCPDeployResponse)

@@ -1047,6 +1047,7 @@ async def reassign_instance_workgroup(
                 job = j
                 break
 
+    previous = job.workgroup if job is not None else None
     if job is not None:
         job.workgroup = canonical
         meta = job.metadata_dict
@@ -1057,7 +1058,12 @@ async def reassign_instance_workgroup(
         db.commit()
 
     await cache_service.invalidate(instances_cache_key())
-    return {"instance_id": instance_id, "workgroup": canonical, "job_id": job.id if job else None}
+    # The VM's Password Safe system follows it: the old workstream's attributes off, the
+    # new one's on. Reported, never raised — the tag rewrite above already happened.
+    from ..services import ps_workstream_attrs
+    ps_report = await ps_workstream_attrs.on_reassign(db, job, previous)
+    return {"instance_id": instance_id, "workgroup": canonical, "job_id": job.id if job else None,
+            "ps_attributes": ps_report}
 
 
 # ── Tags ──────────────────────────────────────────────────────────────────────

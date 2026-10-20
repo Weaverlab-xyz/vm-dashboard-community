@@ -5,7 +5,8 @@ Workgroups scope RBAC and cloud-resource visibility (via AWS `Workgroup` tag,
 Azure/GCP `workgroup` tag/label). Names are canonical lowercase; the
 ``display_name`` field preserves the original casing for UI rendering.
 """
-from typing import List, Optional
+import logging
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -15,6 +16,8 @@ from ..database import User, get_db
 from ..services import workgroup_service
 from ..services.workgroup_service import WorkgroupError
 from .auth import get_current_user, has_explicit_permission, require_admin, require_permission
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/workgroups", tags=["workgroups"])
 
@@ -386,6 +389,108 @@ def put_post_deploy_runs(
     _audit(db, current_user, "workstream_post_deploy_runs_update", workstream=name.lower(),
            assets=[r["asset"] for r in out])
     return PostDeployRuns(runs=out)
+
+
+class PSAttributes(BaseModel):
+    # {"<AttributeType name>": "<value>"}, as a Smart Rule names them.
+    attributes: Dict[str, str] = {}
+
+
+class PSAttributesUpdate(PSAttributes):
+    # The ONLY way saving creates a type or value in Password Safe; off, an unknown one
+    # is a 400 naming it.
+    create_missing: bool = False
+
+
+class PSAttributesApply(BaseModel):
+    # Where in the matched set this call starts; the response's next_offset is the next.
+    offset: int = Field(0, ge=0)
+    # Optionally re-run one Smart Rule afterwards, so it picks the attributes up now.
+    smart_rule_id: Optional[int] = Field(default=None, gt=0)
+
+
+def _raise_ps(err: WorkgroupError) -> None:
+    if isinstance(err, workgroup_service.PSAttributesUnavailable):
+        raise HTTPException(status_code=err.status, detail=str(err))
+    _raise_from(err)
+
+
+@router.get("/{name}/ps-attributes", response_model=PSAttributes)
+def get_ps_attributes(
+    name: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """The Password Safe attributes every system onboarded from this workstream carries."""
+    wg = workgroup_service.get(db, name)
+    if not wg:
+        raise HTTPException(status_code=404, detail=f"Workstream '{name}' not found")
+    return PSAttributes(attributes=workgroup_service.ps_attributes(wg.name, db))
+
+
+@router.put("/{name}/ps-attributes")
+async def put_ps_attributes(
+    name: str,
+    payload: PSAttributesUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Administrator only: these are written into a customer's PAM tenant on every
+    onboarding, and a Smart Rule keyed on one can grant access. Each is checked against
+    the tenant's vocabulary; ``create_missing`` is the only path that creates one."""
+    try:
+        out = await workgroup_service.set_ps_attributes(
+            db, name, dict(payload.attributes), create_missing=payload.create_missing)
+    except WorkgroupError as exc:
+        _raise_ps(exc)
+    _audit(db, current_user, "workstream_ps_attributes_update", workstream=name.lower(),
+           attributes=out["attributes"],
+           created=[f"{c['type']} = {c['value']}" for c in out["created"]])
+    return out
+
+
+@router.post("/{name}/ps-attributes/apply")
+async def apply_ps_attributes(
+    name: str,
+    payload: PSAttributesApply,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Apply this workstream's attributes to the Password Safe systems its EXISTING
+    resources match — the ones onboarded before it named any. At most 50 per call;
+    page with ``next_offset``. Per-system, per-attribute outcomes; a skip is not a
+    success."""
+    from ..services import ps_api_service, ps_workstream_attrs
+    wg = workgroup_service.get(db, name)
+    if not wg:
+        raise HTTPException(status_code=404, detail=f"Workstream '{name}' not found")
+    if not workgroup_service.ps_attributes(wg.name, db):
+        raise HTTPException(status_code=400,
+                            detail=f"Workstream '{wg.name}' names no Password Safe attributes.")
+    why_not = ps_workstream_attrs.unavailable_reason()
+    if why_not:
+        raise HTTPException(status_code=409, detail=why_not)
+    try:
+        out = await ps_workstream_attrs.backfill(db, wg.name, offset=payload.offset)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    out["smart_rule"] = None
+    if payload.smart_rule_id:
+        try:
+            out["smart_rule"] = await ps_api_service.process_smart_rule(payload.smart_rule_id)
+        except ps_api_service.PSApiError:
+            # Logged, not returned: process_smart_rule's message quotes the tenant's
+            # response body (CodeQL py/stack-trace-exposure).
+            logger.warning(
+                "Smart Rule %s re-run failed after a workstream apply",
+                payload.smart_rule_id, exc_info=True)
+            out["smart_rule"] = {"smart_rule_id": payload.smart_rule_id,
+                                 "error": "Password Safe refused the re-run — see the dashboard log"}
+    _audit(db, current_user, "workstream_ps_attributes_apply", workstream=wg.name,
+           offset=out["offset"], systems=[t["managed_system_id"] for t in out["targets"]],
+           states={t["managed_system_id"]: t["state"] for t in out["targets"]},
+           smart_rule_id=payload.smart_rule_id)
+    return out
 
 
 class NetworkDefault(BaseModel):
