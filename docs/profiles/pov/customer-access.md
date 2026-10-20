@@ -286,6 +286,27 @@ identifier inside your appliances: no jump item ids, no managed account ids, no 
 ids, no tenant names, and none of the wiring errors written for you. That list is a
 projection built for them, not your view with fields removed.
 
+### Whether they are using it
+
+The POV list's **Customer** column, and the **Customer** fact on a POV's page, answer the
+question to ask before a check-in call: has the customer actually opened their login?
+
+| Shows | Means |
+|---|---|
+| `no login` | no customer login was ever issued for this POV |
+| `never signed in` (amber) | logins exist and nobody has used one |
+| `signed in` | somebody signed in and has not ticked anything yet |
+| `active` (green) | the customer ticked a use case themselves |
+
+Underneath is how long ago the customer last did anything, whether a sign-in or a tick. On
+the POV page it turns amber after a week.
+
+A sign-in is recorded when an accessor completes one: their password, plus the FIDO2 step
+if they have one. A token used all afternoon counts as one sign-in. The time is kept on the
+accessor record as well as on the login, so it survives the accessor being revoked and the
+POV being destroyed. Every dashboard account now records its last interactive sign-in in
+the same way, whether by password, password and FIDO2, or SSO.
+
 ### Where they come from
 
 Two ways, and the Access tab shows which for every row.

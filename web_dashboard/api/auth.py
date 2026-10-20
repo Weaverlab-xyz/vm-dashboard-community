@@ -80,6 +80,32 @@ def _get_user_from_pat(raw_token: str, db: Session) -> User:
 
 # ── Token helpers ─────────────────────────────────────────────────────────────
 
+def _stamp_login(db, user) -> None:
+    """Record that ``user`` just completed an interactive sign-in. Never fails a login.
+
+    Called at the three points a session token is issued -- password, password + FIDO2,
+    SSO -- and nowhere else: bearer-token requests, PATs and the client-credentials grant
+    are not a person signing in.
+    """
+    try:
+        now = utcnow()
+        user.last_login_at = now
+        if getattr(user, "accessor_env_id", None):
+            from ..database import PovAccessor
+            (db.query(PovAccessor)
+               .filter(PovAccessor.username == user.username,
+                       PovAccessor.environment_id == user.accessor_env_id)
+               .update({PovAccessor.last_login_at: now}, synchronize_session=False))
+        db.commit()
+    except Exception:  # noqa: BLE001 - a bookkeeping write must not lock somebody out
+        logger.warning("could not record a login time for %s",
+                       getattr(user, "username", "?"), exc_info=True)
+        try:
+            db.rollback()
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+
 def create_access_token(data: dict) -> str:
     payload = data.copy()
     expire = utcnow() + timedelta(minutes=settings.access_token_expire_minutes)
@@ -927,6 +953,7 @@ def login(
         )
 
     login_guard.clear(db, username=user.username)
+    _stamp_login(db, user)
     token = create_access_token({"sub": user.username})
     return TokenResponse(
         access_token=token,
@@ -1007,6 +1034,7 @@ def login_mfa(
 
     # Both factors are now satisfied — this is the point the budget resets.
     login_guard.clear(db, username=user.username)
+    _stamp_login(db, user)
     token = create_access_token({"sub": user.username})
     return TokenResponse(
         access_token=token,
@@ -1296,6 +1324,7 @@ def _complete_oauth_login(db, *, subject, email, display_name, groups, provider,
         # Group map not configured — require pre-existing account (legacy behaviour)
         return RedirectResponse(url="/login?error=not_registered", status_code=302)
 
+    _stamp_login(db, user)
     token = create_access_token({"sub": user.username})
 
     # Return JWT via URL fragment (not sent to server on redirect, safe for internal use)

@@ -74,7 +74,8 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         pov_accessor_entitle, pov_cell_roles, pov_gateway,
                         pov_platform_cache,
                         pov_reconcile,
-                        pov_cloud_cost, pov_entitle_agent, pov_guest_step,
+                        pov_cloud_cost, pov_engagement, pov_entitle_agent,
+                        pov_guest_step,
                         pov_ot_adapter,
                         pov_pra_ps_link, pov_ps_config, pov_resource_broker,
                         pov_setup_steps,
@@ -612,7 +613,10 @@ def list_managed(db: Session = Depends(get_db),
     # call for a single environment; this list is the one caller where the per-row cost is
     # multiplied by the inventory AND by every SE loading the page at once.
     brokers = pov_broker.describe_many(db, rows)
-    return {"environments": [_serialize(e, broker=brokers.get(e.id))
+    # Batched for the same reason: three queries for the page, whatever its length.
+    engagement = pov_engagement.describe_many(db, rows)
+    return {"environments": [{**_serialize(e, broker=brokers.get(e.id)),
+                              "engagement": engagement.get(e.id, {})}
                              for e in rows]}
 
 
@@ -641,7 +645,9 @@ def get_managed(env_id: str, db: Session = Depends(get_db),
         raise HTTPException(status_code=404, detail="No such POV environment")
     vms = (db.query(PovEnvironmentVM)
              .filter(PovEnvironmentVM.environment_id == env.id).all())
-    return {"environment": _serialize(env, vms, broker=pov_broker.describe(db, env))}
+    out = _serialize(env, vms, broker=pov_broker.describe(db, env))
+    out["engagement"] = pov_engagement.describe(db, env)
+    return {"environment": out}
 
 
 @router.post("/managed/reconcile", dependencies=_POV_WRITE)

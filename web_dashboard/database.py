@@ -311,6 +311,12 @@ class User(Base):
     # No DEFAULT in the retrofit ALTER for the PostgreSQL reason on `is_admin`; NULL reads
     # as False everywhere, which is every existing row.
     is_service_account = Column(Boolean, default=False, nullable=True)
+    # When this account last completed an interactive sign-in: password (and the FIDO2
+    # step when MFA applies) or SSO. Stamped when the session token is issued, never per
+    # request -- a token used all afternoon is one login. NULL = never signed in since this
+    # column existed. Read by services/pov_engagement to answer "has the customer actually
+    # opened their POV login?", which a login being ISSUED does not.
+    last_login_at = Column(DateTime, nullable=True)
 
     fido2_credentials = relationship("Fido2Credential", back_populates="user", cascade="all, delete-orphan")
     personal_access_tokens = relationship("PersonalAccessToken", back_populates="user", cascade="all, delete-orphan")
@@ -4118,6 +4124,11 @@ class PovAccessor(Base):
     created_by = Column(String(100), nullable=True)
     revoked_at = Column(DateTime, nullable=True)
     revoke_reason = Column(String(255), nullable=True)
+    # The accessor's own last sign-in, copied here from the login (api/auth._stamp_login).
+    # Kept on THIS row rather than read off `users` because revoking an accessor deletes
+    # its user, and "did the customer ever open it?" is exactly what a finished POV's
+    # record needs to answer. NULL = never signed in.
+    last_login_at = Column(DateTime, nullable=True)
 
 
 class PovVendorUser(Base):
@@ -5381,6 +5392,9 @@ def init_db():
             "ALTER TABLE pov_environments ADD COLUMN pra_vendor_expires_at TIMESTAMP",
             # The one-off demo warm-up. NULL = nothing booked, which every existing row is.
             "ALTER TABLE pov_environments ADD COLUMN wake_at TIMESTAMP",
+            # When each accessor last signed in. NULL = never, which every existing row
+            # reads as -- correctly, since nothing recorded it before.
+            "ALTER TABLE pov_accessors ADD COLUMN last_login_at TIMESTAMP",
             # `workload_cloud_credentials` needs no entry either, for the same two reasons
             # create_all covers: new table, and empty means no workload has been given a
             # dynamic cloud credential yet. Explicitly NOT backfilled from
@@ -5480,6 +5494,8 @@ def init_db():
             # which is every existing row. `oauth_clients` itself is new, so create_all
             # builds it.
             "ALTER TABLE users ADD COLUMN is_service_account BOOLEAN",
+            # When the account last signed in interactively. NULL = not since this shipped.
+            "ALTER TABLE users ADD COLUMN last_login_at TIMESTAMP",
             "ALTER TABLE agent_cells ADD COLUMN oauth_client_id VARCHAR(36)",
             # OAuth clients that authenticate with a SPIFFE JWT-SVID instead of a secret
             # (services/spiffe_assertion). NULL auth_method reads as "secret", which is
