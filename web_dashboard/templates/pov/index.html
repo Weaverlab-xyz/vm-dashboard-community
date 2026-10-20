@@ -719,6 +719,18 @@
                             class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed">edit</button>
                   </div>
                 </template>
+                <!-- The one-off warm-up, under whichever of the two above rendered: it is
+                     an exception to both, and the only one of the three Skytap allows
+                     alongside its idle timer, because it only ever starts the lab. -->
+                <div class="mt-1 space-y-0.5">
+                  <p x-show="e.wake && e.wake.booked" class="text-xs text-indigo-700 whitespace-nowrap"
+                     :title="'Starts ' + wakeWhen(e.wake.wake_at) + ' for a demo at ' + wakeWhen(e.wake.demo_at)"
+                     x-text="'warm-up ' + wakeWhen(e.wake.wake_at)"></p>
+                  <button @click="setWake(e)" :disabled="!actionable(e) || !e.platform_environment_id"
+                          title="Start this POV automatically before a demo"
+                          class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed"
+                          x-text="e.wake && e.wake.booked ? 'change warm-up' : 'warm up'"></button>
+                </div>
               </td>
               <td class="px-4 py-2">
                 <!-- The spend cap. Shown only where the dashboard can actually price the
@@ -2156,6 +2168,66 @@ function povPage(tabSlugs) {
           : 'schedule removed — it now runs until somebody suspends it');
         await this.load();
       } catch (e) { this.error = e.message; }
+    },
+
+    // The one-off warm-up. Prompts, like setSchedule() above. The time is typed in the
+    // browser's own timezone, which is sent with it, so "14:00" means 14:00 where the SE
+    // is sitting -- the time on their calendar invite.
+    async setWake(env) {
+      const cur = env.wake || {};
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+      const pad = n => String(n).padStart(2, '0');
+      const local = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+                         `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      let suggested;
+      if (cur.booked && cur.demo_at) {
+        suggested = local(new Date(cur.demo_at));
+      } else {
+        const t = new Date(Date.now() + 24 * 3600 * 1000);
+        t.setHours(14, 0, 0, 0);
+        suggested = local(t);
+      }
+      const when = window.prompt(
+        `When does the demo start? YYYY-MM-DD HH:MM, in your timezone (${tz}).\n` +
+        (cur.booked ? 'Leave blank to cancel the booked warm-up.' : 'Leave blank to cancel.'),
+        suggested);
+      if (when === null) return;
+      let lead = null;
+      if (when.trim()) {
+        const answer = window.prompt(
+          'Start it how many minutes before? A suspended lab can take several minutes ' +
+          'to resume.', String(cur.lead_minutes || 20));
+        if (answer === null) return;
+        lead = answer.trim() ? Number(answer.trim()) : null;
+        if (lead !== null && !Number.isInteger(lead)) {
+          this.error = 'Minutes must be a whole number.';
+          return;
+        }
+      } else if (!cur.booked) {
+        return;
+      }
+      this.error = ''; this.notice = '';
+      try {
+        const data = await this.post(`/api/pov/managed/${env.id}/wake-at`, {
+          demo_at_local: when.trim().replace(' ', 'T'),
+          timezone: tz,
+          lead_minutes: lead,
+        });
+        const w = data.wake || {};
+        this.notice = `${env.name}: ` + (w.booked
+          ? `starts ${this.wakeWhen(w.wake_at)} for a demo at ${this.wakeWhen(w.demo_at)}`
+          : 'warm-up cancelled') +
+          ((data.warnings || []).length ? '. Note: ' + data.warnings.join(' ') : '');
+        await this.load();
+      } catch (e) { this.error = e.message; }
+    },
+
+    // A booking's time, in the browser's zone: "Thu 22 Oct 13:40".
+    wakeWhen(iso) {
+      const t = iso ? new Date(iso) : null;
+      if (!t || Number.isNaN(t.getTime())) return '—';
+      return t.toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short',
+                                           hour: '2-digit', minute: '2-digit' });
     },
 
     // Red once over the cap, amber past the warning threshold, plain otherwise. Grey when

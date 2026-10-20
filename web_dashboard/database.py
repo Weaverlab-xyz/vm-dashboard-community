@@ -3833,6 +3833,13 @@ class PovEnvironment(Base):
     # last three things. NULL means "never evaluated": the first pass records the time and
     # acts on nothing, because an unbounded window has crossed every boundary there is.
     schedule_last_checked_at = Column(DateTime, nullable=True)
+    # A ONE-OFF start, for a demo: "have it running by 14:00 Thursday". Naive UTC, the
+    # moment to start the lab (the demo time minus a lead), not the demo time itself --
+    # that is kept in extra_data["wake"] for display. NULL = nothing booked. Cleared by the
+    # sweep the first time it is evaluated at or after this moment, whether or not that
+    # pass had to act, so a booking fires at most once. Unlike the recurring schedule it
+    # also applies on a platform with its own idle timer: it only ever STARTS a lab.
+    wake_at = Column(DateTime, nullable=True)
 
 
     # The spend cap. NULL throughout = no cap, which is what every existing row backfills
@@ -5372,6 +5379,8 @@ def init_db():
             "ALTER TABLE pov_environments ADD COLUMN pra_vendor_policy_id VARCHAR(36)",
             "ALTER TABLE pov_environments ADD COLUMN pra_vendor_group_id VARCHAR(36)",
             "ALTER TABLE pov_environments ADD COLUMN pra_vendor_expires_at TIMESTAMP",
+            # The one-off demo warm-up. NULL = nothing booked, which every existing row is.
+            "ALTER TABLE pov_environments ADD COLUMN wake_at TIMESTAMP",
             # `workload_cloud_credentials` needs no entry either, for the same two reasons
             # create_all covers: new table, and empty means no workload has been given a
             # dynamic cloud credential yet. Explicitly NOT backfilled from

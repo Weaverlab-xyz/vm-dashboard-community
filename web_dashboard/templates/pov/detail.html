@@ -1516,6 +1516,14 @@
         } else {
           sleeps = [{ text: 'always on', tone: 'muted' }];
         }
+        // A booked warm-up, set from the POV list's Sleeps column.
+        if (e.wake && e.wake.booked) {
+          const at = new Date(e.wake.wake_at);
+          if (!Number.isNaN(at.getTime())) {
+            sleeps.push({ text: 'warm-up ' + at.toLocaleString(undefined,
+              { weekday: 'short', hour: '2-digit', minute: '2-digit' }) });
+          }
+        }
         let spend = [{ text: '—', tone: 'muted' }];
         if (e.spend_priced) {
           const s = e.spend || {};
