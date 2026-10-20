@@ -140,7 +140,7 @@ asyncssh>=2.14.0
 # SMB / CIFS client — pure-Python, no system deps. Backs the local-storage
 # UNC option on /storage so contributors can host playbooks on a corporate
 # file share without bind-mounting it into the container.
-smbprotocol>=1.12.0
+smbprotocol>=1.17.0
 
 # BeyondTrust Password Safe / Secrets Safe CLI (ps-cli)
 beyondtrust-bips-cli
