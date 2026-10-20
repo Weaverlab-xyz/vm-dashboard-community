@@ -4,6 +4,48 @@
 
 Part of [A POV Instance](README.md). Reconciling against the platform, and the auto-delete timer.
 
+## Warming a POV up for a demo
+
+A suspended lab can take several minutes to resume. If you press **Start** when the
+customer joins, the first five minutes of the call are spent waiting for it. Use the
+**Sleeps** column on the POV list instead: its **warm up** control books a one-off start.
+
+You give it two things:
+
+- **When the demo starts**, as `YYYY-MM-DD HH:MM` in your browser's own timezone, so it
+  matches your calendar invite. The timezone is sent along with the time.
+- **How many minutes before to start it.** The default is 20, and the maximum is 240.
+
+The booking shows as `warm-up Thu 22 Oct 13:40` in the same column and on the POV page.
+**change warm-up** moves it, and a blank time cancels it.
+
+It is a booking, not a schedule. That makes a few things different from the
+[recurring suspend schedule](public-cloud.md#the-suspend-schedule):
+
+- **It only ever starts a lab.** That is why it also works on Skytap, which refuses a
+  recurring schedule because of its own idle timer: a single start has nothing to fight
+  the timer over. Nothing is suspended afterwards. The platform's idle timer, the
+  schedule or a person does that, exactly as after a press of **Start**.
+- **It fires at most once.** The first reconcile pass at or after the start time clears
+  it, whatever it found. That might be:
+  - it started the lab
+  - the lab was already running
+  - a power job was already in flight
+  - the demo started more than an hour ago, so nothing was started for a call that has
+    ended
+- **It is as precise as the reconcile pass**, which runs every ten minutes by default. A
+  20-minute lead therefore really means 10 to 20 minutes.
+
+The start is the same `pov_env_power` job **Start** creates, attributed to `pov-warmup`, so
+the `/jobs` row says why the lab woke up.
+
+Booking it warns you, without refusing, when the lab may not stay up for the whole call:
+
+- the lead is shorter than the reconcile interval
+- the platform's idle timer is shorter than the lead, so the lab could suspend itself again
+  before you connect
+- the POV's recurring schedule suspends it during the call or within two hours of its start
+
 ## Keeping the view true
 
 A POV's `runstate` is a **remembered** value, and for most of this feature's life it was
