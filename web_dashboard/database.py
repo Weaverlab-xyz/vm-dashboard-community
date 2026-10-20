@@ -1738,6 +1738,12 @@ class Workgroup(Base):
     # {asset, asset_backend}. Administrator-only like secret_bindings, because each one
     # is code run on every new machine. NULL = none.
     post_deploy_runs = Column(Text, nullable=True)
+    # Password Safe attributes every managed system onboarded from the workstream carries
+    # (services/ps_workstream_attrs), so a customer's Smart Rule can filter on
+    # "Workstream = X": a JSON object {"<AttributeType name>": "<value>"}. Administrator-
+    # only like post_deploy_runs, because it writes into a customer's PAM tenant. NULL =
+    # none, which is every workstream that predates the column.
+    ps_attributes = Column(Text, nullable=True)
     # The subnet / security groups its deploy forms start from, per cloud and region
     # (services/workgroup_service.NETWORK_KEYS): {cloud: {region: {key: value}}}. A form
     # convenience, never applied by the server. NULL = none.
@@ -5506,6 +5512,10 @@ def init_db():
             # existing workstream, so no deploy changes until an administrator sets one.
             "ALTER TABLE workgroups ADD COLUMN post_deploy_runs TEXT",
             "ALTER TABLE workgroups ADD COLUMN network_defaults TEXT",
+            # Password Safe attributes stamped on every system the workstream onboards.
+            # NULL = none, every existing workstream, so no onboarding changes until an
+            # administrator sets one.
+            "ALTER TABLE workgroups ADD COLUMN ps_attributes TEXT",
 
             # Service accounts and their OAuth clients (services/service_accounts). A bare
             # BOOLEAN for the PostgreSQL reason on users.is_admin; NULL reads as "a person",

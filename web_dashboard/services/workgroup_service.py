@@ -652,6 +652,177 @@ def set_post_deploy_runs(db: Session, name: str, runs) -> list:
     return clean
 
 
+# ── Password Safe attributes (administrator) ───────────────────────────────────
+#
+# Attributes every managed system onboarded from the workstream carries, so a customer's
+# Smart Rule can filter on "Workstream = team-a" (services/ps_workstream_attrs writes them).
+# Stored as {"<AttributeType name>": "<value>"} — names, not ids, so the mapping reads the
+# way a Smart Rule is written. Each is validated against the tenant's vocabulary on save;
+# nothing is created there unless the administrator asked for exactly that.
+
+PS_ATTRIBUTES_MAX = 16
+_PS_TEXT_MAX = 256
+
+
+class PSAttributesUnavailable(WorkgroupError):
+    """Password Safe could not be asked (off, unconfigured, a read or create refused).
+    Its own class so the API answers 409/502 rather than a 400 that blames the input."""
+
+    def __init__(self, message: str, status: int = 502):
+        super().__init__(message)
+        self.status = status
+
+
+def _read_ps_attributes(wg: Optional[Workgroup]) -> dict:
+    stored = getattr(wg, "ps_attributes", None) if wg is not None else None   # see _read_defaults
+    if not stored:
+        return {}
+    try:
+        raw = json.loads(stored)
+    except (ValueError, TypeError):
+        return {}
+    out = {}
+    for key, value in (raw.items() if isinstance(raw, dict) else ()):
+        if isinstance(key, str) and key and isinstance(value, str) and value:
+            out[key] = value
+    return dict(list(out.items())[:PS_ATTRIBUTES_MAX])
+
+
+def ps_attributes(name: Optional[str], db: Optional[Session] = None) -> dict:
+    """The workstream's Password Safe attributes, ``{type name: value}``; ``{}`` when it
+    sets none or does not exist."""
+    wg_name = _normalize(name or "")
+    if not wg_name:
+        return {}
+    if db is not None:
+        return _read_ps_attributes(get(db, wg_name))
+    from ..database import SessionLocal
+    own = SessionLocal()
+    try:
+        return _read_ps_attributes(get(own, wg_name))
+    finally:
+        own.close()
+
+
+def _ps_text(value, what: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise WorkgroupError(f"{what} is empty")
+    value = value.strip()
+    if len(value) > _PS_TEXT_MAX or any(ord(c) < 32 or 0x7F <= ord(c) <= 0x9F for c in value):
+        raise WorkgroupError(f"{what} '{value[:60]}' is not a Password Safe attribute name")
+    return value
+
+
+def onboarded_system_ids(db: Session, name: str) -> list:
+    """Managed system ids recorded on the workstream's live deploys, oldest first."""
+    wanted = _normalize(name)
+    out = []
+    for job in (db.query(Job).filter(Job.status == "completed")
+                .order_by(Job.created_at.asc()).all()):
+        if (job.workgroup or "").lower() != wanted:
+            continue
+        meta = job.metadata_dict
+        sid = str(meta.get("ps_managed_system_id") or "").strip()
+        if sid and not meta.get("destroyed") and sid not in out:
+            out.append(sid)
+    return out
+
+
+async def set_ps_attributes(db: Session, name: str, mapping, create_missing: bool = False) -> dict:
+    """Replace a workstream's Password Safe attributes. The caller must be an administrator.
+
+    Every entry is checked against the tenant's vocabulary
+    (``ps_api_service.read_attribute_vocabulary``): an unknown type or value is refused by
+    name, and a read-only type by ``ps_attribute_catalog.assert_assignable``. Names are
+    stored as the tenant spells them.
+
+    ``create_missing`` is the ONLY way this creates anything in Password Safe. A missing
+    type or value is created with ``ps_api_service.ensure_managed_system_attribute``, which
+    needs a managed system to assign it to — so it lands on the workstream's oldest
+    onboarded system, which should carry it anyway. A workstream with none is refused
+    rather than have the dashboard invent a target.
+
+    Returns ``{"attributes": {...}, "created": [{type, value, created_type,
+    created_value, managed_system_id}]}``. Nothing is stored unless every entry passed.
+    """
+    from . import ps_api_service, ps_attribute_catalog as pac, ps_workstream_attrs as pwa
+
+    wg = get(db, name)
+    if wg is None:
+        raise WorkgroupError(f"Workstream '{name}' not found.")
+    if not isinstance(mapping, dict):
+        raise WorkgroupError("attributes must be an object of {type: value}")
+    if len(mapping) > PS_ATTRIBUTES_MAX:
+        raise WorkgroupError(f"At most {PS_ATTRIBUTES_MAX} Password Safe attributes per workstream")
+    asked = []
+    for key, value in mapping.items():
+        type_name = _ps_text(key, "an attribute type")
+        if any(t.lower() == type_name.lower() for t, _v in asked):
+            raise WorkgroupError(f"the attribute type '{type_name}' is named twice")
+        asked.append((type_name, _ps_text(value, f"the value for '{type_name}'")))
+
+    clean, created = {}, []
+    if asked:
+        why_not = pwa.unavailable_reason()
+        if why_not:
+            raise PSAttributesUnavailable(why_not, status=409)
+        raw = await ps_api_service.read_attribute_vocabulary()
+        if raw.get("state") != ps_api_service.PROBE_OK:
+            raise PSAttributesUnavailable(
+                raw.get("detail") or "the Password Safe attribute vocabulary could not be read")
+        vocabulary = pac.build_vocabulary(raw["types"], raw["values_by_type"])
+
+        missing = []
+        for type_name, value in asked:
+            try:
+                type_row, value_row = pwa.resolve(vocabulary, type_name, value)
+            except LookupError as exc:
+                if not create_missing:
+                    raise WorkgroupError(
+                        f"{exc}. Pick one it has, or tick 'create missing' to create it.") from None
+                # A read-only type is refused even here: Password Safe would refuse the
+                # value, and finding that out after creating things is too late.
+                existing = next((t for t in vocabulary if t["name"].lower() == type_name.lower()), None)
+                if existing and existing["read_only"]:
+                    raise WorkgroupError(
+                        f"'{existing['name']}' is read-only in this Password Safe, so "
+                        f"'{value}' cannot be created from here") from None
+                missing.append((existing["name"] if existing else type_name, value))
+                continue
+            try:
+                pac.assert_assignable(vocabulary, value_row["attribute_id"])
+            except ValueError as exc:
+                raise WorkgroupError(str(exc)) from None
+            clean[type_row["name"]] = value_row["value"]
+
+        if missing:
+            systems = onboarded_system_ids(db, wg.name)
+            if not systems:
+                names = ", ".join(f"{t} = {v}" for t, v in missing)
+                raise WorkgroupError(
+                    f"{names} does not exist in Password Safe, and nothing in workstream "
+                    f"'{wg.name}' is onboarded yet to create it on. Create it in the "
+                    f"Password Safe console, or onboard a VM first.")
+            for type_name, value in missing:
+                try:
+                    r = await ps_api_service.ensure_managed_system_attribute(
+                        systems[0], type_name, value)
+                except ps_api_service.PSApiError as exc:
+                    done = ", ".join(f"{c['type']} = {c['value']}" for c in created)
+                    raise PSAttributesUnavailable(
+                        f"creating {type_name} = {value} failed: {exc}"
+                        + (f" (already created: {done})" if done else "")) from None
+                created.append({"type": type_name, "value": value,
+                                "created_type": bool(r.get("created_type")),
+                                "created_value": bool(r.get("created_value")),
+                                "managed_system_id": systems[0]})
+                clean[type_name] = value
+
+    wg.ps_attributes = json.dumps(clean) if clean else None
+    db.commit()
+    return {"attributes": clean, "created": created}
+
+
 # ── Network defaults (members) ─────────────────────────────────────────────────
 #
 # The subnet and security groups a workstream's deploy forms start from. Network values

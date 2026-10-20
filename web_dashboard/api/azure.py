@@ -1263,6 +1263,7 @@ async def reassign_vm_workgroup(
     except AzureError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
+    previous = job.workgroup if job is not None else None
     if job is not None:
         job.workgroup = canonical
         meta = job.metadata_dict
@@ -1273,7 +1274,12 @@ async def reassign_vm_workgroup(
         db.commit()
 
     await cache_service.invalidate(cache_service.key_global("azure_vms"))
-    return {"vm_name": vm_name, "workgroup": canonical, "job_id": job.id if job else None}
+    # The VM's Password Safe system follows it: the old workstream's attributes off, the
+    # new one's on. Reported, never raised — the tag rewrite above already happened.
+    from ..services import ps_workstream_attrs
+    ps_report = await ps_workstream_attrs.on_reassign(db, job, previous)
+    return {"vm_name": vm_name, "workgroup": canonical, "job_id": job.id if job else None,
+            "ps_attributes": ps_report}
 
 
 # ── Tags ──────────────────────────────────────────────────────────────────────

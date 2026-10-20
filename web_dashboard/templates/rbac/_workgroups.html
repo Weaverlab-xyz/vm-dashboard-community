@@ -375,6 +375,97 @@
           </div>
         </details>
 
+        <!-- Password Safe attributes: stamped on every managed system onboarded from this
+             workstream (services/ps_workstream_attrs), so a Smart Rule can filter on
+             "Workstream = X". Administrator-only to read and change (GET/PUT
+             .../ps-attributes are require_admin): they are written into the customer's
+             PAM tenant. The pickers come from the tenant's own vocabulary. -->
+        <details x-show="modalMode === 'edit' && isAdmin" x-cloak class="border-t border-gray-200 pt-3">
+          <summary class="cursor-pointer select-none text-xs font-medium text-gray-600">
+            Password Safe attributes
+            <span class="font-normal text-gray-400">— set on every system this workstream onboards</span>
+          </summary>
+          <div class="mt-3 space-y-2">
+            <p x-show="psAttrsError" x-cloak class="text-[11px] text-red-600" x-text="psAttrsError"></p>
+            <p x-show="psVocabError" x-cloak class="text-[11px] text-amber-700" x-text="psVocabError"></p>
+            <p class="text-[11px] text-gray-500">
+              Applied when a VM deployed into this workstream is onboarded into Password Safe,
+              and swapped when a VM is reassigned. Write a Smart Rule on them to make
+              Password Safe access follow the workstream.
+            </p>
+            <p x-show="!psAttrs.length" class="text-xs text-gray-400">None.</p>
+            <template x-for="(a, i) in psAttrs" :key="a.type">
+              <div class="flex items-center gap-2 text-xs">
+                <span class="font-medium" x-text="a.type"></span>
+                <span class="text-gray-400">=</span>
+                <span class="font-mono flex-1 truncate" x-text="a.value"></span>
+                <button type="button" @click="psAttrs.splice(i, 1)"
+                        class="px-1 text-red-500 hover:text-red-700">Remove</button>
+              </div>
+            </template>
+            <div x-show="psAttrs.length < 16" class="flex flex-wrap gap-2">
+              <select x-model="psNewType" @change="psNewValue = ''"
+                      class="flex-1 min-w-[6rem] border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <option value="">Attribute type…</option>
+                <template x-for="t in psVocab" :key="t.type_id">
+                  <option :value="t.name" :disabled="t.read_only"
+                          x-text="t.read_only ? t.name + ' (read-only)' : t.name"></option>
+                </template>
+                <option value="__new__">New type…</option>
+              </select>
+              <input x-show="psNewType === '__new__'" type="text" x-model="psNewTypeText"
+                     placeholder="Workstream" maxlength="256"
+                     class="flex-1 min-w-[6rem] border border-gray-300 rounded-lg px-2 py-1.5 text-sm"/>
+              <select x-show="psNewType && psNewType !== '__new__'" x-model="psNewValue"
+                      class="flex-1 min-w-[6rem] border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <option value="">Value…</option>
+                <template x-for="v in psValuesFor(psNewType)" :key="v.attribute_id">
+                  <option :value="v.value" x-text="v.value"></option>
+                </template>
+                <option value="__new__">New value…</option>
+              </select>
+              <input x-show="psNewType === '__new__' || psNewValue === '__new__'" type="text"
+                     x-model="psNewValueText" :placeholder="form.name" maxlength="256"
+                     class="flex-1 min-w-[6rem] border border-gray-300 rounded-lg px-2 py-1.5 text-sm"/>
+              <button type="button" @click="addPsAttr()"
+                      class="px-3 py-1.5 text-xs border border-gray-300 rounded-lg">Add</button>
+            </div>
+            <label class="flex items-center gap-2 text-[11px] text-gray-600">
+              <input type="checkbox" x-model="psCreateMissing" class="rounded border-gray-300"/>
+              Create a type or value Password Safe does not have yet, on save
+            </label>
+            <p x-show="psCreateMissing" x-cloak class="text-[11px] text-amber-700">
+              Saving will create it in the Password Safe tenant, on this workstream's oldest
+              onboarded system. Without this box ticked, an unknown one is refused.
+            </p>
+            <div class="border-t border-gray-100 pt-2 space-y-2">
+              <p class="text-[11px] text-gray-500">
+                Systems onboarded before these were set do not carry them yet. Apply them
+                to the systems this workstream's resources match, 50 at a time.
+              </p>
+              <div class="flex flex-wrap gap-2">
+                <select x-model="psRuleId"
+                        class="flex-1 min-w-[10rem] border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                  <option value="">Then re-run no Smart Rule</option>
+                  <template x-for="r in psRules" :key="r.id">
+                    <option :value="String(r.id)" x-text="'Then re-run: ' + r.title"></option>
+                  </template>
+                </select>
+                <button type="button" @click="applyPsAttrs()"
+                        :disabled="psApplying || !psAttrsLoaded || psAttrsLoaded === '[]' || JSON.stringify(psAttrs) !== psAttrsLoaded"
+                        :title="JSON.stringify(psAttrs) !== psAttrsLoaded ? 'Save first' : ''"
+                        class="px-3 py-1.5 text-xs border border-gray-300 rounded-lg disabled:opacity-40"
+                        x-text="psApplying ? 'Applying…' : (psApplyNext ? 'Apply the next 50' : 'Apply to existing systems')"></button>
+              </div>
+              <p x-show="psApplySummary" x-cloak class="text-[11px] text-gray-600" x-text="psApplySummary"></p>
+              <template x-for="t in psApplyProblems" :key="t.managed_system_id + t.type + t.action">
+                <p class="text-[11px]" :class="t.status === 'failed' ? 'text-red-600' : 'text-amber-700'"
+                   x-text="(t.name || ('system ' + t.managed_system_id)) + ': ' + t.action + ' ' + t.type + ' = ' + t.value + ' ' + t.status + (t.detail ? ' (' + t.detail + ')' : '')"></p>
+              </template>
+            </div>
+          </div>
+        </details>
+
         <!-- Network defaults: the subnet / security groups this workstream's deploy forms
              start from, per cloud and region. Saved from a deploy form ("Save as this
              workstream's network for this region"); listed and removed here. A form
@@ -474,6 +565,24 @@ function workgroupsPage() {
     runsError: '',
     runAssets: [],
     runToAdd: '',
+    // Password Safe attributes (admin only): [{type, value}], and the tenant's vocabulary
+    // and Smart Rules for the pickers. `psAttrsLoaded` is the saved list, as runsLoaded.
+    psAttrs: [],
+    psAttrsLoaded: '',
+    psAttrsError: '',
+    psVocab: [],
+    psVocabError: '',
+    psRules: [],
+    psNewType: '',
+    psNewValue: '',
+    psNewTypeText: '',
+    psNewValueText: '',
+    psCreateMissing: false,
+    psRuleId: '',
+    psApplying: false,
+    psApplyNext: null,
+    psApplySummary: '',
+    psApplyProblems: [],
     bindingClouds: [
       {id: 'aws', label: 'AWS', hint: 'Secrets Manager secret name', list: '/api/aws/secrets/ssh-keys'},
       {id: 'azure', label: 'Azure', hint: 'Key Vault secret name', list: '/api/azure/secrets/ssh-keys'},
@@ -537,6 +646,7 @@ function workgroupsPage() {
       this.loadBindings(w.name);
       this.loadRuns(w.name);
       this.loadNetwork(w.name);
+      this.loadPsAttrs(w.name);
     },
 
     async loadProfile(name) {
@@ -652,6 +762,102 @@ function workgroupsPage() {
       this.postRuns.splice(j, 0, r);
     },
 
+    async loadPsAttrs(name) {
+      this.psAttrs = [];
+      this.psAttrsLoaded = '';
+      this.psAttrsError = '';
+      this.psVocabError = '';
+      this.psNewType = '';
+      this.psNewValue = '';
+      this.psNewTypeText = '';
+      this.psNewValueText = '';
+      this.psCreateMissing = false;
+      this.psRuleId = '';
+      this.psApplyNext = null;
+      this.psApplySummary = '';
+      this.psApplyProblems = [];
+      if (!this.isAdmin) return;
+      try {
+        const r = await API.get('/api/workgroups/' + encodeURIComponent(name) + '/ps-attributes');
+        this.psAttrs = Object.entries(r.attributes || {}).map(([type, value]) => ({type, value}));
+        this.psAttrsLoaded = JSON.stringify(this.psAttrs);
+      } catch (e) {
+        this.psAttrsError = 'Password Safe attributes unavailable: ' + (e.message || e);
+        return;
+      }
+      if (!this.psVocab.length) {
+        try {
+          this.psVocab = ((await API.get('/api/password-safe/attribute-vocabulary')) || {}).types || [];
+        } catch (e) {
+          // Password Safe off or unreachable: the saved list can still be cleared.
+          this.psVocabError = 'Password Safe attribute types unavailable: ' + (e.message || e);
+        }
+      }
+      if (!this.psRules.length) {
+        try {
+          this.psRules = ((await API.get('/api/password-safe/smart-rules')) || {}).rules || [];
+        } catch (e) { /* applying still works without a rule re-run */ }
+      }
+    },
+
+    psValuesFor(typeName) {
+      const t = this.psVocab.find(x => x.name === typeName);
+      return t ? t.values : [];
+    },
+
+    addPsAttr() {
+      const type = (this.psNewType === '__new__' ? this.psNewTypeText : this.psNewType).trim();
+      const value = (this.psNewType === '__new__' || this.psNewValue === '__new__'
+        ? this.psNewValueText : this.psNewValue).trim();
+      if (!type || !value) return;
+      const i = this.psAttrs.findIndex(a => a.type.toLowerCase() === type.toLowerCase());
+      if (i >= 0) this.psAttrs.splice(i, 1, {type, value});
+      else this.psAttrs.push({type, value});
+      this.psNewType = '';
+      this.psNewValue = '';
+      this.psNewTypeText = '';
+      this.psNewValueText = '';
+    },
+
+    psAttrsPayload() {
+      const attributes = {};
+      for (const a of this.psAttrs) attributes[a.type] = a.value;
+      return {attributes, create_missing: !!this.psCreateMissing};
+    },
+
+    async applyPsAttrs() {
+      this.psApplying = true;
+      this.psApplySummary = '';
+      this.psApplyProblems = [];
+      try {
+        const body = {offset: this.psApplyNext || 0};
+        if (this.psRuleId) body.smart_rule_id = Number(this.psRuleId);
+        const r = await API.post('/api/workgroups/' + encodeURIComponent(this.form.name) + '/ps-attributes/apply', body);
+        const states = {};
+        const problems = [];
+        for (const t of r.targets || []) {
+          states[t.state] = (states[t.state] || 0) + 1;
+          for (const o of t.outcomes || []) {
+            if (o.status !== 'ok') problems.push({...o, name: t.name, managed_system_id: t.managed_system_id});
+          }
+        }
+        const parts = Object.entries(states).map(([s, n]) => n + ' ' + s);
+        let msg = (r.targets || []).length + ' of ' + r.matched + ' matched systems: '
+          + (parts.join(', ') || 'nothing to do') + '.';
+        if (r.unmatched) msg += ' ' + r.unmatched + ' resources match no Password Safe system.';
+        if ((r.ambiguous || []).length) msg += ' ' + r.ambiguous.length + ' are ambiguous and were left alone.';
+        if (r.smart_rule) msg += r.smart_rule.error ? ' Smart Rule re-run failed: ' + r.smart_rule.error
+                                                    : ' Smart Rule re-run queued.';
+        this.psApplySummary = msg;
+        this.psApplyProblems = problems;
+        this.psApplyNext = r.next_offset;
+      } catch (e) {
+        this.psApplySummary = 'Apply failed: ' + (e.message || e);
+      } finally {
+        this.psApplying = false;
+      }
+    },
+
     bindingsPayload() {
       const ssh = {};
       for (const c of this.bindingClouds) ssh[c.id] = (this.bindings.ssh[c.id] || '').trim() || null;
@@ -702,6 +908,11 @@ function workgroupsPage() {
               && JSON.stringify(this.postRuns) !== this.runsLoaded) {
             await API.put('/api/workgroups/' + encodeURIComponent(this.form.name) + '/post-deploy-runs',
                           {runs: this.postRuns});
+          }
+          if (this.isAdmin && !this.psAttrsError
+              && JSON.stringify(this.psAttrs) !== this.psAttrsLoaded) {
+            await API.put('/api/workgroups/' + encodeURIComponent(this.form.name) + '/ps-attributes',
+                          this.psAttrsPayload());
           }
           if (this.isAdmin && !this.bindingsError
               && JSON.stringify(this.bindingsPayload()) !== this.bindingsLoaded) {

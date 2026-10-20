@@ -305,6 +305,8 @@ async def register(db, job_id: str, vm_name: str, hostname: str, *,
         result["ps_error"] = str(e)
         logger.warning("Password Safe registration failed for %s: %s", vm_name, e)
 
+    await apply_workstream_attributes(db, job_id, result)
+
     # Opt-in: make the key Password Safe now rotates usable in PRA. Deliberately
     # OUTSIDE the try/except above — the sync has its own failure key, and folding it
     # in would let a PRA-side problem overwrite ps_error and report the onboarding
@@ -414,6 +416,38 @@ async def register_password_managed(db, job_id: str, *, name: str, host_name: st
         result["ps_error"] = str(e)
         logger.warning("Password Safe %s registration failed for %s: %s",
                        platform_label, name, e)
+
+    await apply_workstream_attributes(db, job_id, result)
+
+
+async def apply_workstream_attributes(db, job_id: str, result: dict) -> None:
+    """Stamp the deploy's workstream attributes (``services/ps_workstream_attrs``) onto the
+    managed system just onboarded. Non-fatal, and OUTSIDE the registration's try/except
+    for the reason the vault sync is: an attribute Password Safe refuses must not
+    overwrite ``ps_error`` and report a healthy onboarding as failed.
+
+    Does nothing — no Password Safe call at all — unless the workstream names attributes.
+    The outcome lands on ``result["ps_workstream_attributes"]`` and in the job's progress
+    message; a partial apply says so rather than reading as done."""
+    from . import job_service, ps_workstream_attrs, workgroup_service
+    from ..database import Job
+    sid = result.get("ps_managed_system_id")
+    if not sid or result.get("ps_error") or db is None:
+        return
+    try:
+        job = db.query(Job).filter(Job.id == job_id).first()
+        workgroup = (job.workgroup if job else None) or ""
+        if not workgroup_service.ps_attributes(workgroup, db):
+            return
+        report = await ps_workstream_attrs.apply(db, workgroup, sid)
+        result["ps_workstream_attributes"] = report
+        job_service.update_progress(
+            db, job_id, 96, f"Password Safe {ps_workstream_attrs.summary(report)}.")
+    except Exception as e:  # noqa: BLE001 — never fails the deploy
+        result["ps_workstream_attributes"] = {"state": "failed", "outcomes": [],
+                                              "detail": str(e)}
+        logger.warning("Password Safe workstream attributes failed for job %s: %s",
+                       job_id, e)
 
 
 def password_safe_holds_credential(result: dict) -> bool:
