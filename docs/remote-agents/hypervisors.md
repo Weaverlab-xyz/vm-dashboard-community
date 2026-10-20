@@ -101,6 +101,13 @@ are true of it that are not true of the others:
   one config field and replaces it wholesale, so the dashboard reads the current set,
   applies your add/remove, and sends the result. An empty list is therefore a real
   instruction — "remove the last tag" — not a missing field.
+* That read is the agent's last **inventory sync**, so the sync has to report tags. Agents
+  built before it did sent no tags at all, and an edit computed against that gap
+  **overwrote every tag the guest already had** with just the ones you added. The
+  dashboard now keeps "this agent did not report tags" apart from "this guest has none",
+  and it refuses the edit for that guest. The refusal tells you to update the agent and
+  run **Sync Now**. After one sync from an updated agent, the guest's tags appear in the
+  table and on `/inventory`, and edits preserve them.
 
 `set_tags` also queues an `inventory_sync` on completion, like the power verbs and unlike
 `snapshot`, because `tags` is a column the cache stores: without it the page would keep

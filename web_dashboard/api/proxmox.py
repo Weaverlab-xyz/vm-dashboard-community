@@ -18,7 +18,7 @@ from .auth import get_current_user, require_permission
 from ..services import change_window_service, job_service, workgroup_service, workgroup_override_service
 from ..services import proxmox_service
 from ..services.proxmox_service import ProxmoxError
-from ..services import hypervisor_view_service
+from ..services import hypervisor_sync_service, hypervisor_view_service
 from ..services import tag_policy
 from . import tag_batch
 from .hypervisor_deps import (agent_power_job, agent_tag_job, conn_in_task,
@@ -33,6 +33,13 @@ router = APIRouter(prefix="/api/proxmox", tags=["proxmox"],
 )
 
 PROVIDER = "proxmox"
+
+# The agent that last synced this guest did not report its tags, so the dashboard does not
+# know what it carries — and `set_tags` writes a COMPLETE set, so guessing "none" would
+# erase them. Agents before the tag-reporting sync all land here.
+TAGS_UNKNOWN_REFUSAL = (
+    "this agent's last sync did not report the guest's tags, so an edit could erase the "
+    "ones it has — update the on-prem agent, run Sync Now, and try again")
 
 
 def _override_key(vm: dict) -> str:
@@ -254,9 +261,12 @@ async def _queue_tag_jobs(db: Session, conn, payload: TagEditRequest,
     # The cache is the only reading of "current" available — the dashboard cannot dial
     # this host. That is also why `set_tags` triggers a resync: an edit computed against
     # a stale cache is how a tag someone else added gets silently removed.
+    #
+    # The GENERIC cache rows, not the page projection: only they carry `tags_known`, and
+    # the projection may only hold keys the live page also has (tests/test_hypervisor_view).
     by_key = {}
-    for row in hypervisor_view_service.synced_rows(db, conn):
-        by_key[(str(row.get("node") or ""), str(row.get("vmid")))] = row
+    for row in hypervisor_sync_service.list_vms(db, conn.id):
+        by_key[(str(row.get("scope") or ""), str(row.get("vm_id")))] = row
 
     queued, failed = [], []
     for target in payload.targets:
@@ -266,6 +276,9 @@ async def _queue_tag_jobs(db: Session, conn, payload: TagEditRequest,
             failed.append({"name": label,
                            "error": "not in the last synced inventory for this "
                                     "connection — run Sync Now and try again"})
+            continue
+        if row.get("tags_known") is False:
+            failed.append({"name": label, "error": TAGS_UNKNOWN_REFUSAL})
             continue
         current = [c["key"] for c in tag_policy.normalise(row.get("tags"), "proxmox")]
         desired = _desired_tags(current, add, remove)

@@ -98,6 +98,17 @@ PROTECTED_KEYS = {
     "k8s-cluster-id": "it is this cluster's identity on teardown",
     # ephemeral_secrets.TAG_KEY — the sweeper that removes ephemeral accounts.
     "vm-dashboard-ephemeral": "the ephemeral-account sweeper selects on it",
+    # aws_service / azure_service node listings read the running image back from it; an
+    # edit would make the page report an image the node is not running.
+    #
+    # `purpose` is read by the same listings (and the GCP jumpoint/compose/rancher/
+    # portainer filters) and is deliberately NOT here: it is one of the commonest keys in
+    # a customer's own estate, so protecting it globally would lock operators out of
+    # their own tags on every unrelated VM. Every one of those selectors also requires
+    # `managed-by`, which is protected, so a mistagged `purpose` can only drop one of the
+    # dashboard's own helper VMs from its listing, never hand it to someone else.
+    "container-image": "the node listing reads the running image from it; an edit makes "
+                       "the page report an image this node is not running",
     # The row's own display name on AWS and OCI. Renaming via the tag editor would change
     # the name in the table without changing anything else that refers to it.
     "name": "it is this resource's display name; rename it where it was created",
