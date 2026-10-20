@@ -1,0 +1,49 @@
+# Create the local Password Safe functional account on one Windows guest in a POV.
+# Target: a Windows guest in an AWS POV, over WinRM HTTP (5985), from the POV's control-node
+# agent. Queued by the POV wire-up (services/pov_windows_functional.py), never by hand.
+#
+# Through the dashboard: the FIRST run logs on as the built-in Administrator, whose
+# password the dashboard decrypts from EC2 for that run only. Later runs log on as the
+# account this play creates, because Password Safe rotates Administrator straight after
+# onboarding and EC2's copy stops working.
+# Required (bound by the job, never typed):
+#   pov_functional_user:     the local account name (povpsfunc)
+#   pov_functional_password: its password, a secret var resolved at bundle fetch
+#
+# Idempotent: re-running sets the same password and the same group again.
+- name: Ensure the POV's Password Safe functional account exists
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: winrm
+  tasks:
+    - name: Fail early on a missing name or password
+      ansible.builtin.assert:
+        that:
+          - pov_functional_user is defined and pov_functional_user | length > 0
+          - pov_functional_password is defined and pov_functional_password | length > 0
+        fail_msg: The job must bind pov_functional_user and pov_functional_password.
+
+    - name: Create or update the local account
+      ansible.windows.win_user:
+        name: "{{ pov_functional_user }}"
+        password: "{{ pov_functional_password }}"
+        update_password: always
+        password_never_expires: true
+        user_cannot_change_password: true
+        account_disabled: false
+        groups: [Administrators]
+        groups_action: add
+        description: Password Safe functional account for this POV (vm-dashboard)
+        state: present
+      no_log: true              # module args carry the password
+
+    # Without this, UAC remote restrictions strip the admin token of every local account
+    # except the built-in Administrator. Password Safe's rotation and the dashboard's
+    # later WinRM runs as this account would then fail as "access denied".
+    - name: Let local administrators keep their admin token remotely
+      ansible.windows.win_regedit:
+        path: HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System
+        name: LocalAccountTokenFilterPolicy
+        data: 1
+        type: dword

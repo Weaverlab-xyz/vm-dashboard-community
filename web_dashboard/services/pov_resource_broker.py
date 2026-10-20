@@ -505,7 +505,8 @@ def queue(db: Session, env: PovEnvironment, *, created_by: str = "") -> Job:
     return job
 
 
-async def platform_login(db: Session, env_id: str, vm_id: str) -> tuple:
+async def platform_login(db: Session, env_id: str, vm_id: str, *,
+                         service_account: bool = True) -> tuple:
     """``(username, password)`` for a POV VM, read from the lab platform.
 
     The reason slice 5b stores no Windows credential. Fetched per run and never written
@@ -532,6 +533,16 @@ async def platform_login(db: Session, env_id: str, vm_id: str) -> tuple:
         if (row.login_username or "").strip():
             return (row.login_username.strip(),
                     config_service.get(login_password_config_key(env.id, vm_id)))
+        # Next, the dashboard's own local account, once the wire-up has put it on this
+        # guest. Password Safe rotates Administrator straight after onboarding, so from
+        # then on EC2's copy is stale and this is the login that still works.
+        # `service_account=False` is for the one caller that wants Administrator itself:
+        # the onboarding that seeds it into Password Safe.
+        if service_account:
+            from . import pov_windows_functional
+            own = pov_windows_functional.login(env, row)
+            if own:
+                return own
         # No login typed and no problem: the platform answers for this VM itself, so fall
         # through to the live read below exactly as a stored-credentials platform does.
 

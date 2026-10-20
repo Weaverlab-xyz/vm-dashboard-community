@@ -414,6 +414,11 @@ outranks it, for a custom image with a fixed password. A POV built before this c
 no key, so its preflight refusal says to rebuild the POV. Until EC2 has published the
 password (4–15 minutes after first boot), the run is refused with "try again shortly".
 
+Once a POV with a Password Safe tenant is wired, Password Safe rotates Administrator, and
+EC2's copy stops working. So the login precedence has a middle step: a typed login, then
+the dashboard's local functional account `povpsfunc` once it is on the guest, then EC2's
+Administrator. See [AWS Windows guests](../wiring.md#aws-windows-guests-the-dashboard-creates-the-functional-account-on-each-guest).
+
 WinRM also has to be *reachable and enabled* on that guest, which is a template-contract
 question rather than a dashboard one — see §7.
 

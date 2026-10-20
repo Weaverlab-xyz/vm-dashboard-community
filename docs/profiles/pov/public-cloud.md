@@ -253,11 +253,16 @@ can create resource groups — or the narrower custom roles in
 | Environment | A tag on every resource | A resource group |
 | Teardown | Six resource types, in order | One call |
 | Listing | Per region | Subscription-wide, so the orphan sweep is complete |
-| Platform login | None | **Generated per POV** — see below |
+| Platform login | Windows: EC2's generated Administrator, read with the POV's own key. Linux: none | **Generated per POV** — see below |
 | Suspend | `StopInstances` | `begin_deallocate`, never power-off |
 | Private address | Persists across stop/start | **Made static**, because it does not |
 
-**Azure POVs have a platform login; AWS ones do not.** Not an inconsistency — Azure's
+**Azure POVs have one platform login; AWS Windows guests each have their own.** EC2
+generates each Windows instance's Administrator password at first boot, and the dashboard
+decrypts it with the POV's own key. Those logins differ per guest, so Password Safe's
+functional account on AWS is a local account the wire-up creates instead. See
+[AWS Windows guests](wiring.md#aws-windows-guests-the-dashboard-creates-the-functional-account-on-each-guest).
+AWS Linux guests still have none. Azure's case is different: its
 `os_profile` requires an admin account at VM creation, for Linux as well as Windows, so a
 POV built there has one whether anybody wanted it or not. The dashboard generates it,
 stores it encrypted alongside the POV's other secrets, and puts the same account on every

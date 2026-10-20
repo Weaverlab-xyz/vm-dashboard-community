@@ -74,8 +74,8 @@ from ..database import PovEnvironment, PovEnvironmentVM
 from .pra_tenant_api import PRATenantError
 from . import (bt_tenant_service, config_service, entitle_registration_service,
                job_service, pov_cell_roles, pov_functional_account, pov_gateway,
-               pov_vendor_access, pra_vendor_api, ps_api_service, ps_resource_service,
-               terraform_pra_service)
+               pov_vendor_access, pov_windows_functional, pra_vendor_api, ps_api_service,
+               ps_resource_service, terraform_pra_service)
 
 logger = logging.getLogger(__name__)
 
@@ -331,6 +331,15 @@ async def ps_context(db: Session, env: PovEnvironment, *, mint: bool = True) -> 
         # it — the ordinary shape of a Linux-only POV, not a problem to report. Minting
         # anyway would leave an unused credential in a customer's tenant.
         if not pov_functional_account.guests_of(db, env, family):
+            continue
+        # On AWS the Windows account is the dashboard's own local account, so it is only
+        # worth minting once at least one guest has it. Otherwise the tenant would hold a
+        # credential that works nowhere.
+        if (family == "windows" and pov_windows_functional.applies(env)
+                and not any(pov_windows_functional.prepared(env, vm)
+                            for vm in pov_windows_functional.windows_guests(db, env))):
+            problems[family] = (f"no Windows guest has the {pov_windows_functional.ACCOUNT} "
+                                f"account yet, so there is no functional account to create.")
             continue
         try:
             accounts[family] = await pov_functional_account.ensure(
@@ -644,10 +653,25 @@ async def onboard_vm(db: Session, env: PovEnvironment, vm: PovEnvironmentVM, *,
     Password Safe will accept a second managed system on the same address and the second
     is invisible here.
     """
-    if vm.ps_managed_system_id:
-        return f"{vm.name}: already in Password Safe (system {vm.ps_managed_system_id})."
-
     family = vm.guest_os
+    own_account = family == "windows" and pov_windows_functional.applies(env)
+    if vm.ps_managed_system_id:
+        line = f"{vm.name}: already in Password Safe (system {vm.ps_managed_system_id})."
+        if own_account and not pov_windows_functional.rotated(env, vm):
+            # A rotation that failed on an earlier run is retried, because until it
+            # succeeds the password EC2 publishes still logs in.
+            line += await _rotate_admin(db, env, vm, ps=ps)
+        return line
+
+    if own_account and not pov_windows_functional.prepared(env, vm):
+        # The functional account Password Safe would rotate with is the dashboard's local
+        # account, and it is not on this guest. Onboarding anyway would fail its first
+        # rotation, days later, on a schedule.
+        problem = ((ps.get("prep_problems") or {}).get(vm.name)
+                   or f"{pov_windows_functional.ACCOUNT} has not been created on it yet")
+        return (f"{vm.name}: skipped Password Safe — the functional account is not on this "
+                f"guest: {problem}")
+
     account = (ps.get("accounts") or {}).get(family)
     if account is None:
         # The mint attempt's own reason when there was one: it is specific and actionable
@@ -667,8 +691,10 @@ async def onboard_vm(db: Session, env: PovEnvironment, vm: PovEnvironmentVM, *,
     username, password = "", ""
     try:
         from . import pov_resource_broker
+        # `service_account=False`: the account onboarded is the guest's own login
+        # (Administrator on AWS), never the dashboard's functional account.
         username, password = await pov_resource_broker.platform_login(
-            db, env.id, vm.platform_vm_id)
+            db, env.id, vm.platform_vm_id, service_account=False)
     except Exception as exc:  # noqa: BLE001
         logger.info("POV %s: no seedable credential for %s (%s)", env.id, vm.name,
                     type(exc).__name__)
@@ -739,7 +765,32 @@ async def onboard_vm(db: Session, env: PovEnvironment, vm: PovEnvironmentVM, *,
 
     _record(db, vm, ps_system_id=system_id, ps_account_id=account_id, ps_state=state)
     seeded = " (credential seeded)" if result.get("initial_password_seeded") else ""
-    return f"{vm.name}: Password Safe system {system_id}, account {account_id}{seeded}."
+    line = f"{vm.name}: Password Safe system {system_id}, account {account_id}{seeded}."
+    if own_account:
+        line += await _rotate_admin(db, env, vm, ps=ps)
+    return line
+
+
+async def _rotate_admin(db: Session, env: PovEnvironment, vm: PovEnvironmentVM, *,
+                        ps: dict) -> str:
+    """Rotate an AWS Windows guest's onboarded account now. Returns a log suffix.
+
+    Straight after onboarding, because EC2 keeps publishing the password it generated to
+    anyone who holds the POV's key and ``ec2:GetPasswordData``. Until a rotation, Password
+    Safe is not the only holder. Never fails the VM: auto-management rotates on its
+    schedule anyway, and the line says so.
+    """
+    try:
+        await ps_api_service.change_managed_account_password(
+            int(vm.ps_managed_account_id), tenant=ps.get("api"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("POV %s: rotating %s's account in Password Safe failed", env.id,
+                       vm.name, exc_info=True)
+        return (f" Rotating it failed ({type(exc).__name__}), so the password EC2 "
+                f"published still works until auto-management rotates it; wiring again "
+                f"retries.")
+    pov_windows_functional.mark_rotated(db, env, vm)
+    return " Rotated, so the password EC2 published no longer works."
 
 
 async def register_vm_entitle(db: Session, env: PovEnvironment, vm: PovEnvironmentVM, *,
@@ -837,12 +888,25 @@ async def run_env_wireup(job_id: str, meta: dict) -> None:
         # The Password Safe half is optional and resolved once. A refusal here does NOT
         # fail the run: the PRA half is independently useful, and a POV whose tenant is
         # half-configured should get its jump items rather than nothing.
+        # On AWS the Windows functional account is a local account the dashboard creates
+        # on each guest, so it has to exist BEFORE ps_context mints the Password Safe side
+        # of it. A guest that fails is skipped by the Password Safe half below, never the
+        # whole run.
+        prep_problems = {}
+        if (pov_windows_functional.wanted(env)
+                and pov_windows_functional.windows_guests(db, env)):
+            prep_problems = await pov_windows_functional.ensure_prepared(
+                db, env, created_by=str(meta.get("created_by") or ""),
+                log=lambda line: job_service.append_job_log(db, job_id, line))
+
         ps = {}
         ps_note = ""
         try:
             ps = await ps_context(db, env)
         except (WireupError, bt_tenant_service.BTTenantError) as exc:
             ps_note = str(exc)
+        if ps:
+            ps["prep_problems"] = prep_problems
 
         # And the Entitle half, on exactly the same terms.
         ent = {}
@@ -1301,6 +1365,7 @@ async def _teardown_password_safe(db: Session, env: PovEnvironment, rows: list) 
     minted = any(pov_functional_account.recorded_id(env, fam)
                  for fam in pov_functional_account.FAMILIES)
     if not onboarded and not minted:
+        _forget_windows_functional(db, env)
         return ""
     try:
         # `mint=False`: this is a teardown. A creating read here would mint an account
@@ -1354,7 +1419,18 @@ async def _teardown_password_safe(db: Session, env: PovEnvironment, rows: list) 
                 f"are still in tenant {ps['label']} — remove them by hand.")
     else:
         line = f"Off-boarded {removed} managed system(s) from tenant {ps['label']}."
+        # Only once nothing in the tenant still uses it: a functional account that
+        # survived the cleanup above still needs its password.
+        if not pov_functional_account.recorded_id(env, "windows"):
+            _forget_windows_functional(db, env)
     return f"{line} {fa_line}".strip()
+
+
+def _forget_windows_functional(db: Session, env: PovEnvironment) -> None:
+    """Drop the AWS local functional account's password and per-guest records."""
+    if pov_windows_functional.applies(env):
+        pov_windows_functional.forget_password(env)
+        pov_windows_functional.clear_records(db, env)
 
 
 # ── what the UI shows ────────────────────────────────────────────────────────

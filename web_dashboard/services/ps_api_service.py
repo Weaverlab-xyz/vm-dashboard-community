@@ -1110,7 +1110,7 @@ async def get_workgroup_id(name_or_id: str, tenant=None) -> str:
             await _sign_out(client)
 
 
-async def change_managed_account_password(account_id: int) -> None:
+async def change_managed_account_password(account_id: int, tenant=None) -> None:
     """Queue an immediate Password Safe credential change ("Change Password") for a
     managed account.
 
@@ -1122,9 +1122,13 @@ async def change_managed_account_password(account_id: int) -> None:
     Endpoint: ``POST ManagedAccounts/{id}/Credentials/Change`` (public API v3, present
     across 21.x–24.x). The body is optional; ``Queue=false`` asks for an immediate change
     rather than queueing behind other pending change operations.
-    Verify the exact shape against the tenant's API version during live testing."""
-    async with _client() as client:
-        await _sign_in(client)
+    Verify the exact shape against the tenant's API version during live testing.
+
+    ``tenant`` targets a Password Safe other than the install's own, as the rest of this
+    module's tenant-aware calls do. The POV wire-up passes its tenant to rotate an AWS
+    Windows guest's Administrator straight after onboarding."""
+    async with _client(tenant) as client:
+        await _sign_in(client, tenant)
         try:
             resp = await client.post(
                 f"ManagedAccounts/{int(account_id)}/Credentials/Change",

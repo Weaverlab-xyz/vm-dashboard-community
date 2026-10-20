@@ -166,6 +166,40 @@ When the lab platform has a login for the VM, it is seeded as the managed accoun
 initial credential, so the first rotation replaces a password somebody knows rather than
 one nobody does.
 
+#### AWS Windows guests: the dashboard creates the functional account on each guest
+
+On AWS the guests can never agree. EC2 gives every Windows instance its own random
+Administrator password, so "every guest reports the same login" fails on any POV with two
+Windows guests. So with the Windows field blank, wire-up on an AWS POV does this instead:
+
+1. **Creates a local account, `povpsfunc`, on every Windows guest.** One password per POV,
+   generated and stored encrypted (`pov/<pov>/windows_functional_password`). The built-in
+   play `builtin:pov-windows-functional-account` runs from the control node over WinRM,
+   logging on as that guest's own Administrator (decrypted from EC2 for that run only). It
+   also sets `LocalAccountTokenFilterPolicy = 1`. Without it, UAC strips a non-built-in
+   local admin's token remotely, and rotation fails as "access denied".
+2. **Mints the POV's Windows functional account from `povpsfunc`**, exactly as above, and
+   only once at least one guest has it.
+3. **Onboards each guest's Administrator as the managed account**, seeded with the EC2
+   password, and **rotates it at once**. Until that rotation, EC2 still hands the old
+   password to anyone with the POV's key and `ec2:GetPasswordData`. A failed rotation is
+   reported on the VM's line and retried on the next wire-up. Auto-management rotates it
+   on schedule regardless.
+4. **Later WinRM runs log on as `povpsfunc`.** That covers the Resource Broker install and
+   guest steps. After rotation EC2's password is stale, and nothing depends on it.
+
+The login a WinRM run uses on AWS, in order: one typed in the Login column, then
+`povpsfunc` once it is on the guest, then EC2's Administrator.
+
+The control node's agent has to be allowed to reach every Windows guest for step 1. On an
+AWS POV with a Password Safe tenant, the policy grants all of them. A control node built
+before this change was granted fewer, so a guest it cannot reach is skipped with
+"press Rebuild control node".
+
+Naming a Windows functional account on the tenant still works, and nothing is minted. The
+`povpsfunc` account is still created, because it is what keeps later runs working once
+Password Safe rotates Administrator.
+
 ### The Entitle agent
 
 Entitle's SSH connector reaches a **private** target through an **Entitle agent** running
@@ -321,6 +355,13 @@ the dashboard will not mint one from guests that disagree — it would rotate th
 and fail the rest on a schedule, days later. The message names which guests hold which
 group. Give them the same login, or create one functional account by hand in Password Safe
 and name it on the tenant.
+
+**An AWS Windows VM shows as skipped with "the functional account is not on this
+guest".** The run that creates `povpsfunc` did not succeed there; the line carries its
+reason. A policy remedy ("press Rebuild control node") means the control node was built
+before every Windows guest was granted. Otherwise open the run on the Jobs page. A WinRM
+timeout usually means the guest is still booting or blocks 5985. Wire the POV again once
+it is fixed; guests that already have the account are not re-run.
 
 **A VM shows as skipped with "none of this POV's <os> guests offered a usable stored
 credential".** The lab platform's credential box is empty for those guests, or holds
