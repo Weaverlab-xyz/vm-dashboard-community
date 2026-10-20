@@ -817,6 +817,34 @@
           </p>
         </div>
 
+        <!-- Sample activity: make the tenant look lived-in before the call. A fixed
+             catalog from services/pov_seed. Each run WRITES to this POV's tenant, so the
+             button confirms first and the request is audited. -->
+        <div x-show="seeds.length" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Sample activity</h2>
+          <p class="text-sm text-gray-500 mt-1">
+            Fill this POV's tenant with a little real activity, so the first screen you show
+            is not empty. Every request is tagged as sample activity.
+          </p>
+          <ul class="mt-3 divide-y divide-gray-100">
+            <template x-for="sd in seeds" :key="sd.id">
+              <li class="flex items-start justify-between gap-4 py-3">
+                <div class="min-w-0">
+                  <p class="text-sm font-medium text-gray-800" x-text="sd.label"></p>
+                  <p class="text-xs text-gray-500" x-text="sd.description"></p>
+                  <p x-show="sd.unavailable" class="text-xs text-amber-700 mt-1" x-text="sd.unavailable"></p>
+                  <p x-show="sd.last && sd.last.at" class="text-xs text-gray-400 mt-1"
+                     x-text="seedLastLine(sd)"></p>
+                </div>
+                <button type="button" @click="seedRun(sd)"
+                        :disabled="!!sd.unavailable || !!seedRunning || seedBusy === sd.id"
+                        class="shrink-0 text-xs px-3 py-1.5 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                        x-text="seedBusy === sd.id || seedRunning ? 'Running…' : 'Run'"></button>
+              </li>
+            </template>
+          </ul>
+        </div>
+
         <!-- One section per group, carrying only the cards this POV can actually run. A
              group with nothing in scope renders nothing at all — not an empty heading —
              which is the same thing the customer's page and the /use-cases lead do. -->
@@ -1455,7 +1483,7 @@
         if (this.tabs.some(t => t.id === hash)) this.tab = hash;
         await Promise.all([this.loadEnv(), this.loadUseCases(), this.loadAccessors(),
                            this.loadSummary(), this.loadStepAssets(), this.loadTenants(),
-                           this.readyLoad()]);
+                           this.readyLoad(), this.seedLoad()]);
         if (this.ready && this.ready.running) this.readyWatch();
         // After loadEnv, not beside it: the template list is only fetched for a platform
         // that can merge one, and that answer arrives with the environment.
@@ -1582,6 +1610,65 @@
       readyRanAt() {
         const at = this.ready && this.ready.last_run && this.ready.last_run.finished_at;
         return at ? 'last full check ' + this.readyAgo(at) : 'never fully checked';
+      },
+
+      // ── Sample activity ---------------------------------------------------
+      //
+      // GET .../seeds is stored state only; seedRun() queues the job and seedWatch()
+      // re-reads until it ends.
+      seeds: [],
+      seedRunning: '',
+      seedBusy: '',
+      _seedPoll: null,
+
+      async seedLoad() {
+        try {
+          const res = await this.apiFetch(`/api/pov/managed/${this.envId}/seeds`);
+          if (!res.ok) return;
+          const data = await res.json();
+          this.seeds = data.seeds || [];
+          this.seedRunning = data.running || '';
+        } catch (e) { /* the card stays as it was */ }
+      },
+
+      async seedRun(sd) {
+        if (!confirm(`${sd.label}: this writes ${sd.writes} into this POV's own tenant. ` +
+                     `It cannot be removed from the tenant's history afterwards. Continue?`)) return;
+        this.error = ''; this.notice = '';
+        this.seedBusy = sd.id;
+        try {
+          const res = await this.apiFetch(`/api/pov/managed/${this.envId}/seeds/${sd.id}`,
+                                          { method: 'POST' });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.detail || `Could not start it (${res.status}).`);
+          this.notice = `${sd.label}: running — job ${data.job_id}.`;
+          this.seedRunning = data.job_id;
+          this.seedWatch();
+        } catch (e) {
+          this.error = e.message;
+        } finally {
+          this.seedBusy = '';
+        }
+      },
+
+      seedWatch() {
+        if (this._seedPoll) clearInterval(this._seedPoll);
+        let left = 40;
+        this._seedPoll = setInterval(async () => {
+          await this.seedLoad();
+          left -= 1;
+          if (left <= 0 || !this.seedRunning) {
+            clearInterval(this._seedPoll);
+            this._seedPoll = null;
+          }
+        }, 3000);
+      },
+
+      seedLastLine(sd) {
+        const l = sd.last || {};
+        const when = l.at ? new Date(l.at + (/Z$/.test(l.at) ? '' : 'Z')).toLocaleString() : '';
+        const tail = l.failed ? `, ${l.failed} refused${l.error ? ': ' + l.error : ''}` : '';
+        return `Last run ${when}: ${l.ok || 0} done${tail}`;
       },
 
       // ── Power, on Setup and Overview -------------------------------------

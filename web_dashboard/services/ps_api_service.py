@@ -1436,6 +1436,41 @@ async def get_managed_account_states(account_ids: list) -> dict:
     return out
 
 
+async def request_cycle(tenant, accounts: list, *, reason: str,
+                        duration_min: int = 5) -> list:
+    """One request → release → check-in per ``(account_id, system_id)``, in ONE session.
+
+    What a person does when they check a credential out in the Password Safe UI, so the
+    tenant's request history and release audit show real activity for a demo. Written for
+    ``services/pov_seed``; nothing else should need it.
+
+    **The credential is discarded the moment it is read.** It is fetched because a release
+    is what Password Safe audits, and it is never returned, logged or stored. Check-in is
+    the plain ``Checkin`` -- the same rule as :func:`_checkin`: a rotate-on-release here
+    would rotate the customer's credentials as a side effect of making a demo look busy.
+
+    Returns ``[{"account_id", "ok", "detail"}]``; one refusal does not stop the others.
+    """
+    out = []
+    async with _client(tenant) as client:
+        await _sign_in(client, tenant)
+        try:
+            for account_id, system_id in accounts:
+                try:
+                    request_id, credential = await _checkout(
+                        client, int(account_id), duration_min=duration_min,
+                        reason=reason, system_id=int(system_id or 0))
+                    del credential
+                    await _checkin(client, request_id, reason=reason)
+                    out.append({"account_id": str(account_id), "ok": True, "detail": ""})
+                except PSApiError as exc:
+                    out.append({"account_id": str(account_id), "ok": False,
+                                "detail": str(exc)[:300]})
+        finally:
+            await _sign_out(client)
+    return out
+
+
 async def checkout_credential(account_id: int, *, duration_min: int = 15,
                               reason: str = "", system_id: int = 0) -> str:
     """Check one managed account's credential out and RETURN it.

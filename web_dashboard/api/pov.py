@@ -78,7 +78,7 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         pov_guest_step,
                         pov_ot_adapter,
                         pov_pra_ps_link, pov_ps_config, pov_ready,
-                        pov_resource_broker,
+                        pov_resource_broker, pov_seed,
                         pov_setup_steps,
                         suspend_schedule, pov_share, pov_signoff, spend_policy,
                         pov_summary,
@@ -2342,6 +2342,34 @@ def withdraw_sign_off(env_id: str, signoff_id: str, db: Session = Depends(get_db
     job_service.log_audit(db, actor, "pov_signoff_withdrawn", target_vm=env.name,
                           details={"environment_id": env.id, "signoff_id": signoff_id})
     return {"signoff": out}
+
+
+@router.get("/managed/{env_id}/seeds")
+def list_seeds(env_id: str, db: Session = Depends(get_db),
+               current_user: User = Depends(get_current_user)):
+    """The sample-activity sets this POV can run, and what each did last. No calls."""
+    return pov_seed.describe(db, _env_or_404(db, env_id))
+
+
+@router.post("/managed/{env_id}/seeds/{seed_id}", status_code=202,
+             dependencies=_POV_WRITE_OWN)
+def run_seed(env_id: str, seed_id: str, db: Session = Depends(get_db),
+             current_user: User = Depends(get_current_user)):
+    """Queue one sample-activity set. It WRITES to this POV's tenant, so it is audited.
+
+    A run already in flight is returned rather than duplicated; see services/pov_seed for
+    what each set writes and what it can never do.
+    """
+    env = _env_or_404(db, env_id)
+    actor = getattr(current_user, "username", "") or ""
+    try:
+        job_id = pov_seed.enqueue(db, env, seed_id, by=actor)
+    except pov_seed.SeedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    job_service.log_audit(db, actor, "pov_seed_requested", target_vm=env.name,
+                          details={"environment_id": env.id, "seed": seed_id,
+                                   "job_id": job_id})
+    return {"job_id": job_id}
 
 
 @router.delete("/managed/{env_id}", status_code=202, dependencies=_POV_DELETE_OWN)
