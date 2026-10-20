@@ -7,8 +7,9 @@ Part of [OIDC and single sign-on](../oidc.md). The dashboard publishes an OIDC i
 **Preview.** The dashboard keeps a short-lived JWT-SVID per audience in a file, publishes
 the discovery document and keys a cloud fetches to verify it, and — once you retire a
 stored key — uses those tokens for its own AWS, Azure and GCP calls, including Terraform and
-Packer. No cloud has yet accepted one of these tokens from a live install; the first one
-you set up is the test. The design, including what is not built, is
+Packer. **AWS has accepted these tokens from a live install** as the everyday credential,
+with jobs on a Workload Credentials provisioning lease. Azure and GCP have not yet; the
+first one you set up there is the test. The design, including what is not built, is
 [The dashboard as a SPIFFE workload](../design/dashboard-workload-identity.md).
 
 ## What it does
