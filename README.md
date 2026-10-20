@@ -49,6 +49,9 @@ you're new to the tool; skim if you already know how this kind of platform works
    runners are the security argument, and how on-prem and cloud targets are reached.
 3. [Secrets Management](docs/access/secrets-management.md): encrypted database, then an
    external vault, then runtime checkout from a vault, and why the JWT root key can't move.
+   The recommended end state stores no cloud key at all:
+   [workload identity](docs/access/workload-identity.md), with write privilege granted just
+   in time.
 4. [Storage Management](docs/operations/storage-management.md): four backends, and why a
    backend is a deployment-level choice rather than a per-feature one.
 5. [Image Management](docs/cloud/image-management.md): build an image once, then promote it

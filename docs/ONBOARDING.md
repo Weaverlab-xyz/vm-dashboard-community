@@ -217,7 +217,7 @@ complete.
 | **AWS** | Access Key ID, Secret Access Key, and default region from Part A |
 | **Azure** | Service principal credentials from Part B. Optionally expand **Sign in with Microsoft (legacy)** to add the older Entra-only sign-in ([oidc/entra-oauth.md](oidc/entra-oauth.md)); for new setups, prefer the OIDC panel on the Admin step |
 | **GCP** | Project ID, region/zone, and service account JSON key from Part C. Expand **Advanced** to set the SSH key secret name |
-| **OCI** | Tenancy/user OCID, key fingerprint, private key and region. Every field may be left blank to skip OCI |
+| **OCI** | Tenancy/user OCID, key fingerprint, private key and region. Every field may be left blank to skip OCI. A stored API key is OCI's only option |
 | **Feature flags** | Enable optional integrations — all default off (each has its own guide: see [Optional integrations](#optional-integrations)). Toggles only; the per-integration fields live in **Settings → Integrations** |
 
 Steps are listed by name rather than number on purpose: the wizard's step list is data, and
@@ -225,6 +225,10 @@ citing an ordinal is how this table came to omit OCI and call Feature flags "ste
 
 Click **Complete setup**. Credentials are encrypted with AES-256 and
 stored in the application database — not in any file on disk.
+
+The cloud keys the wizard asks for are the quick start, not the recommended end state.
+Once you are running, replace the AWS, Azure and GCP keys with the dashboard's own workload
+identity, so none is stored: see [Workload identity](access/workload-identity.md).
 
 ### 3. Log in
 

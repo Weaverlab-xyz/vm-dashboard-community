@@ -97,6 +97,12 @@ def reason(cloud: str) -> str:
         return "the dashboard's SPIFFE identity is off"
     if _stored_key(cloud):
         return "a stored key is configured, and it wins"
+    return _federation_gap(cloud)
+
+
+def _federation_gap(cloud: str) -> str:
+    """The first federation setting ``cloud`` still lacks, or "" when it has them all.
+    Ignores the stored key, so :func:`shadowed` can ask whether one is all that is left."""
     aud = config_service.get(_AUDIENCE_SETTING[cloud])
     if cloud == "gcp":
         if not (aud or "").strip():
@@ -116,6 +122,20 @@ def reason(cloud: str) -> str:
 
 def active(cloud: str) -> bool:
     return reason(cloud) == ""
+
+
+def shadowed(cloud: str) -> bool:
+    """Federation is ready for ``cloud`` and a stored key is the only thing in its way.
+
+    Such an install looks keyless in Settings (identity on, audience ticked, role set) and
+    is not, because the stored key wins. Settings warns on it; removing the key is the fix.
+    """
+    return (cloud in CLOUDS and dashboard_identity.enabled() and _stored_key(cloud)
+            and _federation_gap(cloud) == "")
+
+
+def shadowed_clouds() -> list:
+    return [cloud for cloud in CLOUDS if shadowed(cloud)]
 
 
 def source(cloud: str) -> str:

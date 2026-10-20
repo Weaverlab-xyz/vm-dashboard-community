@@ -313,7 +313,10 @@ def status() -> dict:
     out = {"enabled": enabled(), "issuer": issuer(), "token_dir": token_dir(),
            # Which rung each cloud's calls use right now — so an operator who clears a
            # stored key sees federation take over rather than inferring it.
-           "sources": cloud_federation.sources()}
+           "sources": cloud_federation.sources(),
+           # Clouds where federation is ready and a stored key still wins: they look
+           # keyless and are not, so Settings warns rather than leaving it to inference.
+           "shadowed": cloud_federation.shadowed_clouds()}
     if not out["enabled"]:
         return out
     directory = token_dir()

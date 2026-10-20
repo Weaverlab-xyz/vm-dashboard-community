@@ -42,7 +42,9 @@ gcloud run deploy dash-worker \
 **Remote agents cannot attest through SPIRE on Cloud Run.** Cloud Run's only ingress is
 HTTPS, which it terminates itself, and an agent's mTLS gRPC to tcp/8081 has to reach the
 server untouched ([why](../../spiffe.md#publishing-8081-to-agents)).
-Agents on a Cloud Run dashboard stay on Ed25519, which is fully supported.
+Agents on a Cloud Run dashboard stay on Ed25519, which is fully supported. It is one of
+the few places SPIRE, the [recommended](../../access/workload-identity.md#where-a-stored-secret-is-still-the-answer)
+agent identity, is not available; host the dashboard elsewhere if you want it.
 
 The sidecar is still worth running for [the dashboard's own SPIFFE
 identity](../../oidc/dashboard-identity.md), which needs nothing inbound beyond the

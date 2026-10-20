@@ -74,6 +74,9 @@ So, for the community edition:
 > [`docs/access/secrets-management.md`](../access/secrets-management.md). Removing the on-disk root
 > key entirely (fetched at boot via cloud workload identity) is on the
 > **SaaS-edition roadmap** — see [`docs/editions/comparison.md`](../editions/comparison.md).
+> That roadmap item is the root key only: the cloud keys themselves can already go,
+> replaced by the dashboard's own workload identity, which is the recommended setup — see
+> [Workload identity](../access/workload-identity.md).
 
 
 ### Platform notes

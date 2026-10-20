@@ -47,6 +47,12 @@ Three reasons the legacy agent path is permanent rather than deprecated:
 
 The dashboard *recommends* SPIRE with a banner. It never forces it. See [The banner](#the-banner).
 
+**Update, 2026-10:** with attestation proven live (2026-10-13), the docs now present SPIRE as
+the **recommended** agent identity rather than an option, and Ed25519 as the compatibility
+default. Nothing above changes: Ed25519 is still the enrolment default, still permanent, and
+no setting's default moved. See
+[Workload identity: the recommended credential model](../access/workload-identity.md).
+
 ---
 
 ## Part 1: the agent attests through SPIRE

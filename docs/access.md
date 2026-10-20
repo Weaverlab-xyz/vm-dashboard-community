@@ -9,6 +9,7 @@ record of all of it.
 |---|---|
 | [Permissions](access/permissions.md) | you are deciding what a user may see or do, and especially before ticking "Full access", or handing a POV to a customer stakeholder |
 | [Service Accounts](access/service-accounts.md) | something that is not a person (a CI job, an MCP agent, a script) needs to call the API, and you would otherwise hand it a PAT |
+| [Workload identity](access/workload-identity.md) | you still store a cloud key, a product token or an agent's signing key, and want the recommended replacement: an identity, with write privilege granted just in time |
 | [Secrets Management](access/secrets-management.md) | you are deciding where to store cloud credentials, and how to evolve that over time |
 | [Audit Log](access/audit-log.md) | you need to show who did what, or to satisfy yourself that the record has not been edited |
 
