@@ -4067,6 +4067,38 @@ class PovUseCaseProgress(Base):
                                        name="uq_pov_use_case_progress_env_card"),)
 
 
+class PovSignoff(Base):
+    """Somebody confirming what a POV covered: the close of a technical evaluation.
+
+    The checklist says what was ticked; this says that a named person -- the SE, or the
+    customer through their accessor login -- looked at that list and agreed it was what
+    they evaluated. It is evidence, so it is never deleted: a withdrawn sign-off keeps its
+    row with ``revoked_at`` set, and the report shows both.
+
+    ``coverage_json`` is a SNAPSHOT of what was covered at the moment of signing, and
+    ``summary_hash`` its fingerprint (``services/pov_signoff``). A checklist ticked further
+    after somebody signed is then visible as such -- the sign-off is "for an earlier
+    version" -- rather than silently stretching to cover work it never saw.
+
+    **No free-text column, and no customer field.** The same rule ``PovEnvironment``
+    states: this database is not approved to hold a company name, and a comment box on a
+    sign-off is exactly where one gets typed. ``signed_by`` is a dashboard username, which
+    for an accessor is the generated ``pov_<slug>_<random>`` login, never their email.
+    """
+    __tablename__ = "pov_signoffs"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    environment_id = Column(String(36), index=True, nullable=False)
+    signed_by = Column(String(100), nullable=False)
+    # se | accessor -- pov_use_cases.KIND_SE / KIND_ACCESSOR, as on the progress rows.
+    signed_by_kind = Column(String(16), nullable=False, default="se")
+    signed_at = Column(DateTime, default=utcnow, nullable=False)
+    coverage_json = Column(Text, nullable=False)
+    summary_hash = Column(String(64), nullable=False)
+    revoked_at = Column(DateTime, nullable=True)
+    revoked_by = Column(String(100), nullable=True)
+
+
 class PovAccessor(Base):
     """One prospect's ephemeral login into one POV.
 

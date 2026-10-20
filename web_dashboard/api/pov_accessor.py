@@ -39,8 +39,8 @@ from sqlalchemy.orm import Session
 from fastapi import Request
 
 from ..database import PovEnvironment, User, get_db
-from ..services import (pov_accessor_entitle, pov_accessor_service, pov_env_service,
-                        pov_use_cases)
+from ..services import (job_service, pov_accessor_entitle, pov_accessor_service,
+                        pov_env_service, pov_signoff, pov_use_cases)
 from . import pov_gates
 from .auth import get_current_user, require_pov_env_access
 
@@ -211,9 +211,15 @@ def accessor_self(db: Session = Depends(get_db),
     second permission rule to keep in step with the allowlist.
     """
     try:
-        return pov_accessor_service.self_view(db, current_user)
+        out = pov_accessor_service.self_view(db, current_user)
     except pov_accessor_service.AccessorError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # Their own standing sign-off, so the page can say "you confirmed this" rather than
+    # offering the button again.
+    env = pov_env_service.get(db, getattr(current_user, "accessor_env_id", "") or "")
+    out["signoff"] = (pov_signoff.for_signer(db, env, current_user.username)
+                      if env is not None else {})
+    return out
 
 
 class SelfUseCaseRequest(BaseModel):
@@ -270,6 +276,28 @@ def clear_self_use_case(card_id: str, db: Session = Depends(get_db),
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"card_id": card_id, "cleared": removed,
             "summary": pov_use_cases.summary_for(db, env)}
+
+
+@self_router.post("/self/signoff")
+def sign_off_self(db: Session = Depends(get_db),
+                  current_user: User = Depends(get_current_user)):
+    """The customer confirming that the checklist is what they evaluated.
+
+    No body and no environment id, like every other write on this router: the POV comes
+    from the session's binding. Recorded under the accessor's generated username, never
+    their email -- see ``PovSignoff``.
+    """
+    env = _accessor_env(db, current_user)
+    username = getattr(current_user, "username", "") or ""
+    try:
+        out = pov_signoff.record(db, env, by=username,
+                                 by_kind=pov_use_cases.KIND_ACCESSOR)
+    except pov_signoff.SignoffError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    job_service.log_audit(db, username, "pov_signoff", target_vm=env.name,
+                          details={"environment_id": env.id, "signoff_id": out["id"],
+                                   "kind": pov_use_cases.KIND_ACCESSOR})
+    return {"signoff": out}
 
 
 @self_router.post("/self/wake")
