@@ -129,6 +129,9 @@ async def _run_power_op(job_id: str, connection_id: str, moref: str, op: str, la
         result = await vsphere_service.power_op(
             conn_in_task(db, "vsphere", connection_id), moref, op)
         job_service.set_completed(db, job_id, result)
+        # Password Safe follows the change once the job is terminal — never raises.
+        from ..services import ps_power_attrs
+        await ps_power_attrs.after_hypervisor_power(db, job_id, op, connection_id, moref)
     except Exception as e:
         job_service.set_failed(db, job_id, str(e))
     finally:

@@ -180,6 +180,59 @@ Practical notes:
   Password Safe is not the sole owner of that account and something else is configured
   statically with the same password.
 
+### Power-state attributes
+
+You can have a VM's Password Safe records follow its power state. When a start or stop
+completes, the dashboard applies one attribute and removes the other on the VM's **managed
+system and its linked asset**. A Smart Rule keyed on that attribute can then act on it, for
+example to keep a stopped host out of a rotation that would only fail.
+
+**Set it up**
+
+1. In Password Safe, create an attribute type such as *Power State* with two values,
+   *Online* and *Offline*. The dashboard never creates attribute types or values.
+2. In **Settings → Integrations → Password Safe → VMs**, turn on **Set a power-state attribute
+   when a VM is started or stopped**.
+3. Pick the value to apply **on start** and the one to apply **on stop**. If you leave one
+   blank, only that direction is stamped.
+
+**Which operations it covers**
+
+| Operation | Attribute applied |
+|---|---|
+| Start, power on, resume, unpause | Online |
+| Stop, shut down, pause, save, suspend | Offline |
+| Reboot, reset, restart | Nothing changes |
+
+This covers every path that runs one of those operations: single and bulk buttons on every
+cloud and hypervisor page, agent-brokered hypervisors, the Workstation page, suspend
+schedules, the spend cap, change-window schedules, and a POV environment's suspend and
+resume. A POV stamps each of its guests.
+
+The stamp runs only after the power job has **completed**. A power operation that failed
+changes nothing in Password Safe. The result is written as one line in the power job's
+Live Output, naming each record written or the reason nothing was. A Password Safe error
+never turns a successful power operation red.
+
+**How a VM is matched to its records**
+
+- A VM the dashboard onboarded is found by the managed-system id it recorded at onboarding.
+- Any other VM, such as a hypervisor guest or a discovered VM, is matched by IP address:
+  the last-known address from the synced inventory.
+- An address that matches **more than one managed system is skipped**. Private addresses
+  repeat across labs, and stamping another host offline because this one stopped is worse
+  than not stamping at all.
+- A cloud VM the dashboard did not deploy has no address on record where the power job runs,
+  so it is reported as not applied.
+
+**POV environments** have their own Password Safe tenant, where the attribute ids differ.
+There the configured values are looked up **by name**: the same type name and value text.
+If that POV's tenant has no such value, its guests are skipped and the job log says what is
+missing.
+
+Every write is audited as `attributes.assign` or `attributes.remove`, the same actions as
+an edit from [Inventory](../../inventory.md), with `trigger: power` in the details.
+
 ---
 
 ## Password Safe VM onboarding (managed systems)

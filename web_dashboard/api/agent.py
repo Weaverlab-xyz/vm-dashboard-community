@@ -629,6 +629,11 @@ async def complete(job_id: str, body: CompleteRequest, request: Request,
     except Exception:  # noqa: BLE001 — a finished job must not fail on its follow-up
         logger.exception("could not queue an inventory sync after job %s", job.id)
 
+    # Power-state attributes in Password Safe, for a completed power verb only. Sealed
+    # inside (ps_power_attrs._never_raises), so it cannot fail the agent's completion.
+    from ..services import ps_power_attrs
+    await ps_power_attrs.after_agent_job(db, job, applied)
+
     # Release a Password Safe credential this job checked out. The fast path only — a job
     # whose agent was killed never gets here, which is why `agent_ps_credential_service.
     # sweep` and not this hook is the authority. Ref-counted inside, so a sibling job

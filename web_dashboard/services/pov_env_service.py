@@ -478,6 +478,10 @@ async def run_env_power(job_id: str, meta: dict) -> None:
         db.commit()
         job_service.set_completed(db, job_id,
                                   {"environment_id": env.id, "runstate": env.runstate})
+        # The SETTLED runstate, not the requested one: Password Safe follows what the
+        # platform reached. Every wired guest, in the POV's own tenant; never raises.
+        from . import ps_power_attrs
+        await ps_power_attrs.after_pov_power(db, job_id, env, env.runstate)
     finally:
         db.close()
 

@@ -72,6 +72,10 @@ async def _run_power(job_id: str, action: str, instance_ocid: str) -> None:
         await oci_service.power_instance(instance_ocid, action)
         job_service.set_completed(db, job_id, {"instance_ocid": instance_ocid, "action": action})
         await cache_service.invalidate_prefix("oci_instances")
+        # After the job is terminal: Password Safe follows a power change that HAPPENED.
+        # Sealed inside — see ps_power_attrs._never_raises.
+        from . import ps_power_attrs
+        await ps_power_attrs.after_cloud_power(db, job_id, action)
     except Exception as exc:
         logger.error("%s power (%s) failed for job %s: %s", "OCI", action, job_id, exc)
         job_service.set_failed(db, job_id, str(exc))

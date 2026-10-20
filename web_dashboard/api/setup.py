@@ -1033,6 +1033,22 @@ class PasswordSafeFeatureConfig(BaseModel):
     passwordsafe_vault_sync_converge: bool = True   # one Change through the new link, so PRA holds a real key now
     passwordsafe_vault_sync_platform: str = "PRA Vault Private Key"
     passwordsafe_vault_sync_functional_account: str = ""   # no fallback — a Username Password FA writes no key
+    # Power-state attributes: AttributeIDs applied on start / stop (services/ps_power_attrs).
+    passwordsafe_power_attributes_enabled: bool = False
+    passwordsafe_power_attr_online: str = ""
+    passwordsafe_power_attr_offline: str = ""
+
+    @field_validator("passwordsafe_power_attr_online", "passwordsafe_power_attr_offline")
+    @classmethod
+    def _attribute_id(cls, v: str) -> str:
+        # An AttributeID, not a label. The panel picks from the tenant's vocabulary; a
+        # typed name would save cleanly and then fail on every power op.
+        value = str(v or "").strip()
+        if value and not value.isdigit():
+            raise ValueError(f"{v!r} is not a Password Safe attribute id — pick a value "
+                             f"from the list, or leave it blank")
+        return value
+
     # Optional cloud-DATABASE Password Safe onboarding (AWS) — see config.py.
     # The Azure and GCP counterparts follow further down.
     # The two custom plugins + jump-host RSA prep are one-time MANUAL setup.
