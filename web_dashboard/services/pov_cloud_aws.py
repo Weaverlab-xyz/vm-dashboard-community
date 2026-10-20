@@ -347,46 +347,194 @@ def _root_device(ec2, image_id: str) -> tuple:
 def _create_vms_sync(env_id: str, region: str, specs: list, network: dict) -> list:
     ec2 = aws_service._get_ec2_pinned(region)
     created = []
-    for spec in specs:
-        where = {**network, **env.placement(network, spec)}
-        image_id = spec["image_id"]
-        device, minimum = _root_device(ec2, image_id)
-        size = max(int(spec.get("disk_gb") or env.DEFAULT_DISK_GB), minimum)
-        kwargs = {
-            "ImageId": image_id,
-            "InstanceType": spec["instance_type"],
-            "MinCount": 1,
-            "MaxCount": 1,
-            "SubnetId": where["subnet_id"],
-            "SecurityGroupIds": [where["security_group_id"]],
-            "BlockDeviceMappings": [{
-                "DeviceName": device,
-                "Ebs": {"VolumeSize": size, "VolumeType": "gp3",
-                        "DeleteOnTermination": True},
-            }],
-            "TagSpecifications": [
-                _tag_spec("instance", env_id, spec["name"], spec.get("role") or "target"),
-                # The root volume too, so a stray volume after a failed teardown is still
-                # attributable to the POV that made it.
-                _tag_spec("volume", env_id, spec["name"], spec.get("role") or "target"),
-            ],
-            # IMDSv2 required. A POV runs for weeks with a customer inside it, and the
-            # instance role — if one is ever attached — should not be readable by anything
-            # that can make a plain GET from the guest.
-            "MetadataOptions": {"HttpTokens": "required", "HttpEndpoint": "enabled"},
-        }
-        if spec.get("user_data"):
-            kwargs["UserData"] = spec["user_data"]
-        resp = ec2.run_instances(**kwargs)
-        inst = resp["Instances"][0]
-        created.append({"id": inst["InstanceId"], "name": spec["name"]})
-        logger.info("POV %s: launched %s as %s", env_id, spec["name"],
-                    inst["InstanceId"])
+    windows = any(s.get("os_family") == "windows" for s in specs)
+    key_name = _import_windows_key_sync(ec2, env_id) if windows else ""
+    try:
+        for spec in specs:
+            created.append(_launch_sync(ec2, env_id, spec, network,
+                                        key_name if spec.get("os_family") == "windows"
+                                        else ""))
+    finally:
+        if key_name:
+            # The EC2 half is needed only AT launch: GetPasswordData encrypts to the key
+            # the instance was launched with, whether or not the pair still exists. So it
+            # goes now rather than at teardown, and there is no key pair to leak.
+            try:
+                ec2.delete_key_pair(KeyName=key_name)
+            except Exception:  # noqa: BLE001 - re-imported on the next launch anyway
+                logger.warning("POV %s: could not delete key pair %s", env_id, key_name,
+                               exc_info=True)
     return created
+
+
+def _launch_sync(ec2, env_id: str, spec: dict, network: dict, key_name: str) -> dict:
+    where = {**network, **env.placement(network, spec)}
+    image_id = spec["image_id"]
+    device, minimum = _root_device(ec2, image_id)
+    size = max(int(spec.get("disk_gb") or env.DEFAULT_DISK_GB), minimum)
+    kwargs = {
+        "ImageId": image_id,
+        "InstanceType": spec["instance_type"],
+        "MinCount": 1,
+        "MaxCount": 1,
+        "SubnetId": where["subnet_id"],
+        "SecurityGroupIds": [where["security_group_id"]],
+        "BlockDeviceMappings": [{
+            "DeviceName": device,
+            "Ebs": {"VolumeSize": size, "VolumeType": "gp3",
+                    "DeleteOnTermination": True},
+        }],
+        "TagSpecifications": [
+            _tag_spec("instance", env_id, spec["name"], spec.get("role") or "target"),
+            # The root volume too, so a stray volume after a failed teardown is still
+            # attributable to the POV that made it.
+            _tag_spec("volume", env_id, spec["name"], spec.get("role") or "target"),
+        ],
+        # IMDSv2 required. A POV runs for weeks with a customer inside it, and the
+        # instance role — if one is ever attached — should not be readable by anything
+        # that can make a plain GET from the guest.
+        "MetadataOptions": {"HttpTokens": "required", "HttpEndpoint": "enabled"},
+    }
+    if spec.get("user_data"):
+        kwargs["UserData"] = spec["user_data"]
+    if key_name:
+        # Windows only. EC2 encrypts the generated Administrator password to this key,
+        # and without one GetPasswordData has nothing to return -- ever. See
+        # :func:`stored_credentials`.
+        kwargs["KeyName"] = key_name
+    resp = ec2.run_instances(**kwargs)
+    inst = resp["Instances"][0]
+    logger.info("POV %s: launched %s as %s", env_id, spec["name"],
+                inst["InstanceId"])
+    return {"id": inst["InstanceId"], "name": spec["name"]}
 
 
 async def create_vms(env_id: str, region: str, specs: list, network: dict) -> list:
     return await aws_service._to_thread(_create_vms_sync, env_id, region, specs, network)
+
+
+# ── the Windows login ────────────────────────────────────────────────────────
+#
+# A stock Windows AMI has no password anybody chose: EC2Launch generates the
+# Administrator's at first boot and publishes it only RSA-encrypted to the instance's key
+# pair. These instances used to launch with NO key pair, so that password was unknowable
+# by anyone, ever -- and the remedy the Resource Broker install offered, "type the login
+# into the VMs tab", had nothing true to type.
+#
+# So each POV gets one RSA key, generated here and kept encrypted in config like Azure's
+# generated password. Only its PUBLIC half reaches EC2, imported for the length of a
+# launch and deleted straight after (see `_create_vms_sync`). The password itself is never
+# stored: it is decrypted from GetPasswordData per run, the way Skytap's stored
+# credentials are read live.
+#
+# Keyed on the platform environment id, for the reason Azure's `_PW_FMT` gives.
+_WINDOWS_KEY_FMT = "pov/{env_id}/windows_key"
+
+# The account EC2Launch sets the generated password on.
+WINDOWS_ADMIN = "Administrator"
+
+
+def windows_key_config_key(env_id: str) -> str:
+    return _WINDOWS_KEY_FMT.format(env_id=env_id)
+
+
+def _windows_key_pem(env_id: str) -> str:
+    """This environment's private key, generated once and remembered."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    from . import config_service
+    key = windows_key_config_key(env_id)
+    existing = config_service.get_opt(key)
+    if existing:
+        return existing
+    private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = private.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption()).decode()
+    config_service.set(key, pem)
+    return pem
+
+
+def _import_windows_key_sync(ec2, env_id: str) -> str:
+    """Put this environment's public key in EC2 under a name it owns. Returns the name.
+
+    A pair left by a launch that died before its cleanup is replaced rather than refused:
+    the name is derived from an environment id only this dashboard mints, so nothing else
+    can own it, and refusing would wedge every later launch of this POV.
+    """
+    from cryptography.hazmat.primitives import serialization
+    name = f"{env_id}-windows"
+    private = serialization.load_pem_private_key(_windows_key_pem(env_id).encode(),
+                                                 password=None)
+    public = private.public_key().public_bytes(serialization.Encoding.OpenSSH,
+                                               serialization.PublicFormat.OpenSSH)
+    try:
+        ec2.delete_key_pair(KeyName=name)
+    except Exception:  # noqa: BLE001 - absent is the normal case
+        pass
+    ec2.import_key_pair(KeyName=name, PublicKeyMaterial=public, TagSpecifications=[
+        _tag_spec("key-pair", env_id)])
+    return name
+
+
+def holds_login(env_id: str, os_family: str = "") -> bool:
+    """Whether :func:`stored_credentials` can answer for a VM of this family. No network.
+
+    Windows only, and only for an environment built since the key existed: a POV launched
+    before then has instances with no key pair, whose password nothing can recover.
+    """
+    if (os_family or "").strip().lower() != "windows":
+        return False
+    from . import config_service
+    return bool(config_service.get_opt(windows_key_config_key(env_id)))
+
+
+def _password_data_sync(region: str, vm_id: str) -> str:
+    return (aws_service._get_ec2_pinned(region).get_password_data(InstanceId=vm_id)
+            .get("PasswordData") or "").strip()
+
+
+async def stored_credentials(env_id: str, vm_id: str = "") -> list:
+    """A Windows VM's Administrator login, decrypted from EC2, in the contract's shape.
+
+    ``[]`` for a VM this environment holds no key for -- a Linux guest, or a POV built
+    before the key existed. Raises :class:`pov_cloud_env.CredentialNotReady` while EC2 has
+    not published the password yet, which is normal for the first few minutes of a boot
+    and is a "wait", not a fault.
+    """
+    from . import config_service
+    pem = config_service.get_opt(windows_key_config_key(env_id))
+    if not pem or not vm_id:
+        return []
+    region = env.recorded_region(env_id, "aws")
+    data = await aws_service._to_thread(_password_data_sync, region, vm_id)
+    if not data:
+        raise env.CredentialNotReady(
+            "EC2 has not published this VM's Windows password yet. It does so a few "
+            "minutes after first boot (4-15 is normal); try again shortly. If it never "
+            "appears, the image does not run EC2Launch, or it was built with a fixed "
+            "password -- then enter that login in the Login column on the VMs tab.")
+    try:
+        password = aws_service.decrypt_windows_password(data, pem)
+    except Exception:  # noqa: BLE001 - a key mismatch, never anything worth echoing
+        logger.warning("POV %s: could not decrypt the password of %s", env_id, vm_id,
+                       exc_info=True)
+        return []
+    return [{
+        "text": f"{WINDOWS_ADMIN} / {password}",
+        "notes": ("Generated by EC2 at first boot and decrypted with this POV's own key. "
+                  "Read live, never stored."),
+    }]
+
+
+def _forget_windows_key(env_id: str) -> None:
+    from . import config_service
+    try:
+        config_service.delete(windows_key_config_key(env_id))
+    except Exception:  # noqa: BLE001 - never fail a teardown over housekeeping
+        logger.warning("POV %s: could not clear the stored Windows key", env_id,
+                       exc_info=True)
 
 
 # ── read ─────────────────────────────────────────────────────────────────────
@@ -722,4 +870,7 @@ def _delete_sync(env_id: str, region: str) -> list:
 
 async def delete_environment(env_id: str, region: str) -> None:
     removed = await aws_service._to_thread(_delete_sync, env_id, region)
+    # After the instances, never before: a teardown that fails partway is retried, and a
+    # surviving Windows VM is still one somebody may need to log into.
+    _forget_windows_key(env_id)
     logger.info("POV %s: removed %d AWS resources from %s", env_id, len(removed), region)

@@ -11,7 +11,9 @@ What this platform cannot do, and where each one is declared:
 
     share link          - CAPABILITIES["aws"]["share_link"] = False. No publish sets, and
                           no analogue. A cloud POV's customer-facing access is PRA.
-    stored credentials  - False. AWS holds no guest login to read back.
+    stored credentials  - False. AWS holds no guest login to read back -- except a
+                          Windows guest launched with the POV's own key; see
+                          `holds_login`.
     idle suspend        - False. No cloud has one; `scheduled_suspend` is how a cloud POV
                           stops costing money overnight.
     projects            - False. The environment's scope is its own VPC and its tag.
@@ -97,6 +99,20 @@ async def set_runstate(env_id: str, runstate: str) -> dict:
 
 async def wait_for_runstate(env_id: str, target: str, **kwargs) -> dict:
     return await pov_cloud_env.wait_for_runstate(CLOUD, env_id, target, **kwargs)
+
+
+def holds_login(env_id: str, os_family: str = "") -> bool:
+    """Whether :func:`stored_credentials` can answer for a VM of this family. No network.
+
+    Optional in the contract. AWS's capability row stays ``stored_credentials: False``,
+    because a Linux guest, or a POV built before the per-POV Windows key, still has its
+    login set by hand -- this is what lets ``pov_resource_broker`` tell those apart.
+    """
+    return pov_cloud_aws.holds_login(env_id, os_family)
+
+
+async def stored_credentials(env_id: str, vm_id: str = "") -> list:
+    return await pov_cloud_aws.stored_credentials(env_id, vm_id)
 
 
 async def delete_environment(env_id: str) -> None:

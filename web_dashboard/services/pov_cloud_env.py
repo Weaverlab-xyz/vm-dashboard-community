@@ -108,6 +108,12 @@ class CloudEnvError(Exception):
     """
 
 
+class CredentialNotReady(CloudEnvError):
+    """A platform login exists but cannot be read YET -- EC2 publishing a Windows password
+    a few minutes after first boot. Its message is written here, names no address or
+    secret, and is meant to reach the operator verbatim."""
+
+
 def driver(cloud: str):
     """The SDK driver for one cloud. Imported on use, like ``lab_platforms.adapter``."""
     name = (cloud or "").strip().lower()
