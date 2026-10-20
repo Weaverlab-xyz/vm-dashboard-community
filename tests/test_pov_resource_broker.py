@@ -1131,6 +1131,183 @@ def test_teardown_clears_operator_set_passwords():
     db.close()
 
 
+# ── AWS: the Windows password EC2 generated, read with the POV's own key ─────
+#
+# A stock Windows AMI's Administrator password is minted by EC2Launch and published only
+# encrypted to the instance's key pair. POV instances used to launch with none, so the
+# "Login column" remedy above had nothing true to type. These pin the key, that it reaches
+# EC2 only for a launch, and that a VM launched with it needs no login typed at all.
+
+class _FakeEc2:
+    def __init__(self):
+        self.calls = []
+        self.keys = {}
+
+    def describe_images(self, **_kw):
+        return {"Images": []}
+
+    def import_key_pair(self, KeyName, PublicKeyMaterial, **_kw):
+        self.calls.append(("import", KeyName))
+        self.keys[KeyName] = PublicKeyMaterial
+
+    def delete_key_pair(self, KeyName):
+        self.calls.append(("delete", KeyName))
+        self.keys.pop(KeyName, None)
+
+    def run_instances(self, **kw):
+        self.calls.append(("run", kw.get("KeyName"), kw["TagSpecifications"][0]))
+        return {"Instances": [{"InstanceId": f"i-{len(self.calls)}"}]}
+
+
+def _patch(obj, name, value, undo):
+    undo.append((obj, name, getattr(obj, name)))
+    setattr(obj, name, value)
+
+
+def _unpatch(undo):
+    for obj, name, old in reversed(undo):
+        setattr(obj, name, old)
+
+
+def _published_for(env_id, password):
+    """What GetPasswordData would return: the password RSA-encrypted to the POV's key."""
+    import base64
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from web_dashboard.services import pov_cloud_aws
+    pem = pov_cloud_aws._windows_key_pem(env_id)
+    public = serialization.load_pem_private_key(pem.encode(), password=None).public_key()
+    return base64.b64encode(public.encrypt(password.encode(), padding.PKCS1v15())).decode()
+
+
+def _aws_keyed(db):
+    from web_dashboard.services import pov_cloud_aws
+    env, agent, vm = _aws_ready(db)
+    env.platform_environment_id = f"pov-{uuid.uuid4().hex[:8]}"
+    db.commit()
+    pov_cloud_aws._windows_key_pem(env.platform_environment_id)
+    return env, agent, vm
+
+
+def test_windows_vms_launch_with_the_pov_key_and_ec2_keeps_it_only_for_the_launch():
+    from web_dashboard.services import aws_service, pov_cloud_aws, pov_cloud_env
+    fake, undo = _FakeEc2(), []
+    _patch(aws_service, "_get_ec2_pinned", lambda _r: fake, undo)
+    _patch(pov_cloud_env, "placement",
+          lambda net, _spec: {"subnet_id": "s", "security_group_id": "g"}, undo)
+    env_id = f"pov-{uuid.uuid4().hex[:8]}"
+    try:
+        specs = [{"name": "rb", "role": "target", "os_family": "windows",
+                  "image_id": "ami-w", "instance_type": "t3.large"},
+                 {"name": "lin", "role": "target", "os_family": "linux",
+                  "image_id": "ami-l", "instance_type": "t3.small"}]
+        created = pov_cloud_aws._create_vms_sync(env_id, "us-east-1", specs, {})
+    finally:
+        _unpatch(undo)
+    assert [c["name"] for c in created] == ["rb", "lin"]
+    runs = [c for c in fake.calls if c[0] == "run"]
+    assert runs[0][1] == f"{env_id}-windows", "the Windows VM carried no key pair"
+    assert runs[1][1] is None, "a Linux VM was given the Windows key"
+    assert fake.calls[-1] == ("delete", f"{env_id}-windows"), "the key pair outlived the launch"
+    assert not fake.keys
+    assert pov_cloud_aws.holds_login(env_id, "windows")
+    assert not pov_cloud_aws.holds_login(env_id, "linux")
+
+
+def test_a_linux_only_launch_mints_no_key():
+    from web_dashboard.services import aws_service, pov_cloud_aws, pov_cloud_env
+    fake, undo = _FakeEc2(), []
+    _patch(aws_service, "_get_ec2_pinned", lambda _r: fake, undo)
+    _patch(pov_cloud_env, "placement",
+          lambda net, _spec: {"subnet_id": "s", "security_group_id": "g"}, undo)
+    env_id = f"pov-{uuid.uuid4().hex[:8]}"
+    try:
+        pov_cloud_aws._create_vms_sync(env_id, "us-east-1", [{
+            "name": "brk", "role": "broker", "os_family": "linux", "image_id": "ami-l",
+            "instance_type": "t3.small"}], {})
+    finally:
+        _unpatch(undo)
+    assert not any(c[0] == "import" for c in fake.calls)
+    assert not pov_cloud_aws.holds_login(env_id, "windows")
+
+
+def test_a_keyed_aws_windows_vm_needs_no_typed_login():
+    from web_dashboard.services import pov_cloud_aws, pov_cloud_env
+    db = d.SessionLocal()
+    env, _a, vm = _aws_keyed(db)
+    blob = _published_for(env.platform_environment_id, "Ec2-Generated9")
+    undo = []
+    _patch(pov_cloud_aws, "_password_data_sync", lambda _r, _v: blob, undo)
+    _patch(pov_cloud_env, "recorded_region", lambda _e, _c: "us-east-1", undo)
+    try:
+        assert rb.login_problem(env, vm) == ""
+        rb.preflight(db, env)
+        got = asyncio.run(rb.platform_login(db, env.id, vm.platform_vm_id))
+    finally:
+        _unpatch(undo)
+        db.close()
+    assert got == ("Administrator", "Ec2-Generated9")
+
+
+def test_a_typed_login_still_outranks_the_key():
+    """A custom AMI with a fixed password has nothing for EC2 to publish."""
+    from web_dashboard.services import pov_cloud_aws
+    db = d.SessionLocal()
+    env, _a, vm = _aws_keyed(db)
+    pov_env_service.set_vm_login(db, env, vm.platform_vm_id, "rbadmin", "Fixed-1")
+    undo = []
+    _patch(pov_cloud_aws, "_password_data_sync",
+          lambda *_a: (_ for _ in ()).throw(AssertionError("EC2 was asked")), undo)
+    try:
+        got = asyncio.run(rb.platform_login(db, env.id, vm.platform_vm_id))
+    finally:
+        _unpatch(undo)
+        db.close()
+    assert got == ("rbadmin", "Fixed-1")
+
+
+def test_a_password_ec2_has_not_published_yet_says_wait():
+    from web_dashboard.services import pov_cloud_aws, pov_cloud_env
+    db = d.SessionLocal()
+    env, _a, vm = _aws_keyed(db)
+    undo = []
+    _patch(pov_cloud_aws, "_password_data_sync", lambda _r, _v: "", undo)
+    _patch(pov_cloud_env, "recorded_region", lambda _e, _c: "us-east-1", undo)
+    try:
+        asyncio.run(rb.platform_login(db, env.id, vm.platform_vm_id))
+        raise AssertionError("an unpublished password produced a login")
+    except rb.ResourceBrokerError as exc:
+        assert "not published" in str(exc) and "CredentialNotReady" not in str(exc)
+    finally:
+        _unpatch(undo)
+        db.close()
+
+
+def test_an_aws_pov_built_before_the_key_says_the_password_is_unrecoverable():
+    db = d.SessionLocal()
+    env, _a, _vm = _aws_ready(db)
+    try:
+        rb.preflight(db, env)
+        raise AssertionError("an AWS RB with no login and no key was queued")
+    except rb.ResourceBrokerError as exc:
+        assert "Login column" in str(exc) and "rebuild the POV" in str(exc)
+    finally:
+        db.close()
+
+
+def test_aws_teardown_forgets_the_windows_key():
+    from web_dashboard.services import aws_service, pov_cloud_aws
+    env_id = f"pov-{uuid.uuid4().hex[:8]}"
+    pov_cloud_aws._windows_key_pem(env_id)
+    undo = []
+    _patch(aws_service, "_to_thread", lambda fn, *a: asyncio.sleep(0, result=[]), undo)
+    try:
+        asyncio.run(pov_cloud_aws.delete_environment(env_id, "us-east-1"))
+    finally:
+        _unpatch(undo)
+    assert not pov_cloud_aws.holds_login(env_id, "windows")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

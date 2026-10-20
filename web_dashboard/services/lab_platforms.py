@@ -183,8 +183,10 @@ CAPABILITIES = {
         # page reads this and says "PRA only" rather than offering a Share button that
         # cannot work.
         "share_link": False,
-        # AWS holds no guest credentials. The platform login a Resource Broker install
-        # needs comes from the template's own key pair / Vault account instead.
+        # AWS holds no guest credentials it can return in general, so this stays False and
+        # the Login column stays. The exception is a Windows guest launched with the POV's
+        # own key, whose EC2-generated password the adapter decrypts per run -- see
+        # `pov_cloud_aws.holds_login`, which `pov_resource_broker` asks per VM.
         "stored_credentials": False,
         "verify": True,                # a cheap DescribeRegions; see the adapter
         # An AWS account is not a project. The environment's scoping is its own VPC plus

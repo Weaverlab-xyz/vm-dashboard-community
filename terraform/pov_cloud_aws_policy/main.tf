@@ -46,7 +46,7 @@ locals {
   # table that cannot be tagged at creation.
   creating_actions = [
     "CreateVpc", "CreateSubnet", "CreateSecurityGroup", "CreateInternetGateway",
-    "RunInstances",
+    "RunInstances", "ImportKeyPair",
   ]
 
   request_tagged = var.tag_conditions ? {
@@ -70,6 +70,15 @@ locals {
       Action   = ["ssm:GetParameter", "ssm:GetParameters"]
       Resource = "arn:${local.p}:ssm:*::parameter/aws/service/*"
     },
+    merge({
+      # A POV Windows guest's EC2-generated Administrator password, read when the agent
+      # fetches a run's bundle -- the request path, hence here rather than in provision.
+      # It comes back encrypted to the POV's own key, which only the dashboard holds.
+      Sid      = "PovWindowsPassword"
+      Effect   = "Allow"
+      Action   = ["ec2:GetPasswordData"]
+      Resource = "${local.ec2}:instance/*"
+    }, local.resource_tagged == null ? {} : { Condition = local.resource_tagged }),
     ], var.allow_pricing ? [{
       # /pov/cloud's optional list-price estimate. The Pricing API has no resources.
       Sid      = "PovPriceEstimate"
@@ -99,6 +108,19 @@ locals {
       Action   = ["ec2:RunInstances"]
       Resource = ["${local.ec2}:instance/*", "${local.ec2}:volume/*"]
       Cond     = local.request_tagged
+    },
+    {
+      # The POV's own Windows key: imported for one launch, deleted straight after.
+      Sid      = "PovWindowsKeyImport"
+      Action   = ["ec2:ImportKeyPair"]
+      Resource = ["${local.ec2}:key-pair/*"]
+      Cond     = local.request_tagged
+    },
+    {
+      Sid      = "PovWindowsKeyUse"
+      Action   = ["ec2:RunInstances", "ec2:DeleteKeyPair"]
+      Resource = ["${local.ec2}:key-pair/*"]
+      Cond     = local.resource_tagged
     },
     {
       Sid      = "PovLaunchIntoOwnNetwork"
