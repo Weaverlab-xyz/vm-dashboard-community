@@ -675,17 +675,14 @@ def get_ready(env_id: str, demo_at: str = Query(""),
     out = pov_ready.describe(row, health, areas, pov_ready.last_run(env), demo_at=when)
     out["retry_in_seconds"] = pov_ready.throttled(env)
     out["running"] = _ready_job_in_flight(db, env.id)
+    # A check a warm-up booked for just before the demo (services/pov_reconcile).
+    out["booked_for"] = pov_ready.booked_for(db, env.id)
     return {"ready": out}
 
 
 def _ready_job_in_flight(db: Session, environment_id: str) -> str:
-    """The id of a queued or running ready check for this POV, or ""."""
-    from ..database import Job
-    rows = (db.query(Job)
-              .filter(Job.job_type == pov_ready.JOB_TYPE,
-                      Job.status.in_(job_service.ACTIVE_STATUSES)).all())
-    return next((r.id for r in rows
-                 if r.metadata_dict.get("environment_id") == environment_id), "")
+    """The id of a ready check for this POV that is queued or running NOW, or ""."""
+    return pov_ready.job_in_flight(db, environment_id)
 
 
 @router.post("/managed/{env_id}/ready/run", status_code=202, dependencies=_POV_WRITE_OWN)

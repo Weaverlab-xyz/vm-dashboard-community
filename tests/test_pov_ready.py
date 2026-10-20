@@ -275,6 +275,25 @@ def test_a_mashed_button_is_one_run():
         first.json()["job_id"]
 
 
+def test_a_check_booked_for_later_is_not_in_flight():
+    """A warm-up books one for just before the demo. Counting it as running would grey
+    out Check now until then."""
+    from web_dashboard.services import job_service
+    env_id = _env()
+    db = d.SessionLocal()
+    try:
+        job_service.create_job(db, job_type=pov_ready.JOB_TYPE, created_by="pov-warmup",
+                               metadata={"environment_id": env_id},
+                               scheduled_for=datetime.utcnow() + timedelta(minutes=20))
+    finally:
+        db.close()
+    c = _client()
+    ready = c.get(f"/api/pov/managed/{env_id}/ready").json()["ready"]
+    assert ready["running"] == "" and ready["booked_for"].endswith("Z")
+    res = c.post(f"/api/pov/managed/{env_id}/ready/run")
+    assert res.status_code == 202 and res.json()["already_running"] is False
+
+
 def test_a_run_that_just_started_refuses_another():
     env_id = _env()
     db = d.SessionLocal()

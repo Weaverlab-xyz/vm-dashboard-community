@@ -85,6 +85,12 @@ It is a booking, not a schedule. That makes a few things different from the
 The start is the same `pov_env_power` job **Start** creates, attributed to `pov-warmup`, so
 the `/jobs` row says why the lab woke up.
 
+It also books a [ready check](#before-a-demo) for **five minutes before the demo**, so the
+badge you open the POV to is current. The check never runs sooner than five minutes after
+the start, which gives the lab time to resume. It is booked when the lab was started and
+also when it was already running, and the **Ready for demo** panel shows it as
+`next check …`. **Check now** stays available meanwhile.
+
 Booking it warns you, without refusing, when the lab may not stay up for the whole call:
 
 - the lead is shorter than the reconcile interval

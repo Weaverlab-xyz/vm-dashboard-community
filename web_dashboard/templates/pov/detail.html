@@ -1609,7 +1609,17 @@
 
       readyRanAt() {
         const at = this.ready && this.ready.last_run && this.ready.last_run.finished_at;
-        return at ? 'last full check ' + this.readyAgo(at) : 'never fully checked';
+        let line = at ? 'last full check ' + this.readyAgo(at) : 'never fully checked';
+        // A check a booked warm-up queued for just before the demo.
+        const booked = this.ready && this.ready.booked_for;
+        if (booked) {
+          const t = new Date(booked);
+          if (!Number.isNaN(t.getTime())) {
+            line += ' · next check ' + t.toLocaleString(undefined,
+              { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+          }
+        }
+        return line;
       },
 
       // ── Sample activity ---------------------------------------------------
