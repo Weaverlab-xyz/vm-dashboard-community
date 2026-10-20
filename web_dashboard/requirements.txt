@@ -67,7 +67,7 @@ azure-mgmt-network>=25.0.0,<31
 azure-mgmt-resource>=23.0.0,<27
 azure-mgmt-containerinstance>=10.0.0,<11
 azure-mgmt-storage>=21.0.0,<26
-azure-keyvault-secrets>=4.7.0,<5
+azure-keyvault-secrets>=4.11.3,<5
 azure-mgmt-automation>=1.0.0,<2
 
 # MCP (Model Context Protocol) server — exposes dashboard tools to AI clients
