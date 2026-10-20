@@ -170,6 +170,34 @@ def test_settings_is_told_which_rung_each_cloud_uses():
     assert dashboard_identity.status()["sources"]["aws"] == "not configured"
 
 
+def test_a_stored_key_shadowing_ready_federation_is_reported():
+    """Identity on, audience ticked, role set — and a stored key still wins. That install
+    looks keyless and is not, so Settings is told; the key is the ONLY thing missing."""
+    _fresh(**dict(AWS_ON, aws_access_key_id="AKIA", aws_secret_access_key="s"))
+    assert cloud_federation.shadowed("aws")
+    assert cloud_federation.reason("aws") == "a stored key is configured, and it wins"
+    assert cloud_federation.source("aws") == "stored key"  # pov_cloud_* compare this string
+    assert dashboard_identity.status()["shadowed"] == ["aws"]
+
+    _fresh(**dict(GCP_ON, gcp_service_account_json="{}"))
+    assert cloud_federation.shadowed_clouds() == ["gcp"]
+    _fresh(**dict(AZURE_ON, azure_client_secret="s"))
+    assert cloud_federation.shadowed_clouds() == ["azure"]
+
+
+def test_a_stored_key_is_not_shadowing_when_federation_is_not_ready():
+    key = dict(aws_access_key_id="AKIA", aws_secret_access_key="s")
+    for settings in (dict(AWS_ON, aws_federation_role_arn="", **key),
+                     dict(AWS_ON, dashboard_spiffe_aud_aws="", **key),
+                     dict(AWS_ON, dashboard_spiffe_identity_enabled="", **key)):
+        _fresh(**settings)
+        assert not cloud_federation.shadowed("aws"), settings
+    _fresh(**AWS_ON)  # federated and no key: nothing shadowed, federation active
+    assert not cloud_federation.shadowed("aws") and cloud_federation.active("aws")
+    assert dashboard_identity.status()["shadowed"] == []
+    assert not cloud_federation.shadowed("oci")
+
+
 # ── AWS ───────────────────────────────────────────────────────────────────────
 
 def test_aws_assumes_the_role_with_the_files_token_and_caches_it():

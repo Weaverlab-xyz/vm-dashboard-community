@@ -23,7 +23,14 @@ advance at your own pace.
 | **3 — Vault-backed cloud credentials** | External vault; fetched at runtime by BeyondTrust | Password Safe audit log | Regulated environments; zero-standing-access |
 | **4 — Dynamic cloud credentials** | Nowhere — minted per lease by BeyondTrust Workload Credentials | Workload Credentials audit log | Removing the standing cloud credential entirely |
 
-You do not have to climb this ladder. Tier 1 is secure enough for a
+**The recommended destination is to store no cloud secret at all.** Every tier above
+is about where a secret *lives*; the dashboard's own
+[workload identity](workload-identity.md) removes the AWS, Azure and GCP keys outright, and
+pairing it with Tier 4 or an Entitle grant for writes removes standing privilege as well.
+Use this ladder for what still has to be stored (an OCI key, a Terraform provider's
+credential, a hypervisor password), and for a cloud you have not moved over yet.
+
+Every tier stays supported. Tier 1 is secure enough for a
 single-user local deployment. Tier 2 is the right target for any shared or
 persistent environment. Tier 3 adds checkout audit trails and is worth the added
 complexity when compliance or separation-of-duties is a requirement. Tier 4 goes

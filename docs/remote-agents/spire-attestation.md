@@ -6,10 +6,14 @@ Part of [Remote Agents](../remote-agents.md). By default an agent enrols with a 
 code and keeps an Ed25519 key in its state volume (`identity.json`), and whoever can read
 that volume *is* the agent. With SPIRE, the agent proves who it is at every start with a
 short-lived JWT-SVID from the dashboard's own SPIRE server, and keeps its signing key only
-in memory. Ed25519 stays the default and stays supported; nothing changes for an agent you
-do not migrate.
+in memory. **SPIRE is the recommended way to run an agent.** Ed25519 stays the enrolment
+default, for compatibility, and stays supported for sites that cannot reach a SPIRE server
+(a TLS-inspecting proxy, a dashboard on Cloud Run); nothing changes for an agent you do not
+migrate. Why this is the recommendation, and what comes after it, is on
+[Workload identity](../access/workload-identity.md#remote-agents).
 
-**Preview.** Built and covered by tests, but not yet run against a live agent host. The
+Proven live on 2026-10-13: a Docker Desktop agent attested to a dashboard on Azure
+Container Apps, and POV control nodes have attested the same way since 2026-10-14. The
 design is [SPIRE for agents, Dex for people](../design/agent-and-human-identity.md#part-1-the-agent-attests-through-spire).
 The server itself, and every other feature that uses it, is on
 [SPIFFE and SPIRE](../spiffe.md).

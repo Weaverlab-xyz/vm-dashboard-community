@@ -37,6 +37,12 @@ Nothing below removes a working path:
   never go into the dashboard's real trust domain.
 - **Every item is opt-in** and off by default.
 
+**Update, 2026-10:** AWS federation is proven live (2026-10-15), and the docs now recommend
+this identity over a stored key, paired with a Workload Credentials lease or an Entitle
+grant for writes so it holds no standing write privilege. The rules above are unchanged:
+stored keys still work, still win, and nothing became on by default. See
+[Workload identity: the recommended credential model](../access/workload-identity.md).
+
 ## Slice 1: the dashboard gets an identity of its own
 
 Everything else depends on this slice.

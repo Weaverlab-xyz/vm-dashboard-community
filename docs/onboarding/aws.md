@@ -5,6 +5,11 @@
 Part of the [Onboarding Guide](../ONBOARDING.md).
 
 
+> **Recommended once you are running: no access key.** The steps below create an access
+> key, which is the quick start and stays supported. Once the dashboard is up, switch AWS
+> to the dashboard's own SPIFFE identity (it assumes a role, nothing stored) and remove the
+> key: see [Workload identity](../access/workload-identity.md#dashboard-to-aws).
+
 The dashboard deploys EC2 instances into **your** AWS account using an IAM
 user dedicated to the dashboard.
 

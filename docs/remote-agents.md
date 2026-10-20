@@ -324,10 +324,11 @@ Hypervisor brokering followed it and is described above. Next:
   identical problem an on-prem database had, and the fix is the same shape — an `agent_id` on
   the cluster row and the existing `run_kind` enum grown a third member.
 - ~~**An agent identity with no key at rest**~~ — shipped; see
-  [Attesting an agent through SPIRE](remote-agents/spire-attestation.md). An opt-in SPIRE sidecar that attests the agent
-  and lets it hold its signing key only in memory, beside — never instead of — today's
-  Ed25519 enrolment, which stays the default and stays supported (sites behind a
-  TLS-inspecting proxy cannot reach a SPIRE server). **Built:** `POST /api/agent/attest`,
+  [Attesting an agent through SPIRE](remote-agents/spire-attestation.md), proven live
+  2026-10-13 and the **recommended** way to run an agent. A SPIRE sidecar attests the agent
+  and lets it hold its signing key only in memory, beside — never instead of — Ed25519
+  enrolment, which stays the enrolment default for compatibility and stays supported (sites
+  behind a TLS-inspecting proxy cannot reach a SPIRE server). **Built:** `POST /api/agent/attest`,
   the per-agent SPIFFE binding, agent 2.6.0's `AGENT_SPIFFE_JWT_FILE` mode, and a one-click
   **Migrate to SPIRE** on the Agents page (SPIRE entries, join token and trust domain,
   through the dashboard's own SPIRE server) with a banner recommending it. Agent host side:

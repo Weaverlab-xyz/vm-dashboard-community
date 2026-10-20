@@ -57,9 +57,16 @@ Turning WC on is what *unlocks* retiring **your** static credentials. It never
 retires them for anyone else, and never as a side effect of an upgrade. See
 [Secrets management](../access/secrets-management.md) for the wider tiered model.
 
-**GCP is absent on purpose.** WC mints AWS and Azure credentials only, so a GCP
-deployment stays on the static tier. A mixed install — say AWS dynamic, Azure
-dynamic, GCP static — is the normal case, not a gap.
+The **recommended** pairing is WC for jobs only, with the dashboard's SPIFFE identity as
+the everyday read credential (`wlc_aws_everyday_source` / `wlc_azure_everyday_source` =
+`federation`): nothing stored, and write privilege only while a job runs. See
+[Workload identity](../access/workload-identity.md).
+
+**GCP is absent on purpose.** WC mints AWS and Azure credentials only. GCP still needs
+no stored key: the dashboard's SPIFFE identity covers reads, and an Entitle grant covers
+writes ([Workload identity](../access/workload-identity.md#dashboard-to-gcp)). Without
+those, a GCP deployment stays on the static tier. A mixed install is the normal case,
+not a gap.
 
 ### Be clear about what this buys
 
