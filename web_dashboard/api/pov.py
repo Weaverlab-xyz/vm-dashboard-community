@@ -76,7 +76,8 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         pov_reconcile,
                         pov_cloud_cost, pov_entitle_agent, pov_guest_step,
                         pov_ot_adapter,
-                        pov_pra_ps_link, pov_ps_config, pov_resource_broker,
+                        pov_pra_ps_link, pov_ps_config, pov_ready,
+                        pov_resource_broker,
                         pov_setup_steps,
                         suspend_schedule, pov_share, spend_policy, pov_summary,
                         pov_use_case_scope, pov_use_cases, pov_vendor_access,
@@ -642,6 +643,71 @@ def get_managed(env_id: str, db: Session = Depends(get_db),
     vms = (db.query(PovEnvironmentVM)
              .filter(PovEnvironmentVM.environment_id == env.id).all())
     return {"environment": _serialize(env, vms, broker=pov_broker.describe(db, env))}
+
+
+@router.get("/managed/{env_id}/ready")
+def get_ready(env_id: str, demo_at: str = Query(""),
+              db: Session = Depends(get_db),
+              current_user: User = Depends(get_current_user)):
+    """Is this POV ready to demo? Served from what is stored, so it never waits on a tenant.
+
+    ``demo_at`` (ISO 8601; an offset is honoured, none means UTC) moves the window a share
+    link or auto-delete date is judged against. The live refresh is ``POST .../ready/run``.
+    """
+    env = _env_or_404(db, env_id)
+    vms = (db.query(PovEnvironmentVM)
+             .filter(PovEnvironmentVM.environment_id == env.id).all())
+    row = _serialize(env, vms, broker=pov_broker.describe(db, env))
+    health, areas = pov_ready.health_inputs(db, env)
+    when = None
+    if demo_at.strip():
+        from ..services.health import core as health_core
+        when = health_core.parse_when(demo_at.strip())
+        if when is None:
+            raise HTTPException(status_code=400, detail="demo_at is not an ISO 8601 time")
+    out = pov_ready.describe(row, health, areas, pov_ready.last_run(env), demo_at=when)
+    out["retry_in_seconds"] = pov_ready.throttled(env)
+    out["running"] = _ready_job_in_flight(db, env.id)
+    return {"ready": out}
+
+
+def _ready_job_in_flight(db: Session, environment_id: str) -> str:
+    """The id of a queued or running ready check for this POV, or ""."""
+    from ..database import Job
+    rows = (db.query(Job)
+              .filter(Job.job_type == pov_ready.JOB_TYPE,
+                      Job.status.in_(job_service.ACTIVE_STATUSES)).all())
+    return next((r.id for r in rows
+                 if r.metadata_dict.get("environment_id") == environment_id), "")
+
+
+@router.post("/managed/{env_id}/ready/run", status_code=202, dependencies=_POV_WRITE_OWN)
+def run_ready(env_id: str, db: Session = Depends(get_db),
+              current_user: User = Depends(get_current_user)):
+    """Refresh every input the ready check reads, as a job.
+
+    A job rather than an inline await: it reads a PRA appliance, Password Safe, Entitle and
+    the platform, and the slowest of those is a customer's network. The page polls the job
+    and re-reads ``GET .../ready`` when it ends. Refused while one is already in flight, and
+    within ``RUN_MIN_SECONDS`` of the last, so a mashed button is one run.
+    """
+    env = _env_or_404(db, env_id)
+    if env.status == pov_env_service.STATUS_DESTROYED:
+        raise HTTPException(status_code=409, detail="this POV has been destroyed")
+    running = _ready_job_in_flight(db, env.id)
+    if running:
+        return {"job_id": running, "already_running": True}
+    wait = pov_ready.throttled(env)
+    if wait:
+        raise HTTPException(status_code=429,
+                            detail=f"checked moments ago; try again in {wait}s",
+                            headers={"Retry-After": str(wait)})
+    job = job_service.create_job(
+        db, job_type=pov_ready.JOB_TYPE,
+        created_by=getattr(current_user, "username", None),
+        workgroup=env.workgroup,
+        metadata={"environment_id": env.id})
+    return {"job_id": job.id, "already_running": False}
 
 
 @router.post("/managed/reconcile", dependencies=_POV_WRITE)

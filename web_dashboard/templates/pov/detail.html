@@ -71,6 +71,14 @@
           <p x-show="env.status === 'failed' && env.error_message"
              class="text-xs text-red-600 mt-1 break-words" x-text="env.error_message"></p>
         </div>
+        <!-- Ready for demo: the worst of the ready check's rows, on the two tabs an SE
+             runs a POV from. The rows themselves are on Overview. -->
+        <button type="button" x-show="ready && (tab === 'setup' || tab === 'overview')"
+                @click="select('overview')"
+                class="shrink-0 sm:self-center text-xs px-2.5 py-1 rounded-full border"
+                :class="readyBadgeClass(ready ? ready.overall : '')"
+                :title="'Ready check: ' + readyLabel(ready ? ready.overall : '') + '. Open Overview for the details.'"
+                x-text="readyLabel(ready ? ready.overall : '')"></button>
         <!-- Start / Suspend, on the two tabs an SE runs a POV from. -->
         <div x-show="tab === 'setup' || tab === 'overview'"
              class="flex items-center gap-2 shrink-0 sm:ml-auto sm:mr-6 sm:self-center">
@@ -293,6 +301,55 @@
               </template>
             </ul>
           </section>
+        </template>
+      </div>
+
+      <!-- ── Ready for demo ─────────────────────────────────────────────
+           Everything a demo leans on, one row each, worst first in the badge. Served
+           from stored results (pov_ready.describe), so opening this tab never waits on a
+           customer's appliance; "Check now" runs a job that refreshes them. -->
+      <div x-show="tab === 'overview' && ready" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3">
+          <div class="flex items-center gap-3 min-w-0">
+            <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Ready for demo</h2>
+            <span class="text-xs px-2 py-0.5 rounded-full border"
+                  :class="readyBadgeClass(ready ? ready.overall : '')"
+                  x-text="readyLabel(ready ? ready.overall : '')"></span>
+            <span class="text-xs text-gray-400 truncate" x-text="readyRanAt()"></span>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <label class="text-xs text-gray-500">Demo at
+              <input type="datetime-local" x-model="readyDemoAt" @change="readyLoad()"
+                     class="ml-1 text-xs border border-gray-300 rounded px-1.5 py-0.5">
+            </label>
+            <button type="button" @click="readyRun()"
+                    :disabled="readyBusy || (ready && (ready.running || ready.retry_in_seconds > 0))"
+                    :title="ready && ready.retry_in_seconds > 0
+                            ? 'Checked moments ago; try again shortly'
+                            : 'Re-read the platform, the tenants, the Gateway and this instance now'"
+                    class="text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                    x-text="(readyBusy || (ready && ready.running)) ? 'Checking…' : 'Check now'"></button>
+          </div>
+        </div>
+        <ul class="divide-y divide-gray-100">
+          <template x-for="c in (ready ? ready.checks : [])" :key="c.key">
+            <li class="flex items-start gap-3 py-2">
+              <span class="shrink-0 mt-1 w-2.5 h-2.5 rounded-full" :class="readyDotClass(c.status)"></span>
+              <div class="flex-1 min-w-0">
+                <p class="text-sm">
+                  <span class="font-medium text-gray-800" x-text="c.label"></span>
+                  <a x-show="c.href" :href="c.href" class="ml-2 text-xs text-blue-600 hover:underline">open</a>
+                </p>
+                <p class="text-xs text-gray-600 break-words" x-text="c.detail"></p>
+              </div>
+              <span x-show="c.checked_at" class="shrink-0 text-[11px] text-gray-400"
+                    x-text="readyAgo(c.checked_at)"></span>
+            </li>
+          </template>
+        </ul>
+        <template x-if="ready && ready.last_run && ready.last_run.errors.length">
+          <p class="mt-3 text-xs text-amber-700 break-words"
+             x-text="'The last check could not finish everything: ' + ready.last_run.errors.join('; ')"></p>
         </template>
       </div>
 
@@ -1356,7 +1413,9 @@
         const hash = window.location.hash.slice(1);
         if (this.tabs.some(t => t.id === hash)) this.tab = hash;
         await Promise.all([this.loadEnv(), this.loadUseCases(), this.loadAccessors(),
-                           this.loadSummary(), this.loadStepAssets(), this.loadTenants()]);
+                           this.loadSummary(), this.loadStepAssets(), this.loadTenants(),
+                           this.readyLoad()]);
+        if (this.ready && this.ready.running) this.readyWatch();
         // After loadEnv, not beside it: the template list is only fetched for a platform
         // that can merge one, and that answer arrives with the environment.
         await this.loadTemplates();
@@ -1397,6 +1456,91 @@
       toneClass(tone) {
         return { ok: 'text-green-700', warn: 'text-amber-700', bad: 'text-red-600',
                  muted: 'text-gray-400' }[tone] || 'text-gray-600';
+      },
+
+      // ── Ready for demo ----------------------------------------------------
+      //
+      // `ready` is GET .../ready: stored results only. readyRun() queues the job that
+      // refreshes them and readyWatch() re-reads until it is no longer running.
+      ready: null,
+      readyBusy: false,
+      readyDemoAt: '',
+      _readyPoll: null,
+
+      async readyLoad() {
+        try {
+          let url = `/api/pov/managed/${this.envId}/ready`;
+          if (this.readyDemoAt) {
+            const when = new Date(this.readyDemoAt);
+            if (!Number.isNaN(when.getTime())) url += '?demo_at=' + encodeURIComponent(when.toISOString());
+          }
+          const res = await this.apiFetch(url);
+          if (res.ok) this.ready = (await res.json()).ready;
+        } catch (e) { /* the panel stays as it was; the rest of the page is unaffected */ }
+      },
+
+      async readyRun() {
+        this.error = ''; this.notice = '';
+        this.readyBusy = true;
+        try {
+          const res = await this.apiFetch(`/api/pov/managed/${this.envId}/ready/run`, { method: 'POST' });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.detail || `Could not start the check (${res.status}).`);
+          await this.readyLoad();
+          this.readyWatch();
+        } catch (e) {
+          this.error = e.message;
+        } finally {
+          this.readyBusy = false;
+        }
+      },
+
+      // Every 3s for up to three minutes. The env is re-read when it ends too: the check
+      // refreshes the runstate and the PRA->PS counts the rest of the page shows.
+      readyWatch() {
+        if (this._readyPoll) clearInterval(this._readyPoll);
+        let left = 60;
+        this._readyPoll = setInterval(async () => {
+          await this.readyLoad();
+          left -= 1;
+          if (left <= 0 || !(this.ready && this.ready.running)) {
+            clearInterval(this._readyPoll);
+            this._readyPoll = null;
+            await this.loadEnv();
+          }
+        }, 3000);
+      },
+
+      readyLabel(status) {
+        return { ok: 'Ready', warn: 'Needs attention', fail: 'Not ready',
+                 unknown: 'Not checked' }[status] || 'Not checked';
+      },
+
+      readyBadgeClass(status) {
+        return { ok: 'bg-green-50 text-green-800 border-green-200',
+                 warn: 'bg-amber-50 text-amber-800 border-amber-200',
+                 fail: 'bg-red-50 text-red-700 border-red-200' }[status]
+               || 'bg-gray-50 text-gray-600 border-gray-200';
+      },
+
+      readyDotClass(status) {
+        return { ok: 'bg-green-500', warn: 'bg-amber-500', fail: 'bg-red-500' }[status]
+               || 'bg-gray-300';
+      },
+
+      readyAgo(iso) {
+        const t = Date.parse(iso);
+        if (Number.isNaN(t)) return '';
+        const mins = Math.round((Date.now() - t) / 60000);
+        if (mins < 1) return 'just now';
+        if (mins < 90) return mins + ' min ago';
+        const hrs = Math.round(mins / 60);
+        return hrs < 48 ? hrs + ' h ago' : Math.round(hrs / 24) + ' days ago';
+      },
+
+      readyRanAt() {
+        const at = this.ready && this.ready.last_run && this.ready.last_run.finished_at;
+        return at ? 'last full check ' + this.readyAgo(at) : 'never fully checked';
       },
 
       // ── Power, on Setup and Overview -------------------------------------
