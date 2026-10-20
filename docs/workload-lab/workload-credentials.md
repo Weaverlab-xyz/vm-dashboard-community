@@ -30,8 +30,8 @@ free and unmetered; everything on that one bills.
 |---|---|
 | Static secrets as a `wlc://` secrets backend (list / read / create / update / delete, staleness metadata) | **Implemented, verified live** |
 | Migrating the database's own secrets into it in one step | **Implemented** — see [Emptying the database](#emptying-the-database-wc-as-the-secrets-backend); not yet run live |
-| [Dynamic AWS credentials](dynamic-credentials.md) for the dashboard's own cloud calls | **Implemented** — not yet exercised against a live dynamic secret |
-| [Splitting AWS into an everyday and a provisioning lease](dynamic-credentials.md#the-optional-two-lease-split) | **Implemented** — opt-in, not yet exercised live |
+| [Dynamic AWS credentials](dynamic-credentials.md) for the dashboard's own cloud calls | **Implemented, verified live** |
+| [Splitting AWS into an everyday and a provisioning lease](dynamic-credentials.md#the-optional-two-lease-split) | **Implemented, verified live** — opt-in |
 | [Dynamic Azure credentials](dynamic-credentials.md#how-azure-differs) | **Implemented** — not yet exercised against a live dynamic secret |
 | Authenticating to WC with a **workload identity** instead of a stored PAT | **Implemented** — Azure run end to end 2026-09-15; GCP and AWS client paths unit-tested, not yet pointed at a live registration |
 | In-cluster workload identity (a pod federating its ServiceAccount token) | **Implemented** — the `file` platform reads the projected token; not yet run live |
