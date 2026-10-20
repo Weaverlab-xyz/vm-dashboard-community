@@ -61,9 +61,12 @@ you raise it.
 
 ## Blueprints, and where templates come from
 
-**POV → Templates** (`/pov/templates`), admin only. Two things live there.
+**POV → Templates** (`/pov/templates`), admin only. Two things live there, and the
+page's platform toggle decides the first: on Skytap it is the template builder, on a cloud
+it is the **Templates** tab, where a cloud template — a list of VMs and a network — is
+defined, since no public cloud holds a template of its own.
 
-**The template builder** authors the templates a POV is built from — see
+**The template builder** (**Build a template** and **Build history**) authors the templates a Skytap POV is built from — see
 [building a template](skytap.md#building-a-template). It exists because a POV
 *is* a template instantiated whole, so before it the whole feature was downstream of a
 catalogue nobody could author from here, and because the parts of the
