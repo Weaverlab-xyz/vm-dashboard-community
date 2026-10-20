@@ -305,6 +305,16 @@ def sweep_schedules(db: Session, *, job_id: str = "") -> int:
               .filter(PovEnvironment.status == pov_env_service.STATUS_ACTIVE)
               .all())
     for env in rows:
+        # The one-off warm-up FIRST, and before both skips below: it is a booking, not a
+        # schedule, and it only starts a lab -- so it applies with no recurring schedule,
+        # and on a platform with its own idle timer. See services/pov_wake.
+        if env.wake_at is not None:
+            try:
+                acted += _sweep_wake(db, env, now.replace(tzinfo=None), job_id)
+            except Exception as exc:  # noqa: BLE001 — one bad row never stops the sweep
+                logger.warning("POV %s: could not evaluate its warm-up", env.id,
+                               exc_info=True)
+                _log(db, job_id, f"{env.name}: warm-up ignored ({exc})")
         if not suspend_schedule.has_schedule(env):
             continue
         try:
@@ -344,6 +354,40 @@ def sweep_schedules(db: Session, *, job_id: str = "") -> int:
 
     db.commit()
     return acted
+
+
+def _sweep_wake(db: Session, env: PovEnvironment, now: datetime, job_id: str) -> int:
+    """Act on this row's warm-up booking if it is due. Returns 1 if a start was queued.
+
+    The booking is cleared on EVERY path out once it is due -- started, already running,
+    already being powered, or too late to matter -- so it fires at most once. That is the
+    property that keeps it from waking a lab an SE has since suspended on purpose.
+    """
+    from . import pov_env_service, pov_wake
+
+    decision = pov_wake.due(env, now)
+    if not decision:
+        return 0
+    pov_wake.clear(env)
+    if decision == pov_wake.MISSED:
+        _log(db, job_id, f"{env.name}: warm-up dropped, the demo it was for is over")
+        return 0
+    if (env.runstate or "") == "running":
+        _log(db, job_id, f"{env.name}: warm-up due, already running")
+        return 0
+    ok, _why = pov_env_service.may_act_on(env)
+    if not ok:
+        return 0
+    if pov_env_service.power_job_in_flight(db, env.id):
+        _log(db, job_id, f"{env.name}: warm-up due, a power job is already running")
+        return 0
+    job = job_service.create_job(
+        db, job_type="pov_env_power", created_by=pov_wake.WAKE_ACTOR,
+        workgroup=env.workgroup,
+        metadata={"environment_id": env.id, "runstate": "running"})
+    logger.info("POV %s: warm-up -> running (job %s)", env.name, job.id)
+    _log(db, job_id, f"{env.name}: warming up for a demo (job {job.id})")
+    return 1
 
 
 def _spend_config() -> tuple:
@@ -609,7 +653,7 @@ def describe(env: PovEnvironment) -> dict:
     what this module exists to stop, and replacing "never asked" with "asked 40 minutes
     ago, silently" would be a smaller version of the same lie.
     """
-    from . import pov_cloud_cost, suspend_schedule, spend_policy
+    from . import pov_cloud_cost, pov_wake, suspend_schedule, spend_policy
     action, percent = _spend_config()
     spend = spend_policy.describe(env, warn_at_percent=percent, action=action)
     priced = pov_cloud_cost.priced(env.platform)
@@ -630,6 +674,8 @@ def describe(env: PovEnvironment) -> dict:
         # page shows exactly one of the two — they answer the same question and a row
         # offering both would be a row where neither is clearly in charge.
         "schedule": schedule,
+        # The one-off warm-up booking, beside the schedule it is the exception to.
+        "wake": pov_wake.describe(env),
         # The spend cap. `priced` is what the page gates its control on: a cloud with no
         # price source would offer a cap that never accrues, which is worse than no cap.
         "spend": spend,

@@ -564,6 +564,9 @@ at 19:00.
 Setting a schedule is refused on a platform that has its own idle timer. The two answer
 the same question, and a POV carrying both is one where neither is in charge.
 
+For a single early start before a call, outside the schedule's hours or on a platform that
+refuses one, book a [warm-up](lifecycle.md#warming-a-pov-up-for-a-demo) instead.
+
 #### The customer can wake it
 
 A schedule without a customer-reachable resume is a broken demo: the POV sleeps at 19:00

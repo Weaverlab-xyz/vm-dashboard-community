@@ -80,7 +80,7 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         pov_setup_steps,
                         suspend_schedule, pov_share, spend_policy, pov_summary,
                         pov_use_case_scope, pov_use_cases, pov_vendor_access,
-                        pov_wireup)
+                        pov_wake, pov_wireup)
 from . import pov_gates
 from .auth import (get_current_user, has_explicit_permission, has_permission,
                    pov_env_scope, require_permission, require_pov_env_access,
@@ -2033,6 +2033,62 @@ def set_schedule(env_id: str, payload: ScheduleRequest,
     logger.info("POV %s: schedule set by %s", env.name,
                 getattr(current_user, "username", "?"))
     return {"schedule": suspend_schedule.describe(env)}
+
+
+class WakeRequest(BaseModel):
+    """A one-off warm-up before a demo. ``demo_at_local`` blank cancels the booking.
+
+    ``demo_at_local`` is the demo's start, ``YYYY-MM-DDTHH:MM`` in ``timezone`` (IANA,
+    the browser's own zone by default); ``lead_minutes`` is how long before it to start.
+    """
+    demo_at_local: str = ""
+    timezone: str = ""
+    lead_minutes: int | None = None
+
+
+@router.post("/managed/{env_id}/wake-at", dependencies=_POV_WRITE_OWN)
+def set_wake_at(env_id: str, payload: WakeRequest,
+                db: Session = Depends(get_db),
+                current_user: User = Depends(get_current_user)):
+    """Book, or cancel, a one-off start before a demo.
+
+    Allowed on every platform, including one with its own idle timer that refuses the
+    recurring schedule above: this only ever STARTS a lab, so it has nothing to fight
+    over. The booking is acted on by the reconcile pass (``pov_reconcile._sweep_wake``),
+    which queues the same ``pov_env_power`` job the Start button does.
+
+    Returns ``warnings``: reasons the lab may not be running for the whole call -- a lead
+    shorter than the reconcile interval, an idle timer shorter than the lead, a recurring
+    suspend that lands mid-call. Warnings, not refusals: each has a legitimate reading.
+    """
+    env = _env_or_404(db, env_id)
+    actor = getattr(current_user, "username", "") or ""
+    if not (payload.demo_at_local or "").strip():
+        pov_wake.clear(env)
+        db.commit()
+        logger.info("POV %s: warm-up cancelled by %s", env.name, actor)
+        return {"wake": pov_wake.describe(env), "warnings": []}
+
+    ok, why = pov_env_service.may_act_on(env)
+    if not ok:
+        raise HTTPException(status_code=409, detail=why)
+    if not env.platform_environment_id:
+        raise HTTPException(status_code=409,
+                            detail="this environment was never created on the platform")
+    try:
+        wake_at, demo_at, lead = pov_wake.plan(payload.demo_at_local, payload.timezone,
+                                               payload.lead_minutes)
+    except (pov_wake.WakeError, suspend_schedule.ScheduleError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    pov_wake.book(env, wake_at, demo_at, lead, by=actor, tz_name=payload.timezone)
+    db.commit()
+    logger.info("POV %s: warm-up booked by %s for %s (start %s)", env.name, actor,
+                demo_at.isoformat(), wake_at.isoformat())
+    return {"wake": pov_wake.describe(env),
+            "warnings": pov_wake.warnings(
+                env, wake_at, demo_at, interval_s=pov_reconcile.interval_seconds(),
+                idle_suspend=lab_platforms.supports(env.platform, "idle_suspend"))}
 
 
 class SpendCapRequest(BaseModel):

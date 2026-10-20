@@ -257,6 +257,12 @@
           write Terraform state) &mdash; then generate an access key.
         </p>
       </div>
+      <p class="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 text-xs text-blue-900">
+        A stored access key gets you started and stays supported. <strong>Recommended once
+        you're running:</strong> switch this cloud to the dashboard's own workload identity
+        and remove the access key, so none is stored.
+        <a href="/docs/access/workload-identity#dashboard-to-aws" target="_blank" class="underline">How</a>
+      </p>
       <div class="space-y-4">
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">Access Key ID</label>
@@ -354,6 +360,12 @@
         </p>
         <pre class="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 mt-2 text-xs font-mono text-gray-700 whitespace-pre-wrap">az ad sp create-for-rbac --name dashboard-dev --role Contributor --scopes /subscriptions/&lt;sub-id&gt;</pre>
       </div>
+      <p class="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 text-xs text-blue-900">
+        A stored client secret gets you started and stays supported. <strong>Recommended once
+        you're running:</strong> switch this cloud to the dashboard's own workload identity
+        and remove the client secret, so none is stored.
+        <a href="/docs/access/workload-identity#dashboard-to-azure" target="_blank" class="underline">How</a>
+      </p>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">Client ID (appId)</label>
@@ -658,6 +670,12 @@ gcloud projects add-iam-policy-binding &lt;PROJECT_ID&gt; \
 gcloud iam service-accounts keys create sa-key.json \
   --iam-account "dashboard-sa@&lt;PROJECT_ID&gt;.iam.gserviceaccount.com"</pre>
       </div>
+      <p class="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 text-xs text-blue-900">
+        A stored service-account key gets you started and stays supported. <strong>Recommended once
+        you're running:</strong> switch this cloud to the dashboard's own workload identity
+        and remove the service-account key, so none is stored.
+        <a href="/docs/access/workload-identity#dashboard-to-gcp" target="_blank" class="underline">How</a>
+      </p>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">Project ID</label>
@@ -790,6 +808,10 @@ gcloud iam service-accounts keys create sa-key.json \
           matching private-key PEM below. All fields may be left blank to skip OCI.
         </p>
       </div>
+      <p class="text-xs text-gray-500">
+        A stored API key is OCI's only option: the dashboard's workload identity covers AWS,
+        Azure and GCP, not OCI.
+      </p>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div class="sm:col-span-2">
           <label class="block text-sm font-medium text-gray-700 mb-1">Tenancy OCID</label>

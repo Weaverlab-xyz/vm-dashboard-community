@@ -7,7 +7,9 @@ Part of [Remote Agents](../remote-agents.md). What the dashboard holds, what the
 ### Central storage with SPIRE: the recommended model
 
 Keep each credential in the dashboard, attest the agent through SPIRE, and let the agent
-fetch the credential per job. In practice:
+fetch the credential per job. This is the agent's half of the dashboard-wide
+recommendation: an identity instead of a stored secret, and privilege only for the job that
+needs it ([Workload identity](../access/workload-identity.md)). In practice:
 
 1. **Migrate the agent to SPIRE.** Use **Migrate to SPIRE** on the Agents page and the
    [`docker-compose.spire.yml`](../../examples/remote-agent/docker-compose.spire.yml) overlay;

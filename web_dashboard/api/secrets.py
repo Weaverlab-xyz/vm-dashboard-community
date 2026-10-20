@@ -184,11 +184,13 @@ async def get_credential_sources(request: Request):
     documented boundary instead of a gap the operator has to infer.
     """
     _require_admin(request)
+    from ..services import cloud_federation
     from ..services import workload_credential_lease as leases
     out = []
     for cloud in ("aws", "azure", "gcp"):
         source = leases.source_for(cloud)
-        entry = {"cloud": cloud, "source": source, "leases": [], "problem": ""}
+        entry = {"cloud": cloud, "source": source, "leases": [], "problem": "",
+                 "federation_shadowed": cloud_federation.shadowed(cloud)}
         if source == "dynamic":
             configured = leases.purposes_for(cloud)
             if not configured:
@@ -207,7 +209,6 @@ async def get_credential_sources(request: Request):
             if leases.everyday_from_federation(cloud):
                 # No everyday lease to report: say what serves requests instead, and
                 # why it cannot, since outside jobs that is every call to the cloud.
-                from ..services import cloud_federation
                 entry["everyday"] = {"source": cloud_federation.SOURCE,
                                      "problem": cloud_federation.reason(cloud)}
         out.append(entry)

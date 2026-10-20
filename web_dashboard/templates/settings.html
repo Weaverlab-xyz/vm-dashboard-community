@@ -1395,8 +1395,8 @@
               <div>
                 <select x-model="panelCfg.ps_auth_mode"
                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-                  <option value="oauth">OAuth client credentials (above)</option>
-                  <option value="workload">Workload identity (BeyondTrust platform identity)</option>
+                  <option value="oauth">OAuth client credentials (above, a stored secret)</option>
+                  <option value="workload">Workload identity — recommended (BeyondTrust platform identity)</option>
                 </select>
                 <p class="text-[11px] text-gray-400 mt-1">
                   <strong>Workload identity</strong> presents this dashboard's own identity token instead of
@@ -2819,8 +2819,8 @@
               <div>
                 <select x-model="panelCfg.pra_auth_mode"
                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-                  <option value="oauth">OAuth client credentials (above)</option>
-                  <option value="workload">Workload identity (BeyondTrust platform identity)</option>
+                  <option value="oauth">OAuth client credentials (above, a stored secret)</option>
+                  <option value="workload">Workload identity — recommended (BeyondTrust platform identity)</option>
                 </select>
                 <p class="text-[11px] text-gray-400 mt-1">
                   <strong>Workload identity</strong> presents this dashboard's own identity token instead of
@@ -3256,8 +3256,8 @@
               <div>
                 <select x-model="panelCfg.epml_auth_mode"
                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-                  <option value="pat">Personal Access Token (stored)</option>
-                  <option value="workload">Workload identity (BeyondTrust platform identity)</option>
+                  <option value="pat">Personal Access Token (a stored secret)</option>
+                  <option value="workload">Workload identity — recommended (BeyondTrust platform identity)</option>
                 </select>
                 <p class="text-[11px] text-gray-400 mt-1">
                   <strong>Workload identity</strong> presents this dashboard's own identity token instead of
@@ -4418,8 +4418,8 @@
               <div>
                 <select x-model="panelCfg.entitle_auth_mode"
                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-                  <option value="token">API token (above)</option>
-                  <option value="workload">Workload identity (BeyondTrust platform identity)</option>
+                  <option value="token">API token (above, a stored secret)</option>
+                  <option value="workload">Workload identity — recommended (BeyondTrust platform identity)</option>
                 </select>
                 <p class="text-[11px] text-gray-400 mt-1">
                   <strong>Workload identity</strong> presents this dashboard's own identity token instead of
@@ -5157,7 +5157,7 @@
                   <input type="radio" name="pov-aws-source" value="key"
                          :checked="povAwsSource === 'key'" @change="choosePovAwsSource('key')"
                          class="border-gray-300 text-blue-600 focus:ring-blue-500">
-                  Access key
+                  Stored access key
                 </label>
                 <label class="flex items-center gap-2">
                   <input type="radio" name="pov-aws-source" value="spiffe"
@@ -5169,7 +5169,7 @@
                   <input type="radio" name="pov-aws-source" value="spiffe_wlc"
                          :checked="povAwsSource === 'spiffe_wlc'" @change="choosePovAwsSource('spiffe_wlc')"
                          class="border-gray-300 text-blue-600 focus:ring-blue-500">
-                  SPIFFE + Workload Credentials <span class="text-[11px] text-gray-500">privileged lease for jobs only</span>
+                  SPIFFE + Workload Credentials <span class="text-[11px] text-gray-500">privileged lease for jobs only</span> <span class="text-[11px] font-medium text-green-700">recommended</span>
                 </label>
               </div>
 
@@ -5350,7 +5350,7 @@
                   <input type="radio" name="pov-azure-source" value="secret"
                          :checked="povAzureSource === 'secret'" @change="choosePovAzureSource('secret')"
                          class="border-gray-300 text-blue-600 focus:ring-blue-500">
-                  Client secret
+                  Stored client secret
                 </label>
                 <label class="flex items-center gap-2">
                   <input type="radio" name="pov-azure-source" value="spiffe"
@@ -5362,7 +5362,7 @@
                   <input type="radio" name="pov-azure-source" value="spiffe_wlc"
                          :checked="povAzureSource === 'spiffe_wlc'" @change="choosePovAzureSource('spiffe_wlc')"
                          class="border-gray-300 text-blue-600 focus:ring-blue-500">
-                  SPIFFE + Workload Credentials <span class="text-[11px] text-gray-500">privileged password for jobs only</span>
+                  SPIFFE + Workload Credentials <span class="text-[11px] text-gray-500">privileged password for jobs only</span> <span class="text-[11px] font-medium text-green-700">recommended</span>
                 </label>
               </div>
 
@@ -5580,7 +5580,7 @@
                   <input type="radio" name="pov-gcp-source" value="key"
                          :checked="povGcpSource === 'key'" @change="choosePovGcpSource('key')"
                          class="border-gray-300 text-blue-600 focus:ring-blue-500">
-                  Service account key
+                  Stored service-account key
                 </label>
                 <label class="flex items-center gap-2">
                   <input type="radio" name="pov-gcp-source" value="spiffe"
@@ -5592,7 +5592,7 @@
                   <input type="radio" name="pov-gcp-source" value="spiffe_entitle"
                          :checked="povGcpSource === 'spiffe_entitle'" @change="choosePovGcpSource('spiffe_entitle')"
                          class="border-gray-300 text-blue-600 focus:ring-blue-500">
-                  SPIFFE + Entitle <span class="text-[11px] text-gray-500">write role granted just in time</span>
+                  SPIFFE + Entitle <span class="text-[11px] text-gray-500">write role granted just in time</span> <span class="text-[11px] font-medium text-green-700">recommended</span>
                 </label>
               </div>
 
@@ -6015,10 +6015,12 @@
               <span class="block text-[11px] text-gray-500">
                 An agent bound to a SPIFFE ID (Agents page) can then prove itself with a
                 short-lived JWT-SVID from a SPIRE sidecar and keep its signing key only in
-                memory — no key at rest on a cloud VM. Ed25519 enrolment codes keep working
-                either way and stay the default; sites behind a TLS-inspecting proxy usually
-                cannot reach a SPIRE server. See
-                <code class="font-mono">examples/remote-agent/docker-compose.spire.yml</code>.
+                memory — no key at rest on a cloud VM. <strong>Recommended</strong> wherever
+                agents can reach it. Ed25519 enrolment codes keep working either way and stay
+                supported for sites that cannot: a TLS-inspecting proxy usually blocks a SPIRE
+                server. See
+                <code class="font-mono">examples/remote-agent/docker-compose.spire.yml</code> and
+                <a href="/docs/access/workload-identity#remote-agents" target="_blank" class="text-blue-600 hover:underline">why</a>.
               </span>
             </span>
           </label>
@@ -6158,6 +6160,15 @@
                       <span :class="entry[1] === 'SPIFFE federation' ? 'text-green-700' : 'text-gray-700'"
                             x-text="entry[1]"></span>
                     </div>
+                  </template>
+                  <!-- Federation ready, but a stored key outranks it: the panel above looks
+                       keyless and is not. cloud_federation.shadowed. -->
+                  <template x-for="cloud in (spiffeIdentity.shadowed || [])" :key="'shadow-' + cloud">
+                    <p class="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-900">
+                      <span class="font-medium" x-text="'SPIFFE federation is ready for ' + cloud.toUpperCase() + ', but the stored key still wins.'"></span>
+                      Remove the stored key to go keyless; until then every call uses it.
+                      <a href="/docs/access/workload-identity#moving-a-surface-over" target="_blank" class="underline">How</a>
+                    </p>
                   </template>
                   <template x-for="entry in Object.entries(spiffeIdentity.tokens || {})" :key="entry[0]">
                     <div>
@@ -8092,8 +8103,8 @@
               <label class="block text-sm font-medium text-gray-700 mb-1">Authentication</label>
               <select x-model="panelCfg.wlc_auth_mode"
                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-                <option value="pat">Personal Access Token (stored)</option>
-                <option value="workload">Workload identity (nothing stored)</option>
+                <option value="pat">Personal Access Token (a stored secret)</option>
+                <option value="workload">Workload identity — recommended (nothing stored)</option>
               </select>
               <p class="text-[11px] text-gray-400 mt-1">
                 <strong>Workload identity</strong> is available when the platform hands this

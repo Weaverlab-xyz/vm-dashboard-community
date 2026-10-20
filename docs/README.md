@@ -72,6 +72,7 @@ folder of the pages themselves. A page that stands alone is a row on its own.
 | [Identity and access](access.md) | you are deciding who and what may use the dashboard, how it keeps credentials, or how you would prove what happened. |
 | [Permissions](access/permissions.md) | you are deciding what a user may see or do — and especially before ticking "Full access", or handing a POV to a customer stakeholder. |
 | [Service Accounts](access/service-accounts.md) | something that is not a person — a CI job, an MCP agent, a script — needs to call the API, and you would otherwise hand it a PAT. OAuth 2.0 client credentials, built in, no IdP needed. |
+| [Workload identity](access/workload-identity.md) | you still store a cloud key, a product token or an agent's signing key — the recommended model replaces each with an identity, and grants write privilege just in time. |
 | [Secrets Management](access/secrets-management.md) | you are deciding where to store cloud credentials, and how to evolve that over time. |
 | [Audit Log](access/audit-log.md) | you need to show who did what, or to satisfy yourself that the record has not been edited. |
 | [Directories](directories.md) | you want Windows servers joined to an Active Directory domain (built in a cloud, one you already run, or your on-premises domain), want to manage an on-prem AD or LDAP directory through a remote agent, or want to browse and change group membership in Entra ID, Okta or PingOne. The pages are under [`directories/`](directories.md). |

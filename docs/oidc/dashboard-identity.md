@@ -4,12 +4,21 @@
 
 Part of [OIDC and single sign-on](../oidc.md). The dashboard publishes an OIDC issuer of its own, and AWS, Azure, GCP, k3s and BeyondTrust Workload Credentials can trust the short-lived tokens it signs instead of a stored key. The tokens come from the same SPIRE server that [attests remote agents](../remote-agents/spire-attestation.md); the server itself is on [SPIFFE and SPIRE](../spiffe.md).
 
-**Preview.** The dashboard keeps a short-lived JWT-SVID per audience in a file, publishes
-the discovery document and keys a cloud fetches to verify it, and — once you retire a
-stored key — uses those tokens for its own AWS, Azure and GCP calls, including Terraform and
-Packer. **AWS has accepted these tokens from a live install** as the everyday credential,
-with jobs on a Workload Credentials provisioning lease. Azure and GCP have not yet; the
-first one you set up there is the test. The design, including what is not built, is
+**This is the recommended way for the dashboard to reach a cloud**, in place of a stored
+access key, client secret or service-account key; why, and what to pair it with so the
+identity holds no standing write privilege, is on
+[Workload identity](../access/workload-identity.md#the-dashboards-cloud-credentials). The
+dashboard keeps a short-lived JWT-SVID per audience in a file, publishes the discovery
+document and keys a cloud fetches to verify it, and — once you retire a stored key — uses
+those tokens for its own AWS, Azure and GCP calls, including Terraform and Packer.
+
+| Cloud | Status |
+|---|---|
+| AWS | **proven live** 2026-10-15: `AssumeRoleWithWebIdentity` from a dashboard on Azure Container Apps, with Workload Credentials authenticated over the same identity; also run as the everyday credential, with jobs on a Workload Credentials provisioning lease |
+| Azure | built and covered by tests; not yet run against a live tenant |
+| GCP | built and covered by tests; not yet run against a live project |
+
+The design, including what is not built, is
 [The dashboard as a SPIFFE workload](../design/dashboard-workload-identity.md).
 
 ## What it does
@@ -33,7 +42,8 @@ anything still pointed at it fails now rather than when it expires.
 the stored key, then this identity, then whatever the SDK finds on its own. So ticking
 the box changes nothing until you clear that cloud's stored key — do that only after the
 cloud trusts the issuer (below). The panel shows which one each cloud is using, and when it
-is not this identity, why not.
+is not this identity, why not. When federation is otherwise ready but a stored key is still
+set, it says so in amber: the install looks keyless and is not until you remove the key.
 
 ## Setting it up
 
