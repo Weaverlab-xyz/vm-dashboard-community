@@ -2,9 +2,10 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you are moving a cloud off its standing access key, and need the lease behaviour, the IAM chain and what an issuance costs before you turn it on.
 
-> **Preview.** Dynamic AWS and Azure are **implemented and have never been exercised
-> against a live dynamic secret.** The lease mechanics below are read off the
-> implementation and the API contract, not off a run. Workload Credentials itself is
+> **Dynamic AWS is verified live; dynamic Azure is not yet.** AWS leases have been
+> minted and used against a live dynamic secret. Azure is implemented, but its lease
+> mechanics below are read off the implementation and the API contract, not off a
+> run. Workload Credentials itself is
 > generally available and has its own toggle under Settings → Integrations → BeyondTrust;
 > it is off by default, and each cloud is opted in separately.
 

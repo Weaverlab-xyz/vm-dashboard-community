@@ -14,7 +14,7 @@ those tokens for its own AWS, Azure and GCP calls, including Terraform and Packe
 
 | Cloud | Status |
 |---|---|
-| AWS | **proven live** 2026-10-15: `AssumeRoleWithWebIdentity` from a dashboard on Azure Container Apps, with Workload Credentials authenticated over the same identity |
+| AWS | **proven live** 2026-10-15: `AssumeRoleWithWebIdentity` from a dashboard on Azure Container Apps, with Workload Credentials authenticated over the same identity; also run as the everyday credential, with jobs on a Workload Credentials provisioning lease |
 | Azure | built and covered by tests; not yet run against a live tenant |
 | GCP | built and covered by tests; not yet run against a live project |
 

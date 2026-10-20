@@ -166,7 +166,7 @@ def _cfg_bool(key: str) -> bool:
 def dynamic_enabled(cloud: str) -> bool:
     """Whether `cloud` should take its credentials from Workload Credentials.
 
-    Both the master preview flag and the per-cloud flag must be on. Two gates rather than
+    Both the integration's own flag and the per-cloud flag must be on. Two gates rather than
     one so enabling the feature to browse secrets cannot silently reroute a cloud's
     credentials as a side effect.
     """

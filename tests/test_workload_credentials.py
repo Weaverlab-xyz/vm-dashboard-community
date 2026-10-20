@@ -1155,8 +1155,8 @@ def _select_block(html, x_model):
 def test_workload_credentials_is_offered_as_a_migration_target():
     html = _read("web_dashboard", "templates", "secrets", "index.html")
     block = _select_block(html, "migrateTarget")
-    # Driven by /api/secrets/backends, which already omits `wlc` while the preview
-    # flag is off — so the gating stays in one place instead of being restated here.
+    # Driven by /api/secrets/backends, which already omits `wlc` while the integration
+    # toggle is off — so the gating stays in one place instead of being restated here.
     assert "backends" in block, "the target list is not driven by the backend list"
     assert "<option value=" not in block, \
         "a literal option list is what hid the wlc backend in the first place"
@@ -1208,7 +1208,7 @@ def test_the_bootstrap_skip_names_the_way_out():
     assert "entra" in reason
 
 
-def test_a_wlc_target_is_refused_while_the_preview_flag_is_off():
+def test_a_wlc_target_is_refused_while_the_integration_is_off():
     """Otherwise every secret fails its own write with "not configured", which
     reads as a broken vault rather than an unset flag."""
     api = _read("web_dashboard", "api", "secrets.py")
