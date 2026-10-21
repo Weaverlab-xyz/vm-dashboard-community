@@ -30,8 +30,9 @@ instances get a public address for egress instead, which for a handful of VMs co
 fraction of a NAT's standing charge and, with no inbound rules, exposes nothing.
 
 **A cloud environment has no idle timer.** Nothing here suspends anything on its own;
-``pov_reconcile`` drives the schedule and enqueues a normal ``pov_env_power`` job. This
-module only ever does what it was asked to do, once.
+``pov_reconcile`` drives the schedule and the idle check, and enqueues a normal
+``pov_env_power`` job. This module only ever does what it was asked to do, once — the
+idle check included: ``idle_check`` reads metrics and gives a verdict, and stops nothing.
 """
 from __future__ import annotations
 
@@ -79,6 +80,45 @@ DEFAULT_DISK_GB = 30
 # instance stops, it does not suspend to RAM, and offering "suspended" would be a word the
 # platform silently reinterprets. `pov_env_service` writes whatever comes back.
 VALID_RUNSTATES = ("running", "stopped")
+
+# Skytap's other two runstates, as a cloud means them. The POV page offers ONE Suspend
+# button on every platform and sends "suspended", and refusing that word here is what
+# left every cloud POV with a Suspend button that could never work. A cloud stop is the
+# nearest thing a cloud has: the compute bill stops, the disks stay. "halted" (Skytap's
+# hard power-off) lands in the same place. Translated on the way in, so the runstate
+# written back to the row is what the cloud reached — "stopped" — not a word it never
+# reported.
+RUNSTATE_ALIASES = {"suspended": "stopped", "halted": "stopped"}
+
+
+def cloud_runstate(runstate: str) -> str:
+    """``runstate`` as a cloud environment can reach it; unknown words pass through."""
+    target = (runstate or "").strip().lower()
+    return RUNSTATE_ALIASES.get(target, target)
+
+# The dashboard's idle timer, for a cloud with none of its own (`dashboard_idle_suspend`
+# in lab_platforms). An environment is idle when EVERY VM's CPU and network have stayed
+# under these for the whole window, read from the cloud's own metrics — no guest agent,
+# so it works on every POV, including one whose control node never came up.
+#
+# Deliberately low, because the two ways to be wrong are not equal. Reading a busy POV as
+# idle stops it mid-demo; reading an idle one as busy costs an hour of compute. A Windows
+# Update download, a Defender scan or an agent chattering keeps a POV up longer, which is
+# the cheap mistake. An RDP session through PRA moves far more than the network threshold
+# per period whenever anybody is actually clicking.
+#
+# The blind spot, stated: a customer reading a static screen over PRA for the whole window
+# generates almost nothing, and looks idle. Skytap's timer has the same one.
+IDLE_PERIOD_S = 300                       # EC2 basic monitoring's own granularity
+IDLE_CPU_PERCENT = 5.0                    # average over a period, per VM
+IDLE_NETWORK_BYTES = 2 * 1024 * 1024      # in + out over a period, per VM
+# Metrics arrive late — EC2 basic monitoring can trail by 10 minutes. The newest periods
+# are allowed to be missing; any that HAS arrived still counts, so activity in the last
+# few minutes keeps a POV up as soon as it is visible.
+IDLE_METRICS_LAG_S = 900
+# The shortest idle window that means anything given the lag and the period above.
+IDLE_MIN_WINDOW_S = 1800
+IDLE_MAX_WINDOW_S = 86400
 
 # How long to wait for every instance in an environment to reach a runstate. Generous:
 # this covers a cold Windows boot as well as a Linux one, and the caller is a job with its
@@ -591,11 +631,11 @@ async def delete_environment(cloud: str, env_id: str) -> None:
 
 
 async def set_runstate(cloud: str, env_id: str, runstate: str) -> dict:
-    target = (runstate or "").strip().lower()
+    target = cloud_runstate(runstate)
     if target not in VALID_RUNSTATES:
         raise CloudEnvError(
             f"{cloud} POV environments can be {' or '.join(VALID_RUNSTATES)}, not "
-            f"{runstate!r} — a cloud instance has no suspend-to-RAM")
+            f"{runstate!r}")
     await driver(cloud).power(env_id, recorded_region(env_id, cloud),
                               "start" if target == "running" else "stop")
     # Best effort. The caller wants the new runstate for the row, and a read that has not
@@ -626,7 +666,7 @@ async def wait_for_runstate(cloud: str, env_id: str, target: str,
     Every VM, not the first: an environment is one unit, and reporting "running" while a
     Windows target is still coming up would send the wire-up at a VM with no address yet.
     """
-    target = (target or "").strip().lower()
+    target = cloud_runstate(target)
     deadline = time.monotonic() + max(1, int(timeout_s))
     last = None
     while True:
@@ -648,6 +688,58 @@ async def wait_for_runstate(cloud: str, env_id: str, target: str,
     raise CloudEnvError(
         f"{env_id} did not reach {target!r} within {timeout_s // 60} minutes; its VMs "
         f"report {seen}. Check the {cloud} console, then retry the action.")
+
+
+# ── the idle check ───────────────────────────────────────────────────────────
+
+def idle_verdict(activity: dict, *, window_s: int, now_ts: float) -> tuple[bool, str]:
+    """Whether an environment has been idle for ``window_s``, and why not when it has not.
+
+    ``activity`` is what a driver's ``idle_activity`` returns: ``{vm_name: [{"at": epoch
+    seconds of the period's start, "cpu": percent or None, "net": bytes or None}]}`` for
+    every RUNNING VM. Pure, so the decision is tested without a cloud.
+
+    **Missing data is never idle.** A stopped instance reports nothing, so a VM that has
+    not been reporting since the window began was not running for all of it — which is
+    also what gives an environment started by hand a full window before it can be stopped
+    again. An empty environment, or a driver that read nothing, is "not idle" too.
+    """
+    if not activity:
+        return False, "no running VMs reported any metrics"
+    window_start = now_ts - window_s
+    # Periods that must have arrived by now. The newest ones may still be in flight.
+    expected = max(1, (window_s - IDLE_METRICS_LAG_S) // IDLE_PERIOD_S)
+    for name, points in sorted(activity.items()):
+        seen = [p for p in points or [] if p.get("at", 0) >= window_start - IDLE_PERIOD_S]
+        for p in seen:
+            cpu, net = p.get("cpu"), p.get("net")
+            if cpu is not None and cpu >= IDLE_CPU_PERCENT:
+                return False, f"{name} CPU at {cpu:.0f}%"
+            if net is not None and net >= IDLE_NETWORK_BYTES:
+                return False, f"{name} moved {net / 1048576:.1f} MB in five minutes"
+        complete = [p for p in seen if p.get("cpu") is not None and p.get("net") is not None]
+        if len(complete) < expected:
+            return False, (f"{name} has {len(complete)} of the {expected} metric periods "
+                           f"this window needs — it has not been running for all of it")
+        if min(p["at"] for p in complete) > window_start + IDLE_PERIOD_S:
+            return False, f"{name} has not been running for the whole window"
+    return True, ""
+
+
+async def idle_check(cloud: str, env_id: str, window_s: int) -> tuple[bool, str]:
+    """``idle_verdict`` over this environment's live metrics.
+
+    Raises if the driver has no ``idle_activity`` — a platform claiming
+    ``dashboard_idle_suspend`` without one is a registry bug, and the sweep that calls
+    this logs it against the row rather than guessing.
+    """
+    mod = driver(cloud)
+    reader = getattr(mod, "idle_activity", None)
+    if reader is None:
+        raise CloudEnvError(f"{cloud} has no idle metrics reader")
+    window_s = max(IDLE_MIN_WINDOW_S, min(IDLE_MAX_WINDOW_S, int(window_s)))
+    activity = await reader(env_id, recorded_region(env_id, cloud), window_s)
+    return idle_verdict(activity, window_s=window_s, now_ts=time.time())
 
 
 # ── Test connection: the jobs' credential, when it is a Workload Credentials lease ──

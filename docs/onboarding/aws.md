@@ -66,6 +66,7 @@ Everything past that is per-feature. Each row below names the `Sid` in
 | Kubernetes clusters (EKS) | `eks:*`, role CRUD scoped to `role/k8s-*` and `role/*-role`, `iam:CreateServiceLinkedRole` for the `eks*` service principals, `iam:GetRole` | `DashboardEKS`, `DashboardRoles`, `DashboardEKSServiceLinkedRole`, `DashboardEKSGetRole` |
 | Cloud databases (RDS) | DB instance and DB subnet group CRUD, `rds:DescribeDBEngineVersions`, `rds:DescribeOrderableDBInstanceOptions`, tag actions | `DashboardRDS` |
 | Cloud Functions (Lambda) | `lambda:*`, plus Secrets Manager on `secret:*-fn-secret-*` | `DashboardLambda`, `DashboardSecretsManager` |
+| POV idle suspend (CloudWatch metrics) | `cloudwatch:GetMetricData` | `DashboardCloudWatchMetrics` |
 | Cloud Costs | `ce:GetCostAndUsage`, `ce:GetCostForecast`, `ce:GetDimensionValues`, `ce:GetTags` | `DashboardCostExplorer` |
 | External secrets backend | Secrets Manager CRUD on `secret:dashboard/*` — see [secrets-management.md](../access/secrets-management.md#iam-permissions-required-per-backend) | `DashboardSecretsManager` |
 | Password Safe VM onboarding | `ssm:SendCommand`, `ssm:GetCommandInvocation`, `ssm:ListCommandInvocations` | `DashboardSSMRunCommand` |

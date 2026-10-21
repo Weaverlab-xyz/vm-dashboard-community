@@ -305,7 +305,7 @@
           </select>
         </div>
       </template>
-      <div x-show="current.idle_suspend">
+      <div x-show="current.idle_suspend || current.dashboard_idle_suspend">
         <label class="block text-sm font-medium text-gray-700 mb-1">Suspend when idle</label>
         <select x-model.number="form.suspend_on_idle_seconds"
                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
@@ -315,6 +315,9 @@
           <option :value="7200">After 2 hours</option>
         </select>
         <p class="text-xs text-gray-400 mt-1">The biggest lever on lab spend. Suspending is not destroying.</p>
+        <p x-show="current.dashboard_idle_suspend" class="text-xs text-gray-400 mt-1">
+          On a cloud, idle means every VM's CPU and network stayed quiet for that long; the
+          VMs are stopped, and their disks kept.</p>
       </div>
     </div>
     <div class="flex items-center gap-2">
@@ -713,12 +716,14 @@
               <td class="px-4 py-2">
                 <!-- The suspend schedule, for a platform with no idle timer of its own.
                      Exactly one of the two ever renders: they answer the same question,
-                     and a row offering both is one where neither is clearly in charge. -->
-                <template x-if="e.suspend_on_idle_seconds">
+                     and a row offering both is one where neither is clearly in charge.
+                     The exception is a cloud, where the DASHBOARD runs the idle timer
+                     too: both are ours, nothing fights, so it shows under the schedule. -->
+                <template x-if="e.suspend_on_idle_seconds && e.idle_suspend_by !== 'dashboard'">
                   <p class="text-xs text-gray-600 whitespace-nowrap"
                      x-text="Math.round(e.suspend_on_idle_seconds / 60) + ' min idle'"></p>
                 </template>
-                <template x-if="!e.suspend_on_idle_seconds">
+                <template x-if="!e.suspend_on_idle_seconds || e.idle_suspend_by === 'dashboard'">
                   <div class="space-y-0.5">
                     <p class="text-xs whitespace-nowrap"
                        :class="e.schedule && e.schedule.scheduled ? 'text-gray-600' : 'text-gray-300'"
@@ -728,6 +733,21 @@
                                : 'always on'"></p>
                     <button @click="setSchedule(e)" :disabled="!actionable(e)"
                             title="Suspend and resume this POV on a schedule"
+                            class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed">edit</button>
+                  </div>
+                </template>
+                <template x-if="e.idle_suspend_by === 'dashboard'">
+                  <div class="space-y-0.5">
+                    <p class="text-xs whitespace-nowrap"
+                       :class="e.suspend_on_idle_seconds ? 'text-gray-600' : 'text-gray-300'"
+                       :title="e.suspend_on_idle_seconds
+                               ? 'Stopped once CPU and network on every VM have been quiet this long'
+                               : 'Never stopped for being idle'"
+                       x-text="e.suspend_on_idle_seconds
+                               ? Math.round(e.suspend_on_idle_seconds / 60) + ' min idle'
+                               : 'no idle stop'"></p>
+                    <button @click="setIdleSuspend(e)" :disabled="!actionable(e)"
+                            title="Stop this POV when its VMs have been idle this long"
                             class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed">edit</button>
                   </div>
                 </template>
@@ -2178,6 +2198,30 @@ function povPage(tabSlugs) {
         this.notice = `${env.name}: ` + (data.schedule.scheduled
           ? data.schedule.summary
           : 'schedule removed — it now runs until somebody suspends it');
+        await this.load();
+      } catch (e) { this.error = e.message; }
+    },
+
+    // The dashboard's idle timer on a cloud POV. A prompt, like setSchedule() above.
+    async setIdleSuspend(env) {
+      const cur = env.suspend_on_idle_seconds ? Math.round(env.suspend_on_idle_seconds / 60) : 60;
+      const raw = window.prompt(
+        'Stop this POV after how many minutes with every VM idle (CPU and network quiet)?\n' +
+        '30 to 1440. 0 turns idle suspend off.',
+        String(cur));
+      if (raw === null) return;
+      const minutes = parseInt(raw.trim() || '0', 10);
+      if (Number.isNaN(minutes) || minutes < 0) {
+        this.error = `${raw} is not a number of minutes`;
+        return;
+      }
+      this.error = ''; this.notice = '';
+      try {
+        const data = await this.post(`/api/pov/managed/${env.id}/idle-suspend`,
+                                     { seconds: minutes * 60 });
+        this.notice = `${env.name}: ` + (data.suspend_on_idle_seconds
+          ? `stops after ${minutes} minutes idle`
+          : 'idle suspend off');
         await this.load();
       } catch (e) { this.error = e.message; }
     },

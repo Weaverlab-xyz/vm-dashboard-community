@@ -2105,6 +2105,46 @@ def set_schedule(env_id: str, payload: ScheduleRequest,
     return {"schedule": suspend_schedule.describe(env)}
 
 
+class IdleSuspendRequest(BaseModel):
+    """The idle window in seconds. 0 turns idle suspend off."""
+    seconds: int = 0
+
+
+@router.post("/managed/{env_id}/idle-suspend", dependencies=_POV_WRITE_OWN)
+def set_idle_suspend(env_id: str, payload: IdleSuspendRequest,
+                     db: Session = Depends(get_db),
+                     current_user: User = Depends(get_current_user)):
+    """Set or clear the dashboard's idle timer on a cloud POV.
+
+    Only where the DASHBOARD is the timer (``dashboard_idle_suspend``). Skytap holds its
+    own ``suspend_on_idle`` and this row is a copy the reconcile pass refreshes from it,
+    so a write here would be silently put back ten minutes later.
+    """
+    from ..services import pov_cloud_env
+    env = _env_or_404(db, env_id)
+    if not lab_platforms.supports(env.platform, "dashboard_idle_suspend"):
+        label = lab_platforms.capabilities(env.platform)["label"]
+        raise HTTPException(
+            status_code=409,
+            detail=f"{label} POVs have no dashboard idle timer to set.")
+    seconds = int(payload.seconds or 0)
+    if seconds and not (pov_cloud_env.IDLE_MIN_WINDOW_S <= seconds
+                        <= pov_cloud_env.IDLE_MAX_WINDOW_S):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"the idle window must be between "
+                    f"{pov_cloud_env.IDLE_MIN_WINDOW_S // 60} minutes and "
+                    f"{pov_cloud_env.IDLE_MAX_WINDOW_S // 3600} hours, or 0 to turn it "
+                    f"off — the cloud's metrics arrive in five-minute steps and up to "
+                    f"fifteen minutes late, so a shorter one could not tell a pause from "
+                    f"an idle lab"))
+    env.suspend_on_idle_seconds = seconds or None
+    db.commit()
+    logger.info("POV %s: idle suspend set to %ss by %s", env.name, seconds,
+                getattr(current_user, "username", "?"))
+    return {"suspend_on_idle_seconds": seconds}
+
+
 class WakeRequest(BaseModel):
     """A one-off warm-up before a demo. ``demo_at_local`` blank cancels the booking.
 

@@ -27,6 +27,8 @@ and the one most likely to be interrupted.
 from __future__ import annotations
 
 import logging
+import re
+from datetime import datetime, timedelta, timezone
 
 from . import aws_service, pov_cloud_env as env
 from .aws_service import AWSError
@@ -796,6 +798,86 @@ def _power_sync(env_id: str, region: str, action: str) -> int:
 async def power(env_id: str, region: str, action: str) -> None:
     count = await aws_service._to_thread(_power_sync, env_id, region, action)
     logger.info("POV %s: %s %d instances in %s", env_id, action, count, region)
+
+
+# ── idle metrics ─────────────────────────────────────────────────────────────
+
+# GetMetricData takes at most 500 queries a call; three per instance.
+_METRIC_INSTANCES_PER_CALL = 150
+_QUERY_ID_RE = re.compile(r"^(cpu|nin|nout)(\d+)$")
+
+
+def _idle_activity_sync(env_id: str, region: str, window_s: int) -> dict:
+    """``{vm name: [{at, cpu, net}]}`` from CloudWatch, for ``pov_cloud_env.idle_verdict``.
+
+    Basic monitoring only — the free five-minute metrics every instance publishes, so a
+    POV needs no detailed monitoring, no agent and no alarm of its own. An instance that
+    is not running is listed with no points, which the verdict reads as "not idle".
+    """
+    instances = _describe_sync(region, _env_filter(env_id))
+    out = {}
+    names = {}
+    for inst in instances:
+        iid = inst.get("InstanceId") or ""
+        tags = {t["Key"]: t["Value"] for t in inst.get("Tags") or []}
+        name = tags.get(env.TAG_NAME) or iid
+        # Keyed per instance: two VMs sharing a Name tag merged into one series would
+        # look like one VM with complete coverage.
+        names[iid] = name if name not in out else f"{name} ({iid})"
+        out[names[iid]] = []
+    running = [i["InstanceId"] for i in instances
+               if ((i.get("State") or {}).get("Name") or "") == "running"]
+    if not running:
+        return out
+
+    cw = aws_service.aws_client("cloudwatch", region, pinned=True)
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(seconds=window_s + env.IDLE_PERIOD_S)
+    for i in range(0, len(running), _METRIC_INSTANCES_PER_CALL):
+        chunk = running[i:i + _METRIC_INSTANCES_PER_CALL]
+        queries = []
+        for n, iid in enumerate(chunk):
+            for qid, metric, stat in (("cpu", "CPUUtilization", "Average"),
+                                      ("nin", "NetworkIn", "Sum"),
+                                      ("nout", "NetworkOut", "Sum")):
+                queries.append({
+                    "Id": f"{qid}{n}",
+                    "MetricStat": {
+                        "Metric": {"Namespace": "AWS/EC2", "MetricName": metric,
+                                   "Dimensions": [{"Name": "InstanceId", "Value": iid}]},
+                        "Period": env.IDLE_PERIOD_S, "Stat": stat},
+                    "ReturnData": True})
+        # {instance index: {period start: {"cpu": .., "nin": .., "nout": ..}}}
+        by_period: dict = {}
+        token = None
+        while True:
+            kwargs = {"MetricDataQueries": queries, "StartTime": start, "EndTime": end}
+            if token:
+                kwargs["NextToken"] = token
+            resp = cw.get_metric_data(**kwargs)
+            for result in resp.get("MetricDataResults") or []:
+                m = _QUERY_ID_RE.match(result.get("Id") or "")
+                if not m:
+                    continue
+                qid, idx = m.group(1), int(m.group(2))
+                for ts, val in zip(result.get("Timestamps") or [],
+                                   result.get("Values") or []):
+                    slot = by_period.setdefault(idx, {}).setdefault(ts.timestamp(), {})
+                    slot[qid] = val
+            token = resp.get("NextToken")
+            if not token:
+                break
+        for idx, periods in by_period.items():
+            name = names[chunk[idx]]
+            for at, vals in sorted(periods.items()):
+                net = (vals["nin"] + vals["nout"]
+                       if "nin" in vals and "nout" in vals else None)
+                out[name].append({"at": at, "cpu": vals.get("cpu"), "net": net})
+    return out
+
+
+async def idle_activity(env_id: str, region: str, window_s: int) -> dict:
+    return await aws_service._to_thread(_idle_activity_sync, env_id, region, window_s)
 
 
 # ── teardown ─────────────────────────────────────────────────────────────────

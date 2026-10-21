@@ -572,6 +572,45 @@ the same question, and a POV carrying both is one where neither is in charge.
 For a single early start before a call, outside the schedule's hours or on a platform that
 refuses one, book a [warm-up](lifecycle.md#warming-a-pov-up-for-a-demo) instead.
 
+### Idle suspend on AWS
+
+On AWS the dashboard also runs an **idle timer**, the nearest thing to Skytap's
+`suspend_on_idle`. Pick the window on the create form (*Suspend when idle*, one hour by
+default) or change it later from the *Sleeps* column. Allowed values are 30 minutes to
+24 hours, or off.
+
+**Idle means every VM was quiet for the whole window.** On each ten-minute reconcile pass
+the dashboard reads the free five-minute EC2 metrics from CloudWatch for every running POV
+that has a window set. It stops the POV only when, for every VM, each period in the window
+shows:
+
+| Metric | Must stay under |
+|---|---|
+| `CPUUtilization`, average | 5% |
+| `NetworkIn` + `NetworkOut` | 2 MB per five minutes |
+
+Missing data never counts as idle. A VM that has not been reporting since the window
+began was not running for all of it, so a POV you start by hand gets a full window before
+the timer can stop it again. Metrics can arrive up to fifteen minutes late, so the newest
+periods may be missing. Any period that *has* arrived still counts, though, so activity
+keeps the POV up as soon as CloudWatch has it.
+
+The stop is the same `pov_env_power` job the **Suspend** button creates, attributed to
+`pov-idle`. A stop means the compute bill ends and the disks are kept; see the cost note
+above.
+
+**The blind spot.** A customer reading a static screen over PRA for the whole window
+makes almost no traffic and looks idle. Skytap's timer has the same gap. If that is a risk
+for a particular demo, turn idle suspend off for that POV and rely on the schedule.
+
+The timer and the schedule can both be set on the same POV. The dashboard runs both, so
+they don't conflict: the schedule can resume a POV at 08:00, and the idle timer stops it
+again at 09:00 if nobody used it.
+
+The dashboard's AWS credential needs `cloudwatch:GetMetricData`, the
+`DashboardCloudWatchMetrics` statement in `setup-aws.sh`. Without it the idle check
+fails, nothing is stopped, and the reconcile job log says why.
+
 #### The customer can wake it
 
 A schedule without a customer-reachable resume is a broken demo: the POV sleeps at 19:00
@@ -796,7 +835,7 @@ Read these off the platform's capability row rather than discovering them:
 | Not available | Why, and what to use instead |
 |---|---|
 | **Share link** | No cloud has publish sets. The customer's front door is PRA, which makes PRA **required** for a cloud POV where it is optional on Skytap |
-| **Idle suspend** | No cloud has a platform idle timer. The dashboard supplies a scheduled suspend instead |
+| **Idle suspend** | No cloud has a platform idle timer. The dashboard supplies a [scheduled suspend](#the-suspend-schedule) on every cloud, and on **AWS** an [idle timer of its own](#idle-suspend-on-aws) as well |
 | **Stored credentials** | **AWS, GCP and OCI.** None holds a guest login to read back, so set it yourself: the **Login** column on the POV's VMs tab takes a username and, on these clouds, a password. The password is stored encrypted, never shown again, and cleared at teardown. The Resource Broker, Entitle agent and guest-step runs are refused until the guest they target has both. Azure generates one — see above |
 | **Published services** | No NAT-a-guest-port primitive, and none needed — access is PRA through this POV's own Gateway |
 
