@@ -430,7 +430,11 @@ def power_pool(
         try:
             jobs.append(vdesktop_service.queue_seat_power(
                 db, seat["id"], op, current_user.username))
-        except (LookupError, VDesktopError) as e:
+        except LookupError:
+            # Dropped between the list and the queue. A fixed reason: the exception's
+            # own text is not something to hand back in a response.
+            skipped.append({"seat_id": seat["id"], "reason": "Seat no longer exists."})
+        except VDesktopError as e:
             skipped.append({"seat_id": seat["id"], "reason": str(e)})
     return {"jobs": jobs, "skipped": skipped}
 
