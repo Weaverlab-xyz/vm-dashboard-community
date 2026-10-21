@@ -7174,6 +7174,24 @@
             </div>
           </div>
 
+          <!-- Azure VDI — adopting existing desktops -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Azure — adopt existing desktops <span class="normal-case text-gray-400">(optional)</span></p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Discovery resource groups</label>
+              <input type="text" x-model="panelCfg.azure_desktops_discovery_resource_groups"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="avd-hosts-rg, persistent-vdi-rg">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Comma-separated. <strong>Adopt existing</strong> on the Desktops page lists the VMs in these
+                resource groups so you can bring a VDI you built elsewhere (an AVD session host, say) under
+                dashboard power control. The dashboard's Azure identity needs <strong>Reader</strong> and
+                <strong>Virtual Machine Contributor</strong> on each one. Adopted VMs are never tagged and
+                never deleted — deleting an adopted pool only stops managing them.
+              </p>
+            </div>
+          </div>
+
 
           <!-- AWS desktop pool defaults -->
           <div class="border-t border-gray-100 pt-4">

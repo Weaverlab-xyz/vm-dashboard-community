@@ -62,6 +62,13 @@ class PoolScaleRequest(BaseModel):
     count: int                       # desired seat count
 
 
+class PoolAdoptRequest(BaseModel):
+    """Adopt existing Azure VMs (from GET /api/desktops/discover) as a pool. The
+    dashboard never terminates or tags an adopted VM."""
+    pool_name: str
+    vm_resource_ids: list[str]       # full ARM ids, as discovery returned them
+
+
 class VirtualDesktopInfo(BaseModel):
     id: str
     cloud: str
