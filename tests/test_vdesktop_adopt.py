@@ -32,16 +32,20 @@ _TMPDB = os.path.join(tempfile.mkdtemp(prefix="vdesktop-adopt-"), "test.db")
 os.environ["DATABASE_URL"] = f"sqlite:///{_TMPDB}"
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-vdesktop-adopt-tests")
 
+# Probe the third-party deps by name; the first-party imports below are UNGUARDED so a
+# broken one fails loudly instead of skipping a file whose job is the never-terminate rule.
 try:
-    from web_dashboard.database import Base, Job, SessionLocal, VirtualDesktop, engine
-    from web_dashboard.services import vdesktop_service as vd
-except Exception as exc:  # pragma: no cover — app deps missing
+    import sqlalchemy  # noqa: F401
+except ModuleNotFoundError as exc:  # pragma: no cover — app deps missing
     try:
         import pytest
         pytest.skip(f"app dependencies unavailable: {exc}", allow_module_level=True)
     except ModuleNotFoundError:
         print(f"SKIP: {exc}")
         sys.exit(0)
+
+from web_dashboard.database import Base, Job, SessionLocal, VirtualDesktop, engine  # noqa: E402
+from web_dashboard.services import vdesktop_service as vd  # noqa: E402
 
 Base.metadata.create_all(bind=engine)
 
