@@ -887,6 +887,12 @@ DASHBOARD_POLICY_DOC="$(jq -c . <<JSON
       "Resource": "*"
     },
     {
+      "Sid": "DashboardCloudWatchMetrics",
+      "Effect": "Allow",
+      "Action": "cloudwatch:GetMetricData",
+      "Resource": "*"
+    },
+    {
       "Sid": "DashboardCostExplorer",
       "Effect": "Allow",
       "Action": [

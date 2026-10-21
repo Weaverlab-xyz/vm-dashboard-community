@@ -101,6 +101,11 @@ async def wait_for_runstate(env_id: str, target: str, **kwargs) -> dict:
     return await pov_cloud_env.wait_for_runstate(CLOUD, env_id, target, **kwargs)
 
 
+async def idle_check(env_id: str, window_s: int) -> tuple[bool, str]:
+    """Whether every VM has been quiet for ``window_s``; see ``dashboard_idle_suspend``."""
+    return await pov_cloud_env.idle_check(CLOUD, env_id, window_s)
+
+
 def holds_login(env_id: str, os_family: str = "") -> bool:
     """Whether :func:`stored_credentials` can answer for a VM of this family. No network.
 

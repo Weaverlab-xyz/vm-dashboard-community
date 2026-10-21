@@ -239,11 +239,15 @@ async def reconcile(db: Session, platform: str, *, job_id: str = "") -> dict:
             env.rate_limited = limited
             changed = True
 
-        idle = raw.get("suspend_on_idle")
-        idle = int(idle) if isinstance(idle, (int, float)) else None
-        if idle != env.suspend_on_idle_seconds:
-            env.suspend_on_idle_seconds = idle
-            changed = True
+        # Only from a platform that HOLDS the setting. On a cloud the row is the only copy
+        # — the dashboard is the timer — and a listing that never carries the key would
+        # blank it on the first pass.
+        if lab_platforms.supports(env.platform, "idle_suspend"):
+            idle = raw.get("suspend_on_idle")
+            idle = int(idle) if isinstance(idle, (int, float)) else None
+            if idle != env.suspend_on_idle_seconds:
+                env.suspend_on_idle_seconds = idle
+                changed = True
 
         # The spend accrual, from the read this pass ALREADY made. No extra platform call
         # and no billing API: the live environment dict carries every VM's shape, disk and
@@ -271,6 +275,9 @@ SCHEDULE_ACTOR = "pov-schedule"
 # schedule's: the /jobs row should say why the POV stopped, and a username
 # there reads as somebody having pressed a button.
 SPEND_ACTOR = "pov-spend-cap"
+
+# Who an idle stop is attributed to, for the same reason as the two above.
+IDLE_ACTOR = "pov-idle"
 
 
 def _log(db: Session, job_id: str, line: str) -> None:
@@ -351,6 +358,61 @@ def sweep_schedules(db: Session, *, job_id: str = "") -> int:
         acted += 1
         logger.info("POV %s: schedule -> %s (job %s)", env.name, wanted, job.id)
         _log(db, job_id, f"{env.name}: schedule says {wanted} (job {job.id})")
+
+    db.commit()
+    return acted
+
+
+async def sweep_idle(db: Session, *, job_id: str = "") -> int:
+    """Stop any running cloud POV whose VMs have all been quiet for its idle window.
+
+    The dashboard-side twin of Skytap's ``suspend_on_idle``, for a platform claiming
+    ``dashboard_idle_suspend``. Same shape as the schedule above: it rides this pass, and
+    it only ever ENQUEUES the ``pov_env_power`` job the Suspend button creates. What
+    counts as quiet is ``pov_cloud_env.idle_verdict``'s call, not this function's.
+
+    One metrics read per running POV that has a window set, and none for any other row,
+    so a POV with idle suspend off costs nothing here.
+    """
+    from . import pov_env_service
+
+    acted = 0
+    rows = (db.query(PovEnvironment)
+              .filter(PovEnvironment.status == pov_env_service.STATUS_ACTIVE)
+              .all())
+    for env in rows:
+        window = int(env.suspend_on_idle_seconds or 0)
+        if window <= 0 or (env.runstate or "") != "running":
+            continue
+        if not env.platform_environment_id:
+            continue
+        try:
+            if not lab_platforms.supports(env.platform, "dashboard_idle_suspend"):
+                continue
+            ok, _why = pov_env_service.may_act_on(env)
+            if not ok or pov_env_service.power_job_in_flight(db, env.id):
+                continue
+            idle, why = await lab_platforms.adapter(env.platform).idle_check(
+                env.platform_environment_id, window)
+        except Exception as exc:  # noqa: BLE001 — one bad row never stops the sweep
+            logger.warning("POV %s: could not read its idle metrics", env.id,
+                           exc_info=True)
+            _log(db, job_id, f"{env.name}: idle check skipped ({exc})")
+            continue
+        if not idle:
+            logger.debug("POV %s: not idle (%s)", env.name, why)
+            continue
+
+        job = job_service.create_job(
+            db, job_type="pov_env_power", created_by=IDLE_ACTOR,
+            workgroup=env.workgroup,
+            metadata={"environment_id": env.id, "runstate": "stopped"})
+        acted += 1
+        logger.info("POV %s: idle for %d min -> stopped (job %s)",
+                    env.name, window // 60, job.id)
+        _log(db, job_id,
+             f"{env.name}: every VM quiet for {window // 60} minutes — "
+             f"suspending (job {job.id})")
 
     db.commit()
     return acted
@@ -620,6 +682,20 @@ async def run_reconcile(job_id: str, meta: dict) -> None:
                 db, job_id, f"schedule: enqueued {scheduled} power action(s)")
         result["scheduled_power_actions"] = scheduled
 
+        # The dashboard's idle timer, after the schedule: a POV the schedule has just
+        # queued a stop for already has a power job in flight, so this skips it.
+        try:
+            idled = await sweep_idle(db, job_id=job_id)
+        except Exception as exc:  # noqa: BLE001 — a sweep never fails the pass
+            logger.warning("POV reconcile: the idle sweep failed", exc_info=True)
+            job_service.append_job_log(db, job_id, f"idle sweep FAILED: {exc}")
+            db.rollback()
+            idled = 0
+        if idled:
+            job_service.append_job_log(
+                db, job_id, f"idle: stopping {idled} quiet POV(s)")
+        result["idle_power_actions"] = idled
+
         # The spend cap, AFTER the platform loop and after the schedule. It acts on totals
         # the loop has just accrued, and running it last means a POV that hits its cap in
         # the same pass a schedule would have resumed it ends up stopped — the cap is the
@@ -660,6 +736,17 @@ def _prune_history(db: Session) -> int:
         return 0
 
 
+def _idle_suspend_by(platform: str) -> str:
+    try:
+        if lab_platforms.supports(platform, "idle_suspend"):
+            return "platform"
+        if lab_platforms.supports(platform, "dashboard_idle_suspend"):
+            return "dashboard"
+    except lab_platforms.LabPlatformError:
+        pass
+    return ""
+
+
 def describe(env: PovEnvironment) -> dict:
     """The reconcile's view of one row, for the POV page.
 
@@ -685,6 +772,10 @@ def describe(env: PovEnvironment) -> dict:
         "rate_limited": bool(env.rate_limited),
         "platform_missing": bool(env.platform_missing),
         "suspend_on_idle_seconds": env.suspend_on_idle_seconds or 0,
+        # WHO runs that idle timer: "platform" (Skytap's own, set at create and shown
+        # read-only), "dashboard" (a cloud's, editable and running beside the schedule,
+        # since both are the dashboard's and cannot fight), or "" (none on this platform).
+        "idle_suspend_by": _idle_suspend_by(env.platform),
         # The dashboard-driven schedule, for a platform with no idle timer of its own. The
         # page shows exactly one of the two — they answer the same question and a row
         # offering both would be a row where neither is clearly in charge.

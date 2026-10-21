@@ -119,6 +119,7 @@ CAPABILITIES = {
         "runstate": True,
         "idle_suspend": True,          # suspend_on_idle, in seconds, per environment
         "scheduled_suspend": False,    # it has its own timer; see the aws row below
+        "dashboard_idle_suspend": False,  # the platform's own timer does this
         "bootstrap_injection": "metadata",
         # Skytap refuses a longer user_data with a 422 (pov_broker.fit_bootstrap).
         "bootstrap_max_chars": 16384,
@@ -160,12 +161,22 @@ CAPABILITIES = {
         # something the cloud holds. True because the FEATURE exists, which is what every
         # caller is actually asking.
         "templates": True,
-        "runstate": True,              # start / stop, via EC2. Not suspend: see below
+        # start / stop, via EC2. "suspended" is accepted and means a stop: EC2 has no
+        # suspend-to-RAM, and the POV page's one Suspend button sends that word everywhere.
+        "runstate": True,
         # **No public cloud has an idle timer.** Skytap's `suspend_on_idle` is the single
         # biggest lever on its spend and it has no analogue here, so the dashboard has to
         # supply one — hence the key beside it.
         "idle_suspend": False,
-        # The dashboard suspends and resumes this platform on a SCHEDULE, driven from the
+        # So the dashboard IS the idle timer: the reconcile pass reads each running POV's
+        # CloudWatch CPU and network, and stops one whose VMs have all been quiet for its
+        # `suspend_on_idle_seconds`. Kept apart from `idle_suspend` because that key means
+        # "the platform does it" — `pov_env_service` pushes the value to the platform and
+        # the schedule is refused beside it — and neither is true here. The thresholds,
+        # and the blind spot they leave, are in `pov_cloud_env`. Needs the driver's
+        # `idle_activity`, which tests/test_lab_platforms.py holds it to.
+        "dashboard_idle_suspend": True,
+        # The dashboard ALSO suspends and resumes this platform on a SCHEDULE, driven from the
         # reconcile pass. A schedule rather than an inactivity timer because "idle" on a
         # cloud has no honest definition from outside the guest: every candidate signal
         # (PRA session, agent heartbeat, console hit) has a blind spot that either leaves
@@ -212,6 +223,8 @@ CAPABILITIES = {
         "runstate": True,
         "idle_suspend": False,
         "scheduled_suspend": True,
+        # No driver `idle_activity` yet; AWS is the only cloud with one.
+        "dashboard_idle_suspend": False,
         "bootstrap_injection": "cloud_init",
         "share_link": False,
         # True, unlike AWS. The generated admin credential is stored per environment and
@@ -236,6 +249,8 @@ CAPABILITIES = {
         "runstate": True,
         "idle_suspend": False,
         "scheduled_suspend": True,
+        # No driver `idle_activity` yet; AWS is the only cloud with one.
+        "dashboard_idle_suspend": False,
         "bootstrap_injection": "cloud_init",
         "share_link": False,
         # False, like AWS. GCE holds no guest login to read back — unlike Azure, which is
@@ -259,6 +274,8 @@ CAPABILITIES = {
         "runstate": True,
         "idle_suspend": False,
         "scheduled_suspend": True,
+        # No driver `idle_activity` yet; AWS is the only cloud with one.
+        "dashboard_idle_suspend": False,
         "bootstrap_injection": "cloud_init",
         "share_link": False,
         # False. OCI holds no guest login to read back; only Azure is forced to mint one.

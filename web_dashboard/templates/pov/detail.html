@@ -1790,13 +1790,19 @@
             return { text: short + ': ' + (name || '—'), tone: name ? '' : 'muted' };
           });
         let sleeps;
-        if (e.suspend_on_idle_seconds) {
+        if (e.suspend_on_idle_seconds && e.idle_suspend_by !== 'dashboard') {
           sleeps = [{ text: Math.round(e.suspend_on_idle_seconds / 60) + ' min idle' }];
         } else if (e.schedule && e.schedule.scheduled) {
           sleeps = [{ text: e.schedule.suspend_at_local
                             + (e.schedule.resume_at_local ? '–' + e.schedule.resume_at_local : '') }];
-        } else {
+        } else if (!e.suspend_on_idle_seconds) {
           sleeps = [{ text: 'always on', tone: 'muted' }];
+        } else {
+          sleeps = [];
+        }
+        // A cloud's idle timer runs beside its schedule: both are the dashboard's.
+        if (e.suspend_on_idle_seconds && e.idle_suspend_by === 'dashboard') {
+          sleeps.push({ text: Math.round(e.suspend_on_idle_seconds / 60) + ' min idle' });
         }
         // A booked warm-up, set from the POV list's Sleeps column.
         if (e.wake && e.wake.booked) {

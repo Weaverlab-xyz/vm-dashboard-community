@@ -189,6 +189,15 @@ async def run_env_provision(job_id: str, meta: dict) -> None:
                     db, job_id,
                     f"WARNING: could not set the idle timer ({exc}). The environment "
                     f"will keep running until it is suspended by hand.")
+        elif idle > 0 and lab_platforms.supports(env.platform, "dashboard_idle_suspend"):
+            # Nothing to push: the dashboard is the timer, and the row is where it reads
+            # the window from (pov_reconcile.sweep_idle).
+            env.suspend_on_idle_seconds = idle
+            db.commit()
+            job_service.append_job_log(
+                db, job_id,
+                f"Idle suspend set to {idle // 60} minutes: the dashboard stops this "
+                f"environment once every VM's CPU and network have been quiet that long.")
 
         # 4. Power on and wait. The wait is the long part of this job.
         job_service.update_progress(db, job_id, 40, "Powering on…")
