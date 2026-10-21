@@ -84,6 +84,7 @@ except Azure's subnet; a blank field falls back down a chain.
 | `azure_desktops_subnet_id` | this region's `desktops_subnet_id`. **No further fallback** |
 | `azure_desktops_vm_size` | the pool form's own default |
 | `azure_desktops_vault_account_group_id` | PRA's Default account group |
+| `azure_desktops_discovery_resource_groups` | nothing to scan: **Adopt existing** is off |
 | `aws_desktops_subnet_id` | this region's `desktops_subnet_id`, then `aws_default_subnet_id` |
 | `aws_desktops_instance_type` | the pool form's own default |
 | `gcp_desktops_subnetwork` | this region's `desktops_subnetwork`, then `gcp_subnetwork` |
@@ -130,6 +131,40 @@ with the reason, because a green job whose failure only shows on a seat row is a
 reads.
 
 Seats are exempt from the auto-delete timer: a pool is inventory, not a scratch deploy.
+
+## Adopting an existing desktop
+
+**Adopt existing** brings Azure VMs you built somewhere else (an Azure Virtual Desktop
+session host, or a persistent VDI in its own resource group) into a pool so you can see
+them and start or stop them from this page. It is Azure-only.
+
+1. Grant the dashboard's Azure identity **Reader** and **Virtual Machine Contributor** on
+   the VM's resource group. The sandbox identity is scoped to one resource group, so this
+   is an explicit grant.
+2. In **Settings → Virtual Desktops → Configure**, list that resource group under
+   **Discovery resource groups** (comma-separated).
+3. On this page, click **Adopt existing**, tick the VMs, name the pool, and click **Adopt**.
+   A resource group the dashboard cannot list shows its error in the dialog, not an
+   empty list.
+
+An adopted pool is **rows only**. The dashboard writes no tags to the VMs. It never scales
+an adopted pool, and it never terminates an adopted VM: **Delete** and **Remove** only stop
+managing them. The VMs stay exactly where they are.
+
+The **Seats** view shows each VM's live power state. **Start** and **Stop** queue the same
+`azure_power` job the Azure tab's buttons do, and **Stop deallocates**. Any Azure seat gets
+these buttons, built or adopted.
+
+On an AVD session host:
+
+- A host pool **scaling plan**, or **Start VM on Connect**, can undo a start or stop made
+  here.
+- Stop disconnects anyone signed in. The dashboard does not put the host in drain mode
+  first.
+- The seat shows its host pool when the VM carries the `cm-resource-parent` tag that the
+  AVD portal stamps on it.
+
+The dashboard does not broker adopted seats through PRA. Reach them the way you do today.
 
 ## Related
 

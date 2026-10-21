@@ -17,10 +17,16 @@
 
   <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3 sm:mb-1">
     <h1 class="text-2xl font-bold text-gray-800">Virtual Desktops</h1>
-    <button @click="openCreate()"
-            class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
-      New pool
-    </button>
+    <div class="flex gap-2">
+      <button @click="openAdopt()"
+              class="bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 text-sm font-medium px-3 py-1.5 rounded-lg">
+        Adopt existing
+      </button>
+      <button @click="openCreate()"
+              class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
+        New pool
+      </button>
+    </div>
   </div>
   <p class="text-sm text-gray-500 mb-6">
     A desktop pool is <em>N</em> private VMs from a desktop image. AWS, Azure and GCP all
@@ -57,7 +63,11 @@
       <tbody class="divide-y divide-gray-100">
         <template x-for="p in pools" :key="p.pool_name">
           <tr class="hover:bg-gray-50">
-            <td class="px-4 py-3 font-medium text-gray-900" x-text="p.pool_name"></td>
+            <td class="px-4 py-3 font-medium text-gray-900">
+              <span x-text="p.pool_name"></span>
+              <span x-show="p.kind === 'adopted'" title="Existing VMs brought in for visibility and power. The dashboard never deletes them."
+                    class="ml-1 text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">Adopted</span>
+            </td>
             <td class="px-4 py-3">
               <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-gray-100 text-gray-600" x-text="p.cloud"></span>
             </td>
@@ -65,7 +75,7 @@
             <td class="px-4 py-3 text-xs text-gray-500" x-text="statusText(p.statuses)"></td>
             <td class="px-4 py-3 text-right whitespace-nowrap">
               <button @click="openSeats(p)" class="text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded font-medium">Seats</button>
-              <button @click="scale(p)" class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium ml-1">Scale</button>
+              <button x-show="p.kind !== 'adopted'" @click="scale(p)" class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium ml-1">Scale</button>
               <button @click="del(p)" class="text-xs px-2 py-1 text-red-600 hover:underline ml-1">Delete</button>
             </td>
           </tr>
@@ -336,21 +346,105 @@
     </div>
   </div>
 
+  <!-- Adopt modal. Discovery lists VMs in the configured discovery resource groups
+       (Settings → Virtual Desktops → Configure). Adopted VMs are rows only: never
+       tagged, scaled or terminated by the dashboard. -->
+  <div x-show="showAdopt" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="showAdopt = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="text-lg font-semibold">Adopt existing desktops</h3>
+        <button @click="showAdopt = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+      <div class="px-6 py-5 space-y-4">
+        <p class="text-xs text-gray-500">
+          Bring Azure VMs you built elsewhere — an AVD session host, a persistent VDI — into a
+          pool for visibility and Start / Stop. The dashboard writes nothing to them and never
+          deletes them: deleting the pool only stops managing them.
+          <span x-show="discovery.resource_groups.length" x-cloak>
+            Scanning <span class="font-mono" x-text="discovery.resource_groups.join(', ')"></span>.
+          </span>
+        </p>
+        <div x-show="discovery.loading" x-cloak class="text-sm text-gray-400 text-center py-6">Discovering…</div>
+        <div x-show="discovery.error" x-cloak
+             class="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3" x-text="discovery.error"></div>
+        <template x-for="e in discovery.errors" :key="e.resource_group">
+          <div class="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
+            <strong x-text="e.resource_group"></strong>: <span x-text="e.message"></span>
+            <div class="text-red-500 mt-1">The dashboard's Azure identity needs Reader and Virtual Machine Contributor on this resource group.</div>
+          </div>
+        </template>
+        <div x-show="!discovery.loading && !discovery.error && discovery.vms.length === 0" x-cloak
+             class="text-sm text-gray-400 text-center py-6">No adoptable VMs found.</div>
+        <table x-show="!discovery.loading && discovery.vms.length > 0" x-cloak class="min-w-full text-sm">
+          <thead>
+            <tr class="text-left text-xs uppercase text-gray-500 border-b border-gray-200">
+              <th class="py-2 w-6"></th>
+              <th class="py-2">VM</th>
+              <th class="py-2">Resource group</th>
+              <th class="py-2">Size</th>
+              <th class="py-2">Power</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100">
+            <template x-for="v in discovery.vms" :key="v.vm_resource_id">
+              <tr>
+                <td class="py-2"><input type="checkbox" :value="v.vm_resource_id" x-model="adoptForm.vm_resource_ids"></td>
+                <td class="py-2">
+                  <span class="font-mono text-xs" x-text="v.name"></span>
+                  <span x-show="v.os_type" class="ml-1 text-[10px] text-gray-400" x-text="v.os_type"></span>
+                  <span x-show="v.avd_host_pool" class="ml-1 text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-blue-100 text-blue-700"
+                        :title="'AVD host pool: ' + v.avd_host_pool" x-text="'AVD · ' + v.avd_host_pool"></span>
+                </td>
+                <td class="py-2 text-xs text-gray-600 font-mono" x-text="v.resource_group"></td>
+                <td class="py-2 text-xs text-gray-600" x-text="v.size"></td>
+                <td class="py-2 text-xs text-gray-600" x-text="v.state"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+        <div class="flex flex-col sm:flex-row gap-3 sm:items-end border-t border-gray-100 pt-4">
+          <div class="flex-1">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Pool name</label>
+            <input type="text" x-model="adoptForm.pool_name" placeholder="persistent-vdi"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+          <button @click="submitAdopt()" :disabled="adopting || !adoptForm.pool_name.trim() || adoptForm.vm_resource_ids.length === 0"
+                  class="bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white text-sm font-medium px-4 py-2 rounded-lg">
+            <span x-text="adopting ? 'Adopting…' : 'Adopt ' + adoptForm.vm_resource_ids.length + ' VM(s)'"></span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Seats modal -->
   <div x-show="showSeats" x-cloak
        class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
        @click.self="showSeats = false">
-    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto">
       <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
         <h3 class="text-lg font-semibold">Seats — <span class="font-mono text-base" x-text="seatsPool"></span></h3>
         <button @click="showSeats = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
       </div>
       <div class="px-6 py-5">
-        <p class="text-xs text-gray-400 mb-3">
+        <p x-show="seatsKind !== 'adopted'" class="text-xs text-gray-400 mb-3">
           Every seat is brokered once its VM is up — Windows seats (Azure) as a Remote RDP
           jump with credential injection, Linux seats as a Shell Jump on 22 with none.
           A dash means registration is still pending or it failed; open the pool's job for why.
         </p>
+        <p x-show="seatsKind === 'adopted'" x-cloak class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3 mb-3">
+          Adopted VMs are not brokered through PRA by the dashboard; reach them the way you do today.
+          <strong>Stop deallocates</strong> and disconnects anyone signed in. On an AVD session host, a
+          host pool <strong>scaling plan</strong> or <strong>Start VM on Connect</strong> can undo a
+          Start or Stop made here.
+        </p>
+        <div x-show="seatsCloud === 'azure' && seats.length > 0" x-cloak class="flex items-center justify-end gap-2 mb-2">
+          <button @click="powerPool('start')" class="text-xs px-2 py-1 bg-green-600 hover:bg-green-700 text-white rounded font-medium">Start all</button>
+          <button @click="powerPool('stop')" class="text-xs px-2 py-1 bg-amber-500 hover:bg-amber-600 text-white rounded font-medium">Stop all</button>
+          <button @click="reloadSeats()" class="text-xs text-blue-600 hover:underline">Refresh</button>
+        </div>
         <div x-show="seatsLoading" x-cloak class="text-sm text-gray-400 text-center py-6">Loading…</div>
         <div x-show="!seatsLoading && seats.length === 0" x-cloak class="text-sm text-gray-400 text-center py-6">No seats.</div>
         <table x-show="!seatsLoading && seats.length > 0" x-cloak class="min-w-full text-sm">
@@ -358,22 +452,38 @@
             <tr class="text-left text-xs uppercase text-gray-500 border-b border-gray-200">
               <th class="py-2">VM</th>
               <th class="py-2">Status</th>
+              <th class="py-2">Power</th>
               <th class="py-2">Brokered</th>
-              <th class="py-2 text-right">Session</th>
+              <th class="py-2 text-right">Actions</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-gray-100">
             <template x-for="s in seats" :key="s.id">
               <tr>
-                <td class="py-2 font-mono text-xs" x-text="(s.vm_resource_id || '').split('/').pop() || s.id"></td>
+                <td class="py-2">
+                  <span class="font-mono text-xs" x-text="(s.vm_resource_id || '').split('/').pop() || s.id"></span>
+                  <span x-show="s.avd_host_pool" class="ml-1 text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-blue-100 text-blue-700"
+                        :title="'AVD host pool: ' + s.avd_host_pool" x-text="'AVD · ' + s.avd_host_pool"></span>
+                </td>
                 <td class="py-2 text-xs text-gray-600" x-text="s.status"></td>
+                <td class="py-2 text-xs" :class="powerClass(s.power_state)" x-text="s.power_state || '—'"></td>
                 <td class="py-2">
                   <span x-show="s.pra_jump_id" class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-green-100 text-green-700">PRA</span>
                   <span x-show="!s.pra_jump_id" class="text-[10px] uppercase text-gray-400">—</span>
                 </td>
-                <td class="py-2 text-right">
-                  <button @click="openSession(s)" :disabled="!s.pra_jump_id"
-                          class="text-xs px-2 py-1 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white rounded font-medium">Open session</button>
+                <td class="py-2 text-right whitespace-nowrap">
+                  <template x-if="s.cloud === 'azure' && s.vm_resource_id">
+                    <span>
+                      <button @click="powerSeat(s, 'start')" :disabled="isRunning(s.power_state)"
+                              class="text-xs px-2 py-1 bg-green-600 hover:bg-green-700 disabled:opacity-40 text-white rounded font-medium">Start</button>
+                      <button @click="powerSeat(s, 'stop')" :disabled="isStopped(s.power_state)"
+                              class="text-xs px-2 py-1 bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-white rounded font-medium ml-1">Stop</button>
+                    </span>
+                  </template>
+                  <button x-show="s.kind !== 'adopted'" @click="openSession(s)" :disabled="!s.pra_jump_id"
+                          class="text-xs px-2 py-1 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white rounded font-medium ml-1">Open session</button>
+                  <button x-show="s.kind === 'adopted'" @click="removeSeat(s)"
+                          class="text-xs px-2 py-1 text-red-600 hover:underline ml-1">Remove</button>
                 </td>
               </tr>
             </template>
@@ -428,7 +538,10 @@ function desktopsPage() {
   return {
     pools: [], loading: true, toast: '', toastType: 'success',
     showCreate: false, saving: false,
-    showSeats: false, seatsPool: '', seats: [], seatsLoading: false, session: null,
+    showSeats: false, seatsPool: '', seatsKind: '', seatsCloud: '', seats: [], seatsLoading: false, session: null,
+    showAdopt: false, adopting: false,
+    discovery: { loading: false, error: '', vms: [], errors: [], resource_groups: [] },
+    adoptForm: { pool_name: '', vm_resource_ids: [] },
     azure: { loaded: false, loading: false, locations: [], vm_sizes: [], subnets: [], nsgs: [], images: [] },
     aws: { loaded: false, loading: false, regions: [], amis: [], amisRegion: '',
            instance_types: [], subnets: [], security_groups: [], sshKeyName: '' },
@@ -509,8 +622,93 @@ function desktopsPage() {
       this.onCloudChange();
     },
 
+    async openAdopt() {
+      this.adoptForm = { pool_name: '', vm_resource_ids: [] };
+      this.discovery = { loading: true, error: '', vms: [], errors: [], resource_groups: [] };
+      this.showAdopt = true;
+      try {
+        const d = await API.get('/api/desktops/discover?cloud=azure');
+        this.discovery.vms = d.vms || [];
+        this.discovery.errors = d.errors || [];
+        this.discovery.resource_groups = d.resource_groups || [];
+      } catch (e) {
+        this.discovery.error = e.message || 'Discovery failed.';
+      } finally {
+        this.discovery.loading = false;
+      }
+    },
+
+    async submitAdopt() {
+      this.adopting = true;
+      try {
+        await API.post('/api/desktops/adopt', {
+          pool_name: this.adoptForm.pool_name.trim(),
+          vm_resource_ids: this.adoptForm.vm_resource_ids,
+        });
+        this.showAdopt = false;
+        this.flash('Adopted ' + this.adoptForm.vm_resource_ids.length + ' VM(s).');
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Adopt failed.', 'error');
+      } finally {
+        this.adopting = false;
+      }
+    },
+
+    isRunning(state) { return /running|starting/i.test(state || ''); },
+    isStopped(state) { return /deallocat|stopped/i.test(state || ''); },
+    powerClass(state) {
+      if (this.isRunning(state)) return 'text-green-700';
+      if (this.isStopped(state)) return 'text-gray-500';
+      return 'text-amber-700';
+    },
+
+    async powerSeat(s, op) {
+      const vm = (s.vm_resource_id || '').split('/').pop();
+      if (op === 'stop' && !confirm('Stop (deallocate) ' + vm + '?\n\nAnyone signed in is disconnected.')) return;
+      try {
+        await API.post('/api/desktops/seats/' + encodeURIComponent(s.id) + '/power/' + op, {});
+        this.flash((op === 'start' ? 'Starting ' : 'Stopping ') + vm + '… (see Jobs)');
+        setTimeout(() => this.reloadSeats(), 5000);
+      } catch (e) {
+        this.flash(e.message || 'Power request failed.', 'error');
+      }
+    },
+
+    async powerPool(op) {
+      if (op === 'stop' && !confirm('Stop (deallocate) every seat in "' + this.seatsPool + '"?\n\nAnyone signed in is disconnected.')) return;
+      try {
+        const d = await API.post('/api/desktops/pools/' + encodeURIComponent(this.seatsPool) + '/power/' + op, {});
+        const skipped = (d.skipped || []).length;
+        this.flash('Queued ' + (d.jobs || []).length + ' power job(s)' + (skipped ? ', skipped ' + skipped : '') + '.');
+        setTimeout(() => this.reloadSeats(), 5000);
+      } catch (e) {
+        this.flash(e.message || 'Power request failed.', 'error');
+      }
+    },
+
+    async removeSeat(s) {
+      const vm = (s.vm_resource_id || '').split('/').pop();
+      if (!confirm('Stop managing ' + vm + '?\n\nThe Azure VM is NOT deleted.')) return;
+      try {
+        await API.del('/api/desktops/seats/' + encodeURIComponent(s.id));
+        this.flash('Removed ' + vm + ' from the pool.');
+        this.seats = this.seats.filter(x => x.id !== s.id);
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Remove failed.', 'error');
+      }
+    },
+
+    reloadSeats() {
+      if (!this.showSeats) return;
+      return this.openSeats({ pool_name: this.seatsPool, kind: this.seatsKind, cloud: this.seatsCloud });
+    },
+
     async openSeats(p) {
       this.seatsPool = p.pool_name;
+      this.seatsKind = p.kind || '';
+      this.seatsCloud = p.cloud || '';
       this.seats = [];
       this.seatsLoading = true;
       this.showSeats = true;
@@ -785,7 +983,10 @@ function desktopsPage() {
     },
 
     async del(p) {
-      if (!confirm(`Delete pool "${p.pool_name}"?\n\nThe backing VMs are terminated first.`)) return;
+      const msg = p.kind === 'adopted'
+        ? `Stop managing pool "${p.pool_name}"?\n\nThe Azure VMs are NOT deleted — the dashboard only forgets them.`
+        : `Delete pool "${p.pool_name}"?\n\nThe backing VMs are terminated first.`;
+      if (!confirm(msg)) return;
       try {
         await API.del(`/api/desktops/pools/${encodeURIComponent(p.pool_name)}`);
         this.flash('Pool deleting…');

@@ -42,6 +42,14 @@ logger = logging.getLogger(__name__)
 # Tag stamped on each backing VM so live pool state is recoverable from the cloud.
 POOL_TAG = "dashboard:desktop_pool"
 
+# `kind` of a seat whose VM the dashboard did NOT build — an existing VDI (an AVD
+# session host, say) brought in through "Adopt existing" for visibility + power. The
+# dashboard never terminates, scales or tags one: deleting it only forgets the row.
+# The guard lives in `teardown_seats` itself rather than in its callers, so a new path
+# to teardown cannot forget it.
+ADOPTED_KIND = "adopted"
+POWER_ACTIONS = ("start", "stop")
+
 VALID_CLOUDS = ("aws", "azure", "gcp")
 # Clouds that provision real VMs. DERIVED from
 # `_SEAT_BACKENDS` at the bottom of the backend section, not maintained beside it: a
@@ -615,6 +623,12 @@ def scale_pool(db: Session, name: str, count: int) -> dict:
     if not seats:
         raise VDesktopError(f"Pool '{name}' not found.")
     cloud = seats[0].cloud
+    if seats[0].kind == ADOPTED_KIND:
+        # Scale-down would terminate an adopted VM and scale-up has nothing to build
+        # from — refuse both by name rather than by the accident of a missing spec.
+        raise VDesktopError(
+            "Adopted pools can't be scaled. Remove a seat to stop managing it, or delete "
+            "the pool — the Azure VMs are kept either way.")
     cur = len(seats)
     out = {"pool_name": name, "count": cur, "to_provision": [], "to_teardown": [], "spec": None}
 
@@ -671,6 +685,186 @@ def delete_pool(db: Session, name: str) -> dict:
     db.commit()
     logger.info("Deleted desktop pool %s (%d records)", name, n)
     return {"deleted_seats": n, "to_teardown": []}
+
+
+# ── Adopting an existing VDI ─────────────────────────────────────────────────
+# A persistent desktop built outside the dashboard (an AVD session host in its own
+# resource group) gets visibility and power here without the dashboard ever owning
+# it. Azure only: the operator lists the resource groups to scan, and the dashboard's
+# identity needs Reader + Virtual Machine Contributor on each — the sandbox identity
+# is scoped to one resource group, so this is an explicit grant, not a default.
+
+def discovery_resource_groups() -> list[str]:
+    raw = _cfg("azure_desktops_discovery_resource_groups") or ""
+    seen, out = set(), []
+    for rg in raw.replace(";", ",").split(","):
+        rg = rg.strip()
+        if rg and rg.lower() not in seen:
+            seen.add(rg.lower())
+            out.append(rg)
+    return out
+
+
+def _avd_host_pool(tags: dict) -> str:
+    """The AVD host pool a session host belongs to, from the ``cm-resource-parent``
+    tag the AVD portal flow stamps on it. "" for a plain VM, or a host built some
+    other way — it is a hint for the operator, nothing branches on it."""
+    for k, v in (tags or {}).items():
+        if k.lower() == "cm-resource-parent" and "/hostpools/" in (v or "").lower():
+            return v.rstrip("/").split("/")[-1]
+    return ""
+
+
+def _adopted_ids(db: Session) -> set:
+    rows = (db.query(VirtualDesktop.vm_resource_id)
+            .filter(VirtualDesktop.vm_resource_id.isnot(None)).all())
+    return {(r[0] or "").lower() for r in rows}
+
+
+async def discover_azure(db: Session) -> dict:
+    """VMs in the configured discovery resource groups that are not already seats.
+
+    ``errors`` names each resource group that could not be listed instead of hiding
+    it — the other Azure listings log and move on, which reads as "no VMs here" when
+    the real answer is a missing role assignment.
+    """
+    import asyncio
+    from . import azure_service
+
+    rgs = discovery_resource_groups()
+    results = await asyncio.gather(*(azure_service.list_all_vms(rg) for rg in rgs),
+                                   return_exceptions=True)
+    taken = _adopted_ids(db)
+    vms, errors = [], []
+    for rg, res in zip(rgs, results):
+        if isinstance(res, BaseException):
+            errors.append({"resource_group": rg, "message": str(res)})
+            continue
+        for vm in res:
+            vm_id = vm.get("vm_id") or ""
+            tags = vm.get("tags") or {}
+            # A dashboard-built VM already has a home (the Azure tab, or its own pool).
+            if not vm_id or vm_id.lower() in taken or azure_service._is_dashboard_managed(tags):
+                continue
+            vms.append({
+                "vm_resource_id": vm_id,
+                "name": vm.get("name") or vm_id.split("/")[-1],
+                "resource_group": rg,
+                "location": vm.get("location") or "",
+                "size": vm.get("size") or "",
+                "os_type": vm.get("os_type") or "",
+                "state": vm.get("state") or "Unknown",
+                "private_ip": vm.get("private_ip"),
+                "avd_host_pool": _avd_host_pool(tags),
+            })
+    return {"resource_groups": rgs, "vms": vms, "errors": errors}
+
+
+async def adopt_pool(db: Session, *, name: str, vm_resource_ids: list,
+                     created_by: str) -> dict:
+    """Record existing Azure VMs as an adopted pool. Writes nothing to Azure.
+
+    Only ids that discovery returns are accepted: the resource group a power call
+    acts on comes from what the dashboard listed, never from the caller.
+    """
+    name = (name or "").strip()
+    if not name:
+        raise VDesktopError("pool name is required.")
+    if get_pool(db, name):
+        raise VDesktopError(f"Pool '{name}' already exists.")
+    wanted = [i for i in dict.fromkeys((i or "").strip() for i in vm_resource_ids or []) if i]
+    if not wanted:
+        raise VDesktopError("Select at least one VM to adopt.")
+    if not discovery_resource_groups():
+        raise VDesktopError(
+            "No discovery resource groups are configured (Settings → Virtual Desktops → "
+            "Configure → Discovery resource groups).")
+    found = {v["vm_resource_id"].lower(): v for v in (await discover_azure(db))["vms"]}
+    missing = [i for i in wanted if i.lower() not in found]
+    if missing:
+        raise VDesktopError(
+            "Not adoptable (not in a discovery resource group, already a seat, or "
+            f"dashboard-managed): {', '.join(m.split('/')[-1] for m in missing)}.")
+    for i in wanted:
+        db.add(VirtualDesktop(id=str(uuid.uuid4()), cloud="azure", pool_name=name,
+                              kind=ADOPTED_KIND, status="running",
+                              vm_resource_id=found[i.lower()]["vm_resource_id"],
+                              created_by=created_by))
+    db.commit()
+    logger.info("Adopted %d existing VM(s) as desktop pool %s", len(wanted), name)
+    return {"pool_name": name, "cloud": "azure", "kind": ADOPTED_KIND,
+            "count": len(wanted), "seats": get_pool(db, name)}
+
+
+def remove_adopted_seat(db: Session, seat_id: str) -> dict:
+    """Stop managing one adopted VM. The caller queues the teardown, which removes
+    any PRA jump and never terminates an adopted VM."""
+    row = db.query(VirtualDesktop).filter(VirtualDesktop.id == seat_id).first()
+    if row is None:
+        raise LookupError(seat_id)
+    if row.kind != ADOPTED_KIND:
+        raise VDesktopError("Only adopted seats can be removed one at a time; scale the pool instead.")
+    row.status = "deprovisioning"
+    db.commit()
+    return {"pool_name": row.pool_name, "to_teardown": [row.id]}
+
+
+def queue_seat_power(db: Session, seat_id: str, action: str, created_by: str) -> dict:
+    """Queue an ``azure_power`` job for one seat — the job type, runner and /jobs row
+    the Azure tab's Start / Suspend buttons use. ``stop`` deallocates.
+
+    Any Azure seat with a VM qualifies, built or adopted: the resource group is read
+    off the seat's own ARM id, which is why a seat outside the Azure tab's listing
+    resource groups can be powered here when it 404s there.
+    """
+    if action not in POWER_ACTIONS:
+        raise VDesktopError(f"Unknown power action '{action}'. Valid: {', '.join(POWER_ACTIONS)}.")
+    row = db.query(VirtualDesktop).filter(VirtualDesktop.id == seat_id).first()
+    if row is None:
+        raise LookupError(seat_id)
+    if (row.cloud or "").lower() != "azure":
+        raise VDesktopError("Power control is Azure-only for desktop seats.")
+    rg, vm_name = _parse_vm_id(row.vm_resource_id or "")
+    if not (rg and vm_name):
+        raise VDesktopError("This seat has no VM yet.")
+    from . import job_service
+    job = job_service.create_job(
+        db, job_type="azure_power", created_by=created_by,
+        metadata={"action": action, "vm_name": vm_name, "resource_group": rg,
+                  "deploy_job_id": None, "unmanaged": row.kind == ADOPTED_KIND,
+                  "desktop_seat_id": row.id},
+    )
+    job_service.log_audit(db, created_by, "azure_power",
+                          details={"action": action, "vm_name": vm_name,
+                                   "desktop_seat_id": row.id})
+    return {"job_id": job.id, "seat_id": row.id, "vm_name": vm_name, "action": action}
+
+
+async def seat_power_states(db: Session, name: str) -> list[dict]:
+    """The pool's seats with a live ``power_state`` (Azure only; others get "")."""
+    import asyncio
+    from . import azure_service
+
+    seats = get_pool(db, name)
+
+    async def _one(seat):
+        rg, vm_name = _parse_vm_id(seat.get("vm_resource_id") or "")
+        if (seat.get("cloud") or "").lower() != "azure" or not (rg and vm_name):
+            return "", ""
+        try:
+            vm = await azure_service.get_vm(rg, vm_name)
+        except Exception as exc:                  # noqa: BLE001 - one seat, not the table
+            return f"Unknown ({exc})", ""
+        if vm is None:
+            # get_vm answers None for "not found" AND for a denied read.
+            return "Unknown (not found, or no read access)", ""
+        return vm.get("state") or "Unknown", _avd_host_pool(vm.get("tags") or {})
+
+    states = await asyncio.gather(*(_one(s) for s in seats))
+    for seat, (power, host_pool) in zip(seats, states):
+        seat["power_state"] = power
+        seat["avd_host_pool"] = host_pool
+    return seats
 
 
 # ── PRA brokering helpers ────────────────────────────────────────────────────
@@ -1006,7 +1200,9 @@ async def teardown_seats(seat_ids: list, job_id: str = None) -> None:
             # seats this code has always skipped, now skipped because there is no
             # backend rather than because the string was not "azure".
             backend = seat_backend(row.cloud)
-            if backend is not None and row.vm_resource_id:
+            # An adopted seat's VM belongs to whoever built it: forget the row, never
+            # terminate. tests/test_vdesktop_adopt.py pins this.
+            if backend is not None and row.vm_resource_id and row.kind != ADOPTED_KIND:
                 try:
                     name = await backend.terminate(row.vm_resource_id)
                 except Exception as exc:

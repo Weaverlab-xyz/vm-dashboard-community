@@ -1861,6 +1861,11 @@ class VirtualDesktopsFeatureConfig(BaseModel):
     # PRA Vault account-group id (numeric) for RDP credential injection on Windows
     # seats (Phase 2). Blank → the account lands in PRA's Default group.
     azure_desktops_vault_account_group_id: str = ""
+    # Comma-separated resource groups that "Adopt existing" scans for VMs the
+    # dashboard did not build (an existing AVD session host, say). The dashboard's
+    # identity needs Reader + Virtual Machine Contributor on each. Adopted seats are
+    # never terminated — see vdesktop_service.ADOPTED_KIND.
+    azure_desktops_discovery_resource_groups: str = ""
     # AWS. Blank → aws_region.<r>.desktops_subnet_id, then aws_default_subnet_id.
     # Safe to inherit the VM subnet here: no AWS subnet is delegated the way Azure's
     # aci-subnet is, so there is no subnet that silently cannot host a desktop.

@@ -12,6 +12,11 @@ Remote RDP item for a Windows seat (Azure only), a Shell Jump on 22 for a Linux 
   DELETE /api/desktops/pools/{name}          — delete a pool
   GET    /api/desktops/pools/{name}/seats    — seats in one pool
   GET    /api/desktops/seats/{id}/session    — PRA connection info for a seat
+  GET    /api/desktops/discover              — existing Azure VMs that can be adopted
+  POST   /api/desktops/adopt                 — adopt existing VMs as a pool (never terminated)
+  POST   /api/desktops/seats/{id}/power/{op} — start / stop (deallocate) one seat
+  POST   /api/desktops/pools/{name}/power/{op} — the same for every seat in a pool
+  DELETE /api/desktops/seats/{id}            — stop managing one adopted seat
 """
 import logging
 
@@ -19,7 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..database import User, get_db
-from ..models.vdesktop import PoolCreateRequest, PoolScaleRequest
+from ..models.vdesktop import PoolAdoptRequest, PoolCreateRequest, PoolScaleRequest
 from ..services import job_service, vdesktop_service
 from ..services.vdesktop_service import VDesktopError
 from .auth import require_admin
@@ -314,14 +319,18 @@ def delete_pool(
 
 
 @router.get("/pools/{name}/seats")
-def list_pool_seats(
+async def list_pool_seats(
     name: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Seats in one pool (id, vm_resource_id, status, pra_jump_id) — backs the
-    per-pool Seats view + the Open-session action."""
-    return {"seats": vdesktop_service.get_pool(db, name)}
+    """Seats in one pool (id, vm_resource_id, status, pra_jump_id) plus each Azure
+    seat's live ``power_state`` — backs the per-pool Seats view, its power buttons
+    and the Open-session action."""
+    seats = await vdesktop_service.seat_power_states(db, name)
+    if not seats:
+        raise HTTPException(status_code=404, detail=f"Pool '{name}' not found.")
+    return {"seats": seats}
 
 
 @router.get("/seats/{seat_id}/session")
@@ -343,3 +352,109 @@ def open_seat_session(
     if info is None:
         raise HTTPException(status_code=404, detail=f"Seat '{seat_id}' not found.")
     return info
+
+
+# ── Adopt an existing VDI + power ─────────────────────────────────────────────
+
+@router.get("/discover")
+async def discover(
+    cloud: str = "azure",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Existing VMs in the configured discovery resource groups that are not seats
+    yet. A resource group that could not be listed comes back in ``errors`` rather
+    than as an empty list."""
+    if (cloud or "").lower() != "azure":
+        raise HTTPException(status_code=400, detail="Adopting existing desktops is Azure-only.")
+    if not vdesktop_service.discovery_resource_groups():
+        raise HTTPException(
+            status_code=400,
+            detail=("No discovery resource groups are configured. Set them in Settings → "
+                    "Virtual Desktops → Configure → Discovery resource groups."))
+    return await vdesktop_service.discover_azure(db)
+
+
+@router.post("/adopt", status_code=201)
+async def adopt(
+    payload: PoolAdoptRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Adopt existing Azure VMs as a pool: rows only, no job, nothing written to
+    Azure. Deleting the pool later forgets the VMs and never terminates them."""
+    try:
+        result = await vdesktop_service.adopt_pool(
+            db, name=payload.pool_name, vm_resource_ids=payload.vm_resource_ids,
+            created_by=current_user.username)
+    except VDesktopError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    job_service.log_audit(db, current_user.username, "vdesktop_adopt",
+                          details={"pool_name": result["pool_name"],
+                                   "vm_resource_ids": payload.vm_resource_ids})
+    return result
+
+
+@router.post("/seats/{seat_id}/power/{op}")
+def power_seat(
+    seat_id: str,
+    op: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Start or stop (deallocate) one seat's VM via an ``azure_power`` job."""
+    try:
+        return vdesktop_service.queue_seat_power(db, seat_id, op, current_user.username)
+    except LookupError:
+        raise HTTPException(status_code=404, detail=f"Seat '{seat_id}' not found.")
+    except VDesktopError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/pools/{name}/power/{op}")
+def power_pool(
+    name: str,
+    op: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """One ``azure_power`` job per seat that has a VM. A seat that cannot be powered
+    (no VM yet) is reported in ``skipped`` rather than failing the rest."""
+    if op not in vdesktop_service.POWER_ACTIONS:
+        raise HTTPException(status_code=400, detail=f"Unknown power action '{op}'.")
+    seats = vdesktop_service.get_pool(db, name)
+    if not seats:
+        raise HTTPException(status_code=404, detail=f"Pool '{name}' not found.")
+    jobs, skipped = [], []
+    for seat in seats:
+        try:
+            jobs.append(vdesktop_service.queue_seat_power(
+                db, seat["id"], op, current_user.username))
+        except LookupError:
+            # Dropped between the list and the queue. A fixed reason: the exception's
+            # own text is not something to hand back in a response.
+            skipped.append({"seat_id": seat["id"], "reason": "Seat no longer exists."})
+        except VDesktopError as e:
+            skipped.append({"seat_id": seat["id"], "reason": str(e)})
+    return {"jobs": jobs, "skipped": skipped}
+
+
+@router.delete("/seats/{seat_id}")
+def remove_seat(
+    seat_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Stop managing one ADOPTED seat. The VM is kept; only the row (and any PRA
+    jump item the dashboard registered for it) goes."""
+    try:
+        result = vdesktop_service.remove_adopted_seat(db, seat_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail=f"Seat '{seat_id}' not found.")
+    except VDesktopError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    job = job_service.create_job(
+        db, job_type="vdesktop_pool_teardown", created_by=current_user.username,
+        metadata={"pool_name": result["pool_name"], "seat_ids": result["to_teardown"]},
+    )
+    return {"ok": True, "job_id": job.id}
