@@ -643,15 +643,23 @@ def test_cloud_templates_are_read_from_the_database_not_the_cache():
     assert "_cached_listing(" not in cloud
 
 
-def test_the_blueprint_picker_offers_the_selected_clouds_templates():
-    """The Template picker followed the page's platform toggle, so an AWS cloud template
-    could not be chosen for a blueprint while the page showed Skytap — and a blueprint
-    saved with the toggle's platform would provision on the wrong one."""
-    with open(os.path.join(_ROOT, "web_dashboard", "templates", "pov", "templates.html"),
-              encoding="utf-8") as fh:
+def test_blueprints_and_their_template_picker_follow_the_platform_toggle():
+    """An AWS blueprint is not offered while the page shows Skytap, and the reverse — on
+    the blueprint table, the POV page's Build strip and the by-hand form's picker. The
+    Template picker is scoped the same way, so a blueprint never disappears from the
+    list it was saved in. On the cloud, the dashboard-held templates stand in when the
+    platform listing is empty; the saved platform is still the template's own."""
+    pov = os.path.join(_ROOT, "web_dashboard", "templates", "pov")
+    with open(os.path.join(pov, "templates.html"), encoding="utf-8") as fh:
         src = fh.read()
+    with open(os.path.join(pov, "index.html"), encoding="utf-8") as fh:
+        index = fh.read()
+    for page in (src, index):
+        assert "get platformBlueprints()" in page
+        assert "(b.platform || 'skytap') === this.platform" in page
+        assert 'x-for="b in blueprints"' not in page, "an unscoped blueprint list"
     assert 'x-for="g in bpTemplateGroups"' in src
-    assert "templates: this.cloudTemplates" in src
+    assert "templates = this.cloudTemplates" in src
     save = src.split("async saveBlueprint()")[1].split("async deleteBlueprint")[0]
     assert "platform: tpl ? tpl.platform : this.platform" in save
 
