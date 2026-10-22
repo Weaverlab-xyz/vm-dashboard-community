@@ -1,6 +1,6 @@
 {# The nav link list, rendered once by base.html into the flyout drawer behind the bar's
-   ☰ button. This file decides which links EXIST and nothing else: no containers, no
-   refs, no state, and no knowledge of who is looking. Whatever reorders this list later
+   ☰ button. This file decides which links EXIST, and which group
+   each sits in, and nothing else: no refs, no state, and no knowledge of who is looking. Whatever reorders this list later
    does so by moving DOM nodes, so there is no code path here by which a page could be
    left out. A test asserts that ignorance rather than trusting it — including that this
    file never learns the name of whatever is doing the reordering.
@@ -39,7 +39,19 @@
    {% if request.url.path.startswith('/pov/templates') %}{{ nav_active }}{% endif %}">Templates</a>
 {% endif %}
 
-{# ── On-premises hypervisors ───────────────────────────────────────── #}
+{# ── Groups ────────────────────────────────────────────────────────────
+   Each group is a native details element the drawer shows shut, except the one holding
+   the page you are on, which responsiveNav opens. The groups follow the tabs of Settings,
+   Integrations, so a page sits under the heading its toggle sits under: Cloud services is
+   that tab's four pages, and Preview is every page whose flag is in setup._PREVIEW_FLAGS
+   (Workload Lab is derived from preview flags only).
+
+   A group must never render as an empty heading. Its own if-test is the OR of its links'
+   flags, and where every link a group could show is hidden by a permission check rather
+   than a flag, the group carries the same check. tests/test_nav_groups holds both. #}
+{% if vmware_enabled or proxmox_enabled or vsphere_enabled or hyperv_enabled or nutanix_enabled or xcpng_enabled %}
+<details class="nav-group" data-nav-group="hypervisors">
+<summary class="nav-group-label flex items-center justify-between px-2 py-2 rounded-md text-xs font-semibold uppercase tracking-wider cursor-pointer select-none {{ nav_hover }}">Hypervisors<svg class="nav-group-chevron h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg></summary>
 {% if vmware_enabled %}
 <a data-nav="vms" href="/vms" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/vms' %}{{ nav_active }}{% endif %}">Workstation</a>
@@ -77,12 +89,16 @@
    data-nav="connections" href="/connections" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/connections' %}{{ nav_active }}{% endif %}">Connections</a>
 {% endif %}
+</details>
+{% endif %}
 
 {# ── Cloud providers ──────────────────────────────────────────────────
    `cloud_pages` is not a feature flag — it is a profile-owned page group, so these four
    and Images below disappear on a POV instance, whose wizard deliberately writes no cloud
    credentials. main._profile_page_gate 404s the same five paths from the same reader. #}
 {% if cloud_pages %}
+<details class="nav-group" data-nav-group="clouds">
+<summary class="nav-group-label flex items-center justify-between px-2 py-2 rounded-md text-xs font-semibold uppercase tracking-wider cursor-pointer select-none {{ nav_hover }}">Clouds<svg class="nav-group-chevron h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg></summary>
 <a data-nav="aws" href="/aws" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/aws' %}{{ nav_active }}{% endif %}">AWS</a>
 <a data-nav="azure" href="/azure" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
@@ -91,13 +107,59 @@
    {% if request.url.path == '/gcp' %}{{ nav_active }}{% endif %}">GCP</a>
 <a data-nav="oci" href="/oci" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/oci' %}{{ nav_active }}{% endif %}">OCI</a>
+</details>
 {% endif %}
 
-{# ── Workloads / artefacts ────────────────────────────────────────── #}
+{% if portainer_enabled or cloud_database_enabled or k8s_management_enabled or cloud_functions_enabled %}
+<details class="nav-group" data-nav-group="cloud_services">
+<summary class="nav-group-label flex items-center justify-between px-2 py-2 rounded-md text-xs font-semibold uppercase tracking-wider cursor-pointer select-none {{ nav_hover }}">Cloud services<svg class="nav-group-chevron h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg></summary>
 {% if portainer_enabled %}
 <a data-nav="containers" href="/containers" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/containers' %}{{ nav_active }}{% endif %}">Containers</a>
 {% endif %}
+{% if cloud_database_enabled %}
+<a data-nav="databases" href="/databases"
+   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+   {% if request.url.path.startswith('/databases') %}{{ nav_active }}{% endif %}">Databases</a>
+{% endif %}
+{% if k8s_management_enabled %}
+<a data-nav="k8s" href="/k8s"
+   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+   {% if request.url.path.startswith('/k8s') %}{{ nav_active }}{% endif %}">Kubernetes</a>
+{% endif %}
+{% if cloud_functions_enabled %}
+<a data-nav="functions" href="/functions"
+   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+   {% if request.url.path.startswith('/functions') %}{{ nav_active }}{% endif %}">Functions</a>
+{% endif %}
+</details>
+{% endif %}
+
+{# Desktops is admin-only; with it the only preview page switched on, a non-admin would
+   otherwise see a Preview heading over nothing. #}
+{% if vdesktops_enabled or directories_enabled or workload_lab_enabled %}
+<details class="nav-group" data-nav-group="preview"{% if not (directories_enabled or workload_lab_enabled) %} x-show="$store.auth.isAdmin"{% endif %}>
+<summary class="nav-group-label flex items-center justify-between px-2 py-2 rounded-md text-xs font-semibold uppercase tracking-wider cursor-pointer select-none {{ nav_hover }}">Preview<svg class="nav-group-chevron h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg></summary>
+{% if vdesktops_enabled %}
+<a x-show="$store.auth.isAdmin" data-nav="desktops" href="/desktops"
+   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+   {% if request.url.path.startswith('/desktops') %}{{ nav_active }}{% endif %}">Desktops</a>
+{% endif %}
+{% if directories_enabled %}
+<a data-nav="directories" href="/directories"
+   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+   {% if request.url.path.startswith('/directories') %}{{ nav_active }}{% endif %}">Directories</a>
+{% endif %}
+{% if workload_lab_enabled %}
+<a data-nav="workload_lab" href="/workload-lab"
+   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+   {% if request.url.path.startswith('/workload-lab') %}{{ nav_active }}{% endif %}">Workload Lab</a>
+{% endif %}
+</details>
+{% endif %}
+
+<details class="nav-group" data-nav-group="operations">
+<summary class="nav-group-label flex items-center justify-between px-2 py-2 rounded-md text-xs font-semibold uppercase tracking-wider cursor-pointer select-none {{ nav_hover }}">Operations<svg class="nav-group-chevron h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg></summary>
 {% if cloud_pages %}
 <a x-show="$store.auth.can('images', 'read')" data-nav="images" href="/images"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
@@ -106,36 +168,6 @@
 <a x-show="$store.auth.can('storage', 'read')" data-nav="storage" href="/storage"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/storage') %}{{ nav_active }}{% endif %}">Storage</a>
-{% if vdesktops_enabled %}
-<a x-show="$store.auth.isAdmin" data-nav="desktops" href="/desktops"
-   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-   {% if request.url.path.startswith('/desktops') %}{{ nav_active }}{% endif %}">Desktops</a>
-{% endif %}
-{% if cloud_database_enabled %}
-<a data-nav="databases" href="/databases"
-   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-   {% if request.url.path.startswith('/databases') %}{{ nav_active }}{% endif %}">Databases</a>
-{% endif %}
-{% if directories_enabled %}
-<a data-nav="directories" href="/directories"
-   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-   {% if request.url.path.startswith('/directories') %}{{ nav_active }}{% endif %}">Directories</a>
-{% endif %}
-{% if cloud_functions_enabled %}
-<a data-nav="functions" href="/functions"
-   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-   {% if request.url.path.startswith('/functions') %}{{ nav_active }}{% endif %}">Functions</a>
-{% endif %}
-{% if workload_lab_enabled %}
-<a data-nav="workload_lab" href="/workload-lab"
-   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-   {% if request.url.path.startswith('/workload-lab') %}{{ nav_active }}{% endif %}">Workload Lab</a>
-{% endif %}
-{% if k8s_management_enabled %}
-<a data-nav="k8s" href="/k8s"
-   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-   {% if request.url.path.startswith('/k8s') %}{{ nav_active }}{% endif %}">Kubernetes</a>
-{% endif %}
 {% if cost_explorer_enabled %}
 <a x-show="$store.auth.can('costs', 'read')" data-nav="costs" href="/costs"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
@@ -166,6 +198,7 @@
    rather than a missing link that reads as the feature not existing. #}
 <a data-nav="schedules" href="/schedules" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/schedules') %}{{ nav_active }}{% endif %}">Schedules</a>
+</details>
 
 {# ── Admin ────────────────────────────────────────────────────────── #}
 {# Two kinds of gate below, and which one a link uses is not a matter of taste: a link
@@ -178,6 +211,11 @@
 {# Agents AND their hypervisor connections — one page, two tabs. /connections lights this
    link too, because it is the same page on its other tab and leaving an admin who arrived
    from a Settings panel with no lit link reads as "you are nowhere". #}
+{# Every Admin link but Request access is behind a permission check, so for a viewer who
+   holds none of those the group carries the union of them -- unless Request access, which
+   is ungated, is there to fill it. #}
+<details class="nav-group" data-nav-group="admin"{% if not (entitle_user_jit_enabled and entitle_request_portal_url) %} x-show="$store.auth.isAdmin || $store.auth.can('agents', 'read') || $store.auth.can('audit', 'read') || $store.auth.can('notifications', 'read')"{% endif %}>
+<summary class="nav-group-label flex items-center justify-between px-2 py-2 rounded-md text-xs font-semibold uppercase tracking-wider cursor-pointer select-none {{ nav_hover }}">Admin<svg class="nav-group-chevron h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg></summary>
 {% if remote_agents_enabled %}
 <a x-show="$store.auth.can('agents', 'read')" data-nav="agents" href="/agents"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
@@ -219,3 +257,4 @@
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}"
    title="Request access via Entitle">Request access</a>
 {% endif %}
+</details>

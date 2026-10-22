@@ -37,6 +37,17 @@
     /* Separator applyPins() inserts between a persona's pinned links and the rest. Only
        the colour: the list is `space-y-1`, whose margin rule outranks this one anyway. */
     .nav-drawer hr { border-color: rgb(255 255 255 / 0.2); }
+    /* The drawer's groups (_nav_links.html). A details element is not a flex container, so
+       its links are made blocks here and spaced the way the list's own space-y-1 spaces the
+       top-level rows. The heading is quieter than a link -- it is a label you open, not a
+       place you go -- and the chevron turns when the group is open. The marker is hidden in
+       both engines: Chrome and Firefox draw it from list-style, Safari from the pseudo. */
+    .nav-group > summary { list-style: none; opacity: 0.75; }
+    .nav-group > summary::-webkit-details-marker { display: none; }
+    .nav-group > summary:hover, .nav-group[open] > summary { opacity: 1; }
+    .nav-group-chevron { transition: transform 0.15s ease; }
+    .nav-group[open] .nav-group-chevron { transform: rotate(90deg); }
+    .nav-group > a { display: block; margin-top: 0.25rem; padding-left: 1.25rem; }
 
     /* Data tables: scroll the columns, never hide them.
 
@@ -278,11 +289,18 @@
          the tag below. tests/test_mobile_nav reads this element by scanning forward from
          the word nav-drawer to the end of the next tag, so a bracket in prose here ends
          that scan early and hands the test the prose instead of the classes it means to
-         assert on. Writing one cost two failures before this sentence existed. #}
+         assert on. Writing one cost two failures before this sentence existed.
+
+         Only a LINK click closes the drawer. The list now holds group headings too, and a
+         tap on one of those means open this group, not leave the menu.
+
+         data-nav-active is the one class the theme puts on the lit link, so responsiveNav
+         can open that link's group without restating every link's own path test. #}
       <div class="nav-drawer flex-1 overflow-y-auto overscroll-contain flex flex-col items-stretch space-y-1 p-4 {{ theme.warp }}"
            x-ref="navDrawer"
            data-nav-pins="{{ persona_nav_pins }}"
-           @click="mobileNav = false">
+           data-nav-active="{{ (nav_active.split() or [''])[0] }}"
+           @click="if ($event.target.closest('a')) mobileNav = false">
         {% include '_nav_links.html' %}
       </div>
       {# Pinned to the bottom, not left at the end of a ~28-link scroll. Settings is
