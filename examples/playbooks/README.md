@@ -382,7 +382,7 @@ the network ACL differ between Azure, GCP and AWS.
 
 | File | Purpose |
 |---|---|
-| `spire-server-install.yml` | SPIRE 1.15.3 under systemd: one trust domain, sqlite datastore, and `admin_ids` |
+| `spire-server-install.yml` | SPIRE 1.15.5 under systemd: one trust domain, sqlite datastore, and `admin_ids` |
 | `spire-open-ports.yml` | Open tcp/8081 on the host firewall — the cloud ACL is a separate gate |
 | `spire-seed-entries.yml` | 11 registration entries, of which discovery should return 8 |
 | `spire-admin-identity.yml` | Mint the admin X509-SVID and write its PKCS#12 into Password Safe |

@@ -262,9 +262,37 @@ def test_the_helm_stage_passes_pinned_chart_versions():
     play = _play("spire-helm.yml")["vars"]
     assert play["spire_chart_version"] == svc.SPIRE_CHART_VERSION
     assert play["spire_crds_chart_version"] == svc.SPIRE_CRDS_CHART_VERSION
-    # 0.30.2 ships SPIRE 1.15.3: the three modes run the same server.
-    assert _play("spire-server-install.yml")["vars"]["spire_version"] == "1.15.3"
-    assert _play("spire-docker-server.yml")["vars"]["spire_version"] == "1.15.3"
+    # 0.30.2 ships SPIRE 1.15.3, so the play sets its images: the three modes run the
+    # same server.
+    assert _play("spire-server-install.yml")["vars"]["spire_version"] == "1.15.5"
+    assert _play("spire-docker-server.yml")["vars"]["spire_version"] == "1.15.5"
+    assert play["spire_version"] == "1.15.5"
+    assert v["spire_version"] == svc._install_vars(_row())["spire_version"]
+
+
+def test_the_helm_images_are_the_docker_modes_digests():
+    helm = _play("spire-helm.yml")["vars"]
+    docker = _play("spire-docker-server.yml")["vars"]
+    version = helm["spire_version"]
+    assert version == docker["spire_version"]
+    pins = helm["spire_image_digests"][version]
+    for role in ("server", "oidc"):
+        assert pins[role] == docker["spire_image_digests"][version][role], role
+    assert re.match(r"^sha256:[0-9a-f]{64}$", pins["agent"])
+    tags = _set_fact("spire-helm.yml", "Resolve the pinned image tag", spire_version=version)
+    assert tags["_spire_image_tag"] == f"{version}@{pins['server']}"
+    assert tags["_agent_image_tag"] == f"{version}@{pins['agent']}"
+    assert tags["_oidc_image_tag"] == f"{version}@{pins['oidc']}"
+    values = yaml.safe_load(_rendered("spire-helm.yml", "Write the chart values", **tags,
+                                      trust_domain="lab.test", oidc_domain="oidc.lab.test",
+                                      _admin_id="spiffe://lab.test/a", _issuer="https://x"))
+    assert values["spire-server"]["image"]["tag"] == tags["_spire_image_tag"]
+    assert values["spire-agent"]["image"]["tag"] == tags["_agent_image_tag"]
+    assert values["spiffe-oidc-discovery-provider"]["image"]["tag"] == tags["_oidc_image_tag"]
+    task = "Refuse an image that is not pinned by digest"
+    assert _assert_holds("spire-helm.yml", task, spire_version=version)
+    assert not _assert_holds("spire-helm.yml", task, spire_version="9.9.9")
+    assert _assert_holds("spire-helm.yml", task, spire_version="9.9.9", spire_allow_unpinned=True)
 
 
 # ── the stdout PEM split, run for real ───────────────────────────────────────
@@ -530,7 +558,7 @@ def _rendered(play_name, task_name, **extra):
 
 def test_the_containers_run_unprivileged_and_locked_down():
     compose = yaml.safe_load(_rendered("spire-docker-server.yml", "Write the compose file",
-                                       spire_version="1.15.3", **_images("1.15.3")))
+                                       spire_version="1.15.5", **_images("1.15.5")))
     server = compose["services"]["spire-server"]
     oidc = compose["services"]["oidc-discovery-provider"]
     assert server["user"] == "1000:1000", "the server must run as the image's own non-root user"
@@ -649,11 +677,11 @@ def test_the_tarball_pins_agree_across_plays_and_with_the_default_version():
 def test_the_pinned_checksum_is_the_one_the_download_uses():
     got = _set_fact("spire-server-install.yml",
                     "Resolve the pinned checksum for this version and architecture",
-                    spire_version="1.15.3", _arch="arm64")
-    assert got["_spire_sha256"] == "a9982b3ca7de489def22265fd4586d8e13091ecb6fddf6adcea9291313b18886"
+                    spire_version="1.15.5", _arch="arm64")
+    assert got["_spire_sha256"] == "451baba77cba6a0b2cdd3ca8b589589418b88673867d2da7f8dac9099252b372"
     over = _set_fact("spire-server-install.yml",
                      "Resolve the pinned checksum for this version and architecture",
-                     spire_version="1.15.3", _arch="amd64", spire_sha256="ab" * 32)
+                     spire_version="1.15.5", _arch="amd64", spire_sha256="ab" * 32)
     assert over["_spire_sha256"] == "ab" * 32, "an explicit spire_sha256 must win"
     for name in ("spire-server-install.yml", "spire-agent-install.yml"):
         dl = next(t for t in _play(name)["tasks"] if t.get("name") == "Download the SPIRE release")
@@ -674,10 +702,10 @@ def test_an_unpinned_version_is_refused_unless_explicitly_allowed():
 
 
 def test_the_images_run_by_digest_and_an_unpinned_version_is_refused():
-    img = _images("1.15.3")
-    assert img["_server_image"] == ("ghcr.io/spiffe/spire-server:1.15.3@sha256:"
-                                    "4082f30d3e0ddc4000a171392c4ea174345ee44d161ee917c70b97b2ecfba141")
-    assert img["_oidc_image"].startswith("ghcr.io/spiffe/oidc-discovery-provider:1.15.3@sha256:")
+    img = _images("1.15.5")
+    assert img["_server_image"] == ("ghcr.io/spiffe/spire-server:1.15.5@sha256:"
+                                    "584a9c5cc95b9457f5033e7e4488d603fffe5ec48a80c4dba14b05c5e1c2c384")
+    assert img["_oidc_image"].startswith("ghcr.io/spiffe/oidc-discovery-provider:1.15.5@sha256:")
     task = "Refuse an image that is not pinned by digest"
     assert _assert_holds("spire-docker-server.yml", task, **img)
     loose = _images("9.9.9")
@@ -830,7 +858,8 @@ def test_the_target_release_is_the_configured_version_or_the_pinned_chart():
     try:
         svc._cfg = lambda key, default="": "1.16.0" if key == "spire_lab_version" else default
         assert svc.target_release(_row(deployment_mode="docker")) == "1.16.0"
-        assert svc.target_release(_row(deployment_mode="k8s")) == f"chart {svc.SPIRE_CHART_VERSION}"
+        assert svc.target_release(_row(deployment_mode="k8s")) == (
+            f"chart {svc.SPIRE_CHART_VERSION} / SPIRE 1.16.0")
     finally:
         svc._cfg = orig
 

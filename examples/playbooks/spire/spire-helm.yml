@@ -38,7 +38,10 @@
 #   federation_port: 8082                 # the bundle endpoint, as in the vm and docker modes
 #   helm_version: 3.16.2
 #   helm_sha256: ""                       # the tarball's SHA-256 from get.helm.sh (*.sha256sum)
-#   spire_chart_version: 0.30.2           # pinned: ships SPIRE 1.15.3, as the other modes do
+#   spire_chart_version: 0.30.2           # pinned; ships SPIRE 1.15.3, so the images below override it
+#   spire_version: 1.15.5                 # the server, agent and OIDC provider images, as the
+#                                         #   other modes install; pinned by digest
+#   spire_allow_unpinned: false           # true = take a tag-only image
 #   spire_crds_chart_version: 0.6.1       # blank = latest, with a warning
 #   ca_subject_country: US                # the CA subject; strict mode refuses the chart's
 #   ca_subject_organization: Workload Lab #   placeholders
@@ -64,6 +67,21 @@
     spire_chart_repo: "https://spiffe.github.io/helm-charts-hardened/"
     spire_chart_version: "0.30.2"
     spire_crds_chart_version: "0.6.1"
+    # No chart release ships SPIRE past 1.15.3 yet (0.30.3 still has appVersion 1.15.3), so
+    # the chart's three SPIRE images are set here, by digest, to the release the vm and
+    # docker modes install. The same multi-arch index digests as spire-docker-server.yml;
+    # move them together with spire_version.
+    spire_version: "1.15.5"
+    spire_image_digests:
+      "1.15.3":
+        server: "sha256:4082f30d3e0ddc4000a171392c4ea174345ee44d161ee917c70b97b2ecfba141"
+        agent: "sha256:41b0dcd8b258a69db9e2768292a060766fb76fd866e4bc925849981ea1b825ff"
+        oidc: "sha256:bb95f13c2b4e8392d6631ff1a45a03554ba050534cd3c1045505cc80d3fb77e2"
+      "1.15.5":
+        server: "sha256:584a9c5cc95b9457f5033e7e4488d603fffe5ec48a80c4dba14b05c5e1c2c384"
+        agent: "sha256:3652c732b0f0d36f4dd78394230a1b1cd0ddcc29548a46c67a996b1a78c14481"
+        oidc: "sha256:8889641f0eaec84bb42ea1445dff71c0a6a2cfd2a3cfbbee63d17578aaaec7fc"
+    spire_allow_unpinned: false
     ca_subject_country: "US"
     ca_subject_organization: "Workload Lab"
     helm_values_extra: ""
@@ -149,6 +167,28 @@
           you intend to keep — the value keys this play relies on can change.
       when: spire_chart_version | length == 0 or spire_crds_chart_version | length == 0
 
+    # The chart builds `<repo>:<tag>`, so a tag of `<version>@sha256:<digest>` runs by digest.
+    - name: Resolve the pinned image tag
+      ansible.builtin.set_fact:
+        _spire_image_tag: >-
+          {{ spire_version ~ (('@' ~ spire_image_digests[spire_version].server)
+                              if spire_version in spire_image_digests else '') }}
+        _agent_image_tag: >-
+          {{ spire_version ~ (('@' ~ spire_image_digests[spire_version].agent)
+                              if spire_version in spire_image_digests else '') }}
+        _oidc_image_tag: >-
+          {{ spire_version ~ (('@' ~ spire_image_digests[spire_version].oidc)
+                              if spire_version in spire_image_digests else '') }}
+
+    - name: Refuse an image that is not pinned by digest
+      ansible.builtin.assert:
+        that:
+          - spire_version | length > 0
+          - spire_version in spire_image_digests or spire_allow_unpinned | bool
+        fail_msg: >-
+          No pinned digest for the SPIRE {{ spire_version }} images. Add them to
+          spire_image_digests in this play, or set spire_allow_unpinned to run by tag alone.
+
     - name: Create the values directory
       ansible.builtin.file:
         path: /opt/spire
@@ -181,6 +221,8 @@
               namespaces:
                 create: true
           spire-server:
+            image:
+              tag: "{{ _spire_image_tag }}"
             caTTL: "{{ ca_ttl }}"
             # Key names as chart 0.30.2 spells them. A misspelt key is silently ignored,
             # and the chart's defaults (4h / 1h) would replace the lab's.
@@ -205,8 +247,13 @@
                   oidc-discovery-provider:
                     dnsNameTemplates:
                       - "{{ oidc_domain }}"
+          spire-agent:
+            image:
+              tag: "{{ _agent_image_tag }}"
           spiffe-oidc-discovery-provider:
             enabled: true
+            image:
+              tag: "{{ _oidc_image_tag }}"
             config:
               # The chart derives one domain from jwtIssuer's host (port included);
               # the bare name is what a Host header without a port carries.
