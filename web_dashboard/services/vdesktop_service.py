@@ -715,6 +715,37 @@ def _avd_host_pool(tags: dict) -> str:
     return ""
 
 
+# What discovery and power need on a discovery resource group. ``stop`` deallocates.
+_ADOPT_READ = "Microsoft.Compute/virtualMachines/read"
+_ADOPT_POWER = ("Microsoft.Compute/virtualMachines/start/action",
+                "Microsoft.Compute/virtualMachines/deallocate/action")
+
+
+def _permitted(perms: list, action: str) -> bool:
+    """ARM's rule for one action against a permissions list: some entry grants it
+    through ``actions`` without its own ``notActions`` taking it back. Patterns are
+    case-insensitive and ``*`` is the only wildcard."""
+    import fnmatch
+    a = action.lower()
+
+    def hit(patterns):
+        return any(fnmatch.fnmatchcase(a, (p or "").lower()) for p in patterns or [])
+    return any(hit(p.get("actions")) and not hit(p.get("notActions")) for p in perms or [])
+
+
+def _rg_access_problem(rg: str, perms: list) -> str:
+    """"" when the identity can list and power VMs in ``rg``, else what is missing.
+    The modal adds the role advice under each error, so this says only what is wrong."""
+    if not _permitted(perms, _ADOPT_READ):
+        return ("no read access to its VMs. Azure answers an unreadable resource group "
+                "with an empty list, not an error, so nothing here can be shown.")
+    missing = [a.split("/")[-2] for a in _ADOPT_POWER if not _permitted(perms, a)]
+    if missing:
+        return (f"its VMs are visible but the identity cannot {' or '.join(missing)} "
+                "them, so Start / Stop will fail.")
+    return ""
+
+
 def _adopted_ids(db: Session) -> set:
     rows = (db.query(VirtualDesktop.vm_resource_id)
             .filter(VirtualDesktop.vm_resource_id.isnot(None)).all())
@@ -727,19 +758,32 @@ async def discover_azure(db: Session) -> dict:
     ``errors`` names each resource group that could not be listed instead of hiding
     it — the other Azure listings log and move on, which reads as "no VMs here" when
     the real answer is a missing role assignment.
+
+    A failed listing is only half of that. With NO role on a resource group, ARM does
+    not refuse the VM list: it filters it to what the caller may read and answers 200
+    with nothing in it. So each group's own permissions are read too, and a missing
+    read or power right is reported as an error even though the listing "succeeded".
     """
     import asyncio
     from . import azure_service
 
     rgs = discovery_resource_groups()
-    results = await asyncio.gather(*(azure_service.list_all_vms(rg) for rg in rgs),
-                                   return_exceptions=True)
+    results, perms = await asyncio.gather(
+        asyncio.gather(*(azure_service.list_all_vms(rg) for rg in rgs),
+                       return_exceptions=True),
+        asyncio.gather(*(azure_service.resource_group_permissions(rg) for rg in rgs),
+                       return_exceptions=True))
     taken = _adopted_ids(db)
     vms, errors = [], []
-    for rg, res in zip(rgs, results):
+    for rg, res, perm in zip(rgs, results, perms):
         if isinstance(res, BaseException):
             errors.append({"resource_group": rg, "message": str(res)})
             continue
+        if isinstance(perm, BaseException):
+            # Advisory only: an unreadable permission list must not hide VMs we did list.
+            logger.warning("Desktop discovery: could not read permissions on %s: %s", rg, perm)
+        elif (problem := _rg_access_problem(rg, perm)):
+            errors.append({"resource_group": rg, "message": problem})
         for vm in res:
             vm_id = vm.get("vm_id") or ""
             tags = vm.get("tags") or {}

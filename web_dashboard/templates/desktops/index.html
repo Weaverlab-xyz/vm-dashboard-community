@@ -375,7 +375,7 @@
             <div class="text-red-500 mt-1">The dashboard's Azure identity needs Reader and Virtual Machine Contributor on this resource group.</div>
           </div>
         </template>
-        <div x-show="!discovery.loading && !discovery.error && discovery.vms.length === 0" x-cloak
+        <div x-show="!discovery.loading && !discovery.error && !discovery.errors.length && discovery.vms.length === 0" x-cloak
              class="text-sm text-gray-400 text-center py-6">No adoptable VMs found.</div>
         <table x-show="!discovery.loading && discovery.vms.length > 0" x-cloak class="min-w-full text-sm">
           <thead>

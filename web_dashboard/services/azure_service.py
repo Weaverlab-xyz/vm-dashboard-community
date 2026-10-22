@@ -2075,6 +2075,32 @@ async def list_all_vms(rg: str) -> list:
         raise AzureError(f"Failed to list VMs in {rg}: {e}") from e
 
 
+async def resource_group_permissions(rg: str) -> list:
+    """What this identity may do in ``rg``: the ``value`` of ARM's
+    ``Microsoft.Authorization/permissions`` list, ``[{actions, notActions, ...}]``.
+
+    Any principal may read its own permissions, so this answers even where it has no
+    role at all — which is the case it exists for. A list call there does NOT fail:
+    ARM filters the result to what the caller can read and returns 200 with an empty
+    ``value``, indistinguishable from a resource group with nothing in it.
+    """
+    import httpx
+    try:
+        cred, sub_id = await _ensure_creds()
+        token = (await _to_thread(
+            cred.get_token, "https://management.azure.com/.default")).token
+        url = (f"https://management.azure.com/subscriptions/{sub_id}/resourceGroups/{rg}"
+               "/providers/Microsoft.Authorization/permissions?api-version=2022-04-01")
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+            resp.raise_for_status()
+            return resp.json().get("value") or []
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to read permissions on {rg}: {e}") from e
+
+
 def _get_vm_sync(cred, sub_id: str, rg: str, vm_name: str) -> Optional[dict]:
     """Fetch a single VM by name, regardless of tags."""
     compute = _get_compute(cred, sub_id)

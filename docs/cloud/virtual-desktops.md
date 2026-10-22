@@ -145,7 +145,10 @@ them and start or stop them from this page. It is Azure-only.
    **Discovery resource groups** (comma-separated).
 3. On this page, click **Adopt existing**, tick the VMs, name the pool, and click **Adopt**.
    A resource group the dashboard cannot list shows its error in the dialog, not an
-   empty list.
+   empty list. That includes skipping step 1: without a role on the group, Azure
+   returns an empty VM list rather than an error. So the dialog also checks the
+   identity's own permissions on each group. It reports missing read access, and
+   missing start or deallocate rights (Start / Stop would fail).
 
 An adopted pool is **rows only**. The dashboard writes no tags to the VMs. It never scales
 an adopted pool, and it never terminates an adopted VM: **Delete** and **Remove** only stop
