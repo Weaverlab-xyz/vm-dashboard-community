@@ -243,6 +243,13 @@ opa check terraform/policy/admission/          # parses; catches syntax errors
 python tests/test_opa_policies.py              # evaluates; catches behaviour
 ```
 
+**The image ships OPA 1.x, which reads Rego v1 only.** A rule written for OPA 0.x
+without `import rego.v1` — a bare `deny[msg] { ... }` with no `contains` / `if` — no
+longer parses, so a mounted `ADMISSION_POLICY_DIR` that still holds one turns every
+gated action into a 403 after the upgrade. Run `opa check` with a 1.x binary over the
+folder before you move to an image that carries it; `opa fmt --write --v0-v1 <dir>`
+rewrites old files into the new syntax.
+
 `tests/test_opa_policies.py` runs each shipped policy against the real binary and
 asserts the verdict both ways — that it fires on input it should refuse, and stays
 quiet on input it should not. It skips when no `opa` is on `PATH`, so it costs nothing
