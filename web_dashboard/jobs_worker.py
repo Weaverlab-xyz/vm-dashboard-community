@@ -200,7 +200,7 @@ MEDIUM_TYPES = (
     # granting it light-tier concurrency.
     "pov_env_wireup",
     # Same shape, one step longer: a destroy and a create per VM against the same
-    # appliance, for a POV moving its jump items into a Jump Group of its own.
+    # appliance, for a POV moving its jump items into an Asset Group of its own.
     "pov_env_jump_group_move",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     # Polls a CLOUD runner, but its cloud="local" branch shells out to `docker run` and

@@ -4,7 +4,7 @@ The demo profile's cells (``ot_service``, ``netcell_service``) are not something
 host as they stand. Each one deploys its own VMs, wires PRA against the install's global
 ``bt_*`` tenant and the shared Gateway host, and keeps its state on a Job row. A POV has
 none of those: its VMs come from a template, its PRA tenant comes from the registry, its
-Gateway and Jump Group are its own, and its state is ``PovEnvironmentVM`` rows torn down
+Gateway and Asset Group are its own, and its state is ``PovEnvironmentVM`` rows torn down
 by one ordered destroy. So a cell is not *ported* here. It is split into layers and each
 layer goes where a POV already puts that kind of thing:
 
@@ -12,7 +12,7 @@ layer goes where a POV already puts that kind of thing:
   a ``cell_role``, or a Skytap guest an operator marks).
 * **Per-VM wiring beyond the default** — this module. ``pov_wireup.wire_vm`` builds the
   ordinary jump item every guest gets; :func:`wire_extras` adds what the role needs on
-  top, against the SAME tenant, Gateway and Jump Group, and persists each item to the VM
+  top, against the SAME tenant, Gateway and Asset Group, and persists each item to the VM
   row the moment it exists.
 * **Narrative** — the use-case cards in ``pov_cards``.
 

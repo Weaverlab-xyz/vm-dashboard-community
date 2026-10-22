@@ -639,7 +639,7 @@ stored state.
 
 Each cloud's deploy form has one **Add to BeyondTrust PRA** checkbox, ticked by default (or
 as the VM's [workstream](#workstream-deploy-defaults) sets it) and shown only while PRA is
-enabled. Its Jump Group, Gateway and credential overrides sit in a
+enabled. Its Asset Group (called a Jump Group before PRA 26.1), Gateway and credential overrides sit in a
 collapsed section under it; leave them alone and the configured defaults apply. Untick it
 and the VM deploys with no jump (`enable_pra: false` on the request; a request that omits
 the field keeps the jump unless its workstream's default says otherwise, so API callers and
@@ -664,7 +664,7 @@ which is what an unset one means.
 | Default | What it does |
 |---|---|
 | Add new VMs to PRA | The default for the deploy form's **Add to BeyondTrust PRA** checkbox, and for an API request that leaves `enable_pra` out. |
-| PRA jump group, PRA Gateway | Where this workstream's jumps land, unless the deploy (or the row action) names one. |
+| PRA asset group, PRA Gateway | Where this workstream's jumps land, unless the deploy (or the row action) names one. |
 | Register in Entitle, Onboard into Password Safe | Pre-ticks those boxes on the deploy form. |
 | RDP jump for Windows, Microsoft Entra ID | Pre-fill the Windows choices on the deploy form. |
 
@@ -674,7 +674,7 @@ API caller gets them too.
 
 Resolution, most specific first:
 - **PRA on or off:** the request's `enable_pra` → the workstream default → on.
-- **Jump group and Gateway:** the request → the workstream default → the per-cloud setting
+- **Asset group and Gateway:** the request → the workstream default → the per-cloud setting
   → the global `bt_*` setting.
 
 Anyone who may edit the workstream (an administrator, a member, or its creator) may set
@@ -792,7 +792,7 @@ so is each deploy that queues runs. The API is `GET`/`PUT
 ### Adding PRA to a VM after deploy
 
 A VM this dashboard deployed — on AWS, Azure, GCP or OCI, Linux or Windows — can be added
-to PRA at any time from its row: **Add to PRA** opens the same Jump Group / Gateway / credential choices.
+to PRA at any time from its row: **Add to PRA** opens the same Asset Group / Gateway / credential choices.
 Once it has a jump the button reads **PRA ✓**, and the dialog offers **Re-apply** (replace
 the jump with one built from new choices) and **Remove from PRA**. Each runs as a `vm_pra`
 job; open it from the toast to follow it.
@@ -817,9 +817,9 @@ API: `POST /api/{aws|azure|gcp|oci}/instances/pra` with
 `{"instance": "<EC2 id | Azure VM name | GCE name | OCI OCID>", "action": "register" | "remove",
 "jump_group"?, "jumpoint_name"?, "pra_credential_ref"?}` → `202 {"job_id": ...}`.
 
-### Jump Group and Gateway resolution
+### Asset Group and Gateway resolution
 
-Jump Group / Gateway resolution: per-deploy form `jump_group` / `jumpoint_name` → the VM's
+Asset Group / Gateway resolution: per-deploy form `jump_group` / `jumpoint_name` → the VM's
 workstream default → the per-cloud override (`azure_bt_jump_group_name`/`azure_jumpoint_name`,
 `gcp_bt_jump_group_name`/`gcp_jumpoint_name`, `oci_bt_jump_group_name`/`oci_jumpoint_name`) →
 the `bt_*` defaults, each read from config and then from its environment setting. Deploys
@@ -852,7 +852,7 @@ the config-key table — in the [Password Safe](../integrations/beyondtrust/pass
 
 With `passwordsafe_vault_sync_enabled` on, the three cloud-native methods additionally
 mirror the VM's rotating SSH key into a **PRA Vault Private Key** account associated to the
-VM's Jump Group, so the key can be checked out in PRA's `/login` and injected into the VM's
+VM's Asset Group, so the key can be checked out in PRA's `/login` and injected into the VM's
 Shell Jump. Password Safe owns the propagation through a `SyncedAccounts` link — see
 [Using the VM's key in PRA](../integrations/beyondtrust/password-safe/vm-onboarding.md#using-the-vms-key-in-pra--the-pra-vault-private-key-sync).
 

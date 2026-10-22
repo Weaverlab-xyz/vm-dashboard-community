@@ -64,7 +64,7 @@ WINDOWS_JUMP_KEYS = ("bt_rdp_jump_id", "bt_rdp_vault_account_id", "bt_rdp_tf_sta
 def resolve_target(cloud: str, jump_group: Optional[str] = None,
                    jumpoint_name: Optional[str] = None,
                    workgroup: Optional[str] = None) -> tuple[str, str]:
-    """The Jump Group and Gateway names a jump for ``cloud`` lands in.
+    """The Asset Group and Gateway names a jump for ``cloud`` lands in.
 
     An explicit value wins, then the VM's workstream default (its profile, see
     ``workgroup_service.PROFILE_KEYS``), then the cloud's own key
@@ -215,7 +215,7 @@ async def attach(db: Session, deploy_job, *, jump_group: Optional[str] = None,
     """Create — or re-create with new options — the VM's Shell Jump.
 
     Idempotent: a VM that already has a jump has it removed first and created again, so
-    "Re-apply" with a different Jump Group moves it rather than leaving a second one.
+    "Re-apply" with a different Asset Group moves it rather than leaving a second one.
     Returns the metadata written onto the deploy row.
     """
     from . import job_service, jumpoint_host_service, terraform_pra_service
@@ -294,7 +294,7 @@ async def _attach_windows(db: Session, deploy_job, meta: dict, *, cloud: str, gr
                                           bool(access.get("rdp", True)),
                                           meta.get("windows_ssh_status") or "")
     if not (group and jumpoint):
-        raise VmPraError("No PRA Jump Group / Gateway is configured for this cloud.")
+        raise VmPraError("No PRA Asset Group / Gateway is configured for this cloud.")
     await say(60, f"Creating PRA access to {hostname} in '{group}' via '{jumpoint}'…")
     result: dict = {}
     await wsh.wire_pra(

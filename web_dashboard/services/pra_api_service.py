@@ -134,7 +134,7 @@ async def create_k8s_tunnel_jump(*, name: str, hostname: str, url: str,
     """Create a ``tunnel_type=k8s`` protocol-tunnel jump via the PRA Config API and
     return ``(jump_id, jump_group_id)`` — the jump-group id is reused to scope the
     Vault token account to the group (a per-jump-item association is rejected for
-    ``tunnel_type=k8s``). Resolves the Jump Group + Jumpoint names to ids first
+    ``tunnel_type=k8s``). Resolves the Asset Group + Jumpoint names to ids first
     (both must already exist). This is the REST replacement for the Terraform path,
     which the sra provider blocks for k8s (see module docstring)."""
     async with httpx.AsyncClient(timeout=30.0, headers={"Accept": "application/json"}) as client:
@@ -146,8 +146,8 @@ async def create_k8s_tunnel_jump(*, name: str, hostname: str, url: str,
                 raise PRAApiError(f"GET {path} failed ({r.status_code}): {r.text[:300]}")
             return r.json() if isinstance(r.json(), list) else []
 
-        jg_id = await _resolve_id(await _get_list("/api/config/v1/jump-group", "jump group"),
-                                  jump_group_name, "jump group")
+        jg_id = await _resolve_id(await _get_list("/api/config/v1/jump-group", "asset group"),
+                                  jump_group_name, "asset group")
         jp_id = await _resolve_id(await _get_list("/api/config/v1/jumpoint", "jumpoint"),
                                   jumpoint_name, "jumpoint")
         body = {
@@ -187,9 +187,9 @@ async def list_vault_account_groups() -> list[dict]:
 
 
 async def list_jump_groups() -> list[dict]:
-    """PRA Jump Groups for the provision form's jump-group picker — ``[{id, name}]``.
+    """PRA Asset Groups for the provision form's jump-group picker — ``[{id, name}]``.
     The tunnel HCL filters by name (sra_jump_group_list), so callers submit the name."""
-    return await _list_config("/api/config/v1/jump-group", "jump group")
+    return await _list_config("/api/config/v1/jump-group", "asset group")
 
 
 async def list_jumpoints() -> list[dict]:
@@ -199,7 +199,7 @@ async def list_jumpoints() -> list[dict]:
 
 
 async def list_pickers() -> dict:
-    """All PRA-sourced form pickers — Vault account groups, Jump Groups and Jumpoints —
+    """All PRA-sourced form pickers — Vault account groups, Asset Groups and Jumpoints —
     fetched concurrently. Cloud-agnostic (PRA objects aren't region/cloud-scoped).
     Best-effort: any individual failure yields an empty list for that picker (callers
     fall back to the configured default at broker time). Returns

@@ -128,35 +128,35 @@ PRA's own answer to that is **Vendor Onboarding**, and this drives it.
 
 | In PRA | Named | What it does |
 |---|---|---|
-| Jump Group | `pov-<name>` | Holds this POV's jump items. Created by **Wire up**. |
-| Group Policy | `pov-<name>-vendor-access` | Grants sessions on that Jump Group and nothing else |
+| Asset Group (a Jump Group before PRA 26.1) | `pov-<name>` | Holds this POV's jump items. Created by **Wire up**. |
+| Group Policy | `pov-<name>-vendor-access` | Grants sessions on that Asset Group and nothing else |
 | Vendor Group | `pov-<name>-vendors` | Holds the third-party logins; its policy is the one above |
 | Vendor users | `povvnd_<name>_<random>` | One per person you let in |
 
-The Jump Group is the part worth understanding, because it is why this could not simply be
-bolted on. **A PRA Group Policy grants access by Jump Group**, and a POV's jump items used
-to go into the Jump Group named on the *tenant* — one group shared by every POV on that
-appliance. A vendor attached to it would reach all of them. So a POV now gets a Jump Group
+The Asset Group is the part worth understanding, because it is why this could not simply be
+bolted on. **A PRA Group Policy grants access by Asset Group**, and a POV's jump items used
+to go into the Asset Group named on the *tenant* — one group shared by every POV on that
+appliance. A vendor attached to it would reach all of them. So a POV now gets an Asset Group
 of its own, and the vendor's policy names that one group.
 
 ### A POV wired before this will say so
 
 If this POV's jump items are still in the tenant's appliance-wide group, the card refuses
 and says why rather than offering a button that over-grants. Underneath the refusal it
-offers **Move to its own Jump Group**, which is the fix: it destroys this POV's jump items
+offers **Move to its own Asset Group**, which is the fix: it destroys this POV's jump items
 and rebuilds them in `pov-<name>`, then the vendor group can be created.
 
 Two things to know before pressing it:
 
 * **Nobody can launch a session on this POV while the job runs.** A jump item names its
-  Jump Group when it is created and there is no update for that, so moving one means
+  Asset Group when it is created and there is no update for that, so moving one means
   destroying it and building a new one. A Windows guest's Vault account is rebuilt with its
   jump item, because the two live in one Terraform workspace.
 * **Nothing else moves.** This POV's managed systems, Entitle integrations, Gateway,
   accessors and share link are all left exactly as they are.
 
 If an item cannot be destroyed, the job stops before creating the group and says so —
-items split across two Jump Groups would let a vendor reach part of the POV with nothing on
+items split across two Asset Groups would let a vendor reach part of the POV with nothing on
 the screen saying which part. Press **Wire up** to rebuild whatever did come out (back into
 the tenant's group, where the rest still are), sort the failure out in PRA, and move again.
 
@@ -222,7 +222,7 @@ pass catches the rest — groups whose clock ran out, and groups whose POV is al
 
 ### What it will not do
 
-It will not **adopt** anything. A Jump Group, Group Policy or Vendor Group already in the
+It will not **adopt** anything. An Asset Group, Group Policy or Vendor Group already in the
 appliance that this dashboard did not create is a refusal naming it, never a reuse — a
 policy scoped to a group somebody else filled would hand a third party whatever is already
 in it. Deleting follows the same rule: only names carrying the `pov-` prefix, and only user

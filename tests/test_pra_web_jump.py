@@ -70,7 +70,7 @@ def test_web_jump_hcl_with_vault_account():
     assert "password    = var.rancher_password" in hcl
     assert 'variable "rancher_password"' in hcl            # sensitive TF_VAR (not in HCL)
     assert "account_group_id = 7" in hcl                   # scoped to the chosen group
-    # Associated to the jump's Jump GROUP via shared_jump_groups (not jump_items[].type).
+    # Associated to the jump's Asset GROUP via shared_jump_groups (not jump_items[].type).
     assert "shared_jump_groups = [tonumber(data.sra_jump_group_list.jg.items[0].id)]" in hcl
     assert 'output "vault_account_id"' in hcl
 

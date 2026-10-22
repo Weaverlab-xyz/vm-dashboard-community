@@ -2412,7 +2412,7 @@ class CloudDatabase(Base):
     credentials_ref = Column(Text, nullable=True)          # backend-agnostic ref (resolved via config_service)
     jump_item_id = Column(String(64), nullable=True)       # PRA protocol-tunnel jump (Phase 2)
     # Per-DB PRA broker overrides — config defaults are the fallback.
-    jump_group = Column(String(128), nullable=True)        # PRA Jump Group name override (else bt_jump_group_name)
+    jump_group = Column(String(128), nullable=True)        # PRA Asset Group name override (else bt_jump_group_name)
     jumpoint_name = Column(String(128), nullable=True)     # PRA Jumpoint name override (else bt_jumpoint_name)
     pra_credential_ref = Column(String(256), nullable=True)  # secret ref → bt_client_secret override
     entitle_integration_id = Column(String(64), nullable=True)  # Entitle DB integration registered on apply
@@ -3473,7 +3473,7 @@ class K8sCluster(Base):
     pra_jump_id = Column(String(64), nullable=True)        # sra_protocol_tunnel_jump id (tunnel_type=k8s, Phase 3b)
     pra_tunnel_state = Column(Text, nullable=True)         # scrubbed Terraform state for the tunnel (drives teardown)
     # Per-cluster broker overrides — config defaults are the fallback (Phase 3b).
-    jump_group = Column(String(128), nullable=True)        # PRA Jump Group name override (else bt_jump_group_name)
+    jump_group = Column(String(128), nullable=True)        # PRA Asset Group name override (else bt_jump_group_name)
     jumpoint_name = Column(String(128), nullable=True)     # PRA Jumpoint name override (else bt_jumpoint_name) — the "separate jumpoint"
     pra_credential_ref = Column(String(256), nullable=True)  # secret ref → bt_client_secret override (else config)
     secrets_delivery_kind = Column(String(20), nullable=True)  # eso | secrets_agent (Phase 4)
@@ -3756,12 +3756,12 @@ class PovEnvironment(Base):
     accessor_integration_id = Column(String(64), nullable=True)
     accessor_tf_state = Column(Text, nullable=True)
 
-    # The PRA Jump Group this POV's jump items live in, when it has one of its own.
+    # The PRA Asset Group this POV's jump items live in, when it has one of its own.
     #
-    # NULL means "use the tenant's appliance-wide Jump Group", which is what every POV
+    # NULL means "use the tenant's appliance-wide Asset Group", which is what every POV
     # wired before this column existed does, and the fallback pov_wireup.tenant_override
     # still honours. It is a per-POV group at all because a PRA Group Policy grants access
-    # BY JUMP GROUP: a vendor attached to the tenant-wide group would reach every POV on
+    # BY ASSET GROUP: a vendor attached to the tenant-wide group would reach every POV on
     # that appliance, which is the whole reason the vendor feature could not just reuse it.
     #
     # The name and the id are both stored. The name is what terraform resolves through the
@@ -3771,7 +3771,7 @@ class PovEnvironment(Base):
     pra_jump_group_name = Column(String(255), nullable=True)
     pra_jump_group_id = Column(String(36), nullable=True)
 
-    # PRA Vendor Onboarding, per POV: one Group Policy scoped to the Jump Group above, and
+    # PRA Vendor Onboarding, per POV: one Group Policy scoped to the Asset Group above, and
     # one Vendor Group whose `default_policy` is that policy. Both are ids the appliance
     # assigned, held as text like every other foreign id on this table.
     #
@@ -5420,7 +5420,7 @@ def init_db():
             # and the first reconcile pass after a deploy fills it.
             #
             # PRA Vendor Onboarding per POV. All four backfill to NULL, which reads as
-            # "this POV uses the tenant's Jump Group and has no vendor group" — the right
+            # "this POV uses the tenant's Asset Group and has no vendor group" — the right
             # answer for every environment wired before this feature, and what makes the
             # Access tab's blocker rather than a silent cross-POV grant the thing an
             # operator meets. `pov_vendor_users` needs no entry: create_all makes new

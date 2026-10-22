@@ -53,7 +53,7 @@ def test_api_tunnel_hcl_is_generic_tcp_with_pinned_local_port():
     # local;remote pair — semicolon format confirmed against a live appliance jump.
     assert 'tunnel_definitions    = "6443;443"' in hcl
     assert 'tunnel_listen_address = "127.0.0.1"' in hcl
-    # Name→id lookups for the pre-existing Jump Group + Jumpoint.
+    # Name→id lookups for the pre-existing Asset Group + Jumpoint.
     assert 'data "sra_jump_group_list" "jg"' in hcl and '"Cloud"' in hcl
     assert 'data "sra_jumpoint_list" "jp"' in hcl and '"GCP Run"' in hcl
     assert 'output "tunnel_jump_id"' in hcl

@@ -82,7 +82,7 @@ class BrokerAccessRequest(BaseModel):
     """Per-cluster broker overrides (Phase 3b). All optional — omitted fields fall
     back to the configured defaults. ``pra_credential_ref`` is a secrets-backend
     *reference* (e.g. ``aws_sm://…``), not a raw secret."""
-    jump_group: Optional[str] = None          # PRA Jump Group name override (else bt_jump_group_name)
+    jump_group: Optional[str] = None          # PRA Asset Group name override (else bt_jump_group_name)
     jumpoint_name: Optional[str] = None       # PRA Jumpoint name override (else bt_jumpoint_name)
     pra_credential_ref: Optional[str] = None  # secret ref → bt_client_secret override for the apply
     vault_inject: bool = False                # mint a cluster SA token + store it in the PRA Vault for injection (PRA-only access)

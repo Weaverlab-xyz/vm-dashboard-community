@@ -9,7 +9,7 @@ build time into the image's read-only provider mirror (see TF_PROVIDER_MIRROR_DI
 run time.
 
 PREREQUISITES (enforced at runtime — not created by this service):
-  - A Jump Group named bt_jump_group_name must already exist in PRA.
+  - An Asset Group named bt_jump_group_name must already exist in PRA.
   - A Jumpoint named bt_jumpoint_name must already exist in PRA.
   Both are looked up via data sources; this service never creates them.
 
@@ -17,7 +17,7 @@ Required settings (config_service / .env):
   bt_api_host      - BeyondTrust PRA appliance hostname, e.g. "pra.example.com"
   bt_client_id     - OAuth2 client ID
   bt_client_secret - OAuth2 client secret
-  bt_jump_group_name  - name of the pre-existing shared Jump Group
+  bt_jump_group_name  - name of the pre-existing shared Asset Group
   bt_jumpoint_name    - name of the pre-existing Jumpoint
 """
 
@@ -175,7 +175,7 @@ def _generate_hcl(
 ) -> str:
     """Return the Terraform HCL for one Shell Jump resource.
 
-    Both Jump Group and Jumpoint are looked up with data sources — they must
+    Both Asset Group and Jumpoint are looked up with data sources — they must
     already exist in PRA. Only the Shell Jump itself is managed (created/destroyed)
     by this Terraform workspace.
 
@@ -508,7 +508,7 @@ async def provision_jump(
 ) -> dict:
     """Provision a BeyondTrust PRA Shell Jump via Terraform.
 
-    The Jump Group and Jumpoint must already exist in PRA — this function
+    The Asset Group and Jumpoint must already exist in PRA — this function
     only creates the Shell Jump resource itself, plus, when ``admin_password`` and
     ``vault_account_name`` are both given (a Windows server reached over OpenSSH), a
     PRA Vault username/password account injected into it. A failed vault account
@@ -516,7 +516,7 @@ async def provision_jump(
 
     Returns a dict with:
       shell_jump_id  - PRA numeric ID of the new Shell Jump (str)
-      jump_group_name - name of the Jump Group used
+      jump_group_name - name of the Asset Group used
       tf_state_json  - full Terraform state JSON (store in job extra_data for destroy);
                        scrubbed of the password when a vault account was requested
       vault_account_id, vault_error - only when a vault account was requested
@@ -538,7 +538,7 @@ async def remove_jump(tf_state_json: str, tenant: Optional[dict] = None) -> None
     **State-driven, with a provider-only config**, exactly as :func:`remove_rdp_jump` is.
     It used to regenerate the creation HCL, and that regeneration re-read the GLOBAL
     ``bt_jump_group_name`` and ``bt_jumpoint_name`` from config — names that are simply
-    wrong for anything whose Jump Group is not the global one. A POV's items sit in its
+    wrong for anything whose Asset Group is not the global one. A POV's items sit in its
     own tenant's group (or in its own ``pov-<name>`` group) behind its own Gateway, in an
     appliance where the global names may not exist at all; a VDI seat's sit somewhere
     else again, which is why ``vdesktop_service`` routed around this function rather than
@@ -551,7 +551,7 @@ async def remove_jump(tf_state_json: str, tenant: Optional[dict] = None) -> None
 #
 # The managed-database feature provisions a private DB and reaches it only
 # through a PRA protocol-tunnel jump. Same shape as the Shell Jump pair above —
-# look up the pre-existing Jump Group + Jumpoint, manage one tunnel resource —
+# look up the pre-existing Asset Group + Jumpoint, manage one tunnel resource —
 # but the resource is the engine-specific tunnel jump. Resource names confirmed
 # against the cached provider schema (`terraform providers schema -json`).
 
@@ -669,7 +669,7 @@ def _generate_db_tunnel_hcl(
         var_block = 'variable "db_password"      { sensitive = true }\n'
         group_line = (f"  account_group_id = {int(vault_account_group_id)}\n"
                       if vault_account_group_id else "")
-        # Associate the Vault account to the tunnel jump's Jump GROUP via
+        # Associate the Vault account to the tunnel jump's Asset GROUP via
         # criteria.shared_jump_groups — NOT jump_items[].type. The PRA backend
         # 422s ("jump_items.0.type: The selected value is invalid") for the DB
         # protocol-tunnel jump-item types (postgresql_tunnel_jump / my_sql_tunnel_jump
@@ -960,7 +960,7 @@ async def provision_db_tunnel(
 ) -> dict:
     """Provision a BeyondTrust PRA protocol-tunnel jump for a managed database.
 
-    The Jump Group and Jumpoint must already exist in PRA. When both
+    The Asset Group and Jumpoint must already exist in PRA. When both
     ``admin_password`` and ``vault_account_name`` are given, a Vault
     username/password account is created in the same workspace and associated
     to the tunnel jump for credential injection (the password travels as a
@@ -1114,7 +1114,7 @@ async def provision_api_tunnel(
     tenant: Optional[dict] = None,
 ) -> dict:
     """Provision a generic tunnel_type="tcp" PRA protocol-tunnel jump to a k8s
-    API server, with a pinned local listen port. The Jump Group + Jumpoint must
+    API server, with a pinned local listen port. The Asset Group + Jumpoint must
     already exist. Returns ``{tunnel_jump_id, jump_group_name, tf_state_json}``
     (state SCRUBBED, safe to stash; drives ``remove_api_tunnel`` later).
 
@@ -1161,7 +1161,7 @@ def _generate_web_jump_hcl(name: str, url: str, jump_group_name: str,
     from the jump-group/jumpoint list data sources). verify_certificate defaults
     false (Rancher's self-signed cert). When ``vault_account_name`` is given, also
     emit a Vault account (password via the sensitive TF_VAR ``rancher_password``)
-    associated to this jump's Jump GROUP via criteria.shared_jump_groups — the same
+    associated to this jump's Asset GROUP via criteria.shared_jump_groups — the same
     workaround the DB path uses (jump_items[].type 422s for non-RDP types)."""
     safe_name = re.sub(r"[^a-z0-9_]", "_", name.lower())
     var_block = ""
@@ -1311,7 +1311,7 @@ async def provision_web_jump(
     vault_account_group_id=None, comments: str = "",
     tenant: Optional[dict] = None,
 ) -> dict:
-    """Provision a PRA Web Jump to a web UI (the central Rancher). The Jump Group +
+    """Provision a PRA Web Jump to a web UI (the central Rancher). The Asset Group +
     Jumpoint must already exist. When ``admin_password`` + ``vault_account_name`` are
     given, ALSO vault the credential (username/password) into ``vault_account_group_id``
     for injection. Returns {web_jump_id, vault_account_id, jump_group_name,
@@ -1552,7 +1552,7 @@ async def provision_rdp_jump(
 ) -> dict:
     """Provision a BeyondTrust PRA Remote RDP jump item for a VDI desktop seat.
 
-    The Jump Group and Jumpoint must already exist in PRA. When both
+    The Asset Group and Jumpoint must already exist in PRA. When both
     ``admin_password`` and ``vault_account_name`` are given, a Vault
     username/password account is created and associated to the RDP jump for
     credential injection (the password travels as a sensitive TF_VAR, never in
@@ -1603,14 +1603,14 @@ def _generate_k8s_vault_account_hcl(
     jump_group_id: Optional[int] = None,
 ) -> str:
     """HCL for a PRA Vault **token** account (``sra_vault_token_account``) holding a
-    cluster's ServiceAccount bearer token, scoped to the k8s tunnel's **Jump Group**
+    cluster's ServiceAccount bearer token, scoped to the k8s tunnel's **Asset Group**
     for credential injection.
 
     The tunnel jump is created over the REST API (the sra provider's ``tunnel_type``
     validator blocks ``"k8s"``; see pra_api_service). A per-jump-item association
     (``jump_items = [{id, type}]``) is REJECTED by PRA for a tunnel_type=k8s jump
     (422 ``jump_items.0.type … The selected value is invalid``), so the account is
-    associated to the jump's Jump Group instead via ``criteria.shared_jump_groups``
+    associated to the jump's Asset Group instead via ``criteria.shared_jump_groups``
     (``TF_VAR_k8s_jump_group_id``). The token rides ``TF_VAR_k8s_sa_token``
     (sensitive) and never lands in the HCL."""
     group_line = (f"  account_group_id = {int(vault_account_group_id)}\n"
@@ -1663,7 +1663,7 @@ def _provision_k8s_vault_sync(jump_id, vault_account_name, sa_token,
                               vault_account_group_id=None, client_secret="",
                               jump_group_id=None) -> dict:
     """TF-apply a Vault token account scoped (via jump_item_association criteria) to
-    the k8s jump's Jump Group. Returns ``{vault_account_id, tf_state_json}`` (state
+    the k8s jump's Asset Group. Returns ``{vault_account_id, tf_state_json}`` (state
     scrubbed of the token)."""
     extra_env = {"TF_VAR_k8s_sa_token": sa_token, "TF_VAR_k8s_jump_group_id": str(jump_group_id)}
     if client_secret:
@@ -1713,7 +1713,7 @@ async def provision_k8s_tunnel(
     """Provision a PRA ``tunnel_type=k8s`` protocol-tunnel jump to a managed cluster's
     API. The jump is created over the **REST API** (``pra_api_service``) because the
     sra Terraform provider's ``tunnel_type`` validator rejects ``"k8s"`` client-side
-    (see docs/notes/sra-provider-k8s-tunnel-bug.md). The Jump Group + Jumpoint must
+    (see docs/notes/sra-provider-k8s-tunnel-bug.md). The Asset Group + Jumpoint must
     already exist in PRA.
 
     When ``vault_account_name`` + ``sa_token`` are given, a ``sra_vault_token_account``
@@ -1766,7 +1766,7 @@ async def remove_k8s_tunnel(tf_state_json: Optional[str] = None, jump_id=None) -
 # The OT cell's Password Safe onboarding creates the VM's adminuser managed
 # account; making that credential USABLE in PRA — checkout in /login, injection
 # into the cell's jump items — additionally needs a Vault username/password
-# account scoped to the cell's Jump Group. The password seeded here is a
+# account scoped to the cell's Asset Group. The password seeded here is a
 # throwaway placeholder: Password Safe overwrites it through the "PRA Vault
 # Username Password" plugin the first time the SyncedAccounts pair rotates, so
 # the real credential never passes through the dashboard.
@@ -1775,7 +1775,7 @@ def _generate_vault_up_account_hcl(vault_account_name: str, username: str,
                                    jump_group_name: str,
                                    vault_account_group_id: Optional[int] = None) -> str:
     """HCL for one standalone ``sra_vault_username_password_account``, associated to a
-    Jump Group by NAME via ``criteria.shared_jump_groups`` (per-jump-item association is
+    Asset Group by NAME via ``criteria.shared_jump_groups`` (per-jump-item association is
     rejected by the PRA backend for tunnel jump types — same wall the DB and k8s vault
     accounts hit, see ``_generate_db_tunnel_hcl``). The password rides
     ``TF_VAR_vault_password`` (sensitive), never the HCL; the criteria arrays must all
@@ -1921,7 +1921,7 @@ def _throwaway_openssh_key() -> str:
 def _generate_vault_ssh_account_hcl(vault_account_name: str, username: str,
                                     jump_group_name: str,
                                     vault_account_group_id: Optional[int] = None) -> str:
-    """HCL for one standalone ``sra_vault_ssh_account``, associated to a Jump Group by
+    """HCL for one standalone ``sra_vault_ssh_account``, associated to an Asset Group by
     NAME via ``criteria.shared_jump_groups`` — the same association shape as every
     other Vault account here, for the same reason (a per-jump-item association is
     rejected by the PRA backend; see ``_generate_db_tunnel_hcl``). The key rides

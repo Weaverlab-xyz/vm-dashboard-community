@@ -917,7 +917,7 @@
           </p>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label class="block text-xs font-medium text-gray-600 mb-1">Jump group</label>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Asset group</label>
               <select x-model="form.jump_group" :disabled="loadingOptions"
                       class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
                 <option value="">(configured default)</option>
@@ -938,7 +938,7 @@
             </div>
           </div>
           <p x-show="!loadingOptions && (options.jump_groups || []).length === 0 && (options.gateways || []).length === 0" x-cloak
-             class="text-xs text-gray-400">No PRA jump groups/Gateways returned — the tunnel falls back to the configured defaults (check PRA config to pick per-DB).</p>
+             class="text-xs text-gray-400">No PRA Asset Groups/Gateways returned — the tunnel falls back to the configured defaults (check PRA config to pick per-DB).</p>
           {{ secret_picker("form", "praCredBackend", "pra_credential_ref",
                            "PRA credential", "Resolved to a bt_client_secret override for this DB's tunnel provisioning.") }}
         </div>
@@ -1414,7 +1414,7 @@ function databasesPage() {
 
     onCloudChange() {
       // Switching cloud in the modal: reset region + cloud-specific fields and reload
-      // that cloud's options (instance sizes, subnet/SG pickers, PRA jump groups).
+      // that cloud's options (instance sizes, subnet/SG pickers, PRA asset groups).
       // Keep the engine valid for the chosen cloud: OCI is Oracle-only, and a cloud
       // that does not offer the current engine falls back to the first it does.
       const offered = this.engineOptions().map(e => e.value);

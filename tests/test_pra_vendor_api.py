@@ -228,11 +228,11 @@ def test_the_membership_is_one_jump_group_and_inherits_both_roles():
     assert sent == {"jump_group_id": 44, "jump_item_role_id": 0, "jump_policy_id": 0}
 
 
-# ── Jump groups ──────────────────────────────────────────────────────────────
+# ── Asset groups ──────────────────────────────────────────────────────────────
 
 def test_a_jump_group_name_is_rechecked_after_the_server_side_filter():
     """The `name` query parameter filters, but a filter that is a substring match on some
-    version would hand back a neighbour — and a Jump Group is what scopes a vendor."""
+    version would hand back a neighbour — and an Asset Group is what scopes a vendor."""
     handler, calls = _recorder([
         httpx.Response(200, json=[{"id": 1, "name": "pov-acme-two"},
                                   {"id": 2, "name": "pov-acme"}])])
@@ -377,7 +377,7 @@ def test_the_paged_reader_follows_every_page():
 # ── refusals ─────────────────────────────────────────────────────────────────
 
 def test_a_404_on_a_vendor_path_names_the_appliance_version():
-    """Vendor Onboarding is a newer Config API surface than Jump Groups. Without this,
+    """Vendor Onboarding is a newer Config API surface than Asset Groups. Without this,
     'your PRA is too old' and 'that group was deleted' read identically."""
     handler, _calls = _recorder([httpx.Response(404, json={"message": "not found"})])
     real = _serve(handler)

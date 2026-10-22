@@ -881,7 +881,7 @@ def _pra_configured() -> bool:
 
 
 def _resolve_pra_targets(spec: dict, backend) -> dict:
-    """Jump Group / Gateway / Vault account-group for a pool's jump items.
+    """Asset Group / Gateway / Vault account-group for a pool's jump items.
 
     Resolves ``spec override -> the backend's cloud-specific key -> the shared bt_*``,
     the same chain each cloud's own Shell Jump uses in ``*_vm_service``. A backend
@@ -914,7 +914,7 @@ def session_info(db: Session, seat_id: str) -> dict | None:
     Lives here rather than in the router so it is testable without importing
     FastAPI, and so the per-cloud target resolution is the SAME function the
     provisioner used — the endpoint used to hard-code the ``azure_*`` keys, which
-    named the wrong Jump Group for an AWS or GCP seat.
+    named the wrong Asset Group for an AWS or GCP seat.
     """
     seat = get_seat(db, seat_id)
     if seat is None:
@@ -1214,7 +1214,7 @@ async def teardown_seats(seat_ids: list, job_id: str = None) -> None:
             # which writes a provider-only config and destroys whatever `sra_*` resource
             # the state holds — so it is correct for a Shell Jump too. `remove_jump` now
             # delegates to the same worker (it used to regenerate HCL and re-read
-            # `bt_jump_group_name`, the wrong Jump Group for a GCP seat), so either call
+            # `bt_jump_group_name`, the wrong Asset Group for a GCP seat), so either call
             # would do; this one stays because it also destroys the seat's vault account.
             if row.pra_tunnel_state:
                 try:

@@ -152,7 +152,7 @@ Entitle credential per customer, and duplicated credentials rotate apart.
 | **OAuth client id** | PRA and Password Safe. Entitle authenticates with a bearer token and has no paired id |
 | **Client secret** | Encrypted with the same Fernet key as every other secret in this dashboard |
 | **…or a vault reference** | `aws_sm://`, `azure_kv://`, `gcp_sm://`, `bt_safe://` — for operators who want no credential in this database at all. One or the other, never both |
-| **Jump Group / Gateway** | PRA only. Names *inside that appliance*, which is why they belong on the tenant and not in global settings. The stored option key is still `jumpoint_name`, matching the `bt_jumpoint_name` setting it seeds from — see [why the key looks wrong](#why-the-gateway-option-key-looks-wrong) |
+| **Asset Group / Gateway** | PRA only, and **no longer on the form** — there is nothing to create in PRA by hand. Each POV gets its own Asset Group (called a Jump Group before PRA 26.1), `pov-<name>`, created through the Configuration API at **Wire up** and removed with the POV; and its jump items route through the Gateway installed inside that POV. The API account therefore needs **Configuration API** permission, which **Verify** checks by reading the Asset Group list. The tenant's own `jump_group_name` is still read for a POV wired before per-POV groups existed, and a tenant seeded from Settings keeps both values. The Gateway's stored option key is still `jumpoint_name` — see [why the key looks wrong](#why-the-gateway-option-key-looks-wrong) |
 | **Password Safe run-as user** | Required by the `passwordsafe` Terraform provider block |
 | **Owner id / Workflow id** | Entitle only, and **both are required** — `pov_wireup` refuses before creating *any* integration without them, the REST accessor adapter included. They are ids inside that tenant, which is why they are not a global setting |
 | **Agent token name / SSH sudo user** | Entitle only, and only the SSH ephemeral-accounts connector needs them. The agent token is the manual answer: a POV that installs its own agent [names that one instead](wiring.md#the-entitle-agent) |
@@ -166,7 +166,7 @@ a new one.
 - **The secret field starts blank, and blank keeps the stored secret.** The dashboard
   never sends a secret back to the browser. Type into the field only to replace it, for
   example after rotating the API client secret or the Entitle token.
-- **Only what you changed is saved.** Renaming a tenant or filling in a missing Jump Group
+- **Only what you changed is saved.** Renaming a tenant or filling in a missing option
   keeps its Verify result. A new secret, client id or URL clears that result, and for PRA
   and Password Safe **Verify runs again as part of the save**.
 - **POVs wired into the tenant keep pointing at it.** They reference the row, not its name

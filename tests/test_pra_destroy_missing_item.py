@@ -182,7 +182,7 @@ def test_teardown_entry_points_route_through_the_tolerant_destroy():
     src = Path(_ROOT, "web_dashboard", "services", "terraform_pra_service.py").read_text(
         encoding="utf-8")
     # `_remove_sync` is gone: `remove_jump` delegates to `_destroy_state_only_sync`
-    # rather than regenerating the creation HCL with the GLOBAL Jump Group name.
+    # rather than regenerating the creation HCL with the GLOBAL Asset Group name.
     for fn in ("_destroy_state_only_sync", "_remove_db_tunnel_sync"):
         body = src.split(f"def {fn}(", 1)[1].split("\ndef ", 1)[0]
         assert "_destroy_sync(" in body, f"{fn} does not use the tolerant destroy"

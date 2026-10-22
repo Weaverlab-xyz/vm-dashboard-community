@@ -186,7 +186,7 @@ on the run form is irrelevant — nothing is installed on it.
 | `portainer_data_disk_enabled` | `false` | Put `/data` on a separate volume that survives a teardown |
 | `portainer_ui_web_jump_enabled` | `false` | Broker the UI via a PRA Web Jump (opt-in) |
 | `portainer_ui_verify_certificate` | `false` | Web Jump TLS verification — off for the node's self-signed cert |
-| `portainer_ui_jump_group` | `""` | Jump Group for the Web Jump; blank = `bt_jump_group_name` |
+| `portainer_ui_jump_group` | `""` | Asset Group for the Web Jump; blank = `bt_jump_group_name` |
 | `portainer_ui_jumpoint_name` | `""` | Gateway for the Web Jump; blank = `bt_jumpoint_name` |
 | `portainer_ui_vault_account_group_id` | `""` | Vault account group the admin credential is stored in; blank = `bt_vault_account_group_id`, else the password is shown |
 | `portainer_ui_jumpoint_cloud` | `gcp` | Which managed Gateway host brokers the UI; its egress IP is auto-allowed |

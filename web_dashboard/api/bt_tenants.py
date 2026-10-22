@@ -57,7 +57,7 @@ class TenantUpdate(BaseModel):
     """Every field optional. ``None`` means "not supplied" and the row keeps what it has.
 
     ``secret`` is the one that matters: the form cannot render what is stored, so a blank
-    string has to mean *keep*, not *clear*. Any other rule means saving a Jump Group name
+    string has to mean *keep*, not *clear*. Any other rule means saving an Asset Group name
     wipes the credential.
     """
     name: str | None = None
@@ -80,6 +80,11 @@ def _refuse(exc: bt_tenant_service.BTTenantError) -> HTTPException:
     return HTTPException(status_code=409, detail=str(exc))
 
 
+def _form_keys(kind: str) -> list[str]:
+    hidden = bt_tenant_service.FORM_HIDDEN_OPTIONS.get(kind, ())
+    return [k for k in bt_tenant_service.OPTION_KEYS.get(kind, ()) if k not in hidden]
+
+
 @router.get("")
 def list_tenants(kind: str = "", db: Session = Depends(get_db),
                        current_user: User = Depends(get_current_user)):
@@ -98,13 +103,15 @@ def list_tenants(kind: str = "", db: Session = Depends(get_db),
         "kinds": [
             {"kind": k,
              "label": bt_tenant_service.LABELS[k],
-             "option_keys": list(bt_tenant_service.OPTION_KEYS.get(k, ())),
+             # The form's fields: allowlisted keys minus the ones nothing reads on a POV
+             # registered today (see FORM_HIDDEN_OPTIONS). Still accepted if sent.
+             "option_keys": _form_keys(k),
              "option_labels": {key: bt_tenant_service.OPTION_LABELS.get(key, key)
-                               for key in bt_tenant_service.OPTION_KEYS.get(k, ())},
+                               for key in _form_keys(k)},
              # Only for the keys that have one, so the UI renders nothing for the rest
              # rather than an empty paragraph under every field.
              "option_hints": {key: bt_tenant_service.OPTION_HINTS[key]
-                              for key in bt_tenant_service.OPTION_KEYS.get(k, ())
+                              for key in _form_keys(k)
                               if key in bt_tenant_service.OPTION_HINTS},
              "required_options": list(bt_tenant_service.REQUIRED_OPTIONS.get(k, ())),
              # "" for the kinds whose URL is the customer. Entitle's is REGIONAL, so

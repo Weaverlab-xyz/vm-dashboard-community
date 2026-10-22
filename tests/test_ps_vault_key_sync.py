@@ -343,8 +343,8 @@ def test_no_jump_group_anywhere_skips_rather_than_creating_an_unusable_account()
     rec = Recorder()
     res, _ = _wire(rec, cfg={"bt_jump_group_name": None})
     assert rec.events == []
-    assert "Jump Group" in res["ps_vault_skipped"]
-    assert "ps_vault_error" not in res, "a missing Jump Group is a skip, not a failure"
+    assert "Asset Group" in res["ps_vault_skipped"]
+    assert "ps_vault_error" not in res, "a missing Asset Group is a skip, not a failure"
 
 
 def test_the_account_group_is_passed_when_numeric_and_dropped_otherwise():

@@ -124,10 +124,10 @@ class _FakeTF:
 
 
 class _FakeJumpGroups:
-    """The Config API calls `ensure_jump_group` and the Jump Group teardown make.
+    """The Config API calls `ensure_jump_group` and the Asset Group teardown make.
 
     A separate fake from `_FakeTF` because they are separate layers: jump ITEMS go through
-    terraform, and the Jump Group they live in is created over REST — the provider has an
+    terraform, and the Asset Group they live in is created over REST — the provider has an
     `sra_jump_group` resource, but each VM's jump item is its own workspace, so declaring
     the group there would put it in eight of them.
     """
@@ -212,16 +212,88 @@ def test_a_tenant_with_no_jump_group_is_refused():
     env = _env(db, tenant=tenant)
     try:
         w.tenant_override(db, env)
-        raise AssertionError("a tenant with no Jump Group was accepted")
+        raise AssertionError("a tenant with no Asset Group was accepted")
     except w.WireupError as exc:
-        assert "Jump Group" in str(exc)
+        assert "Asset Group" in str(exc)
     finally:
         db.close()
 
 
-# -- the per-POV Jump Group --------------------------------------------------
+def test_preflight_lets_a_fresh_pov_through_on_a_tenant_with_no_asset_group():
+    """The bug this pins: Wire up's API preflighted with `tenant_override`, which refused
+    this exact POV with a 409 -- before the job that creates `pov-<name>` could run. So
+    SEs were told to build a group by hand in /login that nothing would ever use."""
+    db = d.SessionLocal()
+    try:
+        env = _env(db, tenant=_tenant(db, jump_group_name=""))
+        w.preflight(db, env)                  # no raise
+    finally:
+        db.close()
+
+
+def test_preflight_still_refuses_a_legacy_pov_whose_tenant_lost_its_group():
+    """A POV wired before per-POV groups has its items in the tenant's group, and that
+    name is the only record of where they are."""
+    db = d.SessionLocal()
+    try:
+        env = _env(db, tenant=_tenant(db, jump_group_name=""))
+        vm = _vm(db, env)
+        vm.pra_jump_id = "42"
+        db.commit()
+        try:
+            w.preflight(db, env)
+            raise AssertionError("a legacy POV with no group to resolve was let through")
+        except w.WireupError as exc:
+            assert "appliance-wide Asset Group" in str(exc)
+            assert "Move to its own Asset Group" in str(exc)
+    finally:
+        db.close()
+
+
+def test_preflight_refuses_a_tenant_that_cannot_authenticate():
+    db = d.SessionLocal()
+    try:
+        tenant = bt_tenant_service.create(
+            db, kind="pra", name=_name("pra"), base_url="acme.beyondtrustcloud.com",
+            client_id="", secret="", created_by="t", options={})
+        env = _env(db, tenant=tenant)
+        try:
+            w.preflight(db, env)
+            raise AssertionError("a tenant with no credentials passed preflight")
+        except w.WireupError as exc:
+            assert "OAuth client id" in str(exc)
+    finally:
+        db.close()
+
+
+def test_preflight_makes_no_network_call():
+    db = d.SessionLocal()
+
+    async def _boom(*a, **kw):
+        raise AssertionError("preflight reached the appliance")
+
+    original = {k: getattr(w.pra_vendor_api, k) for k in _JG_PATCHED}
+    for k in original:
+        setattr(w.pra_vendor_api, k, _boom)
+    try:
+        w.preflight(db, _env(db, tenant=_tenant(db, jump_group_name="")))
+    finally:
+        for k, fn in original.items():
+            setattr(w.pra_vendor_api, k, fn)
+        db.close()
+
+
+def test_the_wireup_endpoint_preflights_without_demanding_a_group():
+    """Static: the endpoint must call `preflight`, not `tenant_override`."""
+    src = open(os.path.join(_ROOT, "web_dashboard", "api", "pov.py"), encoding="utf-8").read()
+    handler = src.split('job_type="pov_env_wireup"', 1)[0].rsplit("@router.post", 1)[1]
+    assert "pov_wireup.preflight(" in handler
+    assert "pov_wireup.tenant_override(" not in handler
+
+
+# -- the per-POV Asset Group --------------------------------------------------
 #
-# A PRA Group Policy grants access BY JUMP GROUP, so the tenant's appliance-wide group is
+# A PRA Group Policy grants access BY ASSET GROUP, so the tenant's appliance-wide group is
 # the wrong scope for anything a third party is attached to: a vendor let into it reaches
 # every POV on that appliance. Nothing else in the wire-up cares -- jump items work either
 # way -- which is exactly why the fallback has to keep working and why these are pinned.
@@ -298,7 +370,7 @@ def test_a_create_that_returns_no_id_writes_neither_column():
         env = _env(db, tenant=_tenant(db))
         try:
             asyncio.run(w.ensure_jump_group(db, env))
-            raise AssertionError("a blank Jump Group id was accepted")
+            raise AssertionError("a blank Asset Group id was accepted")
         except w.WireupError as exc:
             assert "returned no id" in str(exc)
         assert env.pra_jump_group_name is None, "the name was committed with no id"
@@ -338,7 +410,7 @@ def test_an_existing_group_of_the_same_name_is_refused_not_adopted():
         env = _env(db, tenant=_tenant(db))
         try:
             asyncio.run(w.ensure_jump_group(db, env))
-            raise AssertionError("a foreign Jump Group was adopted")
+            raise AssertionError("a foreign Asset Group was adopted")
         except w.WireupError as exc:
             assert "did not create" in str(exc)
             assert "will not adopt" in str(exc)
@@ -394,7 +466,7 @@ def test_teardown_removes_the_povs_own_group_and_never_the_shared_one():
                    pra_jump_group_id="44")
         line = asyncio.run(w.teardown(db, own))
         assert ("delete", "44") in jg.calls
-        assert "Removed this POV's Jump Group" in line
+        assert "Removed this POV's Asset Group" in line
         assert own.pra_jump_group_id is None and own.pra_jump_group_name is None
     finally:
         _restore(original)
@@ -571,7 +643,7 @@ def test_a_failure_records_the_reason_on_the_row_and_does_not_raise():
     db = d.SessionLocal()
     env = _env(db, tenant=_tenant(db))
     vm = _vm(db, env)
-    original = _install(_FakeTF(raises="Jump Group 'POV' not found"))
+    original = _install(_FakeTF(raises="Asset Group 'POV' not found"))
     try:
         line = asyncio.run(w.wire_vm(db, env, vm, tenant=w.tenant_override(db, env),
                                      gateway="pov-gw"))
@@ -579,7 +651,7 @@ def test_a_failure_records_the_reason_on_the_row_and_does_not_raise():
         _restore(original)
     assert "FAILED" in line
     db.refresh(vm)
-    assert "Jump Group" in vm.wiring_error
+    assert "Asset Group" in vm.wiring_error
     assert vm.pra_jump_id is None
     db.close()
 
@@ -1707,10 +1779,10 @@ def test_the_job_type_runs_locally_and_not_on_an_agent():
 
 
 
-# ── moving a POV onto its own Jump Group ────────────────────────────────────
+# ── moving a POV onto its own Asset Group ────────────────────────────────────
 #
 # The remedy `pov_vendor_access.blocker` names. It exists because `ensure_jump_group`
-# deliberately will not do it: a jump item names its Jump Group at creation, so moving one
+# deliberately will not do it: a jump item names its Asset Group at creation, so moving one
 # means destroying and rebuilding it, and a re-run of Wire up must not do that quietly to
 # a POV that is working. What is pinned here is the order (destroy, create the group,
 # rebuild) and the one state worse than the one it fixes — items split across two groups.
@@ -1780,7 +1852,7 @@ def test_the_move_rebuilds_the_items_in_the_povs_own_group():
 
 
 def test_a_partial_destroy_stops_before_the_group_is_created():
-    """Items split across two Jump Groups is the state worse than the one being fixed: a
+    """Items split across two Asset Groups is the state worse than the one being fixed: a
     vendor would reach part of the POV with nothing on the screen saying which part."""
     db = d.SessionLocal()
     env = _env(db, tenant=_tenant(db))
@@ -1799,7 +1871,7 @@ def test_a_partial_destroy_stops_before_the_group_is_created():
     assert status == "failed"
     assert "could not be removed" in error
     assert "Wire up" in error, "the operator is not told how to get back to working items"
-    assert jg.calls == [], "a Jump Group was created with items still in the old one"
+    assert jg.calls == [], "an Asset Group was created with items still in the old one"
     db = d.SessionLocal()
     env = db.query(d.PovEnvironment).filter(d.PovEnvironment.id == eid).first()
     assert env.pra_jump_group_name is None
@@ -1854,7 +1926,7 @@ def test_a_group_that_cannot_be_created_says_how_to_get_the_items_back():
     eid = env.id
     db.close()
     jid = _move_job(eid)
-    jg = _FakeJumpGroups(create_raises="the OAuth client cannot create Jump Groups")
+    jg = _FakeJumpGroups(create_raises="the OAuth client cannot create Asset Groups")
     original = _install(_FakeTF(), jg)
     try:
         asyncio.run(w.run_env_jump_group_move(jid, {"environment_id": eid}))
@@ -1887,9 +1959,9 @@ def test_wire_up_alone_never_moves_a_wired_povs_items():
     finally:
         _restore(original)
     assert jg.calls == [], "Wire up moved a working POV's jump items"
-    note = [l for l in _job_lines(jid) if "appliance-wide Jump Group" in l]
+    note = [l for l in _job_lines(jid) if "appliance-wide Asset Group" in l]
     assert note, _job_lines(jid)
-    assert "Move to its own Jump Group" in note[0]
+    assert "Move to its own Asset Group" in note[0]
 
 
 def test_the_move_job_type_is_handled_and_runs_locally():

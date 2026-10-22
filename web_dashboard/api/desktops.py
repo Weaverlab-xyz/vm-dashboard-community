@@ -342,9 +342,9 @@ def open_seat_session(
     """PRA connection info for a seat, plus a link to the PRA console.
 
     Thin on purpose: the resolution lives in ``vdesktop_service.session_info`` so it
-    is testable without FastAPI and so the Jump Group / Gateway come from the SAME
+    is testable without FastAPI and so the Asset Group / Gateway come from the SAME
     per-cloud resolver the provisioner used. This endpoint used to read the
-    ``azure_*`` keys directly, which named the wrong Jump Group for an AWS or GCP
+    ``azure_*`` keys directly, which named the wrong Asset Group for an AWS or GCP
     seat. The web app cannot drive the rep console, so the rep launches the Jump Item
     there (mirrors the k8s open_console pattern).
     """

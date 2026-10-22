@@ -177,7 +177,7 @@ the bundle card. Replace `CORP`, the OU paths, accounts and projects with your o
 
 1. Add the group to the local Remote Desktop Users group on the OT jump hosts and engineering workstations, with a GPO linked only to the OT OU.
 2. In that GPO grant "Allow log on through Remote Desktop Services" to the group; on the rest of the domain deny it ("Deny log on through Remote Desktop Services").
-3. In Privileged Remote Access, map the group to the OT jump group's group policy, so PRA sessions follow the same membership.
+3. In Privileged Remote Access, map the group to the OT asset group's group policy, so PRA sessions follow the same membership.
 
 ### OT break-glass — On-prem AD (`ent-ad-ot-breakglass`)
 

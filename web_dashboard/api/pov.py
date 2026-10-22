@@ -23,7 +23,7 @@
                                           Entitle integration per VM
   POST   /api/pov/managed/{id}/jump-group/move
                                         — rebuild the jump items of a POV wired before
-                                          per-POV Jump Groups in one of its own
+                                          per-POV Asset Groups in one of its own
   POST   /api/pov/managed/{id}/entitle-key
                                         — the SSH key Entitle's connector authenticates with
   POST   /api/pov/managed/{id}/share    — publish a customer-facing link
@@ -1738,7 +1738,9 @@ def wireup(env_id: str, db: Session = Depends(get_db),
         raise HTTPException(status_code=409, detail=why)
 
     try:
-        pov_wireup.tenant_override(db, env)
+        # `preflight`, not `tenant_override`: a POV with nothing wired has no Asset Group
+        # yet, and the job creates it — refusing here would refuse the fix.
+        pov_wireup.preflight(db, env)
         pov_wireup.gateway_name(env)
     except (pov_wireup.WireupError, pov_gateway.GatewayInstallError,
             bt_tenant_service.BTTenantError) as exc:
@@ -1756,14 +1758,14 @@ def wireup(env_id: str, db: Session = Depends(get_db),
              dependencies=_POV_WRITE_OWN)
 def move_jump_group(env_id: str, db: Session = Depends(get_db),
                           current_user: User = Depends(get_current_user)):
-    """Rebuild this POV's jump items in a Jump Group of its own.
+    """Rebuild this POV's jump items in an Asset Group of its own.
 
-    For a POV wired before per-POV Jump Groups existed, whose items are therefore in the
+    For a POV wired before per-POV Asset Groups existed, whose items are therefore in the
     group named on its *tenant* — one group every POV on that appliance shares. A PRA
-    Group Policy grants access by Jump Group, so that is the wrong scope for a vendor, and
+    Group Policy grants access by Asset Group, so that is the wrong scope for a vendor, and
     ``pov_vendor_access.blocker`` refuses to create one. This is the way out it names.
 
-    **Not the same button as Wire up, deliberately.** A jump item names its Jump Group at
+    **Not the same button as Wire up, deliberately.** A jump item names its Asset Group at
     creation, so moving one means destroying and rebuilding it — a POV's items really do
     disappear from the appliance for the length of this job. That is not something a
     re-run of Wire up should do quietly to a POV that is working, which is why
@@ -1782,7 +1784,7 @@ def move_jump_group(env_id: str, db: Session = Depends(get_db),
     if (env.pra_jump_group_name or "").strip():
         raise HTTPException(
             status_code=409,
-            detail=f"this POV's jump items are already in its own Jump Group "
+            detail=f"this POV's jump items are already in its own Asset Group "
                    f"{env.pra_jump_group_name}, so there is nothing to move.")
     if not pov_vendor_access.can_move_jump_group(db, env):
         # The same three conditions the card's button is shown on, checked again here:
@@ -1790,7 +1792,7 @@ def move_jump_group(env_id: str, db: Session = Depends(get_db),
         # job whose first act is to destroy nothing.
         raise HTTPException(
             status_code=409,
-            detail="this POV has no jump items in the tenant's Jump Group to move. Press "
+            detail="this POV has no jump items in the tenant's Asset Group to move. Press "
                    "Wire up instead — on a POV with nothing wired yet it creates a Jump "
                    "Group of its own.")
 

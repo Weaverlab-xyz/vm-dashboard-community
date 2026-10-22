@@ -4,7 +4,7 @@ Covers B (PRA-only K8s access via a Vault-injected ServiceAccount bearer token).
 The tunnel *jump* itself is created over REST (the sra provider blocks
 tunnel_type=k8s — see docs/notes/sra-provider-k8s-tunnel-bug.md), so the Terraform
 HCL here is the Vault token account ALONE, associated to the REST-created jump's
-Jump Group via TF_VAR_k8s_jump_group_id (a per-jump-item association is rejected by
+Asset Group via TF_VAR_k8s_jump_group_id (a per-jump-item association is rejected by
 PRA for a tunnel_type=k8s jump — 422 jump_items.0.type "invalid"):
 - the HCL emits a `sra_vault_token_account` with token via TF_VAR (never in HCL),
   associated via criteria.shared_jump_groups, and declares no `sra_protocol_tunnel_jump`;
@@ -36,7 +36,7 @@ def test_vault_hcl_emits_token_account_associated_to_rest_jump():
     assert 'variable "k8s_sa_token"' in hcl and "sensitive = true" in hcl
     assert 'variable "k8s_jump_group_id"' in hcl
     assert "token       = var.k8s_sa_token" in hcl
-    # Associated to the jump's Jump Group (criteria.shared_jump_groups), NOT
+    # Associated to the jump's Asset Group (criteria.shared_jump_groups), NOT
     # jump_items[].type — PRA 422s jump_items.0.type for a tunnel_type=k8s jump.
     assert "shared_jump_groups = [tonumber(var.k8s_jump_group_id)]" in hcl
     assert 'output "vault_account_id"' in hcl

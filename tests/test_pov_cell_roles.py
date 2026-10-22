@@ -2,10 +2,10 @@
 
 The demo profile's cells wire against the install's global tenant and the shared Gateway
 host. A POV guest playing a cell role must not: every item it adds goes to the POV's own
-tenant, behind the POV's own Gateway, into the POV's own Jump Group, and comes out with
+tenant, behind the POV's own Gateway, into the POV's own Asset Group, and comes out with
 the POV. That is most of what is pinned here:
 
-  * **The items use the POV's tenant, Gateway and Jump Group** -- the same three the base
+  * **The items use the POV's tenant, Gateway and Asset Group** -- the same three the base
     jump item is built with -- and are named after the POV, so two POVs cloned from one
     template never collide.
   * **The ports are the demo cell's**, read off ``ot_service.OT_PORT_PRESETS``, so a POV
@@ -298,7 +298,7 @@ def test_a_role_item_whose_destroy_failed_keeps_its_state_and_the_group():
         _restore(original)
     db.refresh(vm)
     assert cr.has_artifacts(vm), "a failed destroy cleared the item's state"
-    assert "left in place" in line, "the Jump Group was deleted with items still in it"
+    assert "left in place" in line, "the Asset Group was deleted with items still in it"
     db.close()
 
 

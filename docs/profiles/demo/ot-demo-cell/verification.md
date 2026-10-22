@@ -41,10 +41,10 @@ fails on a platform the script has not met.
      `PLC` connection and its four tags. `kubectl get nodes` names *this* cell, not the
      build VM, and `kubectl -n kube-system get pods` is healthy with no image pulls
      pending — that is the air-gapped install doing its job.
-3. Deploy a cell **with several protocols ticked** and the Jump Group + Gateway
+3. Deploy a cell **with several protocols ticked** and the Asset Group + Gateway
    pickers set to the cell's region; the parent job completes; the child holds Shell
    Jump id + private IP; **one tunnel jump per ticked protocol** appears, each named
-   `ot-<cell>-<protocol>`, all in the picked Jump Group (not the configured default),
+   `ot-<cell>-<protocol>`, all in the picked Asset Group (not the configured default),
    and each carrying an OT-cell comment rather than "k8s API tunnel". The cell shows
    **wired** only once every one of them exists.
 4. PRA rep console: Shell Jump SSH works; Web Jump renders FUXA (recorded); a Modbus

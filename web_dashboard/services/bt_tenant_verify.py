@@ -44,6 +44,10 @@ logger = logging.getLogger(__name__)
 # seconds to issue a token has a problem this timeout should surface rather than absorb.
 _TIMEOUT_S = 20.0
 
+# A name no POV can have (POV names are lowercase), so the Asset Group probe in
+# `_verify_pra` is a pure read that finds nothing.
+_PRA_PROBE_GROUP = "VM-Dashboard-Verify-Probe"
+
 
 def _http_reason(exc: Exception) -> str:
     """Turn a transport failure into something that names the likely cause.
@@ -85,10 +89,16 @@ async def _verify_pra(tenant: Tenant) -> tuple[bool, str]:
     # The SAME token call the Gateway install makes, not a second copy of it. A verify
     # that authenticates differently from the real work is a check that can pass while the
     # work fails.
-    from . import pra_tenant_api
+    from . import pra_tenant_api, pra_vendor_api
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT_S) as client:
             await pra_tenant_api.get_token(client, tenant)
+        # Then a READ of the Asset Group list, because a token proves the client exists and
+        # not that it may touch configuration. Wire up creates each POV's Asset Group over
+        # the Configuration API, so an API account without that permission authenticates
+        # here, goes green, and fails the first Wire up instead. The lookup's own 401/403
+        # message names the permission. Read-only: a Verify changes nothing.
+        await pra_vendor_api.find_jump_group(tenant, _PRA_PROBE_GROUP)
     except pra_tenant_api.PRATenantError as exc:
         # Authored text, no exception interpolated — see the module docstring.
         return False, str(exc)
@@ -97,7 +107,8 @@ async def _verify_pra(tenant: Tenant) -> tuple[bool, str]:
         # of this function in any form.
         logger.warning("PRA verify against %s failed", tenant.api_base, exc_info=True)
         return False, f"PRA at {tenant.api_base}: {_http_reason(exc)}"
-    return True, f"PRA at {tenant.api_base} issued a token."
+    return True, (f"PRA at {tenant.api_base} issued a token, and the API account can read "
+                  f"Asset Groups — each POV's is created at Wire up.")
 
 
 async def _verify_password_safe(tenant: Tenant) -> tuple[bool, str]:

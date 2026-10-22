@@ -406,7 +406,7 @@ _UI_SUFFIX_EXCLUSIONS = {
 def test_rancher_and_portainer_ui_panels_are_symmetrical():
     """The two Web-Jump groups must stay bound in lockstep. rancher_ui_web_jump_enabled
     was bound while its whole config group wasn't, so an admin could switch the broker ON
-    from Settings and then had no way to say which Jump Group / Gateway / Vault group /
+    from Settings and then had no way to say which Asset Group / Gateway / Vault group /
     Gateway cloud it used — env var or a hand-rolled PATCH only.
 
     test_every_bound_panel_key_exists_on_some_feature_model cannot catch this: it checks
@@ -464,7 +464,7 @@ def test_rancher_ui_web_jump_fields_round_trip():
     assert isinstance(data["rancher_ui_local_port"], int)
     assert data["rancher_ui_verify_certificate"] is False
     assert data["rancher_ui_web_jump_enabled"] is False
-    # Strings fall back at resolve time (jump group → bt_jump_group_name etc.), so blank
+    # Strings fall back at resolve time (asset group → bt_jump_group_name etc.), so blank
     # is the correct unset read — but the key must be PRESENT or the input has nothing
     # to bind to and saves nothing.
     for key in ("rancher_ui_jump_group", "rancher_ui_jumpoint_name",

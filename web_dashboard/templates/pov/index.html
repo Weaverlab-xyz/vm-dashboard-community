@@ -2025,7 +2025,7 @@ function povPage(tabSlugs) {
       const f = this.tenantForm;
       // Only what changed. `update` resets Verify's verdict whenever `base_url` or
       // `client_id` is merely PRESENT, so resending unchanged values would turn a rename
-      // or a Jump Group fix into "not checked" on a tenant that still works.
+      // or an option fix into "not checked" on a tenant that still works.
       const body = {};
       for (const key of ['name', 'base_url', 'client_id', 'secret_ref']) {
         if ((f[key] || '').trim() !== (orig[key] || '')) body[key] = (f[key] || '').trim();

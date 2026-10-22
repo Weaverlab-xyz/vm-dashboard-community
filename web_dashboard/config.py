@@ -608,7 +608,7 @@ class Settings(BaseSettings):
     passwordsafe_windows_change_password_on_register: bool = True  # rotate at once, so only Password Safe knows it
     # OT demo cell → PRA checkout. When the cell's adminuser is onboarded into Password
     # Safe, the wiring also creates a PRA Vault username/password account (associated to
-    # the cell's Jump Group) plus a managed-account mirror on the "PRA Vault Username
+    # the cell's Asset Group) plus a managed-account mirror on the "PRA Vault Username
     # Password" plugin, and links the pair with SyncedAccounts — so the credential can be
     # checked out / injected in PRA and every Password Safe rotation propagates into it.
     ot_ps_pra_checkout_enabled: bool = True
@@ -621,7 +621,7 @@ class Settings(BaseSettings):
     ot_ps_pravault_functional_account: str = ""  # FA on that platform; falls back to clouddb_ps_pravault_functional_account
     # Cloud VM → PRA Vault key sync. When a VM is onboarded with one of the cloud-native
     # SSH-key plugins (ssm / azurevm / gcpvm), the wiring also creates a PRA Vault SSH
-    # account (associated to the VM's Jump Group) plus a managed-account mirror on the
+    # account (associated to the VM's Asset Group) plus a managed-account mirror on the
     # "PRA Vault Private Key" plugin, and links the pair with SyncedAccounts — so the key
     # Password Safe rotates is check-out-able and injectable in PRA. Off by default: the
     # plugin is a hand-imported .psplugin, so the platform cannot be assumed to exist.
@@ -1378,7 +1378,7 @@ class Settings(BaseSettings):
     azure_acr_password: str = ""                  # ACR password / SP secret (encrypted at rest)
     azure_acr_username_secret_title: str = ""     # Legacy: PS-only secret title (fallback)
     azure_acr_password_secret_title: str = ""     # Legacy: PS-only secret title (fallback)
-    azure_bt_jump_group_name: str = ""            # BT jump group for Azure Shell Jumps (falls back to bt_jump_group_name)
+    azure_bt_jump_group_name: str = ""            # BT asset group for Azure Shell Jumps (falls back to bt_jump_group_name)
     # Azure Key Vault — SSH key retrieval (optional; leave blank to disable)
     azure_key_vault_url: str = ""                     # e.g. "https://my-vault.vault.azure.net/"
     # RG of the vault above, for the cloud_function Azure module's data lookup (what
@@ -1979,7 +1979,7 @@ class Settings(BaseSettings):
     gcp_vm_nat_name: str = "dashboard-sandbox-vm-nat"
     gcp_vm_egress_rule_name: str = "dashboard-sandbox-vm-egress-ondemand"
     gcp_vm_egress_rule_priority: int = 900  # must beat the sandbox deny at 1000
-    gcp_bt_jump_group_name: str = ""     # BT jump group for GCP Shell Jumps (falls back to bt_jump_group_name)
+    gcp_bt_jump_group_name: str = ""     # BT asset group for GCP Shell Jumps (falls back to bt_jump_group_name)
     gcp_jumpoint_name: str = ""          # Jumpoint name for GCP Shell Jumps (falls back to bt_jumpoint_name)
     # On-demand Entitle DB forwarder (GCP-only). A private Cloud SQL PSA IP is
     # unreachable from the Entitle agent's own GKE VPC (non-transitive peering);
@@ -2117,7 +2117,7 @@ class Settings(BaseSettings):
     # account-wide usage tracking; going beyond needs an explicit acknowledgment.
     oci_freetier_enforce: bool = True     # surface the warn+confirm gate; False = no free-tier warnings
     # BeyondTrust PRA per-cloud overrides (fall back to the shared bt_* keys).
-    oci_bt_jump_group_name: str = ""      # BT jump group for OCI Shell Jumps (falls back to bt_jump_group_name)
+    oci_bt_jump_group_name: str = ""      # BT asset group for OCI Shell Jumps (falls back to bt_jump_group_name)
     oci_jumpoint_name: str = ""           # Jumpoint name for OCI Shell Jumps (falls back to bt_jumpoint_name)
     # Shared, ref-counted gateway host inside the VCN (services/jumpoint_host_service).
     # "none" keeps the historical bring-your-own behaviour — no host is created and the

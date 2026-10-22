@@ -15,13 +15,13 @@ the mechanism — Vendor Onboarding — and this module drives it.
 
 **Four objects, all named from the POV, all reaped with it:**
 
-    Jump Group    pov-<name>                  ← created by pov_wireup (the scoping boundary)
+    Asset Group    pov-<name>                  ← created by pov_wireup (the scoping boundary)
     Group Policy  pov-<name>-vendor-access    ← grants sessions on that group and nothing else
     Vendor Group  pov-<name>-vendors          ← default_policy = the policy above
       └ vendor users  povvnd_<name>_<rand>
 
-**The Jump Group is the whole reason this could not be bolted on.** A PRA Group Policy
-grants access BY JUMP GROUP, and until now a POV's jump items went into the tenant's
+**The Asset Group is the whole reason this could not be bolted on.** A PRA Group Policy
+grants access BY ASSET GROUP, and until now a POV's jump items went into the tenant's
 appliance-wide group. A vendor scoped to that would reach every POV on the appliance. So a
 POV whose items are still in the shared group is REFUSED here, with the reason, rather than
 quietly given a policy that over-grants — see :func:`blocker`. The way out is
@@ -105,7 +105,7 @@ def _ttl_days() -> int:
 # ── naming ───────────────────────────────────────────────────────────────────
 
 def jump_group_code_name(env: PovEnvironment) -> str:
-    """The Jump Group's ``code_name``.
+    """The Asset Group's ``code_name``.
 
     ``pov-`` plus a 63-character POV name is 67, and PRA's CodeName caps at 64 — so the
     long tail gets trimmed. A trim can collide with another long POV name, and that is
@@ -246,9 +246,9 @@ def blocker(db: Session, env: PovEnvironment) -> str:
     wired = _wired_vms(db, env.id)
     if not wired:
         return ("this POV has no jump items yet, and a Vendor Group grants access to its "
-                "Jump Group — which would be empty. Press Wire up first.")
+                "Asset Group — which would be empty. Press Wire up first.")
     if not env.pra_jump_group_name:
-        # The compatibility case, and the whole reason a per-POV Jump Group had to come
+        # The compatibility case, and the whole reason a per-POV Asset Group had to come
         # first. Saying it here costs a sentence; not saying it costs a vendor who can see
         # another customer's lab.
         #
@@ -258,16 +258,16 @@ def blocker(db: Session, env: PovEnvironment) -> str:
         # destroying the POV, and `pov_wireup.ensure_jump_group` deliberately leaves an
         # already-wired POV's items where they are, so pressing Wire up again could only
         # ever repeat this message. `can_move_jump_group` is what puts the button there.
-        return ("this POV's jump items are in the PRA tenant's appliance-wide Jump Group, "
+        return ("this POV's jump items are in the PRA tenant's appliance-wide Asset Group, "
                 "which every POV on that appliance shares — a vendor scoped to it would "
                 "reach all of them. This POV was wired before POVs had their own Jump "
-                "Group. Press Move to its own Jump Group below to rebuild its jump items "
+                "Group. Press Move to its own Asset Group below to rebuild its jump items "
                 "in a group nothing else shares, or use the dashboard login instead.")
     return ""
 
 
 def can_move_jump_group(db: Session, env: PovEnvironment) -> bool:
-    """Whether the Jump Group move is offered for this POV.
+    """Whether the Asset Group move is offered for this POV.
 
     The one blocker with a button rather than only a sentence, so the card needs to know
     *which* blocker it is showing — and it reads this instead of matching on the message
@@ -276,7 +276,7 @@ def can_move_jump_group(db: Session, env: PovEnvironment) -> bool:
     The same conditions :func:`blocker` checks — everything the move needs is something
     the vendor group needed anyway — but the columns first and the COUNT last, which is
     the opposite of that function's order. This runs once per row on the POV list and the
-    Jump Group column is what disqualifies nearly every POV, so putting it ahead of the
+    Asset Group column is what disqualifies nearly every POV, so putting it ahead of the
     query means the query is usually never made.
     """
     return bool(env.pra_tenant_id
@@ -457,15 +457,15 @@ async def register(db: Session, env: PovEnvironment, *, by: str = "",
                            "re-registering", env.id, exc_info=True)
 
     if not env.pra_jump_group_id:
-        # blocker() proved the POV has a Jump Group NAME; the id is what deletes and what
+        # blocker() proved the POV has an Asset Group NAME; the id is what deletes and what
         # a membership references, so a name with no id is a wire-up that half-landed.
         raise VendorAccessError(
-            f"this POV's Jump Group {env.pra_jump_group_name!r} has no id recorded, so a "
+            f"this POV's Asset Group {env.pra_jump_group_name!r} has no id recorded, so a "
             f"Group Policy cannot be scoped to it. Re-run Wire up.")
 
     # Same rule as `pov_wireup.ensure_jump_group`: a same-named group in the appliance
     # that this row knows nothing about is refused, never adopted. It matters here for a
-    # case the Jump Group one does not have — a POV row restored from a backup, or a
+    # case the Asset Group one does not have — a POV row restored from a backup, or a
     # register that created the group and died before its commit, both leave an appliance
     # holding a live vendor group that this dashboard would otherwise duplicate or,
     # worse, quietly start handing logins to.
@@ -511,7 +511,7 @@ async def register(db: Session, env: PovEnvironment, *, by: str = "",
     env.pra_vendor_policy_id = policy_id
     db.commit()
 
-    # The single call that IS the scoping: one membership, one Jump Group, one POV.
+    # The single call that IS the scoping: one membership, one Asset Group, one POV.
     await pra_vendor_api.add_policy_jump_group(
         tenant, policy_id, env.pra_jump_group_id)
 
@@ -525,7 +525,7 @@ async def register(db: Session, env: PovEnvironment, *, by: str = "",
     # The same check, and here it is the sharper one: a blank id stored silently would
     # leave `describe` reporting "not registered" and `teardown` removing nothing, while a
     # live vendor group sits in the customer's appliance with a policy pointed at this
-    # POV's Jump Group. That is precisely the standing third-party access this module
+    # POV's Asset Group. That is precisely the standing third-party access this module
     # exists to reap, created invisibly.
     vendor_id = str(vendor.get("id") or "")
     if not vendor_id:
@@ -737,7 +737,7 @@ async def sweep(db: Session) -> int:
     PRA expires the *users* on its own schedule, so this is not what stops a vendor logging
     in — the appliance does that. What it removes is the GROUP, which otherwise stands in a
     customer's appliance forever naming a POV that no longer exists, with a policy pointing
-    at a Jump Group somebody will eventually wonder about.
+    at an Asset Group somebody will eventually wonder about.
 
     Never raises: it rides the reconcile pass, and a pass that fails because one customer's
     appliance is unreachable stops reconciling every other POV.

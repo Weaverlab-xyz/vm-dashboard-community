@@ -326,7 +326,7 @@ def test_missing_jump_group_is_reported_for_each_jump_asked_for():
     result = {}
     _wire(result, jump_group="", rdp=True)
     assert not [c for c in calls if c[0] in ("shell", "rdp")]
-    assert "Jump Group" in result["bt_error"] and "Jump Group" in result["bt_rdp_error"]
+    assert "Asset Group" in result["bt_error"] and "Asset Group" in result["bt_rdp_error"]
 
 
 def test_defaults_are_the_old_rdp_only_build():

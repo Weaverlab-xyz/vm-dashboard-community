@@ -2,9 +2,9 @@
 
 What is pinned here is almost entirely about NOT over-granting and NOT losing track:
 
-  * **A POV on the tenant's appliance-wide Jump Group is refused**, and the refusal names
-    the consequence. This is the whole reason a per-POV Jump Group had to land first: a
-    Group Policy grants BY JUMP GROUP, so a vendor attached to the shared one reaches
+  * **A POV on the tenant's appliance-wide Asset Group is refused**, and the refusal names
+    the consequence. This is the whole reason a per-POV Asset Group had to land first: a
+    Group Policy grants BY ASSET GROUP, so a vendor attached to the shared one reaches
     every POV on that appliance. An over-granting button is worse than no button.
   * **The policy is created, committed, and only then referenced.** An object in a
     customer's appliance with no id on this row is one this dashboard cannot remove — and
@@ -190,21 +190,21 @@ def test_a_pov_with_no_jump_items_is_refused_naming_wire_up():
 
 
 def test_a_pov_on_the_shared_jump_group_is_refused_and_the_reason_names_the_leak():
-    """The load-bearing one. A Group Policy grants BY JUMP GROUP, so a vendor attached to
+    """The load-bearing one. A Group Policy grants BY ASSET GROUP, so a vendor attached to
     the tenant's appliance-wide group reaches every POV on that appliance."""
     db = d.SessionLocal()
     try:
         env = _env(db, tenant=_tenant(db), jump_group=None, jump_group_id=None)
         _wire(db, env)
         why = pv.blocker(db, env)
-        assert "appliance-wide Jump Group" in why
+        assert "appliance-wide Asset Group" in why
         assert "reach all of them" in why
         # The remedy has to be one this page can perform. It used to say to tear the
         # wiring down and press Wire up again, and neither half was true: there is no
         # wiring teardown short of destroying the POV, and `ensure_jump_group` leaves an
         # already-wired POV's items where they are — so following it returned to this
         # same message, forever.
-        assert "Move to its own Jump Group" in why
+        assert "Move to its own Asset Group" in why
         assert "Wire up again" not in why
         assert pv.can_move_jump_group(db, env) is True
     finally:
@@ -520,7 +520,7 @@ def test_a_vendor_group_of_the_same_name_this_row_knows_nothing_about_is_refused
 def test_a_vendor_group_create_that_returns_no_id_is_refused_not_stored_blank():
     """The sharpest of the blank-id cases: stored as "", describe() would report "not
     registered" and teardown would remove nothing, while a live vendor group sits in the
-    customer's appliance with a policy pointed at this POV's Jump Group."""
+    customer's appliance with a policy pointed at this POV's Asset Group."""
     db = d.SessionLocal()
     fake = _FakePRA(vendor_id=None)
     original = _install(fake)
@@ -1044,7 +1044,7 @@ def test_the_vendor_group_is_torn_down_first_of_all_the_removals():
     wireup = body.index("pov_wireup.teardown")
     assert vendor < integration < logins < wireup, (
         "destroy order is wrong: the PRA vendor group must go first, and the jump items "
-        "(which now take the Jump Group with them) last")
+        "(which now take the Asset Group with them) last")
 
 
 def test_a_failed_teardown_keeps_the_ids_so_a_re_run_can_finish_it():

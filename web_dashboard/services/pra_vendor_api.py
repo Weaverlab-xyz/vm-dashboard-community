@@ -1,7 +1,7 @@
 """The PRA Configuration API objects a POV needs to let a third party in.
 
 ``pra_tenant_api`` owns the tenant-scoped handshake and the Gateway read. This module is
-its second half: the four object types PRA Vendor Onboarding is built out of — Jump Group,
+its second half: the four object types PRA Vendor Onboarding is built out of — Asset Group,
 Jump Item Role, Group Policy, Vendor Group (and its users) — spoken to a
 ``bt_tenant_service.Tenant`` rather than to the install's singletons.
 
@@ -122,7 +122,7 @@ def _raise_for_status(tenant, method: str, path: str, resp: httpx.Response) -> N
     """Turn a refusal into a sentence naming the likely cause.
 
     The 404-on-/vendor case is the one worth separating. Vendor Onboarding is a newer
-    Config API surface than Jump Groups, and an appliance that does not serve it answers
+    Config API surface than Asset Groups, and an appliance that does not serve it answers
     exactly like one where the object is missing — so without this, "your PRA is too old"
     and "that vendor group was deleted" read identically.
     """
@@ -141,7 +141,7 @@ def _raise_for_status(tenant, method: str, path: str, resp: httpx.Response) -> N
         raise PRATenantError(
             f"PRA refused {method} {path} on tenant {tenant.name!r} "
             f"({resp.status_code}). The API account needs Configuration API permission "
-            f"covering Jump Groups, Group Policies and Vendors.")
+            f"covering Asset Groups, Group Policies and Vendors.")
     # 422 carries the field-level reason and it is the appliance's own words about the
     # request WE built, not an exception's — so it is the one body worth showing.
     detail = _detail(resp)
@@ -226,14 +226,14 @@ def _id(raw: Any) -> str:
     return "" if raw is None else str(raw)
 
 
-# ── Jump Groups ──────────────────────────────────────────────────────────────
+# ── Asset Groups ──────────────────────────────────────────────────────────────
 
 async def find_jump_group(tenant, name: str) -> dict | None:
-    """One Jump Group by exact name, or None.
+    """One Asset Group by exact name, or None.
 
     The ``name`` query parameter filters server-side, but the match is re-checked here:
     a filter that is a substring match on some version would otherwise hand back a
-    neighbour, and a Jump Group is what scopes a vendor's access.
+    neighbour, and an Asset Group is what scopes a vendor's access.
     """
     wanted = (name or "").strip()
     if not wanted:
@@ -247,7 +247,7 @@ async def find_jump_group(tenant, name: str) -> dict | None:
 
 async def create_jump_group(tenant, *, name: str, code_name: str,
                             comments: str = "") -> dict:
-    """Create a Jump Group. Returns the appliance's row, with its id."""
+    """Create an Asset Group. Returns the appliance's row, with its id."""
     payload: dict[str, Any] = {"name": name[:NAME_MAX], "code_name": code_name[:CODE_NAME_MAX]}
     if comments:
         payload["comments"] = comments[:4096]
@@ -328,7 +328,7 @@ async def delete_group_policy(tenant, policy_id: str) -> None:
 async def add_policy_jump_group(tenant, policy_id: str, jump_group_id: str, *,
                                 jump_item_role_id: int = INHERIT,
                                 jump_policy_id: int = INHERIT) -> None:
-    """Grant a Group Policy access to one Jump Group.
+    """Grant a Group Policy access to one Asset Group.
 
     This single call is the entire scoping story: a Group Policy reaches exactly the Jump
     Groups it has a membership row for, so a vendor policy with one membership reaches one
@@ -344,7 +344,7 @@ async def add_policy_jump_group(tenant, policy_id: str, jump_group_id: str, *,
 # ── Vendor Groups ────────────────────────────────────────────────────────────
 
 async def find_vendor(tenant, name: str) -> dict | None:
-    """One Vendor Group by exact name, or None. Same re-check as Jump Groups, same reason."""
+    """One Vendor Group by exact name, or None. Same re-check as Asset Groups, same reason."""
     wanted = (name or "").strip()
     if not wanted:
         return None

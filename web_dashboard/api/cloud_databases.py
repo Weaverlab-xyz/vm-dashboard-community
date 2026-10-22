@@ -134,7 +134,7 @@ class ProvisionRequest(BaseModel):
     vault_account_group_id: Optional[int] = None
     # Per-DB PRA broker overrides — config defaults are the fallback. Values are
     # secrets-backend references (e.g. aws_sm://…), not raw secrets.
-    jump_group: Optional[str] = None          # PRA Jump Group name override (else bt_jump_group_name)
+    jump_group: Optional[str] = None          # PRA Asset Group name override (else bt_jump_group_name)
     jumpoint_name: Optional[str] = None       # PRA Jumpoint name override (else bt_jumpoint_name)
     pra_credential_ref: Optional[str] = None  # secret ref → bt_client_secret override
     register_in_entitle: bool = False         # opt in to registering this DB as an Entitle integration
@@ -166,7 +166,7 @@ class DatabaseOptions(BaseModel):
     # — that name already means the VM-tier SG (aws_default_security_group_id).
     db_security_group_id: str = ""
     vault_account_groups: list[dict] = []
-    # PRA Jump Groups / Jumpoints for the per-DB tunnel pickers (cloud-agnostic —
+    # PRA Asset Groups / Jumpoints for the per-DB tunnel pickers (cloud-agnostic —
     # PRA objects aren't region/cloud-scoped). Empty when PRA isn't configured.
     jump_groups: list[dict] = []
     jumpoints: list[dict] = []
@@ -188,7 +188,7 @@ _OCI_WORKLOADS = ["OLTP", "DW"]
 
 
 async def _pra_pickers() -> dict:
-    """PRA-sourced provision-form pickers — Vault account groups, Jump Groups and
+    """PRA-sourced provision-form pickers — Vault account groups, Asset Groups and
     Jumpoints — fetched concurrently. Cloud-agnostic (PRA objects aren't
     region/cloud-scoped). Best-effort: any individual failure yields an empty
     list for that picker (the dropdown just falls back to the configured default

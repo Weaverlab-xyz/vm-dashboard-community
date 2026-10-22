@@ -637,7 +637,7 @@
                 added later from its row.</span></span>
           </label>
           <details x-show="deployForm.enable_pra" x-cloak class="ml-6">
-            <summary class="cursor-pointer select-none text-xs text-gray-500">Jump group, Gateway and credential
+            <summary class="cursor-pointer select-none text-xs text-gray-500">Asset group, Gateway and credential
               <span class="text-gray-400">— the configured defaults unless changed</span></summary>
             <div class="mt-2">
             <!-- BeyondTrust PRA options (optional per-deploy overrides) -->
@@ -647,7 +647,7 @@
               </p>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label class="block text-xs font-medium text-gray-600 mb-1">Jump group</label>
+                  <label class="block text-xs font-medium text-gray-600 mb-1">Asset group</label>
                   <select x-model="deployForm.jump_group" :disabled="!praPickers.jump_groups.length"
                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
                     <option value="">(configured default)</option>
@@ -668,7 +668,7 @@
                 </div>
               </div>
               <p x-show="praPickers.loaded && !praPickers.jump_groups.length && !praPickers.gateways.length" x-cloak
-                 class="text-xs text-gray-400">No PRA jump groups/Gateways returned — the shell jump falls back to the configured defaults.</p>
+                 class="text-xs text-gray-400">No PRA Asset Groups/Gateways returned — the shell jump falls back to the configured defaults.</p>
             </div>
             </div>
           </details>
@@ -949,7 +949,7 @@ function ociDashboard() {
     deploying: false,
     serverGateTripped: false,   // backend free-tier 400 (catches cases the client can't, e.g. existing-instance counts)
     serverGateMessage: '',
-    // BeyondTrust PRA Jump Group / Gateway pickers for the deploy-form dropdowns
+    // BeyondTrust PRA Asset Group / Gateway pickers for the deploy-form dropdowns
     // (shared /api/pra/pickers, fetched once). Empty when PRA isn't configured →
     // dropdowns show only "(configured default)" and the backend falls back.
     praPickers: { configured: false, jump_groups: [], gateways: [], loaded: false },
@@ -1750,7 +1750,7 @@ function ociDashboard() {
     },
 
     async loadPraPickers() {
-      // BeyondTrust PRA Jump Group / Gateway pickers for the deploy-form
+      // BeyondTrust PRA Asset Group / Gateway pickers for the deploy-form
       // dropdowns (shared /api/pra/pickers). Fetched once, best-effort: on any
       // failure the dropdowns just show "(configured default)".
       if (this.praPickers.loaded) return;

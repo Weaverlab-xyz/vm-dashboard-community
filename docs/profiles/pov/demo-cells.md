@@ -15,7 +15,7 @@ On the demo profile, a cell such as the [OT Demo Cell](../demo/ot-demo-cell.md) 
 - it keeps its state on the deploy job.
 
 A POV does none of those things. Its VMs come from a template, its PRA tenant comes from
-[the tenant registry](standing-one-up.md#the-tenant-registry), its Gateway and Jump Group
+[the tenant registry](standing-one-up.md#the-tenant-registry), its Gateway and Asset Group
 belong to that POV alone, and destroying the POV tears everything down in one ordered pass.
 
 So a cell is not ported into a POV. Each of its parts goes where a POV already keeps that
@@ -38,7 +38,7 @@ kind of thing:
 Every role needs a Linux guest. A role cannot be set on the control node VM, because the agent, the
 Gateway and the Resource Broker all run there.
 
-All of these items go into the POV's own Jump Group, behind the POV's own Gateway. A vendor
+All of these items go into the POV's own Asset Group, behind the POV's own Gateway. A vendor
 scoped to that group can therefore reach the HMI and the PLC, and nothing from any other
 POV. The item names follow the POV's managed-system naming,
 `<pov>-<vm>-hmi` and `<pov>-<vm>-<protocol>`, so two POVs cloned from the same template

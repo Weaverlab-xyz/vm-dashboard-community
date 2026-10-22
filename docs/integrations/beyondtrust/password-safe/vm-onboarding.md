@@ -178,7 +178,7 @@ managed SSH key into a PRA Vault Private Key account** (Settings → Integration
 Safe) and each onboarded VM additionally gets:
 
 1. a **PRA Vault SSH account** named `<vm>-<account>` (e.g. `web01-adminuser`), associated
-   to the VM's Jump Group so PRA can inject it, seeded with a throwaway key;
+   to the VM's Asset Group so PRA can inject it, seeded with a throwaway key;
 2. a Password Safe **managed system + account on the `PRA Vault Private Key` plugin**, named
    identically — the plugin resolves its PRA-side target by *name*;
 3. a **`SyncedAccounts` link** making that mirror a *subscriber* of the VM's own managed
@@ -196,8 +196,8 @@ account's stored credential *is* the key Password Safe minted. The traditional `
 is deliberately excluded: there the key came from a cloud secret store the dashboard already
 holds, so mirroring it into PRA would publish an existing key rather than a governed one.
 
-The Jump Group is the deploy's own (the Shell Jump is provisioned before the Password Safe
-step), falling back to `bt_jump_group_name` / the per-cloud override. With no Jump Group
+The Asset Group is the deploy's own (the Shell Jump is provisioned before the Password Safe
+step), falling back to `bt_jump_group_name` / the per-cloud override. With no Asset Group
 resolvable the sync is **skipped** rather than half-built — the job records
 `ps_vault_skipped` and the onboarding itself is untouched. Every other failure lands on
 `ps_vault_error` and is likewise non-fatal.

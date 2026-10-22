@@ -60,7 +60,7 @@ LABELS = {
 # blob on a row that holds a credential, and "anything goes" is how a password ends up in
 # one by accident.
 OPTION_KEYS = {
-    # The Jump Group and Gateway a POV's jump items are created in. Per-tenant because
+    # The Asset Group and Gateway a POV's jump items are created in. Per-tenant because
     # they are names inside that appliance and mean nothing in another one.
     #
     # The KEY is still `jumpoint_name`, matching the `bt_jumpoint_name` setting it seeds
@@ -113,7 +113,7 @@ VERIFIABLE_KINDS = ("pra", "password_safe")
 # name from the key itself, which is the one place the Jumpoint/Gateway asymmetry above
 # would leak back into prose — generated labels are still labels.
 OPTION_LABELS = {
-    "jump_group_name": "Jump Group name",
+    "jump_group_name": "Asset Group name",
     "jumpoint_name": "Gateway name",
     "vendor_jump_item_role_name": "Vendor Jump Item Role",
     "vendor_portal_url": "Vendor portal URL",
@@ -163,7 +163,13 @@ REQUIRED_OPTIONS = {
     # `pov_wireup.gateway_name` explains at length why the appliance-wide one cannot
     # work), so nothing in the POV path reads the tenant's copy. Requiring it made a
     # correctly configured tenant report a gap for a field with no consumer.
-    "pra": ("jump_group_name",),
+    #
+    # `jump_group_name` is NOT required either, for the same reason one step removed: every
+    # POV gets its own Asset Group, created over the API by `pov_wireup.ensure_jump_group`
+    # at the top of Wire up and deleted with the POV. The tenant's copy is read only for a
+    # POV wired before that existed, and `pov_wireup.preflight` refuses that POV itself
+    # when it is blank. Requiring it sent SEs to /login to build a group nothing used.
+    "pra": (),
     # `workgroup` and the functional accounts are NOT required: a POV can carry a
     # Password Safe tenant for the Resource Broker's sake without ever onboarding its VMs,
     # and the per-VM path refuses with its own message when one is missing.
@@ -173,6 +179,18 @@ REQUIRED_OPTIONS = {
     # an Entitle tenant without them is unusable rather than merely incomplete, and the
     # row is where that should be visible.
     "entitle": ("owner_id", "workflow_id"),
+}
+
+# Options still accepted and still read, but no longer offered on the register form.
+#
+# Both PRA ones have no consumer on a POV registered today: the Asset Group is created per
+# POV (`pov_wireup.ensure_jump_group`) and the Gateway is the one installed inside the POV
+# (`pov_wireup.gateway_name`). They stay in OPTION_KEYS because a POV wired before per-POV
+# groups still resolves its items through the tenant's `jump_group_name`, and the tenant
+# seeded from Settings carries both — dropping the keys would make those rows unreadable.
+# A field an SE fills in and nothing reads is worse than no field.
+FORM_HIDDEN_OPTIONS = {
+    "pra": ("jump_group_name", "jumpoint_name"),
 }
 
 # Same constraint as a POV's name, and for the same reason: this is where a company name
@@ -521,8 +539,8 @@ def serialize(db: Session, row: BeyondTrustTenant) -> dict:
 
     ``has_secret`` and ``secret_ref`` are what an operator needs — is one stored, and is
     it here or in a vault. ``missing_options`` is reported because a tenant with valid
-    credentials and no Jump Group is configured-but-unusable, and finding that out inside
-    a provision job is finding it out too late.
+    credentials and no Entitle owner, say, is configured-but-unusable, and finding that out
+    inside a provision job is finding it out too late.
     """
     opts = row.options_dict
     return {

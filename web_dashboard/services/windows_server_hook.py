@@ -326,7 +326,7 @@ async def wire(db, job_id: str, *, vm_name: str, hostname: str, username: str,
     if not pra_enabled:
         return
     if not (jump_group and jumpoint_name):
-        missing = "no PRA Jump Group / Jumpoint configured for this cloud"
+        missing = "no PRA Asset Group / Jumpoint configured for this cloud"
         if want_shell:
             result["bt_error"] = missing
         if want_rdp:

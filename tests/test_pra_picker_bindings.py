@@ -1,6 +1,6 @@
 """The deploy forms' PRA pickers, and the one way they come apart silently.
 
-All four VM deploy forms (AWS/Azure/GCP/OCI) fill their Jump group and Gateway
+All four VM deploy forms (AWS/Azure/GCP/OCI) fill their Asset group and Gateway
 dropdowns from one endpoint, ``/api/pra/pickers``, and **map** it field by field
 rather than assigning the response wholesale, because the state also carries a
 ``loaded`` flag the fetch owns:
@@ -183,7 +183,7 @@ _MODALS = (
     ("web_dashboard/templates/databases/index.html", "options"),
     ("web_dashboard/templates/containers/index.html", "praOpts"),
     ("web_dashboard/templates/containers/index.html", "portainerDeployOpts"),
-    # A workstream's deploy defaults name a jump group and Gateway too.
+    # A workstream's deploy defaults name an asset group and Gateway too.
     ("web_dashboard/templates/rbac/_workgroups.html", "wsPraOpts"),
 )
 

@@ -22,7 +22,7 @@ that the air-gapped subnet *is* the plant network, and every path in is PRA-brok
   - **Web Jump** → `http://<vm>:1881` (the HMI, rendered and recorded on the gateway);
   - **one Protocol Tunnel per endpoint you tick** (generic TCP), named
     `ot-<cell>-<protocol>` — so a rep sees the Siemens PLC and the Rockwell PLC as
-    distinct targets and a Jump Group policy can grant them separately, rather than
+    distinct targets and an Asset Group policy can grant them separately, rather than
     one opaque item opening every port. The cell's own **Kubernetes API** is on the
     same list (`ot-<cell>-k3s` → :6443), so "read the PLC but not the cluster"
     is a policy decision rather than a network one;
@@ -168,7 +168,7 @@ in PRA**, the wiring adds three linked artifacts (skipped when the Password Safe
 checkbox is off, or via `ot_ps_pra_checkout_enabled=false`):
 
 1. a **PRA Vault username/password account** `<cell>-adminuser`, associated to the
-   cell's Jump Group (`criteria.shared_jump_groups`, and placed in
+   cell's Asset Group (`criteria.shared_jump_groups`, and placed in
    `bt_vault_account_group_id` when set so a group policy grants it to users). It is
    born with a throwaway placeholder password;
 2. a **Password Safe mirror**: managed system `<cell>-pravault` on the **"PRA Vault
@@ -307,7 +307,7 @@ Notes that save demo time:
 Each cloud's OT tab also creates a **standalone tunnel** to *any* host the gateway can
 reach — for demoing against real lab gear without deploying a cell. It is the same
 generic-TCP protocol tunnel the k8s API tunnel uses, with the OT port presets and the
-same Jump Group / Gateway pickers as the cell form. State lives in config keys
+same Asset Group / Gateway pickers as the cell form. State lives in config keys
 (`ot_tunnel_*`, each recording which cloud's shared gateway it rides), and live
 tunnels hold a reference in **that cloud's** gateway idle-teardown count, so an
 unrelated decommission cannot reap the gateway mid-session. Connection details and
@@ -383,7 +383,7 @@ Proving a deployed cell works, layer by layer: see the [verification checklist](
 | AWS cell got a public IP | The chosen subnet auto-assigns them — EC2 has no per-instance switch; redeploy into the private sandbox subnet |
 | AWS Password Safe onboarding fails / never rotates | The private subnet can't reach the SSM control plane — turn on `aws_ssm_endpoints_enabled` (interface endpoints, not internet egress) |
 | Parent job failed after "VM deployed" | Wiring failure — the error names the failed piece; fix and **Re-wire** |
-| Jump items landed in the wrong Jump Group / Gateway | The configured defaults were set up for another region — use the form's PRA placement pickers; existing cells: destroy + redeploy (jump items don't move) |
+| Jump items landed in the wrong Asset Group / Gateway | The configured defaults were set up for another region — use the form's PRA placement pickers; existing cells: destroy + redeploy (jump items don't move) |
 | Cell shows "wiring incomplete" but Web Jump + tunnel work | The PRA-checkout pair is missing (pre-feature cell, or it failed) — **Re-wire** creates only the missing pieces |
 | PRA checkout returns a password that doesn't log in | The pair never converged — check `adminuser`'s Synced Accounts in Password Safe and its last change result; a rotation on the parent re-syncs both |
 | Second protocol needed to the same host | One port pair per tunnel jump — create a standalone tunnel with another name (see [Using the protocol tunnels](#using-the-protocol-tunnels)) |

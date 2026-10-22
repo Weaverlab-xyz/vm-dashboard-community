@@ -1195,7 +1195,7 @@ class PRAFeatureConfig(BaseModel):
     plus PRA Vault accounts, and runs the Gateway hosts those jumps are brokered
     through. Driven by the ``sra`` Terraform provider plus a small REST client.
 
-    The Jump Group and Gateway named here must already exist in PRA — the dashboard
+    The Asset Group and Gateway named here must already exist in PRA — the dashboard
     looks them up by name, it does not create them.
 
     ``pra_k8s_namespace`` / ``pra_k8s_sa_name`` / ``bt_vault_account_group_id`` live
@@ -1215,7 +1215,7 @@ class PRAFeatureConfig(BaseModel):
     pra_auth_mode: str = "oauth"
     pra_workload_api_url: str = "https://api.beyondtrust.io/site/{site}/pra"
     pra_workload_service_name: str = ""
-    # Shell Jump provisioning — Jump Group and Jumpoint must pre-exist in PRA
+    # Shell Jump provisioning — Asset Group and Jumpoint must pre-exist in PRA
     bt_jump_group_name: str = ""
     bt_jumpoint_name: str = ""
     # Instance type for the managed shared AWS ECS Gateway host — same Web-Jump OOM
@@ -1791,7 +1791,7 @@ class K8sManagementFeatureConfig(BaseModel):
     # Rancher UI PRA web-broker (opt-in zero-trust access without opening CIDRs).
     # Bound in the k8s_management panel, mirroring the Portainer panel's
     # portainer_ui_* group — these are the DEFAULTS the Containers deploy form
-    # starts from (jump group / gateway / vault group are also per-deploy picks).
+    # starts from (asset group / gateway / vault group are also per-deploy picks).
     rancher_ui_web_jump_enabled: bool = False
     rancher_ui_verify_certificate: bool = False  # sra_web_jump verify_certificate — distinct from rancher_verify_tls, which is the dashboard's own httpx verify on Rancher API calls
     rancher_ui_jump_group: str = ""

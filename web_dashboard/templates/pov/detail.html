@@ -1080,7 +1080,7 @@
               <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Let a vendor in through PRA</h2>
               <p class="text-sm text-gray-500 mt-1">
                 Creates a Vendor Group in this POV's own PRA appliance, scoped by a Group
-                Policy to <span class="font-medium">this POV's Jump Group and nothing
+                Policy to <span class="font-medium">this POV's Asset Group and nothing
                 else</span>. Logins made here expire with the POV, and the whole group is
                 removed when it is destroyed.
               </p>
@@ -1103,7 +1103,7 @@
           <div x-show="env.vendor_can_move_jump_group" class="mt-3">
             <button @click="moveJumpGroup()" :disabled="vendorBusy"
                     class="px-3 py-1.5 rounded-lg text-sm font-medium bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50"
-                    x-text="vendorBusy ? 'Working…' : 'Move to its own Jump Group'"></button>
+                    x-text="vendorBusy ? 'Working…' : 'Move to its own Asset Group'"></button>
             <p class="text-xs text-gray-400 mt-2">
               Destroys this POV's jump items and rebuilds them in
               <code class="text-[11px]">pov-<span x-text="env.name"></span></code>. Its
@@ -1114,7 +1114,7 @@
 
           <div x-show="!env.vendor_blocker" class="mt-3 space-y-2">
             <p class="text-xs text-gray-400">
-              Scoped to Jump Group <code class="text-[11px]" x-text="env.vendor_jump_group"></code>
+              Scoped to Asset Group <code class="text-[11px]" x-text="env.vendor_jump_group"></code>
               <template x-if="env.vendor_expires_at">
                 <span> · expires <span x-text="env.vendor_expires_at.slice(0, 10)"></span></span>
               </template>
@@ -2637,12 +2637,12 @@
       // payload, so loadEnv() already carries every vendor_* key. Every call below answers
       // with that same shape, which is why one Object.assign updates the whole card.
 
-      // The remedy for a POV wired before per-POV Jump Groups: its items are rebuilt in a
+      // The remedy for a POV wired before per-POV Asset Groups: its items are rebuilt in a
       // group of its own so a vendor policy can name one POV. A job rather than a live
       // call — one terraform destroy and one apply per VM — so this reloads the row and
       // points at the job log instead of claiming a result it cannot see yet.
       async moveJumpGroup() {
-        if (!confirm("Move this POV's jump items into a Jump Group of its own?\n\n"
+        if (!confirm("Move this POV's jump items into an Asset Group of its own?\n\n"
                      + "Each item is destroyed and rebuilt, so nobody can launch a "
                      + "session on this POV until the job finishes.")) return;
         this.vendorBusy = true;
@@ -2657,7 +2657,7 @@
                       + `finishes.`;
           await this.loadEnv();
         } catch (e) {
-          this.error = 'Could not queue the Jump Group move.';
+          this.error = 'Could not queue the Asset Group move.';
         } finally {
           this.vendorBusy = false;
         }

@@ -21,7 +21,7 @@ Part of [OT demo cell](../ot-demo-cell.md).
    containing `ot-sim`), name the cell, **tick what to broker** — Modbus is pre-checked,
    each ticked entry becomes its own PRA tunnel, and the list's second group is the
    cell's own Kubernetes API rather than anything a PLC speaks — then pick the
-   **PRA Jump Group + Gateway** that match the cell's region (see below) and deploy.
+   **PRA Asset Group + Gateway** that match the cell's region (see below) and deploy.
    The VM defaults
    to the 4 GB shape everywhere (`e2-medium` / `t3.medium` / `Standard_B2s`) — a 2 GB
    cell proved too tight for the PLC sims + FUXA in live use, and the k3s server idles
@@ -36,10 +36,10 @@ Part of [OT demo cell](../ot-demo-cell.md).
    (`gce_deploy` / `ec2_deploy` / `azure_deploy`) — the child **is** the cell's
    inventory record.
 
-### Choosing the Jump Group and Gateway
+### Choosing the Asset Group and Gateway
 
 PRA objects are not region-scoped, so nothing stops a us-east1 cell from wiring into a
-Jump Group named `centralus` through a us-central1 Gateway — which is exactly what the
+Asset Group named `centralus` through a us-central1 Gateway — which is exactly what the
 configured defaults will do if they were set up for another region. Each cloud's cell
 resolves the same fallback chain its own Shell Jump uses: GCP
 `gcp_bt_jump_group_name` / `gcp_jumpoint_name`, Azure `azure_bt_jump_group_name` /
@@ -47,8 +47,8 @@ resolves the same fallback chain its own Shell Jump uses: GCP
 `bt_jumpoint_name` — all falling back to the shared pair. The deploy form's
 **BeyondTrust PRA placement** pickers (fed by `GET /api/pra/pickers`, same as the VM
 deploy modal) override the defaults per cell: every jump item lands in the chosen
-Jump Group and ride the chosen Gateway, and the PRA Vault checkout account is
-associated to the same Jump Group. The standalone tunnel form has the same two
+Asset Group and ride the chosen Gateway, and the PRA Vault checkout account is
+associated to the same Asset Group. The standalone tunnel form has the same two
 pickers. Left at "(configured default)", behaviour is unchanged.
 
 ### The gateway sizing guard
