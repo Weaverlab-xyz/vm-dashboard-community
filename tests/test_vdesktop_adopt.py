@@ -62,10 +62,19 @@ AVD_PARENT = (f"{SUB}/resourcegroups/avd-rg/providers/"
 CALLS = []
 
 
+VM_CONTRIBUTOR = [{"actions": ["Microsoft.Compute/virtualMachines/*",
+                                "Microsoft.Resources/subscriptions/resourceGroups/read"],
+                    "notActions": []}]
+
+
 def _install_stubs(*, vms_by_rg=None, failing_rgs=(), discovery_rgs="avd-rg, other-rg",
-                   get_vm_result=None):
-    """Rebind azure_service / config_service / PRA. Returns nothing; read CALLS."""
+                   get_vm_result=None, perms_by_rg=None, perms_failing_rgs=()):
+    """Rebind azure_service / config_service / PRA. Returns nothing; read CALLS.
+
+    ``perms_by_rg`` overrides what the identity may do per group; the default is
+    Virtual Machine Contributor everywhere."""
     CALLS.clear()
+    perms_by_rg = perms_by_rg or {}
     vms_by_rg = vms_by_rg if vms_by_rg is not None else {
         "avd-rg": [
             {"vm_id": _vm_id("avd-rg", "avd-host-0"), "name": "avd-host-0",
@@ -88,6 +97,11 @@ def _install_stubs(*, vms_by_rg=None, failing_rgs=(), discovery_rgs="avd-rg, oth
         if rg in failing_rgs:
             raise RuntimeError(f"AuthorizationFailed on {rg}")
         return [dict(v) for v in vms_by_rg.get(rg, [])]
+
+    async def resource_group_permissions(rg):
+        if rg in perms_failing_rgs:
+            raise RuntimeError(f"permissions unreadable on {rg}")
+        return perms_by_rg.get(rg, VM_CONTRIBUTOR)
 
     async def get_vm(rg, name):
         CALLS.append(("get_vm", rg, name))
@@ -113,6 +127,7 @@ def _install_stubs(*, vms_by_rg=None, failing_rgs=(), discovery_rgs="avd-rg, oth
                 or tags.get("ManagedBy") == "vm-cli-dashboard")
 
     az.list_all_vms = list_all_vms
+    az.resource_group_permissions = resource_group_permissions
     az.get_vm = get_vm
     az.terminate_vm = terminate_vm
     az.set_desktop_pool_tag = set_desktop_pool_tag
@@ -343,6 +358,53 @@ def test_discovery_reports_an_unlistable_resource_group_and_keeps_the_rest():
     assert [e["resource_group"] for e in out["errors"]] == ["avd-rg"]
     assert "AuthorizationFailed" in out["errors"][0]["message"]
     assert [v["name"] for v in out["vms"]] == ["plain-vdi"]
+
+
+def _discover(**stubs):
+    _install_stubs(**stubs)
+    _reset()
+    db = SessionLocal()
+    try:
+        return asyncio.run(vd.discover_azure(db))
+    finally:
+        db.close()
+
+
+def test_an_unreadable_resource_group_is_an_error_even_though_the_list_succeeded():
+    """Seen live: with no role on the group, ARM answered the VM list 200 with an empty
+    value, and the modal said "No adoptable VMs found" over an AVD host that was there."""
+    out = _discover(vms_by_rg={"avd-rg": [], "other-rg": []},
+                    perms_by_rg={"avd-rg": []})
+    assert [e["resource_group"] for e in out["errors"]] == ["avd-rg"], out["errors"]
+    assert "no read access" in out["errors"][0]["message"]
+
+
+def test_read_without_power_lists_the_vms_and_warns_that_start_stop_will_fail():
+    reader = [{"actions": ["*/read"], "notActions": []}]
+    out = _discover(perms_by_rg={"avd-rg": reader})
+    assert "avd-host-0" in [v["name"] for v in out["vms"]]
+    msg = {e["resource_group"]: e["message"] for e in out["errors"]}["avd-rg"]
+    assert "start or deallocate" in msg, msg
+
+
+def test_a_not_action_takes_back_what_its_own_entry_granted():
+    no_stop = [{"actions": ["Microsoft.Compute/*"],
+                "notActions": ["Microsoft.Compute/virtualMachines/deallocate/action"]}]
+    out = _discover(perms_by_rg={"avd-rg": no_stop})
+    msg = {e["resource_group"]: e["message"] for e in out["errors"]}["avd-rg"]
+    assert "deallocate" in msg and "start or" not in msg, msg
+
+
+def test_full_access_reports_no_error():
+    owner = [{"actions": ["*"], "notActions": []}]
+    out = _discover(perms_by_rg={"avd-rg": owner, "other-rg": VM_CONTRIBUTOR})
+    assert out["errors"] == [], out["errors"]
+
+
+def test_an_unreadable_permission_list_never_hides_listed_vms():
+    out = _discover(perms_failing_rgs=("avd-rg",))
+    assert out["errors"] == [], out["errors"]
+    assert "avd-host-0" in [v["name"] for v in out["vms"]]
 
 
 def test_discovery_hides_adopted_and_dashboard_managed_vms():
