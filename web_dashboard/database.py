@@ -2878,8 +2878,10 @@ class SpireLab(Base):
     # spire_lab_service.stages_for and the CLI-prefix note there.
     deployment_mode = Column(String(16), nullable=True)
     # The SPIRE release this lab runs, as built or last upgraded: a SPIRE version for vm /
-    # docker, "chart <version>" for k8s (the chart decides SPIRE there). NULL is a lab
-    # built before this was recorded -- unknown, so the page offers the upgrade.
+    # docker, "chart <version> / SPIRE <version>" for k8s (the play sets the chart's
+    # images; a lab recorded as a bare "chart <version>" predates that, and is offered
+    # the upgrade). NULL is a lab built before this was recorded -- unknown, so the page
+    # offers the upgrade.
     spire_version = Column(String(32), nullable=True)
 
     # ── The Kubernetes half ──────────────────────────────────────────────────

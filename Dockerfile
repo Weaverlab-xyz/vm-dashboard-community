@@ -16,14 +16,23 @@
 # Only the client half is used here — this image never runs a server. Statically linked,
 # so it runs on the slim base unchanged. Same pinned digest as docker-compose.spire.yml
 # and the sidecar image; tests/test_spire_overlay.py keeps all three in step.
-FROM ghcr.io/spiffe/spire-server:1.15.3@sha256:4082f30d3e0ddc4000a171392c4ea174345ee44d161ee917c70b97b2ecfba141 AS spire
+FROM ghcr.io/spiffe/spire-server:1.15.5@sha256:584a9c5cc95b9457f5033e7e4488d603fffe5ec48a80c4dba14b05c5e1c2c384 AS spire
 
 FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS base
 
-ARG PACKER_VERSION=1.11.2
-# https://releases.hashicorp.com/packer/1.11.2/packer_1.11.2_SHA256SUMS
-ARG PACKER_SHA256_AMD64=ced13efc257d0255932d14b8ae8f38863265133739a007c430cae106afcfc45a
-ARG PACKER_SHA256_ARM64=dd296d743dd4593304307583cff5290bba9b868fc2b0b605b64566f8141ca728
+ARG PACKER_VERSION=1.16.2
+# https://releases.hashicorp.com/packer/1.16.2/packer_1.16.2_SHA256SUMS
+ARG PACKER_SHA256_AMD64=abbfe0cf74985084112659b53e3565f264f70a20914c3b7c4f789f54f61c2414
+ARG PACKER_SHA256_ARM64=5d7d6de86a49b2d64f3c0eef5766855b580e10a7c45bd6605ba8f1dead7815ea
+# The four cloud plugins, pinned so a rebuild cannot pick up a new release unannounced.
+# Move them with PACKER_VERSION: newer plugin builds are published only to
+# releases.hashicorp.com, which Packer < 1.14 cannot install from — under 1.11.2 every
+# image quietly stayed on the last GitHub-hosted builds (amazon 1.3.9, azure 2.3.3,
+# googlecompute 1.2.1), whatever the latest release was.
+ARG PACKER_PLUGIN_AMAZON=1.8.3
+ARG PACKER_PLUGIN_AZURE=2.6.4
+ARG PACKER_PLUGIN_GOOGLECOMPUTE=1.2.8
+ARG PACKER_PLUGIN_ORACLE=1.1.2
 
 # Escape hatch for networks whose proxy still mangles trixie-updates /
 # trixie-security Packages files even with the corp CA installed and apt
@@ -281,14 +290,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #      hard-fails rather than ship an image whose plugins aren't cached.
 # The packer.zip curl also picks up the --retry flags the other release-artifact
 # fetches in this file already carry (see the helm-install curl below).
-ARG TERRAFORM_VERSION=1.10.5
+ARG TERRAFORM_VERSION=1.17.0
 # Packer plugins go to a fixed path, not root's home (~/.config/packer/plugins), so the
 # unprivileged user the app runs as finds them; `packer init` at build time then sees them
 # installed and downloads nothing.
 ENV PACKER_PLUGIN_PATH=/opt/packer-plugins
-# https://releases.hashicorp.com/terraform/1.10.5/terraform_1.10.5_SHA256SUMS
-ARG TERRAFORM_SHA256_AMD64=0566a24f5332098b15716ebc394be503f4094acba5ba529bf5eb0698ed5e2a90
-ARG TERRAFORM_SHA256_ARM64=0ca5d6977c7c46bfa4bbe030030b911e897cf0cb72bff5525fb76c10f1c3409a
+# https://releases.hashicorp.com/terraform/1.17.0/terraform_1.17.0_SHA256SUMS
+ARG TERRAFORM_SHA256_AMD64=c168cab7c637a8769fdb90089ddd19de701bc6ff8aca64dc2e2185fe46f59f67
+ARG TERRAFORM_SHA256_ARM64=f32478134ffc6d710eec474bbd316652cdddc0f4e336973a3745e8d3a3309cdf
 RUN --mount=type=secret,id=github_token,required=false \
     ARCH=$(dpkg --print-architecture) \
     && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
@@ -307,8 +316,14 @@ RUN --mount=type=secret,id=github_token,required=false \
        fi \
     && mkdir -p "${PACKER_PLUGIN_PATH}" \
     && for plugin in amazon azure googlecompute oracle; do \
+           case "$plugin" in \
+               amazon) pin="$PACKER_PLUGIN_AMAZON" ;; \
+               azure) pin="$PACKER_PLUGIN_AZURE" ;; \
+               googlecompute) pin="$PACKER_PLUGIN_GOOGLECOMPUTE" ;; \
+               oracle) pin="$PACKER_PLUGIN_ORACLE" ;; \
+           esac; \
            for attempt in 1 2 3 4 5; do \
-               packer plugins install "github.com/hashicorp/${plugin}" && break; \
+               packer plugins install "github.com/hashicorp/${plugin}" "v${pin}" && break; \
                if [ "$attempt" = 5 ]; then \
                    echo "packer plugins install ${plugin} failed after 5 attempts; if this is a 403 rate limit, pass a GitHub token as the github_token build secret" >&2; \
                    exit 1; \
@@ -329,10 +344,13 @@ RUN --mount=type=secret,id=github_token,required=false \
 # built-in retry only covers timeouts and a few HTTP codes, so a dropped
 # stream (exit 56) needs --retry-all-errors to be retried at all. The
 # `opa version` below stays the proof the binary arrived intact.
-ARG OPA_VERSION=0.70.0
-# https://github.com/open-policy-agent/opa/releases/download/v0.70.0/opa_linux_<arch>_static.sha256
-ARG OPA_SHA256_AMD64=00d114b94fdb1606a48cccdfc73c9ccdc62c38721150131ae578d5ff3df5c084
-ARG OPA_SHA256_ARM64=48061407a2d7b0b59440fc3a257e7bb251e9ec62f6ce7b1e45c142263ae24413
+# OPA 1.x parses Rego v1 by default: a policy without `import rego.v1` (or the `if` /
+# `contains` keywords) no longer loads, and the admission gate then fails closed on
+# every gated action. The shipped policies already import rego.v1.
+ARG OPA_VERSION=1.21.3
+# https://github.com/open-policy-agent/opa/releases/download/v1.21.3/opa_linux_<arch>_static.sha256
+ARG OPA_SHA256_AMD64=add7c9dcf56e1ce1538426a6ee595ea1cc7ee830bbedd4c23219825b02b19a79
+ARG OPA_SHA256_ARM64=45c8734a41436bf21d82453c2aa7b0ad47c150e8237310b8665e8b5a01305fc0
 RUN ARCH=$(dpkg --print-architecture) \
     && case "$ARCH" in \
          amd64) OPA_ARCH=amd64 ;; \

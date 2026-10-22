@@ -252,7 +252,7 @@ the stages that install software, server before agents, as SPIRE requires:
 
 1. the mode's install play — `spire-server-install.yml` restarts onto the new binary,
    `spire-docker-server.yml` recreates on the new pinned image, `spire-helm.yml` is a
-   `helm upgrade` to the pinned chart;
+   `helm upgrade` to the pinned chart and images;
 2. the OIDC provider (vm/docker): each version installs into `/opt/spire/oidc/bin/<version>/`
    behind the symlink the unit runs, the link is re-pointed with a restart, and the old
    version is pruned only after the new one has served the discovery document;
@@ -276,9 +276,11 @@ a JWT-SVID minted by SPIRE and verified by the dashboard through the JWKS URL by
 and TLS name, and `spire-remove.yml`. That also confirmed the `x509 mint` stdout layout the
 container modes split.
 
-**The Kubernetes mode is pinned** to `spire` chart **0.30.2** and `spire-crds` **0.6.1** —
-0.30.2 ships SPIRE 1.15.3, the version the other two modes install, so all three run the
-same server. `spire_lab_helm_chart_version` / `spire_lab_helm_crds_chart_version` override
+**The Kubernetes mode is pinned** to `spire` chart **0.30.2** and `spire-crds` **0.6.1**.
+0.30.2 ships SPIRE 1.15.3, and no chart release ships a later SPIRE yet (0.30.3 still
+carries appVersion 1.15.3), so the play sets the chart's server, agent and OIDC provider
+images to `spire_lab_version` by digest: all three modes run the same server. That
+override has been rendered, not run. `spire_lab_helm_chart_version` / `spire_lab_helm_crds_chart_version` override
 the pin (blank falls back to it); move them together with `spire_version`. The play's
 values were checked by rendering 0.30.2 with `helm template`: `adminIDs`, `caTTL` and the
 SVID TTLs reach `server.conf`, the provider's domains include `oidc.<trust-domain>`, and its
@@ -602,7 +604,7 @@ Preview features**. Nothing here is a secret.
 | Setting | Key | Default | What it does |
 |---|---|---|---|
 | Allowed source CIDRs | `spire_lab_source_cidrs` | blank | Who may reach tcp/8081, and 8443 and 8082 with it. Blank changes no cloud ACL: it does not open anything |
-| SPIRE version | `spire_lab_version` | `1.15.3` | What the `vm` and `docker` modes install, and what **Upgrade** moves to |
+| SPIRE version | `spire_lab_version` | `1.15.5` | What every mode installs (for `k8s`, the chart's images), and what **Upgrade** moves to |
 | CA TTL | `spire_lab_ca_ttl` | `168h` | Caps every SVID the server issues, the admin credential included |
 | Admin SVID TTL | `spire_lab_admin_ttl` | `720h` | What the admin mint asks for; the CA TTL decides what it gets |
 | Secrets Safe safe | `spire_lab_ps_safe` | `Automation` | Where the admin credential lands. It must exist already, with create rights |

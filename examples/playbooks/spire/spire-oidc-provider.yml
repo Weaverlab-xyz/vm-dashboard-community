@@ -39,7 +39,7 @@
 #                                   #   SERVER will reach this on. It becomes the cert's
 #                                   #   SAN and the issuer URL, so it cannot be localhost.
 #   oidc_port: 8443
-#   spire_version: 1.15.3           # match spire-server-install.yml
+#   spire_version: 1.15.5           # match spire-server-install.yml
 #   spire_extras_sha256: ""         # overrides the pinned checksum table
 #   svid_ttl: 168h                  # asked for; ca_ttl is what you actually get
 - name: Install the SPIRE OIDC Discovery Provider
@@ -49,7 +49,7 @@
     trust_domain: ""
     oidc_domain: ""
     oidc_port: 8443
-    spire_version: "1.15.3"
+    spire_version: "1.15.5"
     spire_extras_sha256: ""
     # SHA-256 of the upstream spire-extras tarballs, checked against the project's own
     # *_sha256sum.txt. A version not in this table is REFUSED unless
@@ -58,6 +58,9 @@
       "1.15.3":
         amd64: 625aff623d620dce459d730565709f12b4d6ce2c18a08aa16eb86df03069ccf1
         arm64: f4d88eee2df8a4d6dd0e418fa1392172ca8c9922d023f3273249cfc78283a7d7
+      "1.15.5":
+        amd64: 5357889cd9a2128583328251f6f9767c49ccd49d6deb94eb131554846fdd868f
+        arm64: 73dfd276fb1b0316310b00129a962b0f58f5beafae7379bdf358ec5c7cfc0770
     spire_allow_unpinned: false
     svid_ttl: "168h"
     spire_root: /opt/spire

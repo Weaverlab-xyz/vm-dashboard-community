@@ -2190,7 +2190,7 @@ class SpireLabFeatureConfig(BaseModel):
     # one of them fails on about half the connections, which reads as an intermittent
     # credential fault rather than a network one.
     spire_lab_source_cidrs: str = ""
-    spire_lab_version: str = "1.15.3"
+    spire_lab_version: str = "1.15.5"
     # ca_ttl CAPS every SVID the server issues, the admin credential included: a 720h
     # mint against this 168h default yields ~7 days, and SPIRE says so rather than
     # failing. Raise it for a lab that has to outlive a week.

@@ -147,7 +147,7 @@ def _pin_vars() -> dict:
 def _install_vars(row: SpireLab) -> dict:
     out = {"trust_domain": row.trust_domain,
            "bind_port": row.bind_port or BIND_PORT,
-           "spire_version": _cfg("spire_lab_version", "1.15.3"),
+           "spire_version": _cfg("spire_lab_version", "1.15.5"),
            **_pin_vars(),
            # ca_ttl CAPS every SVID the server issues, including the admin credential:
            # `-ttl 720h` against the 168h default yields ~7 days and SPIRE says so
@@ -1259,7 +1259,7 @@ def _oidc_vars(row: SpireLab) -> dict:
     return {"trust_domain": row.trust_domain,
             "oidc_domain": oidc_domain_for(row),
             "oidc_port": OIDC_PORT,
-            "spire_version": _cfg("spire_lab_version", "1.15.3"),
+            "spire_version": _cfg("spire_lab_version", "1.15.5"),
             **_pin_vars(),
             "oidc_runtime": "docker" if deployment_mode(row) == "docker" else "systemd",
             **cli_vars(row)}
@@ -1303,7 +1303,7 @@ def _agent_vars(row: SpireLab) -> dict:
             "spire_server_address": row.private_ip or row.public_ip or "",
             "spire_server_port": row.bind_port or BIND_PORT,
             "trust_bundle_pem": row.trust_bundle_pem or "",
-            "spire_version": _cfg("spire_lab_version", "1.15.3"),
+            "spire_version": _cfg("spire_lab_version", "1.15.5"),
             **_pin_vars(),
             "workload_user": K8S_WORKLOAD_USER,
             "workload_uid": row.k8s_workload_uid or K8S_WORKLOAD_UID,
@@ -2327,7 +2327,7 @@ def _docker_server_vars(row: SpireLab) -> dict:
     out = {"trust_domain": row.trust_domain,
            "bind_port": row.bind_port or BIND_PORT,
            "oidc_port": OIDC_PORT,
-           "spire_version": _cfg("spire_lab_version", "1.15.3"),
+           "spire_version": _cfg("spire_lab_version", "1.15.5"),
            **_pin_vars(),
            "ca_ttl": _cfg("spire_lab_ca_ttl", "168h"),
            "federation_port": FEDERATION_PORT,
@@ -2337,9 +2337,10 @@ def _docker_server_vars(row: SpireLab) -> dict:
     return out
 
 
-# spiffe/helm-charts-hardened releases checked against spire-helm.yml's values: chart
-# 0.30.2 ships SPIRE 1.15.3 (appVersion), the version the vm and docker modes install, so
-# all three modes run the same server. Move all three together.
+# spiffe/helm-charts-hardened releases checked against spire-helm.yml's values. Chart
+# 0.30.2 ships SPIRE 1.15.3 (appVersion), and no release ships a later SPIRE yet, so the
+# play sets the chart's images to `spire_lab_version` by digest: all three modes run the
+# same server. Move the chart and the version together.
 SPIRE_CHART_VERSION = "0.30.2"
 SPIRE_CRDS_CHART_VERSION = "0.6.1"
 
@@ -2358,6 +2359,8 @@ def _helm_vars(row: SpireLab) -> dict:
            "spire_crds_chart_version": (_cfg("spire_lab_helm_crds_chart_version", "")
                                         or SPIRE_CRDS_CHART_VERSION),
            "helm_values_extra": _cfg("spire_lab_helm_values_extra", ""),
+           "spire_version": _cfg("spire_lab_version", "1.15.5"),
+           **_pin_vars(),
            "federation_port": FEDERATION_PORT,
            # Helm's checksums live only on get.helm.sh; blank downloads with a warning.
            "helm_sha256": _cfg("spire_lab_helm_sha256", "")}
@@ -2446,11 +2449,12 @@ _LAB_JOB_TYPES = (UPGRADE_JOB_TYPE, JWT_BUNDLE_JOB_TYPE, "spirelab_k8s_link", "s
 
 
 def target_release(row) -> str:
-    """The release an upgrade would install: the configured SPIRE version, or for a k8s
-    lab the pinned chart (which decides the SPIRE version there)."""
+    """The release an upgrade would install: the configured SPIRE version, and for a k8s
+    lab the pinned chart that runs it as well."""
     if deployment_mode(row) == "k8s":
-        return f"chart {_helm_vars(row)['spire_chart_version']}"
-    return _cfg("spire_lab_version", "1.15.3")
+        v = _helm_vars(row)
+        return f"chart {v['spire_chart_version']} / SPIRE {v['spire_version']}"
+    return _cfg("spire_lab_version", "1.15.5")
 
 
 def _active_lab_jobs(db: Session, lab_id: str, job_types) -> list:

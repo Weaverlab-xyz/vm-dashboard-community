@@ -7634,7 +7634,7 @@
                 <label class="block text-sm font-medium text-gray-700 mb-1">SPIRE version</label>
                 <input type="text" x-model="panelCfg.spire_lab_version"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
-                       placeholder="1.15.3">
+                       placeholder="1.15.5">
               </div>
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">CA TTL</label>
@@ -7714,8 +7714,8 @@
                        placeholder="0.6.1 (pinned)">
               </div>
               <p class="col-span-2 text-[11px] text-gray-400 -mt-1">
-                Blank uses the pins, never &ldquo;latest&rdquo;. Chart 0.30.2 ships SPIRE 1.15.3,
-                the version the VM and Docker modes install &mdash; move the chart and the
+                Blank uses the pins, never &ldquo;latest&rdquo;. The chart runs the SPIRE version
+                above, by digest, as the VM and Docker modes do &mdash; move the chart and the
                 SPIRE version together, because the value keys the playbook sets are exactly
                 what a chart release renames.
               </p>

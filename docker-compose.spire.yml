@@ -54,7 +54,7 @@ services:
     restart: "no"
 
   spire-server:
-    image: ghcr.io/spiffe/spire-server:1.15.3@sha256:4082f30d3e0ddc4000a171392c4ea174345ee44d161ee917c70b97b2ecfba141
+    image: ghcr.io/spiffe/spire-server:1.15.5@sha256:584a9c5cc95b9457f5033e7e4488d603fffe5ec48a80c4dba14b05c5e1c2c384
     container_name: vmdash-spire-server
     restart: unless-stopped
     # The image's own non-root user, as in the lab.
