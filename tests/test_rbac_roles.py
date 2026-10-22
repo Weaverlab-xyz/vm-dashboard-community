@@ -401,6 +401,21 @@ def test_the_pov_manager_sees_and_manages_every_pov():
     assert role_service.get_by_slug(db, "pov-manager").is_builtin
 
 
+def test_the_template_builder_curates_templates_and_builds_no_pov():
+    """The small group who author what presenters consume: every `pov_templates` level,
+    delete included, and no level that creates a POV -- `pov_gates.may_create` is
+    `pov:write` or `pov_own:write`, and this role holds neither."""
+    spec = next(r for r in role_service._BUILTIN_ROLES if r["slug"] == "pov-template-builder")
+    perms = spec["permissions"]
+    assert sorted(perms["pov_templates"]) == ["delete", "read", "write"], perms
+    assert "pov" not in perms, perms
+    assert perms["pov_own"] == ["read"], perms
+    assert "is_admin" not in perms
+    db = _session()
+    role_service.seed_builtins(db)          # per-slug, so it lands on an existing install
+    assert role_service.get_by_slug(db, "pov-template-builder").is_builtin
+
+
 def test_the_seed_marks_its_rows_builtin():
     db = _session()
     roles = _seeded(db)

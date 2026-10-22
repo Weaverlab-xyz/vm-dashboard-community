@@ -166,6 +166,27 @@ _BUILTIN_ROLES = (
         },
     },
     {
+        "slug": "pov-template-builder",
+        "name": "POV Template Builder",
+        "description": "Author what presenters build from: build and delete POV templates, "
+                       "save and delete blueprints, and maintain the BeyondTrust tenant "
+                       "registry. Does not create POVs.",
+        # The small set of SEs who curate templates for every presenter to consume.
+        # `pov_templates` at every level, delete included -- curating means retiring a
+        # recipe too, and no other built-in holds that. The tenant registry shares this
+        # scope (api/bt_tenants), so it comes with it, deliberately.
+        #
+        # `pov_own:read` and nothing else in the POV area: it opens the POV page -- the
+        # Tenants tab lives there -- while showing only POVs this user owns, which is none.
+        # No `pov:write` and no `pov_own:write`, so `pov_gates.may_create` is False and
+        # neither Build nor Build by hand is offered. A builder who also runs POVs holds
+        # the POV Presenter role beside this one.
+        "permissions": {
+            "pov_templates": _RWD, "pov_own": ["read"],
+            "vms": _R, "jobs": _R, "inventory": _R, "connections": _R,
+        },
+    },
+    {
         "slug": "auditor",
         "name": "Auditor",
         "description": "Oversight without change: the audit trail, the job history, and the "
@@ -277,7 +298,7 @@ def get_by_slug(db: Session, slug: str) -> Optional[AccessRole]:
 def list_all(db: Session) -> List[AccessRole]:
     """Built-ins first, then custom roles, each alphabetically.
 
-    Deterministic order matters for a page an admin scans: the eight rows they did not write
+    Deterministic order matters for a page an admin scans: the rows they did not write
     stay together at the top instead of interleaving with their own as those are named.
     """
     rows = db.query(AccessRole).all()

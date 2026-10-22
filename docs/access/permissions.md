@@ -305,7 +305,7 @@ Things to know:
 A role is a named set of permissions you assign to a person or to a group, instead of
 ticking boxes for each of them. Editing the role changes it for everyone who holds it.
 
-Nine roles ship with the dashboard:
+Ten roles ship with the dashboard:
 
 | Role | For |
 |---|---|
@@ -314,6 +314,7 @@ Nine roles ship with the dashboard:
 | **Read-Only** | Every section at its read level, and nothing else. `secrets` and `change_windows` offer no read level, so neither is included. |
 | **POV Presenter** | Run a proof of value end to end: **create POVs**, then see, set up, run, power, share and destroy **their own**, meaning ones they created or ones assigned to them in the POV access picker, and tick use cases. **Other people's POVs are not visible**, and neither are the platform-wide controls. It holds `pov:use` and `pov_own:read`/`write`/`delete`, but none of the general `pov:read`, `pov:write` or `pov:delete`. |
 | **POV Manager** | Oversee every proof of value: see, set up, run, power, share and destroy **any** POV, and curate the POV templates. It holds every `pov` level plus `pov_templates:read`/`write`. |
+| **POV Template Builder** | Author what presenters build from: build and delete POV templates, save and delete blueprints, and maintain the BeyondTrust tenant registry. It **cannot create POVs**. It holds `pov_templates:read`/`write`/`delete` and `pov_own:read`, which opens the POV page (and its Tenants tab) without showing anyone else's POVs. Give it alongside **POV Presenter** to someone who does both. |
 | **Auditor** | The audit trail, job history and inventory. No writes. |
 | **Cloud Admin** | Full control of the cloud accounts and what runs in them. |
 | **DBA** | Cloud databases end to end, plus the secrets a database run needs. |

@@ -5630,7 +5630,7 @@ def init_db():
     from .services import workgroup_service
     with SessionLocal() as _seed_db:
         workgroup_service.seed_if_empty(_seed_db)
-        # The eight built-in access roles, and then a repair pass over every user's
+        # The built-in access roles, and then a repair pass over every user's
         # materialised copy of the role they hold. Data, not DDL, so outside the
         # advisory-locked transaction for the same reason as every seed below.
         #

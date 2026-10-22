@@ -288,9 +288,8 @@ class BlueprintRequest(BaseModel):
     project_id: str = ""
     broker_vm_name: str = ""
     suspend_on_idle_seconds: int = 0
-    pra_tenant_id: str = ""
-    ps_tenant_id: str = ""
-    entitle_tenant_id: str = ""
+    # No tenant ids: a blueprint holds none, they are chosen per build. An old client
+    # that still sends them is ignored rather than refused (Pydantic drops extras).
     gateway_name: str = ""
     rb_windows_vm_name: str = ""
     rb_zone: str = ""
@@ -328,8 +327,6 @@ def create_blueprint(payload: BlueprintRequest, db: Session = Depends(get_db),
             description=payload.description, project_id=payload.project_id,
             broker_vm_name=payload.broker_vm_name,
             suspend_on_idle_seconds=payload.suspend_on_idle_seconds or None,
-            pra_tenant_id=payload.pra_tenant_id, ps_tenant_id=payload.ps_tenant_id,
-            entitle_tenant_id=payload.entitle_tenant_id,
             gateway_name=payload.gateway_name,
             rb_windows_vm_name=payload.rb_windows_vm_name,
             rb_zone=payload.rb_zone, rb_asset=payload.rb_asset,

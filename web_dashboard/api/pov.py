@@ -162,9 +162,11 @@ class ProvisionRequest(BaseModel):
     # one and would switch auto-detection off for every POV.
     broker_vm_name: str = ""
     # Which BeyondTrust tenants this POV is wired into. Blank means "not chosen yet",
-    # which is allowed: the wire-up slices are what consume these, and refusing to create
-    # a POV until all three are picked would make the registry a gate on a step that does
-    # not need it. What is NOT allowed is a wrong one — see bt_tenant_service.
+    # which is allowed when building by hand: the wire-up slices are what consume these,
+    # and refusing to create a POV until all three are picked would make the registry a
+    # gate on a step that does not need it. A BLUEPRINT build is the exception -- it must
+    # name one for every product it tests, see `provision`. What is never allowed is a
+    # wrong one — see bt_tenant_service.
     pra_tenant_id: str = ""
     ps_tenant_id: str = ""
     entitle_tenant_id: str = ""
@@ -835,6 +837,22 @@ async def provision(payload: ProvisionRequest,
                                             payload.use_case_excluded)
     except pov_use_case_scope.ScopeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # A blueprint build names its tenants. A blueprint holds none -- which tenant a POV
+    # wires into is the per-build choice, not the recipe's -- so a build from one that left
+    # a product it tests without a tenant would wire up whichever is the default, which is
+    # how a customer's POV onboards into somebody else's appliance. Building by hand keeps
+    # "choose later": that form is where an SE deliberately defers the choice.
+    if blueprint is not None:
+        missing = bt_tenant_service.missing_for_build(
+            db, scope[0], {"pra_tenant_id": payload.pra_tenant_id,
+                           "ps_tenant_id": payload.ps_tenant_id,
+                           "entitle_tenant_id": payload.entitle_tenant_id})
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"choose a tenant for {', '.join(missing)} — a blueprint build "
+                       "names the tenants it wires into")
 
     # Record the project the environment will REALLY be created in, not just what the form
     # sent. The adapter falls back to the configured default when the request names none,

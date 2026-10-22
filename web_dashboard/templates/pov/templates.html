@@ -558,9 +558,10 @@
       </label>
       <label class="block">
         <span class="text-sm font-medium text-gray-700">Template</span>
-        {# Every platform this instance builds on, not just the one the page is toggled
-           to: a blueprint names its template's platform, so the toggle above only ever
-           decided which half of the list an SE could see. #}
+        {# The toggled platform's templates only. The table below lists that platform's
+           blueprints and the POV page offers only them, so a template of the other
+           platform here would save a blueprint that vanished from the list it was saved
+           in. #}
         <select x-model="bp.template_id"
                 class="mt-1 block w-full rounded-md border-gray-300 text-sm">
           <option value="">Choose a template…</option>
@@ -595,27 +596,14 @@
         </select>
       </label>
 
-      <template x-for="kind in tenantKinds" :key="kind.kind">
-        <label class="block">
-          <span class="text-sm font-medium text-gray-700"
-                x-text="kind.label + ' tenant'"></span>
-          <select x-model="bp[tenantField(kind.kind)]"
-                  class="mt-1 block w-full rounded-md border-gray-300 text-sm">
-            <option value="">Not chosen</option>
-            <template x-for="t in tenantsOfKind(kind.kind)" :key="t.id">
-              <option :value="t.id" x-text="t.name"></option>
-            </template>
-          </select>
-        </label>
-      </template>
-
+      {# No tenant pickers. Which BeyondTrust tenants a POV wires into is chosen when it is
+         built, on the POV page: a recipe that pinned them was one customer's recipe, and
+         the presenters who build from recipes could not build until somebody saved one
+         for theirs. See pov_blueprint_service. #}
       <p class="md:col-span-2 -mt-1 text-xs text-gray-500">
-        These pickers list the tenants registered under <span class="font-medium">BeyondTrust
-        tenants</span> on <a href="/pov#bt-tenants" class="underline hover:no-underline">the POV
-        page</a> — not the single set in Settings, which is one tenant for the whole instance.
-        Left unchosen, a POV built from this blueprint falls back to that set.
-        <span x-show="!tenants.length" x-cloak class="text-amber-700">No tenants are registered
-        yet, so the pickers are empty.</span>
+        A blueprint names no BeyondTrust tenant. Whoever builds a POV from it chooses the
+        tenants on <a href="/pov" class="underline hover:no-underline">the POV page</a>,
+        from those registered under its Tenants tab.
       </p>
 
       <label class="block">
@@ -687,12 +675,11 @@
             <th class="px-4 py-2 font-medium">Name</th>
             <th class="px-4 py-2 font-medium">Template</th>
             <th class="px-4 py-2 font-medium">Control node</th>
-            <th class="px-4 py-2 font-medium">Tenants</th>
             <th class="px-4 py-2 font-medium"></th>
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-100">
-          <template x-for="b in blueprints" :key="b.id">
+          <template x-for="b in platformBlueprints" :key="b.id">
             <tr>
               <td class="px-4 py-2">
                 <div class="font-medium text-gray-900" x-text="b.name"></div>
@@ -702,21 +689,14 @@
                   x-text="b.template_name || b.template_id"></td>
               <td class="px-4 py-2 text-gray-600"
                   x-text="b.broker_vm_name || 'auto'"></td>
-              <td class="px-4 py-2 text-gray-600 text-xs">
-                <template x-for="kind in tenantKinds" :key="kind.kind">
-                  <div x-show="b[tenantField(kind.kind)]"
-                       x-text="kind.label + ': ' + tenantName(b, kind.kind)"></div>
-                </template>
-                <span x-show="!tenantKinds.some(k => b[tenantField(k.kind)])">none</span>
-              </td>
               <td class="px-4 py-2 text-right">
                 <button @click="deleteBlueprint(b)"
                         class="text-red-600 hover:underline text-sm">Delete</button>
               </td>
             </tr>
           </template>
-          <tr x-show="!blueprints.length">
-            <td colspan="5" class="px-4 py-6 text-center text-gray-500">
+          <tr x-show="!platformBlueprints.length">
+            <td colspan="4" class="px-4 py-6 text-center text-gray-500">
               No blueprints saved yet.
             </td>
           </tr>
@@ -738,8 +718,6 @@ function templatesPage(tabSlugs) {
     templates: [],
     builds: [],
     blueprints: [],
-    tenants: [],
-    tenantKinds: [],
     loading: false,
     building: false,
     verifying: false,
@@ -800,22 +778,26 @@ function templatesPage(tabSlugs) {
       this.select(this.tabSlugs.find(s => shown[s]) || 'blueprints', false);
     },
 
-    // The blueprint Template picker: the toggled platform's templates, plus the selected
-    // cloud's when the toggle is on another platform. Cloud templates are already loaded
-    // for their own section, so offering them costs no extra read.
+    // The blueprint Template picker: the toggled platform's templates only -- a blueprint
+    // belongs to its template's platform, and both lists of blueprints are scoped to the
+    // toggle. On the cloud the dashboard holds the templates, so its own section's list
+    // stands in when the platform listing came back empty.
     get bpTemplateGroups() {
-      const label = name => {
-        const p = this.platforms.find(x => x.name === name);
-        return (p && p.label) || (name || '').toUpperCase();
-      };
-      const groups = [{ platform: this.platform, label: label(this.platform),
-                        templates: this.templates }];
-      if (this.selectedCloud && this.selectedCloud !== this.platform) {
-        groups.push({ platform: this.selectedCloud,
-                      label: label(this.selectedCloud) + ' cloud templates',
-                      templates: this.cloudTemplates });
+      const p = this.platforms.find(x => x.name === this.platform);
+      let templates = this.templates;
+      if (!templates.length && this.platform === this.selectedCloud) {
+        templates = this.cloudTemplates;
       }
+      const groups = [{ platform: this.platform,
+                        label: (p && p.label) || (this.platform || '').toUpperCase(),
+                        templates }];
       return groups.filter(g => g.templates.length);
+    },
+
+    // A row predating the platform column was a Skytap one -- nothing else had
+    // blueprints then. Same rule as the POV page's.
+    get platformBlueprints() {
+      return this.blueprints.filter(b => (b.platform || 'skytap') === this.platform);
     },
 
     // Which platform, and which name, the chosen template belongs to. Ids do not collide
@@ -828,28 +810,9 @@ function templatesPage(tabSlugs) {
       return null;
     },
 
-    // Same mapping the POV page uses. The API column for a kind is not derivable from the
-    // kind alone -- password_safe is ps_tenant_id -- so it lives in one function on both
-    // pages rather than being spelled out at each use.
-    tenantField(kind) {
-      return (kind === 'password_safe' ? 'ps' : kind) + '_tenant_id';
-    },
-
-    tenantsOfKind(kind) {
-      return this.tenants.filter(t => t.kind === kind && t.is_active);
-    },
-
-    tenantName(row, kind) {
-      const id = row[this.tenantField(kind)];
-      if (!id) return '';
-      const found = this.tenants.find(t => t.id === id);
-      return found ? found.name : '(unknown)';
-    },
-
     blankBlueprint() {
       return { name: '', template_id: '', description: '', broker_vm_name: '',
-               suspend_on_idle_seconds: 3600, pra_tenant_id: '', ps_tenant_id: '',
-               entitle_tenant_id: '', gateway_name: '', rb_windows_vm_name: '',
+               suspend_on_idle_seconds: 3600, gateway_name: '', rb_windows_vm_name: '',
                rb_zone: '', rb_asset: '', source_build_id: '' };
     },
 
@@ -914,20 +877,15 @@ function templatesPage(tabSlugs) {
         // The template read is the only one that talks to the lab platform, so it is the
         // only one allowed to fail the page softly: an unreachable account should still
         // show the builds and blueprints already recorded here.
-        const [tpl, builds, bps, registry] = await Promise.all([
+        const [tpl, builds, bps] = await Promise.all([
           this.apiJson('/api/pov/templates' + q).catch(e => { this.error = e.message;
                                                               return {}; }),
           this.apiJson('/api/pov/builds'),
           this.apiJson('/api/pov/blueprints'),
-          // One call: /api/pov/tenants serves the rows AND the registry's shape, so the
-          // UI does not hardcode which products exist or what they are called.
-          this.apiJson('/api/pov/tenants').catch(() => ({})),
         ]);
         this.templates = tpl.templates || [];
         this.builds = builds.builds || [];
         this.blueprints = bps.blueprints || [];
-        this.tenants = registry.tenants || [];
-        this.tenantKinds = registry.kinds || [];
         await this.loadCloudTemplates();
       } catch (e) {
         this.error = e.message;

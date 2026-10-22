@@ -27,7 +27,9 @@ satisfy.
 
 **Who sees which POV.** A **POV Presenter** sees only the POVs they own: the ones they
 created, plus any added to their POV access picker. A **POV Manager** sees and manages every
-POV. See [Permissions → Roles](../../access/permissions.md#roles) and [who a presenter sees](../../access/permissions.md#a-named-person-who-should-also-be-a-real-user).
+POV. A **POV Template Builder** builds the templates and saves the blueprints presenters
+build from, and creates no POV itself; a presenter picks a blueprint and chooses the
+tenants when they press Build. See [Permissions → Roles](../../access/permissions.md#roles) and [who a presenter sees](../../access/permissions.md#a-named-person-who-should-also-be-a-real-user).
 
 **Handing a POV to another SE.** The **Created by** column on the POV list has a
 `hand off` control. Type the new owner's dashboard username and they become the owner,

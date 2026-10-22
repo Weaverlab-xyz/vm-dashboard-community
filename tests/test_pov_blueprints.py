@@ -7,9 +7,9 @@ second way to provision a POV:
   * **The request wins field by field.** A blueprint supplies defaults for fields the
     request left blank and nothing else. An SE who typed a broker VM name before picking a
     recipe meant it.
-  * **A blueprint cannot store a selection the provision would reject.** Tenant ids go
-    through the same `validate_selection` the create endpoint uses, so a bad id is a form
-    error rather than a job failure minutes later.
+  * **A blueprint holds no tenant.** The tenants are chosen at each build, and a blueprint
+    build that leaves a product it tests without one is refused -- unless no tenant of
+    that product is registered at all, when the Settings set is the only answer.
   * **Nothing on a blueprint is a secret.** The Gateway deploy key and the Password Safe
     installer key are per-tenant, and a recipe that carried them would spread two secrets
     across every blueprint an SE ever saved.
@@ -45,8 +45,8 @@ os.close(_DB_FD)
 os.environ["DATABASE_URL"] = f"sqlite:///{_DB_PATH}"
 
 from web_dashboard import database as db_mod  # noqa: E402
-from web_dashboard.database import (Base, PovBlueprint, PovEnvironment,  # noqa: E402
-                                    PovTemplateBuild)
+from web_dashboard.database import (Base, BeyondTrustTenant,  # noqa: E402
+                                    PovBlueprint, PovEnvironment, PovTemplateBuild)
 from web_dashboard.services import pov_blueprint_service as bp  # noqa: E402
 from web_dashboard.services import pov_template_builder as tb  # noqa: E402
 
@@ -58,7 +58,7 @@ def _session():
 
 
 def _clean(db):
-    for model in (PovBlueprint, PovTemplateBuild, PovEnvironment):
+    for model in (PovBlueprint, PovTemplateBuild, PovEnvironment, BeyondTrustTenant):
         db.query(model).delete()
     db.commit()
 
@@ -125,18 +125,39 @@ def test_a_blueprint_needs_a_template():
         db.close()
 
 
-def test_a_tenant_id_that_does_not_exist_is_refused_at_save_time():
-    """Not at provision time. A bad id that surfaces inside a job has already created an
-    environment, and correcting a dropdown would mean destroying it first."""
+def test_a_blueprint_takes_no_tenant():
+    """Tenants are chosen at each build. A recipe that pinned them was one customer's
+    recipe -- and a presenter could not build until somebody saved one for theirs."""
     db = _session()
     try:
         _clean(db)
         try:
-            _blueprint(db, pra_tenant_id="no-such-tenant")
-        except bp.BlueprintError:
+            _blueprint(db, pra_tenant_id="anything")
+        except TypeError:
             pass
         else:
-            raise AssertionError("an unknown tenant id must be refused")
+            raise AssertionError("create() must not accept a tenant id")
+        row = _blueprint(db)
+        bp.update(db, row, {"pra_tenant_id": "anything"})
+        assert row.pra_tenant_id is None, row.pra_tenant_id
+        assert not any(k.endswith("_tenant_id") for k in bp.serialize(row)), bp.serialize(row)
+    finally:
+        _clean(db)
+        db.close()
+
+
+def test_a_legacy_blueprints_tenants_are_never_applied():
+    """A row saved before tenants moved to the build still has its three columns. They
+    must not reach a POV: the build chose its own."""
+    db = _session()
+    try:
+        _clean(db)
+        row = _blueprint(db)
+        row.pra_tenant_id = "legacy-pra"
+        row.ps_tenant_id = "legacy-ps"
+        db.commit()
+        out = bp.apply_to(row, _Payload())
+        assert not any(k.endswith("_tenant_id") for k in out), out
     finally:
         _clean(db)
         db.close()
@@ -612,6 +633,80 @@ def test_the_request_beats_the_blueprint_through_the_endpoint():
                                 "template_id": "tpl-2"})
         assert res.status_code == 202, (res.status_code, res.text)
         assert res.json()["environment"]["template_id"] == "tpl-2", res.text
+    finally:
+        from web_dashboard.api import pov as pov_api
+        pov_api._adapter = saved
+        db = _session(); _clean(db); db.close()
+
+
+def _register_tenant(kind="pra", name="lab"):
+    db = _session()
+    row = BeyondTrustTenant(kind=kind, name=name, base_url="https://bt.example",
+                            is_active=True)
+    db.add(row)
+    db.commit()
+    tenant_id = row.id
+    db.close()
+    return tenant_id
+
+
+def test_a_blueprint_build_without_a_registered_tenant_is_refused():
+    """The Build button's rule, on the server: a product the POV tests, with a tenant
+    registered to pick, must have one picked. Otherwise wire-up takes whichever is the
+    default -- how a customer's POV onboards into somebody else's appliance."""
+    db = _session()
+    _clean(db)
+    bp_id = _blueprint(db, use_case_products=["pra"]).id
+    db.close()
+    tenant_id = _register_tenant("pra")
+
+    client, saved = _provision_app([{"id": "tpl-1", "name": "SaaS base"}])
+    try:
+        res = client.post("/api/pov/managed",
+                          json={"name": "acme-pov", "blueprint_id": bp_id})
+        assert res.status_code == 400, (res.status_code, res.text)
+        assert "Privileged Remote Access" in res.text, res.text
+
+        res = client.post("/api/pov/managed",
+                          json={"name": "acme-pov", "blueprint_id": bp_id,
+                                "pra_tenant_id": tenant_id})
+        assert res.status_code == 202, (res.status_code, res.text)
+        assert res.json()["environment"]["pra_tenant_id"] == tenant_id, res.text
+    finally:
+        from web_dashboard.api import pov as pov_api
+        pov_api._adapter = saved
+        db = _session(); _clean(db); db.close()
+
+
+def test_a_blueprint_build_asks_only_for_the_products_it_tests():
+    """A registered Password Safe tenant does not block a PRA-only build."""
+    db = _session()
+    _clean(db)
+    bp_id = _blueprint(db, use_case_products=["pra"]).id
+    db.close()
+    _register_tenant("password_safe")
+
+    client, saved = _provision_app([{"id": "tpl-1", "name": "SaaS base"}])
+    try:
+        res = client.post("/api/pov/managed",
+                          json={"name": "acme-pov", "blueprint_id": bp_id})
+        assert res.status_code == 202, (res.status_code, res.text)
+    finally:
+        from web_dashboard.api import pov as pov_api
+        pov_api._adapter = saved
+        db = _session(); _clean(db); db.close()
+
+
+def test_a_by_hand_build_may_still_choose_tenants_later():
+    db = _session()
+    _clean(db)
+    db.close()
+    _register_tenant("pra")
+    client, saved = _provision_app([{"id": "tpl-1", "name": "SaaS base"}])
+    try:
+        res = client.post("/api/pov/managed",
+                          json={"name": "acme-pov", "template_id": "tpl-1"})
+        assert res.status_code == 202, (res.status_code, res.text)
     finally:
         from web_dashboard.api import pov as pov_api
         pov_api._adapter = saved
