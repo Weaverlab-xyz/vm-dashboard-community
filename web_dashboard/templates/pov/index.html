@@ -964,7 +964,8 @@
           </thead>
           <tbody class="divide-y divide-gray-100 bg-white">
             <template x-for="t in tenants" :key="t.id">
-              <tr :class="t.is_active ? '' : 'opacity-50'">
+              <tr :class="[t.is_active ? '' : 'opacity-50',
+                           t.id === editingTenantId ? 'bg-blue-50' : '']">
                 <td class="px-4 py-2 text-gray-600" x-text="t.label"></td>
                 <td class="px-4 py-2">
                   <span class="font-medium text-gray-900" x-text="t.name"></span>
@@ -989,6 +990,11 @@
                 </td>
                 <td class="px-4 py-2 text-gray-600 text-xs" x-text="t.in_use_by || '—'"></td>
                 <td class="px-4 py-2 text-right whitespace-nowrap">
+                  <!-- Edit in place, so a rotated client secret is a Save rather than a
+                       delete-and-register — which the delete guard refuses anyway while a
+                       live POV still points at the tenant. -->
+                  <button @click="startEditTenant(t)"
+                          class="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50">Edit</button>
                   <!-- Absent for Entitle, and the tooltip says why rather than the button
                        simply not being there. -->
                   <button x-show="t.verifiable" @click="verifyTenant(t)"
@@ -1012,13 +1018,18 @@
         No tenants registered. Until one is, a POV falls back to the single set in Settings.
       </div>
 
-      <div class="border border-gray-200 rounded-lg p-4 space-y-3 bg-gray-50">
-        <h3 class="text-sm font-medium text-gray-900">Register a tenant</h3>
+      <!-- One form for Register and Edit. Editing locks the product: options are per
+           kind and the PATCH does not take one, so "change the kind" is delete-and-register. -->
+      <div x-ref="tenantFormPanel" class="border rounded-lg p-4 space-y-3"
+           :class="editingTenantId ? 'border-blue-300 bg-blue-50' : 'border-gray-200 bg-gray-50'">
+        <h3 class="text-sm font-medium text-gray-900"
+            x-text="editingTenantId ? 'Edit ' + (tenantOriginal || {}).name : 'Register a tenant'"></h3>
         <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
           <div>
             <label class="block text-xs font-medium text-gray-700 mb-1">Product</label>
             <select x-model="tenantForm.kind" @change="onTenantKindChange()"
-                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                    :disabled="!!editingTenantId"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm disabled:bg-gray-100 disabled:text-gray-500">
               <template x-for="k in tenantKinds" :key="'new-' + k.kind">
                 <option :value="k.kind" x-text="k.label"></option>
               </template>
@@ -1063,6 +1074,8 @@
             <label class="block text-xs font-medium text-gray-700 mb-1"
                    x-text="tenantForm.kind === 'entitle' ? 'API token' : 'Client secret'"></label>
             <input type="password" x-model="tenantForm.secret" autocomplete="new-password"
+                   :placeholder="editingTenantId && (tenantOriginal || {}).has_secret
+                                 ? 'Leave blank to keep the stored one' : ''"
                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
           </div>
           <div>
@@ -1081,15 +1094,22 @@
             </div>
           </template>
         </div>
-        <label class="flex items-center gap-2 text-sm text-gray-700">
+        <!-- Not while editing: the row's Default button already does that, and a second
+             control for the same flag is one that can disagree with it. -->
+        <label x-show="!editingTenantId" class="flex items-center gap-2 text-sm text-gray-700">
           <input type="checkbox" x-model="tenantForm.is_default"> Make this the default for its product
         </label>
-        <button @click="createTenant()"
-                :disabled="!tenantForm.name || savingTenant ||
-                           (!tenantForm.base_url && !defaultBaseUrl(tenantForm.kind))"
-                class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
-          <span x-text="savingTenant ? 'Saving…' : 'Register'"></span>
-        </button>
+        <div class="flex items-center gap-2">
+          <button @click="editingTenantId ? saveTenant() : createTenant()"
+                  :disabled="!tenantForm.name || savingTenant ||
+                             (editingTenantId ? !tenantForm.base_url
+                                              : (!tenantForm.base_url && !defaultBaseUrl(tenantForm.kind)))"
+                  class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
+            <span x-text="savingTenant ? 'Saving…' : (editingTenantId ? 'Save changes' : 'Register')"></span>
+          </button>
+          <button x-show="editingTenantId" @click="cancelEditTenant()"
+                  class="px-4 py-2 rounded-lg text-sm text-gray-600 hover:text-gray-900">Cancel</button>
+        </div>
       </div>
     </div>
   </div>
@@ -1249,6 +1269,10 @@ function povPage(tabSlugs) {
     gatewayCheck: {},
     tenantForm: { kind: 'pra', name: '', base_url: '', client_id: '', secret: '',
                   secret_ref: '', options: {}, is_default: false },
+    // The row being edited and the values it had when Edit was pressed, so Save can send
+    // only what changed — see saveTenant.
+    editingTenantId: '',
+    tenantOriginal: null,
     _poll: null,
 
     get current() {
@@ -1856,11 +1880,68 @@ function povPage(tabSlugs) {
           is_default: this.tenantForm.is_default,
         });
         this.notice = `Registered ${this.tenantForm.name}.`;
-        this.tenantForm = { kind: this.tenantForm.kind, name: '',
-                            base_url: this.defaultBaseUrl(this.tenantForm.kind),
-                            client_id: '', secret: '', secret_ref: '', options: {},
-                            is_default: false };
+        this.tenantForm = this.blankTenantForm(this.tenantForm.kind);
         await this.loadTenants();
+      } catch (e) { this.error = e.message; }
+      finally { this.savingTenant = false; }
+    },
+
+    blankTenantForm(kind) {
+      return { kind, name: '', base_url: this.defaultBaseUrl(kind), client_id: '',
+               secret: '', secret_ref: '', options: {}, is_default: false };
+    },
+
+    startEditTenant(t) {
+      this.error = ''; this.notice = '';
+      // The secret starts blank whatever is stored: the API never sends it, and blank is
+      // what `update` reads as "keep".
+      this.tenantForm = { kind: t.kind, name: t.name, base_url: t.base_url,
+                          client_id: t.client_id, secret: '', secret_ref: t.secret_ref || '',
+                          options: { ...(t.options || {}) }, is_default: false };
+      this.tenantOriginal = { ...t, options: { ...(t.options || {}) } };
+      this.editingTenantId = t.id;
+      this.$nextTick(() => this.$refs.tenantFormPanel?.scrollIntoView(
+        { behavior: 'smooth', block: 'center' }));
+    },
+
+    cancelEditTenant() {
+      const kind = this.tenantForm.kind;
+      this.editingTenantId = '';
+      this.tenantOriginal = null;
+      this.tenantForm = this.blankTenantForm(kind);
+    },
+
+    async saveTenant() {
+      const orig = this.tenantOriginal || {};
+      const f = this.tenantForm;
+      // Only what changed. `update` resets Verify's verdict whenever `base_url` or
+      // `client_id` is merely PRESENT, so resending unchanged values would turn a rename
+      // or a Jump Group fix into "not checked" on a tenant that still works.
+      const body = {};
+      for (const key of ['name', 'base_url', 'client_id', 'secret_ref']) {
+        if ((f[key] || '').trim() !== (orig[key] || '')) body[key] = (f[key] || '').trim();
+      }
+      const kept = o => JSON.stringify(Object.fromEntries(
+        Object.entries(o || {}).map(([k, v]) => [k, String(v ?? '').trim()])
+                               .filter(([, v]) => v).sort()));
+      if (kept(f.options) !== kept(orig.options)) body.options = f.options;
+      if (f.secret) body.secret = f.secret;
+      if (!Object.keys(body).length) { this.notice = 'Nothing to change.'; return; }
+
+      this.savingTenant = true; this.error = ''; this.notice = '';
+      try {
+        const data = await this.post(`/api/pov/tenants/${this.editingTenantId}`, body, 'PATCH');
+        const saved = (data && data.tenant) || { ...orig, name: body.name || orig.name };
+        this.notice = `Saved ${saved.name}.`;
+        this.cancelEditTenant();
+        await this.loadTenants();
+        // A new credential or target is the usual reason to be here, so prove it in the
+        // same click rather than leaving the row at "not checked".
+        const credChanged = ['secret', 'secret_ref', 'base_url', 'client_id']
+          .some(k => k in body);
+        if (credChanged && saved.verifiable && (saved.has_secret || saved.secret_ref)) {
+          await this.verifyTenant(saved);
+        }
       } catch (e) { this.error = e.message; }
       finally { this.savingTenant = false; }
     },
@@ -1898,6 +1979,7 @@ function povPage(tabSlugs) {
       this.error = ''; this.notice = '';
       try {
         await this.post(`/api/pov/tenants/${t.id}`, null, 'DELETE');
+        if (t.id === this.editingTenantId) this.cancelEditTenant();
         await this.loadTenants();
       } catch (e) { this.error = e.message; }
     },

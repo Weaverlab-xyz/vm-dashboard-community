@@ -152,6 +152,22 @@ Entitle credential per customer, and duplicated credentials rotate apart.
 | **Owner id / Workflow id** | Entitle only, and **both are required** — `pov_wireup` refuses before creating *any* integration without them, the REST accessor adapter included. They are ids inside that tenant, which is why they are not a global setting |
 | **Agent token name / SSH sudo user** | Entitle only, and only the SSH ephemeral-accounts connector needs them. The agent token is the manual answer: a POV that installs its own agent [names that one instead](wiring.md#the-entitle-agent) |
 
+### Changing a tenant
+
+Press **Edit** on the row. The form below the table fills in with what is stored, and every
+field can change except the product. To change the product, delete the tenant and register
+a new one.
+
+- **The secret field starts blank, and blank keeps the stored secret.** The dashboard
+  never sends a secret back to the browser. Type into the field only to replace it, for
+  example after rotating the API client secret or the Entitle token.
+- **Only what you changed is saved.** Renaming a tenant or filling in a missing Jump Group
+  keeps its Verify result. A new secret, client id or URL clears that result, and for PRA
+  and Password Safe **Verify runs again as part of the save**.
+- **POVs wired into the tenant keep pointing at it.** They reference the row, not its name
+  or credential, so the next wire-up uses the new values. This is why you edit rather than
+  delete: a tenant a live POV still uses cannot be deleted.
+
 ### How a POV picks one
 
 Choose them on the New POV form, or press **edit** in the Tenants column of an existing
