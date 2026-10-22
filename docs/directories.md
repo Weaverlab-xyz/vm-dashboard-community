@@ -4,7 +4,7 @@
 
 **Preview.** Off by default. Turn it on with the **Directories** toggle under **Preview
 features** in Settings (`directories_enabled`); its **Configure** link opens the settings
-panel. The page is `/directories`, under **Directories** in the nav.
+panel. The page is `/directories`, under **Preview → Directories** in the nav.
 
 The one page holds two kinds of directory, which this section keeps apart:
 

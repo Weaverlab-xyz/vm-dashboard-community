@@ -6,7 +6,7 @@ The dashboard connects to an **XCP-ng** or **XenServer** host or pool master via
 **XAPI XML-RPC API** using Python's built-in `xmlrpc.client` — no external SDK required.
 
 Enable it in **Settings → Integrations**. That sets the `xcpng_enabled` feature flag, and
-the **XCP-ng** page appears in the navigation at `/xcpng`.
+the **XCP-ng** page appears under **Hypervisors** in the navigation, at `/xcpng`.
 
 ---
 

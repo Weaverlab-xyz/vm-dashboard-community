@@ -150,7 +150,7 @@ Two things there are load-bearing:
 ### 3. Enable the integration
 
 Turn on **VMware** in **Settings → Integrations**, and make sure **remote agents** are
-enabled too. The **Workstation** link then appears in the navigation menu (the ☰ button in the top bar).
+enabled too. The **Workstation** link then appears under **Hypervisors** in the navigation menu (the ☰ button in the top bar).
 
 ### 4. Verify
 

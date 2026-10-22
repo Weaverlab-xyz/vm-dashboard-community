@@ -6,7 +6,7 @@ The dashboard connects to **Prism Central** (or Prism Element) via the Nutanix R
 to list and control AHV virtual machines.
 
 Enable it in **Settings → Integrations**. That sets the `nutanix_enabled` feature flag,
-and the **Nutanix** page appears in the navigation at `/nutanix`.
+and the **Nutanix** page appears under **Hypervisors** in the navigation, at `/nutanix`.
 
 ---
 

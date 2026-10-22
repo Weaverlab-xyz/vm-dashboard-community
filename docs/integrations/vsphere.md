@@ -96,7 +96,7 @@ Editing them after that changes nothing.
 
 ### Step 3 — Verify
 
-The **vSphere** link appears in the navigation menu (the ☰ button in the top bar). Click it — you should see
+The **vSphere** link appears under **Hypervisors** in the navigation menu (the ☰ button in the top bar). Click it — you should see
 host tabs and a table of VMs within a few seconds.
 
 ---

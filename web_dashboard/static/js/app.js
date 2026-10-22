@@ -2085,6 +2085,54 @@ function responsiveNav() {
             if (cursor) {
                 list.insertBefore(document.createElement('hr'), cursor.nextSibling);
             }
+
+            // A pinned link leaves its group for the top of the list, so a group whose every
+            // link was pinned is now a heading over nothing. Hidden, never removed: the
+            // reorder may not subtract a node, and a group holds no page of its own anyway.
+            for (const group of list.querySelectorAll('details.nav-group')) {
+                if (!group.querySelector('a[data-nav]')) group.hidden = true;
+            }
+        },
+
+        // The drawer's groups start shut, except the ones this browser last left open and,
+        // always, the one holding the page you are on: a lit link inside a shut group is a
+        // menu that hides where you are. Remembered per browser only, so the storage is a
+        // convenience -- an empty or throwing localStorage just means every group starts
+        // shut, which is a working menu.
+        _groupsKey: 'navOpenGroups',
+
+        restoreGroups() {
+            const list = this.$refs.navDrawer;
+            if (!list) return;
+            let open = [];
+            try { open = JSON.parse(localStorage.getItem(this._groupsKey) || '[]'); } catch (e) { open = []; }
+            if (!Array.isArray(open)) open = [];
+            const groups = Array.from(list.querySelectorAll('details.nav-group'));
+            for (const group of groups) {
+                if (open.includes(group.dataset.navGroup)) group.open = true;
+            }
+            const lit = list.dataset.navActive;
+            if (lit) {
+                for (const a of list.querySelectorAll('a[data-nav]')) {
+                    if (!a.classList.contains(lit)) continue;
+                    const group = a.closest('details.nav-group');
+                    if (group) group.open = true;
+                }
+            }
+            // Saved from the heading's click, not from `toggle`: toggle also fires (later, as
+            // a queued task) for the opens above, which would write the lit group back as
+            // if the user had chosen it. The click runs before the details flips, hence the
+            // negation for the group clicked. Enter and Space on a heading arrive as clicks.
+            for (const group of groups) {
+                const heading = group.querySelector(':scope > summary');
+                if (!heading) continue;
+                heading.addEventListener('click', () => {
+                    const ids = groups
+                        .filter(g => (g === group ? !g.open : g.open))
+                        .map(g => g.dataset.navGroup);
+                    try { localStorage.setItem(this._groupsKey, JSON.stringify(ids)); } catch (e) { /* private window */ }
+                });
+            }
         },
 
         init() {
@@ -2108,6 +2156,7 @@ function responsiveNav() {
             // returns having done nothing — silently, leaving the pins in the attribute
             // and the list in shipped order.
             this.$nextTick(() => this.applyPins());
+            this.$nextTick(() => this.restoreGroups());
             // The links' x-show reads $store.auth.can(), which is reactive: a refreshed map
             // redraws them in place, so this needs no await and no re-render.
             refreshProfileIfStale();
