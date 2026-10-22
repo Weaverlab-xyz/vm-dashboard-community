@@ -136,7 +136,7 @@ token is set here.)
 
 ### Step 3 — Verify
 
-A **Containers** entry appears in the navigation; open it and confirm the container
+A **Containers** entry appears under **Cloud services** in the navigation; open it and confirm the container
 list loads.
 
 ---

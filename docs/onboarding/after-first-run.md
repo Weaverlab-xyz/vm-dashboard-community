@@ -42,6 +42,28 @@ To update credentials or toggle feature flags after setup, navigate to
 reconfigure mode: existing values are pre-filled, and leaving a secret
 field blank keeps the stored value unchanged.
 
+### Finding pages in the navigation menu
+
+Every page is reached from the navigation menu, the ☰ button at the right of the top
+bar. **Dashboard** (and, on a POV instance, **POV** and **Templates**) sit at the top;
+everything else is in collapsible groups that follow the tabs of
+**Settings → Integrations**:
+
+| Group | Pages |
+|---|---|
+| **Hypervisors** | Workstation, Proxmox, vSphere, Hyper-V, Nutanix, XCP-ng, Connections |
+| **Clouds** | AWS, Azure, GCP, OCI |
+| **Cloud services** | Containers, Databases, Kubernetes, Functions |
+| **Preview** | Desktops, Directories, Workload Lab |
+| **Operations** | Images, Storage, Costs, Configuration, Use cases, Inventory, Jobs, Schedules |
+| **Admin** | Agents, Health, Audit, Notifications, Secrets, RBAC, Request access |
+
+A page appears only when its integration is switched on and you hold the permission it
+needs, and a group with nothing in it for you is not shown at all. Groups start
+collapsed; the group holding the page you are on opens by itself, and your browser
+remembers which other groups you left open. A focus chosen on the Dashboard still pins
+its shortlist of pages above the groups.
+
 
 ### Protect and back up the JWT key
 

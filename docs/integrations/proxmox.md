@@ -101,7 +101,7 @@ Editing them after that changes nothing.
 
 ### Step 4 — Verify
 
-The **Proxmox** link appears in the navigation menu (the ☰ button in the top bar). Click it — you should see
+The **Proxmox** link appears under **Hypervisors** in the navigation menu (the ☰ button in the top bar). Click it — you should see
 your nodes as tabs and all VMs and containers listed within a few seconds.
 
 ---
