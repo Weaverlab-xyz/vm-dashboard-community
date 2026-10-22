@@ -27,7 +27,7 @@ Gated by `pra_enabled`. This is one of three independently-gated BeyondTrust pro
 |---|---|
 | BeyondTrust PRA | Appliance or cloud tenant. Required for jump items, protocol tunnels and PRA Vault accounts |
 | Terraform + the `sra` provider | How PRA jump items are created and destroyed; fetched by the dashboard's Terraform flow. No CLI to install |
-| A Jump Group and a Gateway | Both must **already exist** in PRA — the dashboard looks them up by name and does not create them |
+| An Asset Group and a Gateway | Asset Groups were called Jump Groups before PRA 26.1. On an estate instance both must **already exist** in PRA — the dashboard looks them up by name and does not create them. On a [POV instance](../../profiles/pov/standing-one-up.md#the-tenant-registry) neither is asked for: each POV gets its own Asset Group `pov-<name>`, created over the API at **Wire up** and deleted with the POV, and its own Gateway |
 
 ---
 
@@ -43,12 +43,12 @@ PRA Configuration API with an OAuth 2.0 client-credentials pair.
 2. The API host is the hostname of your PRA appliance, e.g.
    `https://pra.company.com`.
 
-Grant the account permission to manage **Jump Items** and **Jump Groups**, and — if you
+Grant the account permission to manage **Jump Items** and **Asset Groups**, and — if you
 use the cloud-database or Kubernetes tunnels — read access to **Vault Accounts** (the
 dashboard enumerates account groups to populate the provision form).
 
 The dashboard provisions three kinds of Vault account, all through the `beyondtrust/sra`
-Terraform provider and all associated to a Jump Group for injection: **username/password**
+Terraform provider and all associated to an Asset Group for injection: **username/password**
 (cloud-database and Kubernetes tunnels, Web Jumps, the OT cell's admin credential),
 **token** (a cluster's ServiceAccount bearer token), and **SSH private key** (a cloud VM's
 rotating host key — see
@@ -87,7 +87,7 @@ Remote Access** on there — that step carries toggles only, so fill in the fiel
    | OAuth Client ID | (from API Account) |
    | OAuth Client Secret | (from API Account) |
 
-3. Fill in **Shell Jump provisioning** — the Jump Group and Gateway to use, with optional
+3. Fill in **Shell Jump provisioning** — the Asset Group and Gateway to use, with optional
    per-cloud overrides for Azure and GCP. The pickers enumerate both from the PRA Config
    API, so a value that isn't listed does not exist.
 4. Click **Save**. No container restart is required.
@@ -139,7 +139,7 @@ EPM-L in the same pass, they are documented once on the hub:
 | `bt_api_host` | PRA appliance hostname, e.g. `tenant.beyondtrustcloud.com` |
 | `bt_client_id` / `bt_client_secret` | PRA Config API OAuth client-credentials pair |
 | `pra_config_api_client_id` / `pra_config_api_client_secret` | Optional narrower client used only for the PRA Vault functional account; falls back to `bt_client_id` / `bt_client_secret` |
-| `bt_jump_group_name` | Jump group new jump items land in |
+| `bt_jump_group_name` | Asset group new jump items land in |
 | `bt_jumpoint_name` | The Gateway to route through, **by name** — the pickers in Settings enumerate both from the PRA Config API |
 | `azure_bt_jump_group_name` / `azure_jumpoint_name` | Azure-specific overrides; blank falls back to the values above |
 | `gcp_bt_jump_group_name` / `gcp_jumpoint_name` | GCP-specific overrides; blank falls back to the values above |

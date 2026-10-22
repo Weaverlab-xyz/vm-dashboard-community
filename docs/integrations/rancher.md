@@ -163,7 +163,7 @@ Like the database and cloud-VM deploys, the deploy form offers **PRA pickers**
 
 - **Broker the Rancher UI via a PRA Web Jump** — tick to create a `rancher-ui`
   Web Jump. Then pick:
-  - **Jump Group** and **Gateway** — where/through-what the Web Jump routes
+  - **Asset Group** and **Gateway** — where/through-what the Web Jump routes
     (blank → the `bt_*` / `rancher_ui_*` config defaults).
   - **Vault Account Group** — the PRA Vault group the generated **admin
     credential is stored in**, so PRA **injects** it into the Rancher login (you
@@ -259,7 +259,7 @@ The node is reachable directly at its source-restricted URL, so the BeyondTrust
 PRA Web Jump is **off by default**. Enable **PRA Web Jump to the Rancher UI**
 (`rancher_ui_web_jump_enabled`) to *also* broker the UI through the PRA
 representative console — brokered, session-recorded access. It requires PRA to be
-configured (Gateway + Jump Group). This is independent of the Entitle JIT RBAC
+configured (Gateway + Asset Group). This is independent of the Entitle JIT RBAC
 grant, which continues to work either way.
 
 When enabled, the dashboard ensures its managed Gateway host is up, captures its
@@ -339,7 +339,7 @@ apply immediately.
 | `rancher_api_token` | (runtime) | Minted at bootstrap (secret) |
 | `rancher_ui_web_jump_enabled` | `false` | Opt-in PRA Web Jump broker for the UI |
 | `rancher_ui_verify_certificate` | `false` | Web Jump cert verification |
-| `rancher_ui_jump_group` / `rancher_ui_jumpoint_name` | `""` (= `bt_jump_group_name` / `bt_jumpoint_name`) | The default Jump Group and Gateway for the Web Jump. The Containers page can pick both per deploy; these are what it starts from |
+| `rancher_ui_jump_group` / `rancher_ui_jumpoint_name` | `""` (= `bt_jump_group_name` / `bt_jumpoint_name`) | The default Asset Group and Gateway for the Web Jump. The Containers page can pick both per deploy; these are what it starts from |
 | `rancher_ui_jumpoint_cloud` | `gcp` | Which dashboard-managed Gateway host brokers the UI (`gcp`\|`aws`\|`azure`); its egress IP is auto-whitelisted |
 | `rancher_ui_jumpoint_egress_ip` | (runtime) | Captured egress IP of the SHARED Web-Jump Gateway (auto-added to the firewall). Gateways you deploy yourself come from the gateway registry, so every cluster node is allowed |
 | `rancher_ui_vault_account_group_id` | `""` | PRA Vault account group (numeric id) the admin credential is vaulted into for Web-Jump injection; usually chosen per-deploy |

@@ -240,7 +240,7 @@ async def provision_options(
 async def pra_options(
     current_user: User = Depends(require_permission("k8s", "read")),
 ):
-    """PRA pickers for the per-cluster tunnel modal — Jump Groups, Jumpoints and
+    """PRA pickers for the per-cluster tunnel modal — Asset Groups, Jumpoints and
     Vault account groups (best-effort, cluster-agnostic). ``configured`` is false
     when PRA OAuth isn't set, so the UI shows a note instead of empty dropdowns.
     Declared before ``/clusters/{cluster_id}`` so the literal isn't captured by the
@@ -322,7 +322,7 @@ async def broker_access(
     ``tunnel_type=k8s`` jump exists and returns a tunnel descriptor (connect via
     the PRA representative console — no public ingress); otherwise returns the
     Phase-3a ingress link. For a Rancher plane with Entitle enabled it also opens
-    a time-boxed RBAC grant. Optional per-cluster overrides (jump group, jumpoint
+    a time-boxed RBAC grant. Optional per-cluster overrides (asset group, jumpoint
     name, PRA credential) fall back to config."""
     # Guarded before brokering, not after: open_console mints a PRA jump and can open a
     # time-boxed RBAC grant, so an unowned call here is a live session, not a lookup.

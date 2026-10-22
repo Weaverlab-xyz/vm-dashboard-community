@@ -806,7 +806,7 @@ def test_each_cloud_warms_its_gateway_in_its_own_region():
 
 def test_a_seat_brokers_against_its_own_clouds_pra_config():
     """`_resolve_pra_targets` read the `azure_*` keys for every cloud, so a GCP seat's
-    jump item landed in the AZURE Jump Group."""
+    jump item landed in the AZURE Asset Group."""
     _install_stubs()
     asyncio.run(vd.provision_seats("pool-a", None, _seed(n=1), dict(SPEC)))
     assert _pra().calls[0][1]["jump_group_name"] == "azure-jg"
@@ -907,7 +907,7 @@ def test_the_seats_jump_kind_is_read_off_its_state():
 
 def test_the_session_targets_follow_the_seats_own_cloud():
     """The endpoint used to hard-code the `azure_*` keys, so an AWS or GCP seat's
-    session named a Jump Group its item was never in."""
+    session named an Asset Group its item was never in."""
     _install_gcp_stubs()
     ids = _seed(n=1, cloud="gcp")
     asyncio.run(vd.provision_seats("pool-a", None, ids, dict(GCP_SPEC)))

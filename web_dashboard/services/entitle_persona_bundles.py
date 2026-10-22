@@ -288,7 +288,7 @@ AD_DELEGATION = {
         "engineering workstations, with a GPO linked only to the OT OU.",
         "In that GPO grant \"Allow log on through Remote Desktop Services\" to the group; on "
         "the rest of the domain deny it (\"Deny log on through Remote Desktop Services\").",
-        "In Privileged Remote Access, map the group to the OT jump group's group policy, so "
+        "In Privileged Remote Access, map the group to the OT asset group's group policy, so "
         "PRA sessions follow the same membership.",
     ),
     "ot-breakglass": (

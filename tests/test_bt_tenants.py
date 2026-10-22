@@ -12,7 +12,7 @@ and the wrong answer never raises. So what is pinned here is mostly *refusals*:
   * **A tenant in use cannot be deleted.** The FK is SET NULL, so deleting one would
     quietly blank a POV's tenant and the next wire-up would resolve the default.
   * **A blank secret keeps the stored one.** The form cannot render what is stored, so
-    any other rule means saving a Jump Group name wipes a credential.
+    any other rule means saving an Asset Group name wipes a credential.
   * **The secret never leaves the service.** `serialize` reports that one exists, never
     the value and never its length.
   * **`api_base` matches what the real clients already do**, or a verified tenant's calls
@@ -222,7 +222,7 @@ def test_the_secret_never_appears_in_the_serialized_row():
 
 def test_a_blank_secret_on_update_keeps_the_stored_one():
     """The form cannot render what is stored, so blank has to mean keep — otherwise
-    saving a Jump Group name wipes the credential."""
+    saving an Asset Group name wipes the credential."""
     db = d.SessionLocal()
     row = _mk(db, secret="keep-me")
     t.update(db, row["id"], name=_name("renamed"), secret="")
@@ -306,12 +306,34 @@ def test_every_kind_has_an_option_allowlist_and_a_required_set():
             f"{kind} requires an option it does not allow"
 
 
-def test_a_missing_required_option_is_reported_not_hidden():
-    """A tenant with valid credentials and no Jump Group is configured-but-unusable, and
-    finding that out inside a provision job is finding it out too late."""
+def test_a_pra_tenant_needs_no_asset_group():
+    """Each POV gets its own Asset Group, created over the API at Wire up
+    (`pov_wireup.ensure_jump_group`). Requiring the tenant's copy put an amber "missing"
+    on every new tenant and sent SEs to /login to build a group nothing used."""
     db = d.SessionLocal()
-    row = _mk(db, kind="pra", options={"jumpoint_name": "gw"})
-    assert row["missing_options"] == ["jump_group_name"]
+    row = _mk(db, kind="pra", options={})
+    assert row["missing_options"] == []
+    assert "jump_group_name" not in t.REQUIRED_OPTIONS["pra"]
+    db.close()
+
+
+def test_the_unread_pra_options_are_off_the_form_but_still_accepted():
+    """Off the register form because a POV registered today reads neither. Still on the
+    allowlist because a POV wired before per-POV Asset Groups resolves through the
+    tenant's `jump_group_name`, and dropping the key would make that row unreadable."""
+    from web_dashboard.api import bt_tenants as api
+    form = api._form_keys("pra")
+    for key in ("jump_group_name", "jumpoint_name"):
+        assert key not in form, f"{key} is still offered on the register form"
+        assert key in t.OPTION_KEYS["pra"], f"{key} was dropped from the allowlist"
+    assert "vendor_portal_url" in form, "hiding swallowed an option that IS read"
+    for kind, keys in t.FORM_HIDDEN_OPTIONS.items():
+        assert set(keys) <= set(t.OPTION_KEYS[kind])
+        assert not set(keys) & set(t.REQUIRED_OPTIONS[kind]), \
+            f"{kind} hides an option it requires"
+    db = d.SessionLocal()
+    row = _mk(db, kind="pra", options={"jump_group_name": "POV", "jumpoint_name": "gw"})
+    assert row["options"] == {"jump_group_name": "POV", "jumpoint_name": "gw"}
     db.close()
 
 
@@ -624,6 +646,58 @@ def test_a_failed_check_is_a_return_value_not_an_exception():
     ok, message = asyncio.run(bt_tenant_verify.verify(tenant))
     assert ok is False
     assert "API account" in message, "the remedy must survive the shape change"
+
+
+def _pra_verify_against(handler):
+    """Run the PRA verify with httpx pointed at ``handler``. Returns ``(ok, message)``."""
+    import asyncio
+    import httpx
+    real = httpx.AsyncClient
+
+    class _Client(real):
+        def __init__(self, *a, **kw):
+            kw["transport"] = httpx.MockTransport(handler)
+            super().__init__(*a, **kw)
+
+    tenant = t.Tenant(id="x", kind="pra", name="p", base_url="acme.beyondtrustcloud.com",
+                      client_id="cid", secret="sek")
+    httpx.AsyncClient = _Client
+    try:
+        return asyncio.run(bt_tenant_verify.verify(tenant))
+    finally:
+        httpx.AsyncClient = real
+
+
+def test_pra_verify_reads_the_asset_group_list():
+    """A token proves the client exists, not that it may touch configuration — and Wire
+    up creates each POV's Asset Group through the Configuration API. Read-only."""
+    import httpx
+    seen = []
+
+    def handler(request):
+        if request.url.path.endswith("/oauth2/token"):
+            return httpx.Response(200, json={"access_token": "t0ken"})
+        seen.append((request.method, request.url.path))
+        return httpx.Response(200, json=[])
+
+    ok, message = _pra_verify_against(handler)
+    assert ok is True, message
+    assert seen == [("GET", "/api/config/v1/jump-group")], seen
+    assert "Asset Group" in message
+
+
+def test_pra_verify_fails_an_account_without_configuration_permission():
+    """Green here and a 403 at the first Wire up is the failure this probe exists for."""
+    import httpx
+
+    def handler(request):
+        if request.url.path.endswith("/oauth2/token"):
+            return httpx.Response(200, json={"access_token": "t0ken"})
+        return httpx.Response(403, json={"message": "Forbidden"})
+
+    ok, message = _pra_verify_against(handler)
+    assert ok is False
+    assert "Configuration API permission" in message, message
 
 
 def test_the_verify_endpoint_builds_no_message_from_a_caught_exception():

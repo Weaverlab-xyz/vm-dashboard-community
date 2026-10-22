@@ -68,7 +68,7 @@ class OTCellError(Exception):
 #
 # ``plc`` separates the fieldbus protocols from the cell's platform endpoints. Both
 # kinds are brokered exactly the same way — one generic-TCP tunnel jump each, so a
-# Jump Group policy can grant the Rockwell PLC and the cluster API to different
+# Asset Group policy can grant the Rockwell PLC and the cluster API to different
 # people — but they are not the same claim, and a form that lists "Kubernetes API"
 # under "PLC protocols" invites the wrong one.
 
@@ -243,7 +243,7 @@ def cell_cloud_for_job_type(job_type: str) -> str:
 
 def resolve_jump_targets(jump_group: Optional[str], jumpoint_name: Optional[str],
                          cloud: str = "gcp") -> Tuple[str, str]:
-    """Resolve the PRA Jump Group / Jumpoint display names with the same fallback
+    """Resolve the PRA Asset Group / Jumpoint display names with the same fallback
     chain the cloud's own Shell Jump uses (override → cloud-specific → bt_*)."""
     jg_key = _CLOUD_JUMP_GROUP_KEY.get(cloud, "")
     jp_key = _CLOUD_JUMPOINT_KEY.get(cloud, "")
@@ -490,7 +490,7 @@ async def create_standalone_tunnel(*, name: str, hostname: str, protocol: str,
                                    region: str, created_by: str,
                                    cloud: str = "gcp") -> dict:
     """Provision a generic-TCP PRA protocol tunnel to any OT endpoint and record it
-    in config_service. The Jump Group + Jumpoint must already exist in PRA.
+    in config_service. The Asset Group + Jumpoint must already exist in PRA.
 
     ``cloud`` names whose shared gateway host the tunnel rides (and therefore whose
     idle-teardown sum it holds a reference in) — the jump item itself is
@@ -508,7 +508,7 @@ async def create_standalone_tunnel(*, name: str, hostname: str, protocol: str,
                       "or pick another name")
     jg, jp = resolve_jump_targets(jump_group, jumpoint_name, cloud)
     if not (jg and jp):
-        raise OTError("PRA Jump Group / Gateway are not configured "
+        raise OTError("PRA Asset Group / Gateway are not configured "
                       "(bt_jump_group_name / bt_jumpoint_name)")
     # Best-effort, like the k8s API tunnel: the target may be reachable through an
     # operator-managed Gateway the dashboard doesn't run a host for. Skipped
@@ -2610,7 +2610,7 @@ async def _wire_ps_checkout(db, parent_id: str, child_id: str, cmeta: dict, *,
     is there and rewire retries only what is missing, like the Web Jump/tunnel):
 
       1. ``ot_vault_tf_state`` — a PRA Vault username/password account, associated
-         to the cell's Jump Group for injection, seeded with a placeholder;
+         to the cell's Asset Group for injection, seeded with a placeholder;
       2. ``ot_ps_mirror_tf_state`` — a managed system + account on the "PRA Vault
          Username Password" plugin, named exactly like the Vault account (the
          plugin resolves its PRA-side target by NAME);

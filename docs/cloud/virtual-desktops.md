@@ -169,6 +169,6 @@ The dashboard does not broker adopted seats through PRA. Reach them the way you 
 ## Related
 
 - [Cloud VMs](vms.md) — the single-VM deploy paths these seat backends reuse.
-- [Privileged Remote Access](../integrations/beyondtrust/privileged-remote-access.md) — Jump Groups, Jump Items and credential injection.
+- [Privileged Remote Access](../integrations/beyondtrust/privileged-remote-access.md) — Asset Groups, Jump Items and credential injection.
 - [Gateways](../integrations/beyondtrust/gateways.md) — the shared Gateway host and how it is reference-counted.
 - [Cloud sandbox](sandbox.md) — the desktops network segment the Azure default points at.

@@ -1,13 +1,13 @@
 """Shared BeyondTrust PRA pickers endpoint.
 
 The per-DB tunnel form and the k8s/rancher tunnel modals each already surface the
-PRA Jump Group / Jumpoint / Vault-account-group pickers, but those endpoints are
+PRA Asset Group / Jumpoint / Vault-account-group pickers, but those endpoints are
 either DB-specific or behind a feature gate. The VM deploy forms (AWS/Azure/GCP/
 OCI) are always available, so they need an always-on source for the same pickers —
-this router provides it, so every deploy/provision form fills its Jump group and
+this router provides it, so every deploy/provision form fills its Asset group and
 Jumpoint dropdowns from one place instead of hardcoding text inputs.
 
-  GET /api/pra/pickers  — Jump Groups, Jumpoints and Vault account groups
+  GET /api/pra/pickers  — Asset Groups, Jumpoints and Vault account groups
 """
 from fastapi import APIRouter, Depends
 
@@ -20,7 +20,7 @@ router = APIRouter(prefix="/api/pra", tags=["pra"])
 
 @router.get("/pickers")
 async def pra_pickers(current_user: User = Depends(get_current_user)):
-    """PRA pickers for the deploy/provision form dropdowns — Jump Groups,
+    """PRA pickers for the deploy/provision form dropdowns — Asset Groups,
     Jumpoints and Vault account groups (best-effort, cloud-agnostic; PRA objects
     aren't region/cloud-scoped). ``configured`` is false when PRA OAuth isn't set,
     so the UI can show a note instead of empty dropdowns and fall back to the

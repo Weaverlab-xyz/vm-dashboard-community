@@ -33,7 +33,7 @@
         PRA is not configured (bt_api_host / bt_client_id / bt_client_secret). Set it on Settings — the dropdowns stay empty and the job will fail until then.
       </p>
       <div>
-        <label class="block text-xs font-medium text-gray-600 mb-1">Jump group</label>
+        <label class="block text-xs font-medium text-gray-600 mb-1">Asset group</label>
         <select x-model="vmPraForm.jump_group" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
           <option value="">(configured default)</option>
           <template x-for="g in vmPraOpts.jump_groups" :key="g.id">

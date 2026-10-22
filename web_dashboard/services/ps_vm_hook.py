@@ -473,7 +473,7 @@ async def wire_pra_vault_key_sync(db, job_id: str, vm_name: str, *,
     cell's checkout pair):
 
       1. ``ps_vault_tf_state`` — a PRA Vault SSH account named ``{vm}-{login}``,
-         associated to the VM's Jump Group for injection, seeded with a throwaway key;
+         associated to the VM's Asset Group for injection, seeded with a throwaway key;
       2. ``ps_vault_mirror_tf_state`` — a managed system + account on the "PRA Vault
          Private Key" plugin, named exactly like the Vault account (the plugin resolves
          its PRA-side target by NAME);
@@ -519,7 +519,7 @@ async def wire_pra_vault_key_sync(db, job_id: str, vm_name: str, *,
 
     try:
         if not result.get("ps_vault_tf_state"):
-            # The deploy's own Jump Group if its Shell Jump was provisioned (this runs
+            # The deploy's own Asset Group if its Shell Jump was provisioned (this runs
             # after that step), else the same fallback chain the Shell Jump itself
             # uses. Blank means PRA has nowhere to inject the key, so there is nothing
             # worth creating.
@@ -527,7 +527,7 @@ async def wire_pra_vault_key_sync(db, job_id: str, vm_name: str, *,
                 or ot_service.resolve_jump_targets(None, None, (tag or "").lower())[0]
             if not jump_group:
                 result["ps_vault_skipped"] = (
-                    "no PRA Jump Group resolved for this VM — set bt_jump_group_name "
+                    "no PRA Asset Group resolved for this VM — set bt_jump_group_name "
                     "(or the per-cloud override) to associate the Vault account")
                 return
             job_service.update_progress(

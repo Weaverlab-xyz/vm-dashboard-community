@@ -577,7 +577,7 @@
                 added later from its row.</span></span>
           </label>
           <details x-show="deployForm.enable_pra" x-cloak class="ml-6">
-            <summary class="cursor-pointer select-none text-xs text-gray-500">Jump group, Gateway and credential
+            <summary class="cursor-pointer select-none text-xs text-gray-500">Asset group, Gateway and credential
               <span class="text-gray-400">— the configured defaults unless changed</span></summary>
             <div class="mt-2">
             <!-- BeyondTrust PRA options (optional per-deploy overrides) -->
@@ -587,7 +587,7 @@
               </p>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label class="block text-xs font-medium text-gray-600 mb-1">Jump group</label>
+                  <label class="block text-xs font-medium text-gray-600 mb-1">Asset group</label>
                   <select x-model="deployForm.jump_group" :disabled="!praPickers.jump_groups.length"
                           class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
                     <option value="">(configured default)</option>
@@ -608,7 +608,7 @@
                 </div>
               </div>
               <p x-show="praPickers.loaded && !praPickers.jump_groups.length && !praPickers.gateways.length" x-cloak
-                 class="text-xs text-gray-400">No PRA jump groups/Gateways returned — the shell jump falls back to the configured defaults.</p>
+                 class="text-xs text-gray-400">No PRA Asset Groups/Gateways returned — the shell jump falls back to the configured defaults.</p>
             </div>
             </div>
           </details>
@@ -1432,7 +1432,7 @@
         </div>
 
         <!-- BeyondTrust PRA placement — same pickers as the VM deploy modal. All three
-             jump items (Web Jump, tunnel, Shell Jump) land in this Jump Group and ride
+             jump items (Web Jump, tunnel, Shell Jump) land in this Asset Group and ride
              this Gateway, so pick the pair that matches the cell's region rather than
              letting a us-east1 cell wire into the us-central1 defaults. -->
         <div class="pt-1 space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
@@ -1441,7 +1441,7 @@
           </p>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label class="block text-xs font-medium text-gray-600 mb-1">Jump group</label>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Asset group</label>
               <select x-model="otForm.jump_group" :disabled="!praPickers.jump_groups.length"
                       class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
                 <option value="">(configured default)</option>
@@ -1660,7 +1660,7 @@
                    class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
             <select x-model="otTunnelForm.jump_group" :disabled="!praPickers.jump_groups.length"
                     class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
-              <option value="">Jump group: (configured default)</option>
+              <option value="">Asset group: (configured default)</option>
               <template x-for="g in praPickers.jump_groups || []" :key="g.id">
                 <option :value="g.name" x-text="g.name"></option>
               </template>
@@ -1962,7 +1962,7 @@ function gcpDashboard() {
     deploying:     false,
     sshKeyPreview: '',
     sshKeyLoading: false,
-    // BeyondTrust PRA Jump Group / Gateway pickers for the deploy-form dropdowns
+    // BeyondTrust PRA Asset Group / Gateway pickers for the deploy-form dropdowns
     // (shared /api/pra/pickers, fetched once). Empty when PRA isn't configured →
     // dropdowns show only "(configured default)" and the backend falls back.
     praPickers: { configured: false, jump_groups: [], gateways: [], loaded: false },
@@ -2526,7 +2526,7 @@ function gcpDashboard() {
     },
 
     async loadPraPickers() {
-      // BeyondTrust PRA Jump Group / Gateway pickers for the deploy-form
+      // BeyondTrust PRA Asset Group / Gateway pickers for the deploy-form
       // dropdowns (shared /api/pra/pickers). Fetched once, best-effort: on any
       // failure the dropdowns just show "(configured default)".
       if (this.praPickers.loaded) return;

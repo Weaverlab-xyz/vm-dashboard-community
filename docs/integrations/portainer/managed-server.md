@@ -205,7 +205,7 @@ both:
 
 Provisioning runs after first-run bootstrap (the password has to exist to be vaulted)
 and is **best-effort** — a PRA hiccup logs a warning and leaves the node deployed and
-usable over its public IP. Jump Group, Gateway and Vault group default to the
+usable over its public IP. Asset Group, Gateway and Vault group default to the
 `bt_*` settings when not chosen on the form.
 
 Requires PRA to be configured (`bt_api_host`, `bt_client_id`, `bt_jumpoint_name`);

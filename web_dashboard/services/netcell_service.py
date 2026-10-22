@@ -143,7 +143,7 @@ def ps_platform_problem(platform_name: str) -> str:
 def pra_preflight_problem() -> str:
     """The cell's PRA preflight, borrowed whole from the OT cell.
 
-    Delegated rather than copied: a cell with no Jumpoint or Jump Group is a device
+    Delegated rather than copied: a cell with no Jumpoint or Asset Group is a device
     nobody can reach, which is the same sentence on both features, and two copies of
     that check would drift the first time either cloud's config keys moved.
     """

@@ -318,13 +318,13 @@ Before any **provisioned** database will get a working tunnel, configure PRA onc
 
 - **PRA appliance + OAuth API account** → `bt_api_host`, `bt_client_id`,
   `bt_client_secret` (used by the SRA Terraform provider to create the tunnel).
-- A **pre-existing Jump Group** and **Gateway** in PRA → `bt_jump_group_name`,
+- A **pre-existing Asset Group** and **Gateway** in PRA → `bt_jump_group_name`,
   `bt_jumpoint_name`. The dashboard does *not* create these.
 - The **Gateway Docker deploy key**, pasted in (config key is per cloud — see each
   section). Without it the shared gateway host can't start and the tunnel shows
   *Unavailable* in PRA.
 
-Each provision can override the Jump Group / Gateway / PRA credential per database
+Each provision can override the Asset Group / Gateway / PRA credential per database
 (the `jump_group`, `jumpoint_name`, `pra_credential_ref` form fields); otherwise the
 `bt_*` defaults apply. (The per-cloud `*_bt_jump_group_name` / `*_jumpoint_name` keys
 are for PRA *Shell Jumps*, not the DB tunnel.)
@@ -732,7 +732,7 @@ See [Permissions](access/permissions.md) for how workgroups sit alongside permis
 ## Lifecycle (provision, register, decommission)
 
 - **Provision:** from the Databases page, pick engine + cloud + region and (when
-  PRA is configured) a Jump Group / Gateway. The record + admin credential are created
+  PRA is configured) an Asset Group / Gateway. The record + admin credential are created
   synchronously; the `terraform apply`, tunnel brokering, and any Password Safe onboarding
   run in the **job worker** as a background job.
 - **Register:** from the Databases page, **Register existing** → engine, location, host and
@@ -805,6 +805,6 @@ See [Permissions](access/permissions.md) for how workgroups sit alongside permis
 - **A registered OCI database can't be selected in Configuration Management.** Expected —
   no Ansible runner resolves for `oci`. Registration still gives you the inventory row.
 
-For the base BeyondTrust/PRA setup (OAuth accounts, Jump Group/Jumpoint, deploy keys), see
+For the base BeyondTrust/PRA setup (OAuth accounts, Asset Group/Gateway, deploy keys), see
 the [Privileged Remote Access](integrations/beyondtrust/privileged-remote-access.md) doc. For the sandbox network
 topology, see [Cloud Sandbox](cloud/sandbox.md).

@@ -245,7 +245,7 @@ class RancherDeployRequest(BaseModel):
     # fields fall back to Settings/config. jump_group + jumpoint by NAME, vault
     # account group by numeric id (the list_pickers() contract).
     web_jump_enabled: bool = False           # broker the Rancher UI via a PRA Web Jump
-    jump_group: Optional[str] = None         # PRA Jump Group name
+    jump_group: Optional[str] = None         # PRA Asset Group name
     jumpoint_name: Optional[str] = None      # PRA Jumpoint name
     vault_account_group_id: Optional[int] = None  # PRA Vault account group for the admin credential
     # Replace a live node whose container was launched with different arguments (the
@@ -317,7 +317,7 @@ class PortainerDeployRequest(BaseModel):
     # fields fall back to Settings/config. jump_group + jumpoint by NAME, vault
     # account group by numeric id (the list_pickers() contract).
     web_jump_enabled: bool = False           # broker the Portainer UI via a PRA Web Jump
-    jump_group: Optional[str] = None         # PRA Jump Group name
+    jump_group: Optional[str] = None         # PRA Asset Group name
     jumpoint_name: Optional[str] = None      # PRA Jumpoint name
     vault_account_group_id: Optional[int] = None  # PRA Vault account group for the admin credential
 

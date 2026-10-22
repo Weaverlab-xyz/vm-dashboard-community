@@ -1053,7 +1053,7 @@ async def get_rancher_pra_options(
     current_user: User = Depends(require_permission("containers", "read")),
 ):
     """Deploy-form options for the Rancher node: selectable GCP regions plus the PRA
-    pickers (Jump Groups, Jumpoints, Vault account groups; best-effort). ``configured``
+    pickers (Asset Groups, Jumpoints, Vault account groups; best-effort). ``configured``
     is false when PRA OAuth isn't set, so the form shows a note instead of empty
     dropdowns. Mirrors ``/api/k8s/clusters/pra-options``.
 
@@ -1314,7 +1314,7 @@ async def get_portainer_node_deploy_options(
     """Deploy-form options for the Portainer node: the clouds it can be hosted on and
     the regions available in each (the default plus every region with a configured
     subnet — the node needs a public subnet, which is regional on every cloud), plus
-    the PRA pickers (Jump Groups, Jumpoints, Vault account groups; best-effort).
+    the PRA pickers (Asset Groups, Jumpoints, Vault account groups; best-effort).
     ``configured`` is false when PRA OAuth isn't set, so the form shows a note instead
     of empty dropdowns. Same payload shape as /api/containers/rancher/pra-options.
 

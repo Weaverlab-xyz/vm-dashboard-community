@@ -907,7 +907,7 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
 
         # Eagerly provision the PRA Web Jump (+ vault the admin credential into the
         # chosen account group) NOW, when it's enabled — so it's ready the moment
-        # deploy finishes, using this deploy's Jump Group / Jumpoint / Vault group.
+        # deploy finishes, using this deploy's Asset Group / Jumpoint / Vault group.
         # Best-effort (a PRA hiccup must not fail the node deploy); the lazy
         # open_console path is the fallback. Runs on fresh + reused.
         if config_service.get_bool("rancher_ui_web_jump_enabled", False):

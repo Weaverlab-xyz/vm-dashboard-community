@@ -119,7 +119,7 @@ class DeployRequest(ScheduleRequestMixin, BaseModel):
     # True = do not queue the workstream's post-deploy runs for this deploy
     # (services/post_deploy_service).
     skip_post_deploy: bool = False
-    jump_group: Optional[str] = None             # PRA Jump Group name override (else bt_jump_group_name)
+    jump_group: Optional[str] = None             # PRA Asset Group name override (else bt_jump_group_name)
     jumpoint_name: Optional[str] = None          # PRA Jumpoint name override (else bt_jumpoint_name)
     pra_credential_ref: Optional[str] = None     # secret ref → bt_client_secret override for the shell jump
     # (No per-deploy ECS deploy-key override: community uses a SHARED jumpoint
@@ -201,7 +201,7 @@ class BulkDeployRequest(ScheduleRequestMixin, BaseModel):
     ssh_key_secret_override: Optional[str] = Field(default=None, description="Optional Secrets Manager secret name to use for the SSH key instead of the configured default (must be JSON with a public_key)")
     # PRA/jumpoint overrides, mirroring DeployRequest. The bulk runner resolved these
     # from config only, so a batch quietly registered every VM against the configured
-    # jump group even when the form said otherwise. Optional, so a client posting the
+    # asset group even when the form said otherwise. Optional, so a client posting the
     # old shape still falls through to config exactly as before.
     # PRA opt-in. None = the default (on, while PRA is enabled); False = no jump,
     # added later from the VM's row if wanted (services/vm_pra_service).
@@ -209,7 +209,7 @@ class BulkDeployRequest(ScheduleRequestMixin, BaseModel):
     # True = do not queue the workstream's post-deploy runs for this deploy
     # (services/post_deploy_service).
     skip_post_deploy: bool = False
-    jump_group: Optional[str] = None             # PRA Jump Group name override (else bt_jump_group_name)
+    jump_group: Optional[str] = None             # PRA Asset Group name override (else bt_jump_group_name)
     jumpoint_name: Optional[str] = None          # PRA Jumpoint name override (else bt_jumpoint_name)
     pra_credential_ref: Optional[str] = None     # secret ref → bt_client_secret override for the shell jump
 

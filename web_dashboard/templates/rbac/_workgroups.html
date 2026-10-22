@@ -232,7 +232,7 @@
                  dialog never silently clears it. -->
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <label class="block text-xs font-medium text-gray-600 mb-1">PRA jump group</label>
+                <label class="block text-xs font-medium text-gray-600 mb-1">PRA asset group</label>
                 <select x-model="profile.jump_group"
                         class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
                   <option value="">Global default</option>
@@ -544,7 +544,7 @@ function workgroupsPage() {
       {key: 'register_in_passwordsafe', label: 'Onboard into Password Safe'},
       {key: 'enable_rdp', label: 'RDP jump for Windows'},
     ],
-    // PRA's jump groups and Gateways for the two dropdowns. `gateways` is filled from
+    // PRA's asset groups and Gateways for the two dropdowns. `gateways` is filled from
     // the payload's r.jumpoints on fetch, the way every picker state does it — see
     // tests/test_pra_picker_bindings.py for why the two spellings must not drift.
     wsPraOpts: {jump_groups: [], gateways: []},

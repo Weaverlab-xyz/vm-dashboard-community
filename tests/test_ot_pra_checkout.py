@@ -1,14 +1,14 @@
 """Unit tests for the OT cell's PRA-checkout Vault account HCL (terraform_pra_service).
 
 The OT cell's Password Safe onboarding gains a PRA-checkout pair: a standalone
-``sra_vault_username_password_account`` associated to the cell's Jump Group, mirrored
+``sra_vault_username_password_account`` associated to the cell's Asset Group, mirrored
 by a Password Safe managed account on the "PRA Vault Username Password" plugin and
 kept current via SyncedAccounts (services/ot_service._wire_ps_checkout). The HCL
 below is the one artifact with sharp edges worth pinning:
 
 - the password rides ``TF_VAR_vault_password`` (sensitive) and is NEVER in the HCL —
   it is a throwaway placeholder Password Safe overwrites on the first synced rotation;
-- the association is ``criteria.shared_jump_groups`` resolved from the Jump Group
+- the association is ``criteria.shared_jump_groups`` resolved from the Asset Group
   NAME via a data source — per-jump-item association is rejected by the PRA backend
   for tunnel jump types (the wall the DB and k8s vault accounts both hit), and every
   criteria array must be present (empty) or the API 4xxes.

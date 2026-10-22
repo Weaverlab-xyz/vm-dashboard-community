@@ -97,7 +97,7 @@ def test_every_required_metadata_key_is_persisted():
     Scope worth being explicit about: this covers `meta["k"]` only, and it would *not*
     have caught the PRA gap below. `run()` reads those three with `.get(...)` on
     purpose — job rows created before this change don't carry them, and a KeyError on
-    an old row is worse than a deploy without a jump group. Optionality is a
+    an old row is worse than a deploy without an asset group. Optionality is a
     deliberate compatibility choice, so the guarantee they need is the named test
     below, not this one."""
     missing = []

@@ -957,7 +957,7 @@ def _row_region(row) -> str:
 
 
 def _pra_configured() -> bool:
-    """True when a PRA/SRA appliance + Gateway + Jump Group are configured —
+    """True when a PRA/SRA appliance + Gateway + Asset Group are configured —
     the prerequisites for brokering a tunnel. When false, a DB is still
     provisioned/recorded; it just isn't reachable until PRA is set up."""
     return all(_cfg(k) for k in ("bt_api_host", "bt_jumpoint_name", "bt_jump_group_name"))

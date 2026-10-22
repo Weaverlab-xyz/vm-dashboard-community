@@ -789,7 +789,7 @@ async def _run_bulk_deploy(
 
     Thin on purpose. This was a 230-line near-copy of ``_run_deploy``, and the copy had
     already drifted: it dropped ``os_type`` (so every Linux VM in a batch booted with no
-    SSM agent), resolved the PRA jump group from config only, and wrapped the whole run
+    SSM agent), resolved the PRA asset group from config only, and wrapped the whole run
     in a handler that could mark completed instances failed. ``_run_deploy`` now owns
     set_running / set_completed / set_failed and cache invalidation per instance, so one
     failure fails that row alone and the batch carries on."""

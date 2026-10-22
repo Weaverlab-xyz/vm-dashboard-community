@@ -469,7 +469,7 @@
           and brokers a session with no public ingress. These per-cluster overrides fall back to the configured defaults.
         </p>
         <div>
-          <label class="block text-xs font-medium text-gray-600 mb-1">Jump group <span class="text-gray-400">(name override)</span></label>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Asset group <span class="text-gray-400">(name override)</span></label>
           <input type="text" x-model="brokerForm.jump_group" placeholder="(configured default)"
                  class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
         </div>
@@ -529,7 +529,7 @@
           PRA is not configured (bt_api_host / bt_client_id / bt_client_secret). Set it on Settings — the dropdowns stay empty and provisioning will fail until then.
         </p>
         <div>
-          <label class="block text-xs font-medium text-gray-600 mb-1">Jump group <span class="text-gray-400">(name override)</span></label>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Asset group <span class="text-gray-400">(name override)</span></label>
           <select x-model="tunnelForm.jump_group" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
             <option value="">(configured default)</option>
             <template x-for="g in tunnelOpts.jump_groups" :key="g.id">
@@ -611,7 +611,7 @@
           PRA is not configured (bt_api_host / bt_client_id / bt_client_secret). Set it on Settings — the dropdowns stay empty and provisioning will fail until then.
         </p>
         <div>
-          <label class="block text-xs font-medium text-gray-600 mb-1">Jump group <span class="text-gray-400">(name override)</span></label>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Asset group <span class="text-gray-400">(name override)</span></label>
           <select x-model="apiTunnelForm.jump_group" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
             <option value="">(configured default)</option>
             <template x-for="g in tunnelOpts.jump_groups" :key="g.id">

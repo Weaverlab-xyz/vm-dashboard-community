@@ -1,7 +1,7 @@
 """
 BeyondTrust Password Safe + ps-cli wrapper for the dashboard.
 
-The previous Jump Group / Shell Jump provisioning surface here has been
+The previous Asset Group / Shell Jump provisioning surface here has been
 replaced by the Terraform PRA provider (services/terraform_pra_service.py).
 This module now exposes only what the rest of the codebase still needs:
 
@@ -100,7 +100,7 @@ class BTAPIError(Exception):
     """Raised when a Password Safe / ps-cli operation fails."""
 
 
-# Shell Jump / Jump Group / Group Policy provisioning was previously handled
+# Shell Jump / Asset Group / Group Policy provisioning was previously handled
 # here via the legacy btapi binary. Community is now fully on the Terraform
 # PRA provider (services/terraform_pra_service.py); the btapi-based path is
 # gone. The remaining surface in this module is Password Safe secret +

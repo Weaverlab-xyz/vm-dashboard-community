@@ -39,7 +39,7 @@ def test_db_vault_associates_via_shared_jump_groups_not_jump_items_type():
     hcl = _hcl(vault_account_name="clouddb-abc123-admin", vault_username="dbadmin",
                vault_account_group_id=6)
     assert 'resource "sra_vault_username_password_account" "db_admin"' in hcl
-    # The fix: associate to the tunnel's Jump Group, jump_items empty.
+    # The fix: associate to the tunnel's Asset Group, jump_items empty.
     assert "shared_jump_groups = [tonumber(data.sra_jump_group_list.jg.items[0].id)]" in hcl
     assert "jump_items = []" in hcl
     assert 'output "vault_account_id"' in hcl
