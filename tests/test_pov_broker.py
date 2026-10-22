@@ -796,6 +796,42 @@ def test_a_successful_enrolment_clears_the_spent_payload():
     assert _reload(env_id)[3] == "", "a success must clear any previous broker error"
 
 
+def test_a_successful_enrolment_replaces_the_waiting_progress_line():
+    """The wait's last tick was the job's last progress line, and set_completed keeps it,
+    so a finished provision read "Waiting for … to enrol — 12 min left…" under a green
+    100% bar."""
+    from web_dashboard.services import job_service
+
+    _set_url()
+    original = _install(FakeAdapter())
+    env_id = _new_env()
+
+    db = d.SessionLocal()
+    env = pov_env_service.get(db, env_id)
+    job = job_service.create_job(db, job_type="pov_env_broker", created_by="tester",
+                                 metadata={})
+
+    async def sleeper(_seconds):
+        inner = d.SessionLocal()
+        row = inner.query(d.RemoteAgent).filter(
+            d.RemoteAgent.id == env.broker_agent_id).first()
+        row.public_key = "fake-public-key"
+        inner.commit()
+        inner.close()
+
+    try:
+        summary = asyncio.run(pov_broker.ensure_broker(db, env, job_id=job.id,
+                                                       sleep=sleeper))
+        db.refresh(job)
+        message = job.progress_message
+    finally:
+        db.close()
+        _restore(original)
+
+    assert "enrolled" in summary
+    assert message == summary, f"the progress line still reads {message!r}"
+
+
 def test_a_plaintext_agent_url_is_refused_before_anything_is_minted():
     """The agent refuses to sign over plaintext, so a broker installed against http://
     would never enrol — and the operator would debug the POV instead of the proxy."""

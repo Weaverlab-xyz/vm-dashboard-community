@@ -1411,15 +1411,21 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
     db.rollback()
     row = db.query(RemoteAgent).filter(RemoteAgent.id == agent.id).first()
     if row is not None and row.auth_mode == "spiffe":
-        return (f"Control node agent {agent.name} attested through SPIRE on {where}; its signing "
-                f"key is held in memory only.")
-    if spire:
+        summary = (f"Control node agent {agent.name} attested through SPIRE on {where}; its "
+                   f"signing key is held in memory only.")
+    elif spire:
         # Offered and not taken: the guest fell back on its own, which only it can explain.
-        return (f"Control node agent {agent.name} enrolled on {where} with an Ed25519 key. SPIRE "
-                f"was offered but the guest fell back: check that {where} reaches "
-                f"{spire['server_address']}:{spire['server_port']} with no TLS inspection "
-                f"in between. The guest's bootstrap output names what it saw.")
-    return f"Control node agent {agent.name} enrolled on {where}."
+        summary = (f"Control node agent {agent.name} enrolled on {where} with an Ed25519 key. "
+                   f"SPIRE was offered but the guest fell back: check that {where} reaches "
+                   f"{spire['server_address']}:{spire['server_port']} with no TLS inspection "
+                   f"in between. The guest's bootstrap output names what it saw.")
+    else:
+        summary = f"Control node agent {agent.name} enrolled on {where}."
+    # Replaces the last "Waiting for … to enrol — N min left…" tick. Nothing after this
+    # writes the progress line, and set_completed keeps it, so without this a finished
+    # job still reads as waiting under a green 100% bar.
+    _progress(95, summary)
+    return summary
 
 
 async def run_env_broker(job_id: str, meta: dict) -> None:
