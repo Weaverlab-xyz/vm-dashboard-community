@@ -161,7 +161,7 @@ a new one.
 - **The secret field starts blank, and blank keeps the stored secret.** The dashboard
   never sends a secret back to the browser. Type into the field only to replace it, for
   example after rotating the API client secret or the Entitle token.
-- **Only what you changed is saved.** Renaming a tenant or filling in a missing Jump Group
+- **Only what you changed is saved.** Renaming a tenant or filling in a missing option
   keeps its Verify result. A new secret, client id or URL clears that result, and for PRA
   and Password Safe **Verify runs again as part of the save**.
 - **POVs wired into the tenant keep pointing at it.** They reference the row, not its name
