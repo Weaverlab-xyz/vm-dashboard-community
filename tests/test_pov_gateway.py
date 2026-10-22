@@ -430,6 +430,7 @@ def test_describe_makes_no_network_call_and_never_leaks_the_key():
         _restore_gateways(original)
         db.close()
     assert got == {"gateway_name": "pov-gw", "gateway_has_key": True,
+                   "gateway_default_name": pov_gateway.default_gateway_name(env),
                    "gateway_created": False, "gateway_ready": True}
     assert "dk-123456" not in repr(got)
 
@@ -532,11 +533,42 @@ def test_provision_reads_the_key_back_when_the_create_response_omits_it():
     env, _a, _t = _unconfigured(db)
     pra = _FakePRA(key_on_create=False).install()
     try:
-        asyncio.run(pov_gateway.provision(db, env, name="custom-gw"))
+        asyncio.run(pov_gateway.provision(db, env, name="custom gw"))
     finally:
         pra.restore()
-    assert env.gateway_name == "custom-gw"
+    assert env.gateway_name == "custom gw"
     assert pov_gateway.has_deploy_key(env)
+    db.close()
+
+
+def test_safe_gateway_name_keeps_only_what_pra_accepts():
+    """PRA 422s a Gateway name with anything but letters, digits, space and "_"."""
+    assert pov_gateway.safe_gateway_name("POV_proofofvalue-1") == "POV_proofofvalue_1"
+    assert pov_gateway.safe_gateway_name("acme.corp--east#2") == "acme_corp_east_2"
+    assert pov_gateway.safe_gateway_name("  -lead-  ") == "lead"
+    assert pov_gateway.safe_gateway_name("Acme Eval 2") == "Acme Eval 2"
+    assert pov_gateway.safe_gateway_name("---") == ""
+    assert len(pov_gateway.safe_gateway_name("a" * 400)) == 255
+
+
+def test_a_hyphenated_pov_name_still_gets_a_valid_default():
+    """A POV cannot be renamed, so its default Gateway name has to work as it is."""
+    env = d.PovEnvironment(id="env-1", name="proofofvalue-1")
+    assert pov_gateway.default_gateway_name(env) == "POV_proofofvalue_1"
+    env.name = "---"
+    assert pov_gateway.default_gateway_name(env) == "POV_env_1"
+
+
+def test_provision_cleans_a_typed_name_and_stores_what_it_used():
+    db = d.SessionLocal()
+    env, _a, _t = _unconfigured(db)
+    pra = _FakePRA().install()
+    try:
+        got = asyncio.run(pov_gateway.provision(db, env, name="acme-gw.1"))
+    finally:
+        pra.restore()
+    assert pra.created == ["acme_gw_1"]
+    assert got["gateway_name"] == env.gateway_name == "acme_gw_1"
     db.close()
 
 

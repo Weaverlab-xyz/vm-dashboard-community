@@ -17,8 +17,10 @@ registered into the PRA tenant [this POV is wired into](standing-one-up.md#the-t
 (the client id and secret on the tenant) to create a clustered Linux Gateway, reads the
 Docker deploy key PRA returns for it, and installs it on the control node. The sequence is:
 
-1. On the POV, press **edit** in the Gateway column. The name defaults to `POV-<pov name>`;
-   change it if you want.
+1. On the POV, press **edit** in the Gateway column. The name defaults to `POV_<pov name>`;
+   change it if you want. PRA accepts only letters, digits, spaces and `_` in a Gateway
+   name, so any other character — the hyphen in `acme-1`, say — becomes `_`
+   (`POV_acme_1`). The POV page shows the name that was actually used.
 2. Press **Create & install**. The dashboard creates the Gateway in the customer's PRA,
    stores its deploy key, and queues the install. The control node's agent starts the container
    and the job reports what happened on the VM.
