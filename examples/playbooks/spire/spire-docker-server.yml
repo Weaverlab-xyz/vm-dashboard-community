@@ -46,7 +46,7 @@
 #   oidc_port: 8443
 #   ca_ttl: 168h
 #   jwt_issuer: ""                        # the OIDC provider's issuer URL; blank = no `iss`
-#   spire_version: 1.15.3                 # the image tag, for both containers
+#   spire_version: 1.15.5                 # the image tag, for both containers
 #   spire_server_image / spire_oidc_image # full image refs; override the digest table
 #   spire_allow_unpinned: false           # true = take a tag-only image
 #   spire_uid/spire_gid: 1000             # the image's default user
@@ -64,7 +64,7 @@
     default_x509_svid_ttl: "1h"
     default_jwt_svid_ttl: "5m"
     jwt_issuer: ""
-    spire_version: "1.15.3"
+    spire_version: "1.15.5"
     spire_root: /opt/spire
     spire_data: /opt/spire/data
     compose_file: /opt/spire/compose.yml
@@ -76,6 +76,9 @@
       "1.15.3":
         server: "sha256:4082f30d3e0ddc4000a171392c4ea174345ee44d161ee917c70b97b2ecfba141"
         oidc: "sha256:bb95f13c2b4e8392d6631ff1a45a03554ba050534cd3c1045505cc80d3fb77e2"
+      "1.15.5":
+        server: "sha256:584a9c5cc95b9457f5033e7e4488d603fffe5ec48a80c4dba14b05c5e1c2c384"
+        oidc: "sha256:8889641f0eaec84bb42ea1445dff71c0a6a2cfd2a3cfbbee63d17578aaaec7fc"
     spire_allow_unpinned: false
     spire_uid: 1000
     spire_gid: 1000

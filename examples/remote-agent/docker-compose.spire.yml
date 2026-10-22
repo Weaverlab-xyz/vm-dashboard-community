@@ -83,7 +83,7 @@ services:
     restart: "no"
 
   spire-agent:
-    image: ghcr.io/spiffe/spire-agent:1.15.3@sha256:41b0dcd8b258a69db9e2768292a060766fb76fd866e4bc925849981ea1b825ff
+    image: ghcr.io/spiffe/spire-agent:1.15.5@sha256:3652c732b0f0d36f4dd78394230a1b1cd0ddcc29548a46c67a996b1a78c14481
     container_name: dashboard-agent-spire
     restart: unless-stopped
     user: "1000:1000"
