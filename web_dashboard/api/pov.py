@@ -1172,7 +1172,8 @@ def gateway(env_id: str, payload: GatewayRequest,
 class GatewayCreateRequest(BaseModel):
     """Create this POV's Gateway in its PRA tenant, then (by default) install it.
 
-    ``name`` blank means the name already on the POV, else ``POV-<pov name>``. The tenant's
+    ``name`` blank means the name already on the POV, else ``POV_<pov name>``. Either way
+    it is folded to the characters PRA accepts (letters, digits, space, "_"). The tenant's
     API account does the creating and the deploy key it returns is stored as if pasted,
     so nothing about the install differs from the manual path.
     """

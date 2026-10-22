@@ -36,6 +36,7 @@ either way. What the status check asks is whether a node of it is *connected*.
 from __future__ import annotations
 
 import logging
+import re
 
 from sqlalchemy.orm import Session
 
@@ -207,9 +208,27 @@ def preflight(db: Session, env: PovEnvironment) -> tuple[RemoteAgent, object]:
 # PRA caps a Gateway name at 255 characters.
 _NAME_MAX = 255
 
+# PRA accepts only ASCII letters, digits, space and "_" in a Gateway name and answers
+# anything else with a 422. A POV cannot be renamed after creation, so a hyphen in its
+# name would otherwise make Create & install impossible for its whole life.
+_NAME_DISALLOWED = re.compile(r"[^A-Za-z0-9 _]+")
+
+
+def safe_gateway_name(name: str) -> str:
+    """``name`` with every run of characters PRA refuses folded into one ``_``.
+
+    Folded rather than dropped, so ``proofofvalue-1`` stays readable as
+    ``proofofvalue_1`` instead of becoming ``proofofvalue1``.
+    """
+    cleaned = _NAME_DISALLOWED.sub("_", (name or "").strip())
+    return re.sub(r"_{2,}", "_", cleaned).strip(" _")[:_NAME_MAX]
+
 
 def default_gateway_name(env: PovEnvironment) -> str:
-    return f"POV-{env.name}"[:_NAME_MAX]
+    # Falls back to the id for a name with nothing PRA-safe in it, so two such POVs on
+    # one tenant still get different Gateways rather than colliding on a bare "POV".
+    stem = safe_gateway_name(env.name or "") or safe_gateway_name(str(env.id or ""))
+    return safe_gateway_name(f"POV_{stem}")
 
 
 async def provision(db: Session, env: PovEnvironment, *, name: str = "") -> dict:
@@ -230,8 +249,11 @@ async def provision(db: Session, env: PovEnvironment, *, name: str = "") -> dict
     appliance, and recording its id is what lets teardown — or the next attempt — find it.
     """
     tenant = pra_tenant(db, env)
-    wanted = ((name or "").strip() or (env.gateway_name or "").strip()
-              or default_gateway_name(env))[:_NAME_MAX]
+    # A typed name is cleaned the same way as the default: the SE asked for a Gateway,
+    # not for a lesson in PRA's character set. What was actually used is returned and
+    # stored, so the POV page shows the real name.
+    wanted = (safe_gateway_name(name) or safe_gateway_name(env.gateway_name or "")
+              or default_gateway_name(env))
 
     try:
         if env.pra_gateway_id:
@@ -451,6 +473,8 @@ def describe(db: Session, env: PovEnvironment) -> dict:
     """
     return {
         "gateway_name": env.gateway_name or "",
+        # What Create & install uses when no name is typed, already PRA-safe.
+        "gateway_default_name": default_gateway_name(env),
         "gateway_has_key": has_deploy_key(env),
         # True when the dashboard created this Gateway in PRA, so destroying the POV
         # deletes it there too. Lets the UI say so instead of leaving an SE to guess.

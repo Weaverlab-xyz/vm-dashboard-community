@@ -526,7 +526,7 @@
                 </div>
                 <div x-show="editingGateway === e.id" class="space-y-1">
                   <input type="text" x-model="gatewayEdit.name"
-                         :placeholder="'POV-' + e.name"
+                         :placeholder="e.gateway_default_name"
                          class="w-full border border-gray-300 rounded px-1 py-0.5 text-xs font-mono">
                   <!-- The default path: the tenant's API account creates the Gateway in PRA
                        and the deploy key it returns is stored as if pasted. -->
