@@ -121,55 +121,97 @@
     <p class="text-sm text-blue-800" x-text="notice"></p>
   </div>
 
-  {# ── Build from a blueprint, in one press ──────────────────────────────────────
-     A blueprint already carries every field the form below asks except the name, and the
-     PROVISION ENDPOINT already applies it: `POST /api/pov/managed {blueprint_id, name}`
-     resolves the recipe, fills the template, project, broker VM, idle timer and all three
-     tenants, and prefills the Gateway and Resource Broker panels. So this needs no new
-     endpoint -- it is the same call the form makes, with the fields left out.
+  {# ── Build from a blueprint ────────────────────────────────────────────────────
+     A blueprint carries every field the form below asks except the name and the tenants,
+     and the PROVISION ENDPOINT already applies it: `POST /api/pov/managed {blueprint_id,
+     name, <kind>_tenant_id...}` resolves the recipe, fills the template, project, broker VM
+     and idle timer, and prefills the Gateway and Resource Broker panels. So this needs no
+     new endpoint -- it is the same call the form makes, with the recipe's fields left out.
 
-     Deliberately NOT routed through applyBlueprint(): that fills the form client-side so
-     an SE can SEE what a recipe chose before sending it, which is the right behaviour for
-     the form and pointless here. The server applies the same defaults either way, which is
-     what stops the two from drifting. #}
-  <div x-show="canProvision && !notConfigured && blueprints.length" class="space-y-3">
-    <div class="flex flex-wrap items-end gap-3">
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Build a POV</label>
-        <input type="text" x-model="quickName" placeholder="poc-014"
-               @keydown.enter="buildFromBlueprint(quickBlueprint())"
-               class="border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
-        {# The same warning the by-hand field carries, and it has to be here too: a form
-           whose only input is a name is exactly where a customer name gets typed, and this
-           database holds none by decision. #}
-        <p class="text-xs text-gray-400 mt-1">
-          Lowercase letters, digits and hyphens. Use a reference, not a customer name.
-        </p>
-      </div>
+     The tenants are asked HERE, not stored on the blueprint: a recipe that pinned them was
+     one customer's recipe, and a presenter could not build until somebody saved one for
+     theirs. The server refuses a blueprint build that leaves a product it tests without a
+     tenant (bt_tenant_service.missing_for_build), and Build is disabled by the same rule
+     so that refusal is never the first an SE hears of it.
+
+     Only the toggled platform's blueprints show: an AWS recipe offered on the Skytap
+     toggle would build on AWS, which is not what the toggle said. #}
+  <div x-show="canProvision && !notConfigured && platformBlueprints.length" class="space-y-3">
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">Build a POV</label>
+      <input type="text" x-model="quickName" placeholder="poc-014"
+             @keydown.enter="quickBuild()"
+             class="border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+      {# The same warning the by-hand field carries, and it has to be here too: a form
+         whose only input is a name is exactly where a customer name gets typed, and this
+         database holds none by decision. #}
+      <p class="text-xs text-gray-400 mt-1">
+        Lowercase letters, digits and hyphens. Use a reference, not a customer name.
+      </p>
     </div>
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-      <template x-for="b in blueprints" :key="'quick-' + b.id">
-        <div class="border border-gray-200 rounded-lg p-3 bg-white flex flex-col gap-1">
-          <p class="text-sm font-medium text-gray-900" x-text="b.name"></p>
-          <p x-show="b.description" class="text-xs text-gray-500" x-text="b.description"></p>
-          <p class="text-xs text-gray-400">
+      <template x-for="b in platformBlueprints" :key="'quick-' + b.id">
+        <button type="button" @click="pickQuickBlueprint(b)"
+                :class="quick.blueprint_id === b.id
+                        ? 'border-blue-600 ring-2 ring-blue-200'
+                        : 'border-gray-200 hover:border-gray-400'"
+                class="text-left border rounded-lg p-3 bg-white flex flex-col gap-1">
+          <span class="text-sm font-medium text-gray-900" x-text="b.name"></span>
+          <span x-show="b.description" class="text-xs text-gray-500" x-text="b.description"></span>
+          <span class="text-xs text-gray-400">
             <span x-text="b.template_name || b.template_id"></span>
             <span x-text="' · ' + blueprintProducts(b)"></span>
-          </p>
-          <div class="mt-1">
-            <button @click="buildFromBlueprint(b)"
-                    :disabled="!quickName || creating"
-                    class="w-full px-3 py-1.5 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                    x-text="creating ? 'Building…' : 'Build'"></button>
-          </div>
-        </div>
+          </span>
+        </button>
       </template>
     </div>
+    <p x-show="!quickBlueprintRow" class="text-xs text-gray-500">
+      Pick a blueprint, then choose the tenants this POV wires into.
+    </p>
+    <div x-show="quickBlueprintRow" class="border border-gray-200 rounded-lg p-3 bg-gray-50 space-y-3">
+      <div class="flex flex-wrap items-center gap-4 text-sm text-gray-700">
+        <span class="text-xs text-gray-500">Tests:</span>
+        <template x-for="k in tenantKinds" :key="'quick-scope-' + k.kind">
+          <label class="inline-flex items-center gap-1.5">
+            <input type="checkbox" :checked="quick.products.includes(k.kind)"
+                   @change="toggleQuickProduct(k.kind)">
+            <span x-text="k.label"></span>
+          </label>
+        </template>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <template x-for="k in quickKinds" :key="'quick-pick-' + k.kind">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1" x-text="k.label + ' tenant'"></label>
+            {# No "choose later" here: a blueprint build names its tenants. A product with
+               no tenant registered at all has nothing to pick, and the build then uses the
+               single set in Settings -- said, rather than shown as an empty picker. #}
+            <select x-show="tenantsOfKind(k.kind).length" x-model="quick[k.kind + '_field']"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="">Choose a tenant…</option>
+              <template x-for="t in tenantsOfKind(k.kind)" :key="t.id">
+                <option :value="t.id" x-text="t.name + (t.is_default ? ' (default)' : '')"></option>
+              </template>
+            </select>
+            <p x-show="!tenantsOfKind(k.kind).length" class="text-xs text-gray-500 py-2">
+              None registered — uses the tenant set in Settings.
+            </p>
+          </div>
+        </template>
+      </div>
+      <div class="flex flex-wrap items-center gap-3">
+        <button @click="quickBuild()" :disabled="!quickReady || creating"
+                class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                x-text="creating ? 'Building…' : 'Build'"></button>
+        <p x-show="quickHint" class="text-xs text-gray-500" x-text="quickHint"></p>
+      </div>
+    </div>
   </div>
-  <p x-show="canProvision && !notConfigured && !blueprints.length && !loading"
+  <p x-show="canProvision && !notConfigured && !platformBlueprints.length && !loading"
      class="text-sm text-gray-500">
-    Save a recipe on <a href="/pov/templates" class="underline">POV Templates</a> to build a
-    POV in one press, or use <span class="font-medium">Build by hand</span>.
+    No <span x-text="current.label || platform"></span> blueprint is saved yet. Save a recipe on
+    <a href="/pov/templates" class="underline">POV Templates</a> to build a POV in one press,
+    or use <span class="font-medium">Build by hand</span>.
   </p>
 
   <!-- Create -->
@@ -182,12 +224,12 @@
          SE can see what the recipe chose instead of discovering it on the row afterwards.
          The server applies the same defaults again for anything still blank, which is what
          keeps the API usable without this page. -->
-    <div x-show="blueprints.length">
+    <div x-show="platformBlueprints.length">
       <label class="block text-sm font-medium text-gray-700 mb-1">Blueprint</label>
       <select x-model="selectedBlueprint" @change="applyBlueprint()"
               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
         <option value="">None — fill the form by hand</option>
-        <template x-for="b in blueprints" :key="b.id">
+        <template x-for="b in platformBlueprints" :key="b.id">
           <option :value="b.id"
                   x-text="b.name + (b.description ? ' — ' + b.description : '')"></option>
         </template>
@@ -297,8 +339,10 @@
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             <!-- Blank is a real choice, not a placeholder: a POV is stood up before its
                  wire-up runs, and requiring all three here would gate a step that does
-                 not need them yet. -->
-            <option value="">Choose later</option>
+                 not need them yet. Except from a blueprint: the server refuses a
+                 blueprint build with a product left unpicked, so the option is not
+                 offered then and Create waits for the choice. -->
+            <option value="" x-text="selectedBlueprint ? 'Choose a tenant…' : 'Choose later'"></option>
             <template x-for="t in tenantsOfKind(k.kind)" :key="t.id">
               <option :value="t.id" x-text="t.name + (t.is_default ? ' (default)' : '')"></option>
             </template>
@@ -321,7 +365,7 @@
       </div>
     </div>
     <div class="flex items-center gap-2">
-      <button @click="create()" :disabled="!form.template_id || !form.name || creating"
+      <button @click="create()" :disabled="!form.template_id || !form.name || creating || formMissingTenants.length"
               class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
         <span x-text="creating ? 'Creating…' : 'Create'"></span>
       </button>
@@ -1193,8 +1237,12 @@ function povPage(tabSlugs) {
     loading: true,
     creating: false,
     showCreate: false,
-    // The one-click strip's only input.
+    // The blueprint strip: the name, the chosen card, and the tenants it builds with.
+    // `<kind>_field` keys for the same reason as `form`'s. Its own object so picking a
+    // card never touches the by-hand form, and the reverse.
     quickName: '',
+    quick: { blueprint_id: '', products: [], pra_field: '', password_safe_field: '',
+             entitle_field: '' },
     savingBlueprint: false,
     error: '',
     notice: '',
@@ -1351,12 +1399,7 @@ function povPage(tabSlugs) {
       if (b.suspend_on_idle_seconds) {
         this.form.suspend_on_idle_seconds = b.suspend_on_idle_seconds;
       }
-      // The tenant pickers are keyed `<kind>_field`, not by the API column, so the mapping
-      // has to be crossed here -- see the note on `form` above.
-      for (const kind of this.tenantKinds) {
-        const key = kind.kind + '_field';
-        if (!this.form[key]) this.form[key] = b[this.tenantField(kind.kind)] || '';
-      }
+      // No tenants: a blueprint holds none, they are this build's choice.
       const scope = b.use_case_scope || {};
       if (!this.form.use_case_products.length && scope.products) {
         this.form.use_case_products = [...scope.products];
@@ -1711,29 +1754,84 @@ function povPage(tabSlugs) {
       }
     },
 
-    // Which recipe an Enter in the name field means. Only unambiguous with exactly one
-    // saved, because guessing between two recipes is guessing which POV to build.
-    quickBlueprint() {
-      return this.blueprints.length === 1 ? this.blueprints[0] : null;
+    // The blueprints for the toggled platform. A row predating the platform column was a
+    // Skytap one -- nothing else had blueprints then.
+    get platformBlueprints() {
+      return this.blueprints.filter(b => (b.platform || 'skytap') === this.platform);
     },
 
-    // Which BeyondTrust products a recipe wires into, for the card. Named from the tenant
-    // references it carries rather than from anything it installs -- a recipe holds no
-    // secret and installs nothing (see pov_blueprint_service).
+    get quickBlueprintRow() {
+      return this.platformBlueprints.find(b => b.id === this.quick.blueprint_id) || null;
+    },
+
+    // Picking a card seeds what the POV tests from the recipe, and keeps the tenants
+    // already picked: an SE comparing two cards should not have to choose them twice.
+    pickQuickBlueprint(b) {
+      this.quick.blueprint_id = b.id;
+      const scope = b.use_case_scope || {};
+      this.quick.products = scope.products ? [...scope.products] : [];
+    },
+
+    toggleQuickProduct(kind) {
+      const chosen = this.quick.products;
+      this.quick.products = chosen.includes(kind)
+          ? chosen.filter(x => x !== kind)
+          : this.tenantKinds.map(k => k.kind).filter(x => x === kind || chosen.includes(x));
+    },
+
+    // The kinds a picker shows for. Nothing ticked means every product's use cases show,
+    // so every product needs its tenant -- the same reading the server gives it.
+    get quickKinds() {
+      const chosen = this.quick.products;
+      return this.tenantKinds.filter(k => !chosen.length || chosen.includes(k.kind));
+    },
+
+    // Labels of the products still without a tenant. Mirrors
+    // bt_tenant_service.missing_for_build: a kind with nothing registered is never
+    // missing, because the build then uses the Settings set.
+    missingTenants(kinds, fields) {
+      return kinds
+        .filter(k => !fields[k.kind + '_field'] && this.tenantsOfKind(k.kind).length)
+        .map(k => k.label);
+    },
+
+    get quickMissingTenants() {
+      return this.missingTenants(this.quickKinds, this.quick);
+    },
+
+    // The by-hand form only has to pick tenants when it builds from a blueprint.
+    get formMissingTenants() {
+      if (!this.selectedBlueprint) return [];
+      return this.missingTenants(
+        this.tenantKinds.filter(k => this.useCaseProductChosen(k.kind)), this.form);
+    },
+
+    get quickReady() {
+      return !!(this.quickBlueprintRow && this.quickName && !this.quickMissingTenants.length);
+    },
+
+    get quickHint() {
+      if (!this.quickName) return 'Name the POV first.';
+      if (this.quickMissingTenants.length) {
+        return 'Choose a tenant for ' + this.quickMissingTenants.join(', ') + '.';
+      }
+      return '';
+    },
+
+    // What a recipe tests, for the card. Never a tenant: it holds none.
     blueprintProducts(b) {
       if (b.use_case_scope && b.use_case_scope.label) return b.use_case_scope.label;
-      const names = [];
-      if (b.pra_tenant_id) names.push('PRA');
-      if (b.ps_tenant_id) names.push('Password Safe');
-      if (b.entitle_tenant_id) names.push('Entitle');
-      return names.length ? names.join(' + ') : 'no tenants chosen';
+      return 'products chosen at build';
     },
 
-    // The one press. Identical call to create()'s, with everything except the name left
+    // The blueprint build. The same call create() makes, with the recipe's fields left
     // out for the server's own blueprint defaults to fill -- so there is still exactly one
-    // provision path and one set of refusals.
-    async buildFromBlueprint(b) {
-      if (!b || !this.quickName) return;
+    // provision path and one set of refusals. Only the shown products' tenants are sent.
+    async quickBuild() {
+      const b = this.quickBlueprintRow;
+      if (!b || !this.quickReady || this.creating) return;
+      const kinds = this.quickKinds.map(k => k.kind);
+      const pick = kind => kinds.includes(kind) ? this.quick[kind + '_field'] : '';
       this.creating = true;
       this.error = ''; this.notice = '';
       try {
@@ -1741,6 +1839,10 @@ function povPage(tabSlugs) {
           platform: b.platform || this.platform,
           blueprint_id: b.id,
           name: this.quickName,
+          pra_tenant_id: pick('pra'),
+          ps_tenant_id: pick('password_safe'),
+          entitle_tenant_id: pick('entitle'),
+          use_case_products: this.quick.products.length ? this.quick.products : null,
         });
         this.notice = `Building ${this.quickName} from ${b.name}. `
                     + 'Its setup ladder below says what comes next.';
@@ -1775,9 +1877,6 @@ function povPage(tabSlugs) {
           project_id: env.project_id,
           broker_vm_name: env.broker_vm_name,
           suspend_on_idle_seconds: env.suspend_on_idle_seconds || 0,
-          pra_tenant_id: env.pra_tenant_id,
-          ps_tenant_id: env.ps_tenant_id,
-          entitle_tenant_id: env.entitle_tenant_id,
           gateway_name: env.gateway_name,
           rb_windows_vm_name: env.rb_vm_name_stored || '',
           rb_zone: env.rb_zone,
@@ -1841,6 +1940,16 @@ function povPage(tabSlugs) {
         if (!res.ok) { this.blueprints = []; return; }
         this.blueprints = (await res.json()).blueprints || [];
       } catch (e) { this.blueprints = []; }
+      // load() runs on a platform switch too, and a choice of the other platform's
+      // blueprint must not survive it: it is no longer on screen, and building it would
+      // build on the platform the toggle just left.
+      const shown = this.platformBlueprints;
+      if (!shown.some(b => b.id === this.selectedBlueprint)) this.selectedBlueprint = '';
+      if (!shown.some(b => b.id === this.quick.blueprint_id)) {
+        this.quick.blueprint_id = '';
+        // One recipe is not a choice, so it is picked for the SE.
+        if (shown.length === 1) this.pickQuickBlueprint(shown[0]);
+      }
     },
 
     async loadTenants() {

@@ -754,6 +754,35 @@ def record_result(db: Session, tenant_id: str, *, error: str = "") -> dict:
 
 # ── validation for the POV provision path ─────────────────────────────────────
 
+# Which ProvisionRequest / PovEnvironment column holds each kind's tenant id.
+TENANT_COLUMNS = {"pra": "pra_tenant_id", "password_safe": "ps_tenant_id",
+                  "entitle": "entitle_tenant_id"}
+
+
+def missing_for_build(db: Session, products, chosen: dict) -> list[str]:
+    """The products a blueprint build still has to pick a tenant for, as labels.
+
+    ``products`` is the build's resolved use-case products; ``None`` means "not chosen",
+    which shows every product's use cases, so every kind is asked for. ``chosen`` maps a
+    column from ``TENANT_COLUMNS`` to the id the request sent.
+
+    A kind with **no active row at all** is never missing: there is nothing to pick, and
+    ``resolve`` answers a blank with the single set in Settings in exactly that case —
+    refusing it would make a demo instance, which never registers a tenant, unable to
+    build from a blueprint.
+    """
+    missing = []
+    for kind in (products if products is not None else VALID_KINDS):
+        if (chosen.get(TENANT_COLUMNS[kind]) or "").strip():
+            continue
+        registered = db.query(BeyondTrustTenant.id).filter(
+            BeyondTrustTenant.kind == kind,
+            BeyondTrustTenant.is_active.is_(True)).first()
+        if registered is not None:
+            missing.append(LABELS[kind])
+    return missing
+
+
 def validate_selection(db: Session, *, pra_tenant_id: str = "", ps_tenant_id: str = "",
                        entitle_tenant_id: str = "") -> dict:
     """Check the three ids a POV was created with, and hand back what to store.

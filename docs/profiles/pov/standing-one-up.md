@@ -74,20 +74,21 @@ catalogue nobody could author from here, and because the parts of the
 image — the metadata runner and a container runtime — had no automation at all.
 
 **A blueprint** is a saved POV recipe: the fields the create form asks, under one name. Pick
-one on the POV page and it fills the form; you still type the POV's own name. On
-the **Blueprints** tab of **POV → Templates**, the blueprint form's **Template** picker lists the selected cloud's
-templates alongside the lab platform's, and a blueprint saved from a cloud template builds
-on that cloud. For a given
+one on the POV page, type the POV's own name and choose its tenants, and press **Build**. On
+the **Blueprints** tab of **POV → Templates**, the blueprint form's **Template** picker lists
+the toggled platform's templates, and a blueprint belongs to that platform: toggle to the
+cloud to save one from a cloud template. For a given
 *kind* of POV — a Password Safe evaluation, a PRA-only demo — every field except the name
-has the same right answer every time, and two SEs building "the same" POV should build the
-same POV.
+and the tenants has the same right answer every time, and two SEs building "the same" POV
+should build the same POV.
 
 | A blueprint carries | It does not carry |
 |---|---|
 | The template, project and control node VM name | The POV's **name** — that is per-POV by definition |
 | … and a blank control node VM name stays blank, which means auto-detect | |
 | The idle timeout and an expiry override | The **workstream**, which decides RBAC and the expiry exempt list. Not something a saved recipe should set silently |
-| The three tenant references | Any **secret** — see below |
+| | The **tenants** — chosen at each build, see below |
+| | Any **secret** — see below |
 | The POV type — which [use cases](design/use-cases.md#choosing-the-povs-use-cases) it tests | |
 | The Gateway name, and the Resource Broker's VM, zone and installer asset | |
 
@@ -102,9 +103,13 @@ auto-detect ([which VM runs the agent](skytap.md#the-control-node-vm)). A recipe
 wrote `broker` into that field would switch auto-detection off for every POV made from
 it.
 
-The tenant ids on a blueprint are validated **when you save it**, against the same check the
-create form uses. A stored selection that only failed at provision time would move a form
-error into a job, against an environment that already exists.
+**A blueprint names no tenant.** Which BeyondTrust tenants a POV wires into is chosen when
+it is built: on the POV page, picking a blueprint shows a tenant picker for each product it
+tests, and **Build** stays disabled until each has one. The server refuses a blueprint build
+that leaves one out, too. A product with no tenant registered at all has nothing to pick,
+and the POV uses the single set in Settings. Only the toggled platform's blueprints are
+offered, on the POV page and on POV Templates alike. Building by hand without a blueprint
+still lets you choose the tenants later.
 
 ### Nothing on a blueprint auto-runs, and nothing on it is a secret
 

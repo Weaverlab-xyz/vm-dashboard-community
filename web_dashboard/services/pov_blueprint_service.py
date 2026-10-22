@@ -2,8 +2,15 @@
 
 The POV create form asks for a template, a name, a workgroup, a project, a broker VM name,
 an idle timeout and three tenant references. For a given *kind* of POV — a Password Safe
-evaluation, a PRA-only demo — every one of those except the name has the same right answer
-every time. A blueprint records one correct set under a name.
+evaluation, a PRA-only demo — every one of those except the name and the tenants has the
+same right answer every time. A blueprint records one correct set under a name.
+
+**A blueprint holds no tenant.** Which BeyondTrust tenants a POV wires into is a per-build
+choice — a recipe that pinned them was a recipe for one customer, and the presenters who
+build from recipes could not build at all until somebody saved one for theirs. So the
+build asks for them (``api/pov`` refuses a blueprint build that leaves a product it tests
+without one), and the three tenant columns on the table are legacy: never written, never
+applied.
 
 Two rules keep this from becoming a second way to provision a POV:
 
@@ -34,7 +41,7 @@ import re
 from sqlalchemy.orm import Session
 
 from ..database import PovBlueprint
-from . import bt_tenant_service, lab_platforms, pov_use_case_scope
+from . import lab_platforms, pov_use_case_scope
 
 logger = logging.getLogger(__name__)
 
@@ -66,15 +73,8 @@ def list_all(db: Session) -> list[PovBlueprint]:
 
 
 def _validate(db: Session, *, platform: str, template_id: str, name: str,
-              pra_tenant_id: str, ps_tenant_id: str, entitle_tenant_id: str,
-              exclude_id: str = "") -> tuple[str, str, dict]:
-    """Everything that can be refused before a row is written.
-
-    Tenant ids go through ``bt_tenant_service.validate_selection`` — the same function the
-    POV create endpoint uses — so a blueprint cannot store a selection the provision would
-    later reject. Storing one that fails only at provision time would move a form error into
-    a job, which is the exact thing ``validate_selection`` exists to prevent.
-    """
+              exclude_id: str = "") -> tuple[str, str]:
+    """Everything that can be refused before a row is written."""
     platform = lab_platforms.normalize(platform)
     slug = normalize_name(name)
     if not (template_id or "").strip():
@@ -85,14 +85,7 @@ def _validate(db: Session, *, platform: str, template_id: str, name: str,
         clash = clash.filter(PovBlueprint.id != exclude_id)
     if clash.first():
         raise BlueprintError(f"a blueprint named {slug!r} already exists")
-
-    try:
-        tenants = bt_tenant_service.validate_selection(
-            db, pra_tenant_id=pra_tenant_id, ps_tenant_id=ps_tenant_id,
-            entitle_tenant_id=entitle_tenant_id)
-    except bt_tenant_service.BTTenantError as exc:
-        raise BlueprintError(str(exc)) from exc
-    return platform, slug, tenants
+    return platform, slug
 
 
 
@@ -100,7 +93,7 @@ def _validate(db: Session, *, platform: str, template_id: str, name: str,
 def _spend_cap(value) -> float | None:
     """The blueprint's spend cap, validated.
 
-    Validated at SAVE, like the schedule and the tenant ids beside it: a stored cap that
+    Validated at SAVE, like the schedule beside it: a stored cap that
     only failed when a POV was provisioned from it would move a form error into somebody
     else's provision job, weeks later.
     """
@@ -114,7 +107,7 @@ def _spend_cap(value) -> float | None:
 def _schedule_fields(suspend_at: str, resume_at: str, tz_name: str, days: str) -> dict:
     """The four schedule columns, validated.
 
-    Validated at SAVE, like the tenant ids above and for the same reason: a stored
+    Validated at SAVE, like the spend cap above and for the same reason: a stored
     schedule that only fails when the sweep reads it would move a form error into a
     background job, three weeks later, against a POV that is already running.
     """
@@ -129,7 +122,6 @@ def _schedule_fields(suspend_at: str, resume_at: str, tz_name: str, days: str) -
 def create(db: Session, *, platform: str, name: str, template_id: str,
            template_name: str = "", description: str = "", project_id: str = "",
            broker_vm_name: str = "", suspend_on_idle_seconds: int | None = None,
-           pra_tenant_id: str = "", ps_tenant_id: str = "", entitle_tenant_id: str = "",
            gateway_name: str = "", rb_windows_vm_name: str = "", rb_zone: str = "",
            rb_asset: str = "", expiry_hours: int | None = None,
            workgroup: str = "", created_by: str = "",
@@ -140,10 +132,7 @@ def create(db: Session, *, platform: str, name: str, template_id: str,
            use_case_products: list | None = None,
            use_case_excluded: list | None = None) -> PovBlueprint:
     scope = _scope(use_case_products, use_case_excluded)
-    platform, slug, tenants = _validate(
-        db, platform=platform, template_id=template_id, name=name,
-        pra_tenant_id=pra_tenant_id, ps_tenant_id=ps_tenant_id,
-        entitle_tenant_id=entitle_tenant_id)
+    platform, slug = _validate(db, platform=platform, template_id=template_id, name=name)
 
     row = PovBlueprint(
         platform=platform, name=slug, description=description or None,
@@ -162,7 +151,6 @@ def create(db: Session, *, platform: str, name: str, template_id: str,
                            schedule_days),
         workgroup=(workgroup or "").strip() or None,
         created_by=created_by or None,
-        **tenants,
     )
     pov_use_case_scope.write(row, *scope)
     db.add(row)
@@ -217,14 +205,11 @@ def update(db: Session, row: PovBlueprint, payload: dict) -> PovBlueprint:
                         list(current_products) if current_products is not None else None),
             payload.get("use_case_excluded", list(current_excluded)))
     name = payload.get("name")
-    platform, slug, tenants = _validate(
+    platform, slug = _validate(
         db,
         platform=payload.get("platform") or row.platform,
         template_id=payload.get("template_id") or row.template_id,
         name=name if name is not None else row.name,
-        pra_tenant_id=payload.get("pra_tenant_id", row.pra_tenant_id) or "",
-        ps_tenant_id=payload.get("ps_tenant_id", row.ps_tenant_id) or "",
-        entitle_tenant_id=payload.get("entitle_tenant_id", row.entitle_tenant_id) or "",
         exclude_id=row.id)
 
     row.platform = platform
@@ -240,8 +225,6 @@ def update(db: Session, row: PovBlueprint, payload: dict) -> PovBlueprint:
             setattr(row, field, (str(value or "").strip() or None))
         else:
             setattr(row, field, value)
-    for column, value in tenants.items():
-        setattr(row, column, value or None)
     if scope is not None:
         pov_use_case_scope.write(row, *scope)
     db.commit()
@@ -286,9 +269,8 @@ def apply_to(row: PovBlueprint, payload) -> dict:
     _fill("project_id", row.project_id)
     _fill("broker_vm_name", row.broker_vm_name)
     _fill("suspend_on_idle_seconds", row.suspend_on_idle_seconds)
-    _fill("pra_tenant_id", row.pra_tenant_id)
-    _fill("ps_tenant_id", row.ps_tenant_id)
-    _fill("entitle_tenant_id", row.entitle_tenant_id)
+    # No tenants: they are chosen per build (see the module docstring). A row saved before
+    # that still has its three tenant columns, and they are deliberately never read here.
     # The use cases travel as a pair: a request that chose its own products also chose
     # which of their cards to untick, and mixing its products with the blueprint's
     # unticked list would hide cards nobody unticked.
@@ -371,9 +353,6 @@ def serialize(row: PovBlueprint) -> dict:
         "source_build_id": row.source_build_id or "",
         "broker_vm_name": row.broker_vm_name or "",
         "suspend_on_idle_seconds": row.suspend_on_idle_seconds or 0,
-        "pra_tenant_id": row.pra_tenant_id or "",
-        "ps_tenant_id": row.ps_tenant_id or "",
-        "entitle_tenant_id": row.entitle_tenant_id or "",
         "gateway_name": row.gateway_name or "",
         "rb_windows_vm_name": row.rb_windows_vm_name or "",
         "rb_zone": row.rb_zone or "",
