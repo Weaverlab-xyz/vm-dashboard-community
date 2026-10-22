@@ -38,6 +38,12 @@ FROM willhallonline/ansible:latest@sha256:969f0990b1ce6669cb6c6096e45047011c99e0
 # config-management runs. Hardening the runtime user is a separate, testable change.
 USER root
 
+# Fixes published after the pinned digest was cut. The nightly Images scan failed on them
+# (2026-10-22: expat CVE-2026-77214, sudo CVE-2026-96512, certifi GHSA-6q48-6c7w-9gw2)
+# with nothing changed in this repo. The floors make the build fail loudly rather than
+# silently install an older copy; drop a line once the base digest carries that version.
+RUN apk add --no-cache --upgrade "libexpat>=2.9.0-r0" "sudo>=1.9.17_p2-r2"
+
 # Upstream installs ansible itself with pip into the system Python, and the libraries its
 # modules import (pywinrm, paramiko, the BeyondTrust library) have to live in that same
 # interpreter; a virtualenv would be invisible to ansible. Newer Alpine py3-pip marks the
@@ -52,6 +58,7 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1
 RUN pip install --no-cache-dir \
         "pywinrm>=0.4.3" \
         "requests-ntlm>=1.2.0" \
+        "certifi>=2026.10.19" \
  && python -c "import winrm, requests_ntlm; print('pywinrm', winrm.__version__, 'OK')"
 
 # paramiko is the SSH backend ansible.netcommon.network_cli needs for network devices --
