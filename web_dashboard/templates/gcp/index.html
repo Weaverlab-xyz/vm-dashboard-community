@@ -568,7 +568,7 @@
         </div>
 
         {% if pra_enabled %}
-        {{ pra_opt_in("deployForm", credential=False) }}
+        {{ pra_opt_in("deployForm") }}
         {% endif %}
         {{ post_deploy_runs("deployForm") }}
         <details>
@@ -1918,6 +1918,7 @@ function gcpDashboard() {
       workgroup:          '',
       dockerKeyBackend:   '',
       docker_deploy_key_ref: '',
+      praCredBackend: '', pra_credential_ref: '',
       register_in_entitle: false,
       register_in_passwordsafe: false,
       ad_directory_id: '', ad_ou: '', entra_join_mode: '{{ 'arc' if windows_arc_entra_default else '' }}', enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
@@ -2499,6 +2500,7 @@ function gcpDashboard() {
         // The Gateway deploy key secret_picker binds to both; without them the
         // wholesale reset drops the keys and the picker starts on undefined.
         dockerKeyBackend: '', docker_deploy_key_ref: '',
+        praCredBackend: '', pra_credential_ref: '',
         register_in_entitle: false,
         register_in_passwordsafe: false,
         ad_directory_id: '', ad_ou: '', entra_join_mode: '{{ 'arc' if windows_arc_entra_default else '' }}', enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
@@ -2665,6 +2667,7 @@ function gcpDashboard() {
           skip_post_deploy:   !!this.deployForm.skip_post_deploy,
           jump_group:         this.deployForm.jump_group || null,
           jumpoint_name:      this.deployForm.jumpoint_name || null,
+          pra_credential_ref: this.deployForm.pra_credential_ref || null,
           docker_deploy_key_ref: this.deployForm.docker_deploy_key_ref || null,
           register_in_entitle: this.deployForm.register_in_entitle,
           register_in_passwordsafe: this.deployForm.register_in_passwordsafe,

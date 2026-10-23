@@ -639,9 +639,10 @@ stored state.
 
 Each cloud's deploy form has one **Add to BeyondTrust PRA** checkbox, ticked by default (or
 as the VM's [workstream](#workstream-deploy-defaults) sets it) and shown only while PRA is
-enabled. Its Asset Group (called a Jump Group before PRA 26.1) and Gateway overrides, plus a PRA
-credential override on AWS and Azure, sit in a collapsed section under it; leave them alone
-and the configured defaults apply. The AWS batch form shows the same overrides, shared by every
+enabled. Its Asset Group (called a Jump Group before PRA 26.1), Gateway and PRA credential
+overrides sit in a collapsed section under it; leave them alone and the configured defaults
+apply. The credential is picked from any configured secrets backend and replaces
+`bt_client_secret` for that VM's shell jump only. The AWS batch form shows the same overrides, shared by every
 VM in the batch. Untick it
 and the VM deploys with no jump (`enable_pra: false` on the request; a request that omits
 the field keeps the jump unless its workstream's default says otherwise, so API callers and

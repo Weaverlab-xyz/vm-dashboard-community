@@ -628,7 +628,7 @@
         </label>
 
         {% if pra_enabled %}
-        {{ pra_opt_in("deployForm", credential=False) }}
+        {{ pra_opt_in("deployForm") }}
         {% endif %}
         {{ post_deploy_runs("deployForm") }}
         <details>
@@ -903,6 +903,7 @@ function ociDashboard() {
       register_in_entitle: false, register_in_passwordsafe: false,
       ssh_key_secret_override: '',
       enable_pra: true, skip_post_deploy: false, jump_group: '', jumpoint_name: '',
+      praCredBackend: '', pra_credential_ref: '',
     },
 
     // The Always-Free AMD micro, but only where the region actually has it. E2
@@ -942,6 +943,7 @@ function ociDashboard() {
         register_in_entitle: false, register_in_passwordsafe: false,
         ssh_key_secret_override: '',
         enable_pra: true, skip_post_deploy: false, jump_group: '', jumpoint_name: '',
+        praCredBackend: '', pra_credential_ref: '',
       };
     },
 
@@ -974,6 +976,8 @@ function ociDashboard() {
         .catch(() => { this.availableWorkgroups = []; });
       // Build-tab scripts are optional garnish — don't make the page wait on them.
       this.loadStoredScripts();
+      // The PRA credential picker on the deploy form lists these.
+      this.loadSecretBackends();
       await Promise.all([this.loadImages(), this.loadNetworkOpts()]);
       // Default the build subnet to the first public one, so the common case needs
       // no picking and the "no public subnet" warning fires when there isn't one.
@@ -1721,6 +1725,7 @@ function ociDashboard() {
       this.deployError = '';
       const body = { ...this.deployForm, image_ocid: this.selectedImage.ocid,
                      image_name: this.selectedImage.display_name,
+                     pra_credential_ref: this.deployForm.pra_credential_ref || null,
                      ...this.schedulePayload() };
       try {
         const r = await API.post('/api/oci/deploy', body);
