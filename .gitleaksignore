@@ -27,3 +27,7 @@ a6b5400d5534ab9c56da1b346cc8e96444fe0abf:docs/integrations/vmware.md:curl-auth-u
 1e6f8b4b55148ec5135b56d5f757ebf160e30779:.env.example:generic-api-key:17
 0d17e9a6e891c7d8da44c9f5576085dda20fd646:tests/test_pov_broker_spire.py:generic-api-key:55
 446358af8a31c947e968a408eeacfea59a048936:tests/test_bt_platform_identity.py:generic-api-key:35
+# Checked 2026-10-23: two `placeholder="-----BEGIN ENCRYPTED PRIVATE KEY-----"` form hints,
+# 165 lines apart, that the private-key rule reads as one key once the Settings split put
+# them in a new file in a single commit. No key material.
+2d26805f4b1e3126091d36495d7980db5a839c70:web_dashboard/templates/settings/panels/password_safe.html:private-key:820
