@@ -94,6 +94,11 @@ def test_the_credential_picker_follows_what_the_request_sends():
         assert offered == sent, (
             f"{cloud}: the form {'offers' if offered else 'hides'} the PRA credential "
             f"picker but the request {'sends' if sent else 'does not send'} pra_credential_ref")
+        if offered:
+            # Without these the picker renders with an empty backend list.
+            for needed in ("...secretPickerState()", "this.loadSecretBackends()",
+                           "praCredBackend: ''"):
+                assert needed in src, f"{cloud}: shows the PRA credential picker but lacks {needed}"
 
 
 def _render(call):
