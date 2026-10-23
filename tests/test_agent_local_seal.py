@@ -446,7 +446,8 @@ def test_a_tmpfs_state_dir_counts_as_ephemeral():
         # A different device (so the first check passes) but a tmpfs, so still ephemeral.
         if _REAL_EPHEMERAL() and os.stat(_STATE).st_dev == os.stat("/").st_dev:
             return  # same device here anyway; the device check already refuses
-        assert agent._state_dir_is_ephemeral() is True
+        # The real probe: the module-level stub would answer False whatever the fstype.
+        assert _REAL_EPHEMERAL() is True
     finally:
         agent._mount_fstype = saved
 
