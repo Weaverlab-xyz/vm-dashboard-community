@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% from "partials/vm_pra_modal.html" import vm_pra_modal %}
 {% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
+{% from "partials/deploy_options.html" import pra_opt_in, bulk_pra_opt_in, pra_overrides, post_deploy_runs %}
 {% from "partials/schedule_picker.html" import schedule_picker %}
 {% from "partials/secret_picker.html" import secret_picker %}
 {% from "partials/tag_chips.html" import tag_chips %}
@@ -1028,65 +1029,9 @@
           </div>
 
           {% if pra_enabled %}
-          <!-- PRA is an opt-in: on by default, untick to deploy without a jump. A Linux VM
-               can be added later from its row (services/vm_pra_service). -->
-          <div class="space-y-3 mb-4">
-            <label class="flex items-start gap-2 text-sm text-gray-700">
-              <input type="checkbox" x-model="deployForm.enable_pra" class="mt-0.5 rounded text-blue-600">
-              <span>Add to BeyondTrust PRA <span class="text-gray-400 font-normal">(Shell Jump)</span>
-                <span class="block text-xs text-gray-400">Untick to deploy without a jump. A Linux VM can be
-                  added later from its row.</span></span>
-            </label>
-            <details x-show="deployForm.enable_pra" x-cloak class="ml-6">
-              <summary class="cursor-pointer select-none text-xs text-gray-500">Asset group, Gateway and credential
-                <span class="text-gray-400">— the configured defaults unless changed</span></summary>
-              <div class="mt-2">
-              <!-- BeyondTrust PRA options (optional per-deploy overrides) -->
-              <div class="mb-4 space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
-                <p class="text-xs font-semibold text-gray-600">BeyondTrust PRA options
-                  <span class="font-normal text-gray-400">— optional; fall back to the configured defaults.</span>
-                </p>
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label class="block text-xs font-medium text-gray-600 mb-1">Asset group</label>
-                    <select x-model="deployForm.jump_group" :disabled="!praPickers.jump_groups.length"
-                            class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
-                      <option value="">(configured default)</option>
-                      <template x-for="g in praPickers.jump_groups || []" :key="g.id">
-                        <option :value="g.name" x-text="g.name"></option>
-                      </template>
-                    </select>
-                  </div>
-                  <div>
-                    <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
-                    <select x-model="deployForm.jumpoint_name" :disabled="!praPickers.gateways.length"
-                            class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
-                      <option value="">(configured default)</option>
-                      <template x-for="j in praPickers.gateways || []" :key="j.id">
-                        <option :value="j.name" x-text="j.name"></option>
-                      </template>
-                    </select>
-                  </div>
-                </div>
-                <p x-show="praPickers.loaded && !praPickers.jump_groups.length && !praPickers.gateways.length" x-cloak
-                   class="text-xs text-gray-400">No PRA Asset Groups/Gateways returned — the shell jump falls back to the configured defaults.</p>
-                {{ secret_picker("deployForm", "praCredBackend", "pra_credential_ref",
-                                 "PRA credential", "Overrides bt_client_secret for this deploy's shell jump.") }}
-              </div>
-              </div>
-            </details>
-          </div>
+          {{ pra_opt_in("deployForm", class="space-y-3 mb-4") }}
           {% endif %}
-          <!-- The workstream's post-deploy runs (services/post_deploy_service), named so
-               the operator knows what will run on the VM, with a per-deploy way out. -->
-          <div x-show="wsRuns.length" x-cloak class="rounded-lg border border-gray-200 px-3 py-2 mb-4">
-            <p class="text-xs text-gray-600">Runs after deploy:
-              <span class="font-mono" x-text="wsRuns.map(r => r.asset).join(', ')"></span></p>
-            <label class="mt-1 flex items-center gap-2 text-xs text-gray-600">
-              <input type="checkbox" x-model="deployForm.skip_post_deploy" class="rounded text-blue-600">
-              Skip them for this deploy
-            </label>
-          </div>
+          {{ post_deploy_runs("deployForm", class="mb-4") }}
           <details class="mb-4">
             <summary class="cursor-pointer select-none text-sm font-medium text-gray-700">Advanced options
               <span class="font-normal text-gray-400">— SSH key override, integrations, Windows identity</span></summary>
@@ -1421,48 +1366,11 @@
 
           {% if pra_enabled %}
           <!-- The batch's PRA opt-in, shared with the single form (deployForm), so it
-               follows the workstream's default the same way. -->
-          <label class="flex items-start gap-2 text-sm text-gray-700">
-            <input type="checkbox" x-model="deployForm.enable_pra" class="mt-0.5 rounded text-blue-600">
-            <span>Add each VM to BeyondTrust PRA
-              <span class="block text-xs text-gray-400">Untick to deploy the batch without jumps; any VM can
-                be added later from its row.</span></span>
-          </label>
+               follows the workstream's default the same way; its overrides apply to every VM. -->
+          {{ bulk_pra_opt_in("deployForm") }}
+          {{ pra_overrides("deployForm", note="shared", show="deployForm.enable_pra",
+                            credential_help="Overrides bt_client_secret for this batch's shell jumps.") }}
           {% endif %}
-          <!-- Shared: BeyondTrust PRA options. The single modal has always had these;
-               the batch path dropped them entirely, so every VM in a batch registered
-               against the configured asset group whatever the operator picked. -->
-          <div x-show="deployForm.enable_pra" class="space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
-            <p class="text-xs font-semibold text-gray-600">BeyondTrust PRA options
-              <span class="font-normal text-gray-400">— shared; fall back to the configured defaults.</span>
-            </p>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label class="block text-xs font-medium text-gray-600 mb-1">Asset group</label>
-                <select x-model="deployForm.jump_group" :disabled="!praPickers.jump_groups.length"
-                        class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
-                  <option value="">(configured default)</option>
-                  <template x-for="g in praPickers.jump_groups || []" :key="g.id">
-                    <option :value="g.name" x-text="g.name"></option>
-                  </template>
-                </select>
-              </div>
-              <div>
-                <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
-                <select x-model="deployForm.jumpoint_name" :disabled="!praPickers.gateways.length"
-                        class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
-                  <option value="">(configured default)</option>
-                  <template x-for="j in praPickers.gateways || []" :key="j.id">
-                    <option :value="j.name" x-text="j.name"></option>
-                  </template>
-                </select>
-              </div>
-            </div>
-            <p x-show="praPickers.loaded && !praPickers.jump_groups.length && !praPickers.gateways.length" x-cloak
-               class="text-xs text-gray-400">No PRA Asset Groups/Gateways returned — the shell jump falls back to the configured defaults.</p>
-            {{ secret_picker("deployForm", "praCredBackend", "pra_credential_ref",
-                             "PRA credential", "Overrides bt_client_secret for this batch's shell jumps.") }}
-          </div>
 
           {% if entitle_enabled %}
           <!-- Entitle registration opt-in (applies to every instance in the batch) -->

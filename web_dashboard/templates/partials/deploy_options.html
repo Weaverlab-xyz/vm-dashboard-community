@@ -1,0 +1,111 @@
+{#
+  The deploy-form blocks every cloud page shares: the PRA opt-in with its per-deploy
+  overrides, the batch PRA opt-in, and the workstream's post-deploy runs.
+
+  Each macro takes the name of the page's Alpine form object (deployForm, deployModal,
+  bulkModal). The page keeps its own `{% if pra_enabled %}` around the PRA calls, so a
+  page reads the same with PRA off. The page's component must spread
+  workstreamDefaultsState() (wsRuns) and hold praPickers; a page that shows the PRA
+  credential picker must also spread secretPickerState() and carry praCredBackend /
+  pra_credential_ref on the form.
+
+  Usage:
+    {% from "partials/deploy_options.html" import pra_opt_in, bulk_pra_opt_in, post_deploy_runs %}
+    {% if pra_enabled %}{{ pra_opt_in("deployForm") }}{% endif %}
+    {{ post_deploy_runs("deployForm") }}
+
+  tests/test_cloud_deploy_partials.py holds the four cloud pages to these.
+#}
+{% from "partials/secret_picker.html" import secret_picker %}
+
+{#
+  The Asset group / Gateway / credential overrides. Blank means the configured default.
+  `credential_help` is the secret picker's help line; None leaves the picker out, for a
+  page whose deploy request does not send pra_credential_ref yet.
+#}
+{% macro pra_overrides(form, note="optional", credential_help=None, show=None) %}
+<div {% if show %}x-show="{{ show }}" {% endif %}class="space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+  <p class="text-xs font-semibold text-gray-600">BeyondTrust PRA options
+    <span class="font-normal text-gray-400">— {{ note }}; fall back to the configured defaults.</span>
+  </p>
+  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+    <div>
+      <label class="block text-xs font-medium text-gray-600 mb-1">Asset group</label>
+      <select x-model="{{ form }}.jump_group" :disabled="!praPickers.jump_groups.length"
+              class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+        <option value="">(configured default)</option>
+        <template x-for="g in praPickers.jump_groups || []" :key="g.id">
+          <option :value="g.name" x-text="g.name"></option>
+        </template>
+      </select>
+    </div>
+    <div>
+      <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
+      <select x-model="{{ form }}.jumpoint_name" :disabled="!praPickers.gateways.length"
+              class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+        <option value="">(configured default)</option>
+        <template x-for="j in praPickers.gateways || []" :key="j.id">
+          <option :value="j.name" x-text="j.name"></option>
+        </template>
+      </select>
+    </div>
+  </div>
+  <p x-show="praPickers.loaded && !praPickers.jump_groups.length && !praPickers.gateways.length" x-cloak
+     class="text-xs text-gray-400">No PRA Asset Groups/Gateways returned — the shell jump falls back to the configured defaults.</p>
+  {% if credential_help %}
+  {{ secret_picker(form, "praCredBackend", "pra_credential_ref", "PRA credential", credential_help) }}
+  {% endif %}
+</div>
+{% endmacro %}
+
+{#
+  The single deploy's PRA opt-in: on by default, untick to deploy without a jump. A
+  Linux VM can be added later from its row (services/vm_pra_service). The overrides
+  fold away under it.
+#}
+{% macro pra_opt_in(form, credential=True, class="space-y-3") %}
+<div class="{{ class }}">
+  <label class="flex items-start gap-2 text-sm text-gray-700">
+    <input type="checkbox" x-model="{{ form }}.enable_pra" class="mt-0.5 rounded text-blue-600">
+    <span>Add to BeyondTrust PRA <span class="text-gray-400 font-normal">(Shell Jump)</span>
+      <span class="block text-xs text-gray-400">Untick to deploy without a jump. A Linux VM can be
+        added later from its row.</span></span>
+  </label>
+  <details x-show="{{ form }}.enable_pra" x-cloak class="ml-6">
+    <summary class="cursor-pointer select-none text-xs text-gray-500">Asset group, Gateway{% if credential %} and credential{% endif %}
+      <span class="text-gray-400">— the configured defaults unless changed</span></summary>
+    <div class="mt-2">
+      {{ pra_overrides(form, credential_help="Overrides bt_client_secret for this deploy's shell jump." if credential else None) }}
+    </div>
+  </details>
+</div>
+{% endmacro %}
+
+{#
+  The batch's PRA opt-in. Starts at the workstream's default (bulkPraDefault, or the
+  single form's state where the batch shares it) and is sent explicitly, as the single
+  form's is.
+#}
+{% macro bulk_pra_opt_in(form) %}
+<label class="flex items-start gap-2 text-sm text-gray-700">
+  <input type="checkbox" x-model="{{ form }}.enable_pra" class="mt-0.5 rounded text-blue-600">
+  <span>Add each VM to BeyondTrust PRA
+    <span class="block text-xs text-gray-400">Untick to deploy the batch without jumps; any VM can
+      be added later from its row.</span></span>
+</label>
+{% endmacro %}
+
+{#
+  The workstream's post-deploy runs (services/post_deploy_service), named so the
+  operator knows what will run on the VM, with a per-deploy way out.
+#}
+{% macro post_deploy_runs(form, class="") %}
+<div x-show="wsRuns.length" x-cloak class="rounded-lg border border-gray-200 px-3 py-2{% if class %} {{ class }}{% endif %}">
+  <p class="text-xs text-gray-600">Runs after deploy:
+    <span class="font-mono" x-text="wsRuns.map(r => r.asset).join(', ')"></span></p>
+  <label class="mt-1 flex items-center gap-2 text-xs text-gray-600">
+    <input type="checkbox" x-model="{{ form }}.skip_post_deploy" class="rounded text-blue-600">
+    Skip them for this deploy
+  </label>
+</div>
+{% endmacro %}
