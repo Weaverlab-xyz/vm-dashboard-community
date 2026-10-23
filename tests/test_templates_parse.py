@@ -17,6 +17,8 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 _TEMPLATES = os.path.join(_ROOT, "web_dashboard", "templates")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _settings_src import page_for  # noqa: E402
 
 try:
     from jinja2 import Environment, FileSystemLoader, TemplateSyntaxError
@@ -58,11 +60,13 @@ def test_x_for_helpers_are_defined_in_their_page():
     for rel, full in _template_files():
         with open(full, encoding="utf-8") as fh:
             src = fh.read()
+        # A Settings panel's helpers are defined in the page script that includes it.
+        page = page_for(rel, src)
         for helper in set(_XFOR_CALL.findall(src)):
             defined = (
-                re.search(r'\b' + re.escape(helper) + r'\s*\(', src) is not None
-                and len(re.findall(r'\b' + re.escape(helper) + r'\s*\(', src)) > 1
-            ) or re.search(r'\b' + re.escape(helper) + r'\s*[:=]', src) is not None
+                re.search(r'\b' + re.escape(helper) + r'\s*\(', page) is not None
+                and len(re.findall(r'\b' + re.escape(helper) + r'\s*\(', page)) > 1
+            ) or re.search(r'\b' + re.escape(helper) + r'\s*[:=]', page) is not None
             if not defined:
                 failures.append(f"{rel}: x-for calls {helper}() but it is never defined")
     assert not failures, "Undefined Alpine helpers:\n  " + "\n  ".join(failures)

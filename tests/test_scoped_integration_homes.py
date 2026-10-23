@@ -32,6 +32,7 @@ import re
 import shutil
 import subprocess
 import sys
+from _settings_src import settings_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -150,7 +151,7 @@ def test_the_endpoint_editor_is_one_copy_shared_with_settings():
                      r'justify-between mb-2">\s*<span[^>]*>Recent deliveries', part), (
         "the delivery log is require_admin and must stay admin-only")
 
-    settings = _tpl("settings.html")
+    settings = settings_source()
     drawer = settings[settings.index("panel?.key === 'notifications' && !panelLoading"):]
     drawer = drawer[:drawer.index("</template>\n\n      <template x-if=")]
     assert 'x-data="notificationEndpoints()" x-init="loadNotifications()"' in drawer
@@ -175,7 +176,7 @@ def test_change_windows_render_on_schedules_and_settings_from_one_copy():
                      r'{% include "partials/change_windows_editor\.html" %}', sched, re.S), (
         "the Schedules page does not render the change-window editor")
 
-    settings = _tpl("settings.html")
+    settings = settings_source()
     assert 'x-data="changeWindowsEditor()" x-init="cw.load()"' in settings
     assert '{% include "partials/change_windows_editor.html" %}' in settings
     assert "    cw: {" not in settings, "settings.html still carries its own copy of `cw`"

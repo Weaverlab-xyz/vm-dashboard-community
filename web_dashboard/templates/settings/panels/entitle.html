@@ -1,0 +1,471 @@
+{# Settings slide-over panel "entitle". Included by settings.html inside settingsPage(); the state it binds (panelCfg, panelOpen, …) lives in that page's script. #}
+{%- from "partials/collapsible.html" import collapsible %}
+      <template x-if="panel?.key === 'entitle' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Entitle integration. As the dashboard builds Linux VMs and databases it
+            registers each as an Entitle integration (SSH ephemeral accounts / PostgreSQL /
+            MySQL / SQL Server) so users can request just-in-time access in Entitle. Requires
+            an Entitle tenant.
+          </p>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">API URL</label>
+            <input type="text" x-model="panelCfg.entitle_api_url"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="https://api.us.entitle.io/v1">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">API Token</label>
+            <input type="password" x-model="panelCfg.entitle_api_token"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="••••••••">
+          </div>
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Authentication</p>
+            <div class="space-y-3">
+              <div>
+                <select x-model="panelCfg.entitle_auth_mode"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="token">API token (above, a stored secret)</option>
+                  <option value="workload">Workload identity — recommended (BeyondTrust platform identity)</option>
+                </select>
+                <p class="text-[11px] text-gray-400 mt-1">
+                  <strong>Workload identity</strong> presents this dashboard's own identity token instead of
+                  a stored credential — set it up once on the
+                  <button type="button" class="text-blue-600 hover:underline"
+                          @click="openPanel(integrations.find(i => i.key === 'bt_platform_identity'))">BeyondTrust
+                    platform identity</button> panel, and add this product to its registration's
+                  <strong>Product Scopes</strong> in Pathfinder. Not yet verified live for this product.
+                </p>
+              </div>
+              <div x-show="panelCfg.entitle_auth_mode === 'workload'" x-cloak class="space-y-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Workload API URL</label>
+                <input type="text" x-model="panelCfg.entitle_workload_api_url"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="https://api.beyondtrust.io/site/{site}/...">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  Where calls go on workload identity auth; <code>{site}</code> is the site ID from
+                  the platform identity panel. The default is a <strong>best guess</strong> at the
+                  Pathfinder gateway path — if calls answer 404 or 421, this is the field to fix
+                  (it may be the product's own host instead).
+                </p>
+              </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">
+                    Service name <span class="text-gray-400 font-normal">(optional override)</span>
+                  </label>
+                  <input type="text" x-model="panelCfg.entitle_workload_service_name"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="(blank = the platform identity's service name)">
+                </div>
+                <p class="text-[11px] text-amber-700">
+                  Covers the dashboard's own REST reads and access requests. Resource registration (the entitleio/entitle Terraform provider) still uses the Terraform Provider API Key / API Token — keep one set.
+                </p>
+              </div>
+            </div>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Terraform Provider API Key</label>
+            <input type="password" x-model="panelCfg.entitle_api_key"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="•••••••• (falls back to API Token)">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Owner ID
+              <span class="text-xs text-gray-400">(entitle_owner_id)</span></label>
+            <input type="text" x-model="panelCfg.entitle_owner_id"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="UUID of the Entitle user that owns created integrations">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Workflow ID
+              <span class="text-xs text-gray-400">(entitle_workflow_id)</span></label>
+            <input type="text" x-model="panelCfg.entitle_workflow_id"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="UUID of the default approval workflow">
+          </div>
+          <p class="text-xs text-gray-400 -mt-2">
+            Owner ID and Workflow ID are <strong>required</strong> to register VMs &amp; databases in Entitle.
+          </p>
+          <p class="text-xs text-gray-500 pt-2 font-medium">Virtual applications &amp; persona bundles</p>
+          <p class="text-xs text-gray-400 -mt-2">Each approval tier routes through its own workflow — the ones
+            <code>terraform/entitle_user_jit</code> creates. A blank tier falls back to the Workflow ID above.
+            See <a href="/docs/integrations/beyondtrust/entitle-virtual-apps" class="text-blue-600 hover:underline">virtual applications</a>
+            and <a href="/docs/integrations/beyondtrust/entitle-persona-bundles" class="text-blue-600 hover:underline">persona bundles</a>.</p>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Auto-approve tier workflow
+              <span class="text-xs text-gray-400">(entitle_workflow_auto_approve_id)</span></label>
+            <input type="text" x-model="panelCfg.entitle_workflow_auto_approve_id"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="UUID (vm-dashboard-auto-approve)">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">One-approver tier workflow
+              <span class="text-xs text-gray-400">(entitle_workflow_single_approver_id)</span></label>
+            <input type="text" x-model="panelCfg.entitle_workflow_single_approver_id"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="UUID (vm-dashboard-single-approver)">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Two-approver tier workflow
+              <span class="text-xs text-gray-400">(entitle_workflow_two_approver_id)</span></label>
+            <input type="text" x-model="panelCfg.entitle_workflow_two_approver_id"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="UUID (vm-dashboard-two-approver)">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Dashboard groups integration
+              <span class="text-xs text-gray-400">(entitle_dashboard_groups_integration_id)</span></label>
+            <input type="text" x-model="panelCfg.entitle_dashboard_groups_integration_id"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="UUID of the directory integration holding the dashboard-* groups (optional)">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Virtual Application catalog name
+              <span class="text-xs text-gray-400">(entitle_virtual_app_slug)</span></label>
+            <input type="text" x-model="panelCfg.entitle_virtual_app_slug"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="(blank → virtual application)">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Provider endpoint
+              <span class="text-xs text-gray-400">(optional)</span></label>
+            <input type="text" x-model="panelCfg.entitle_endpoint"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="(defaults to the API URL host: https://api.us.entitle.io)">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">SSH sudo user
+              <span class="text-xs text-gray-400">(optional override)</span></label>
+            <input type="text" x-model="panelCfg.entitle_ssh_sudo_user"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="(defaults to the VM's cloud-default user: ubuntu / ec2-user / azureuser / gcp-user)">
+          </div>
+          <p class="text-xs text-gray-400 -mt-2">
+            Leave blank — each VM registers with its image's cloud-default login user automatically.
+            Set this only to force a different sudo user for all SSH registrations.
+          </p>
+          <p class="text-xs text-gray-400 -mt-2">
+            The SSH private key is taken from the VM's own keypair (the key cloud-init injected),
+            resolved per-cloud — not configured here.
+          </p>
+          <div class="flex items-center gap-3 pt-1">
+            <button @click="panelCfg.entitle_registration_enabled = !panelCfg.entitle_registration_enabled"
+                    class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors"
+                    :class="panelCfg.entitle_registration_enabled ? 'bg-blue-600' : 'bg-gray-300'">
+              <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
+                    :class="panelCfg.entitle_registration_enabled ? 'translate-x-6' : 'translate-x-1'"></span>
+            </button>
+            <span class="text-sm text-gray-700">Register built VMs &amp; databases in Entitle</span>
+          </div>
+          <p class="text-xs text-gray-400" x-show="entitleAgentToken">
+            Agent token: <span class="font-mono" x-text="entitleAgentToken"></span>
+            <span>— auto-minted; attached to private (PRA-only) targets.</span>
+          </p>
+
+          <!-- ── Atlas MongoDB connector (Databases page → Register in Entitle on an Atlas row) ── -->
+          <div class="pt-3 border-t border-gray-100">
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Atlas MongoDB connector</p>
+            <p class="text-xs text-gray-500 mb-2">
+              An Atlas <strong>programmatic API key</strong> with Organization Owner, which Entitle's
+              Atlas MongoDB integration requires. It is separate from the provisioning service account
+              under Databases. Add Entitle's egress IPs to this key's API access list in Atlas; the
+              Databases panel's extra access CIDRs put them on each cluster's project.
+            </p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Public key</label>
+                <input type="text" x-model="panelCfg.entitle_atlas_public_key"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Private key</label>
+                <input type="password" x-model="panelCfg.entitle_atlas_private_key" autocomplete="new-password"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="••••••••">
+              </div>
+            </div>
+            <div class="mt-2">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Catalog slug <span class="text-gray-400 font-normal">(blank → atlas mongodb)</span></label>
+              <input type="text" x-model="panelCfg.entitle_atlas_app_slug"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="atlas mongodb">
+            </div>
+          </div>
+
+          <!-- ── Persona × cloud access bundles ───────────────────────────── -->
+          <div class="mt-6 pt-5 border-t border-gray-200" x-data="entitleBundles()" x-init="load()">
+            {% call collapsible("panelOpen.entBundles", "Persona access bundles",
+                                button_class="text-sm font-semibold text-gray-800 mb-1 hover:text-gray-900",
+                                body_class="space-y-3") %}
+            <p class="text-xs text-gray-500 mb-3">
+              One Entitle bundle per job function and cloud — or on-prem AD for the IT, OT and hypervisor
+              roles: the virtual-app role over the <code>ent-&lt;target&gt;-&lt;persona&gt;</code> group, the
+              target's own roles or delegated AD groups, and the matching dashboard-* groups. Preview reads Entitle and shows what each one resolves to; only bundles with
+              nothing missing are created. <a href="/docs/integrations/beyondtrust/entitle-persona-bundles"
+              class="text-blue-600 hover:underline">How bundles are built</a>.
+            </p>
+            <div x-show="error" class="text-sm text-red-600 mb-2" x-text="error"></div>
+            <div x-show="!configured && loaded" class="text-sm text-amber-700 mb-2">Set the Entitle API URL and token first.</div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+              <template x-for="c in cloudKeys" :key="c">
+                <div class="border border-gray-200 rounded-lg p-3 space-y-1">
+                  <div class="text-sm font-medium text-gray-700" x-text="cloudLabel[c] + ' integration'"></div>
+                  <div class="text-xs text-gray-500" x-show="c === 'oci'">OCI is granted through its group only; no integration needed.</div>
+                  <div class="text-xs text-gray-500" x-show="c === 'ad'">The Entitle integration pinned on an AD directory
+                    (Directories → Entitle). Leave blank to use the only one; pick one when there are several.</div>
+                  <div x-show="c !== 'oci'" class="space-y-1">
+                    <select x-model="clouds[c].integration_id" @focus="candidates(c)"
+                            class="w-full border border-gray-300 rounded px-2 py-1 text-sm">
+                      <option value="" x-text="c === 'ad' ? '— the only pinned AD directory —' : '— none (group only) —'"></option>
+                      <template x-if="clouds[c].integration_id && !(cands[c] || []).some(i => i.id === clouds[c].integration_id)">
+                        <option :value="clouds[c].integration_id" x-text="clouds[c].integration_id"></option>
+                      </template>
+                      <template x-for="i in (cands[c] || [])" :key="i.id">
+                        <option :value="i.id" x-text="i.name + ' · ' + i.application + (i.suggested ? ' · likely' : '')"></option>
+                      </template>
+                    </select>
+                    <input x-show="c !== 'ad'" type="text" x-model="clouds[c].resource" placeholder="Resource (account / subscription / project) — optional"
+                           class="w-full border border-gray-300 rounded px-2 py-1 text-xs">
+                    <button @click="pinCloud(c)" class="text-xs border border-gray-300 rounded px-2 py-1">Save</button>
+                  </div>
+                </div>
+              </template>
+            </div>
+
+            <div class="overflow-x-auto">
+              <table class="w-full text-xs">
+                <thead><tr class="text-left text-gray-500">
+                  <th class="py-1 pr-2">Persona</th><th class="pr-2">Tier</th>
+                  <template x-for="c in cloudKeys" :key="c"><th class="pr-2" x-text="cloudLabel[c]"></th></template>
+                </tr></thead>
+                <tbody>
+                  <template x-for="a in accesses" :key="a.access">
+                    <tr class="border-t border-gray-100">
+                      <td class="py-1 pr-2"><span class="font-medium text-gray-800" x-text="a.label"></span>
+                        <div class="text-gray-400" x-text="a.purpose"></div></td>
+                      <td class="pr-2 whitespace-nowrap" x-text="a.tier_label"></td>
+                      <template x-for="c in cloudKeys" :key="c">
+                        <td class="pr-2 align-top">
+                          <span x-show="!byKey[a.access + '-' + c]" class="text-gray-300">—</span>
+                          <label x-show="byKey[a.access + '-' + c]" class="flex items-start gap-1">
+                            <input type="checkbox" :value="a.access + '-' + c" x-model="picked" class="mt-0.5">
+                            <span class="text-gray-500" x-text="(byKey[a.access + '-' + c]?.cloud_roles || []).join(', ') || 'group only'"></span>
+                          </label>
+                          <button x-show="byKey[a.access + '-' + c]" @click="showDeleg = (showDeleg === a.access + '-' + c ? '' : a.access + '-' + c)"
+                                  class="text-blue-600 hover:underline">Delegation</button>
+                          <template x-if="showDeleg === a.access + '-' + c">
+                            <ol class="list-decimal ml-4 mt-1 text-gray-600 space-y-0.5">
+                              <template x-for="step in (byKey[a.access + '-' + c]?.delegation || [])"><li x-text="step"></li></template>
+                            </ol>
+                          </template>
+                          <template x-if="preview[a.access + '-' + c]">
+                            <div :class="preview[a.access + '-' + c].ready ? 'text-green-700' : 'text-red-600'"
+                                 x-text="preview[a.access + '-' + c].ready ? ('ready · ' + preview[a.access + '-' + c].role_ids.length + ' roles') : preview[a.access + '-' + c].blockers.join('; ')"></div>
+                          </template>
+                        </td>
+                      </template>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+            <div class="flex gap-2 mt-3">
+              <button @click="picked = catalog.map(b => b.key)" class="text-xs border border-gray-300 rounded px-2 py-1">Select all</button>
+              <button @click="picked = []" class="text-xs border border-gray-300 rounded px-2 py-1">Clear</button>
+              <button @click="runPreview()" :disabled="busy || !picked.length" class="text-xs border border-gray-300 rounded px-3 py-1 disabled:opacity-50">Preview</button>
+              <button @click="runApply()" :disabled="busy || !readyCount()"
+                      class="text-xs bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded px-3 py-1"
+                      x-text="'Create ' + readyCount() + ' ready bundle(s)'"></button>
+            </div>
+
+            <div class="mt-4 border border-gray-200 rounded-lg p-3 space-y-2">
+              <div class="text-sm font-medium text-gray-700">Create missing groups in on-prem AD</div>
+              <p class="text-xs text-gray-500">Creates the selected bundles' <code>ent-ad-*</code> groups — and, if ticked,
+                their <code>ent-&lt;cloud&gt;-*</code> groups for an AD that syncs to your IdP — as empty global security
+                groups, through the directory's remote agent. It never adds members or deletes anything. A new group grants
+                nothing until you complete its <strong>Delegation</strong> steps and Entitle has synced it.</p>
+              <div x-show="!adDirs.length" class="text-xs text-amber-700">Register an on-prem Active Directory with a remote
+                agent on the Directories page first.</div>
+              <div x-show="adDirs.length" class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <select x-model="grp.directory_id" class="border border-gray-300 rounded px-2 py-1 text-sm">
+                  <template x-for="d in adDirs" :key="d.id"><option :value="d.id" x-text="d.name"></option></template>
+                </select>
+                <input type="text" x-model="grp.ou" placeholder="OU (optional) — OU=Entitle,DC=corp,DC=example,DC=com"
+                       class="sm:col-span-2 border border-gray-300 rounded px-2 py-1 text-xs font-mono">
+              </div>
+              <label x-show="adDirs.length" class="flex items-center gap-2 text-xs text-gray-600">
+                <input type="checkbox" x-model="grp.include_cloud"> Also create the cloud bundles' groups (AD synced to your IdP)
+              </label>
+              <button x-show="adDirs.length" @click="createGroups()" :disabled="busy || !picked.length || !grp.directory_id"
+                      class="text-xs border border-gray-300 rounded px-3 py-1 disabled:opacity-50">Create groups for the selected bundles</button>
+              <div x-show="grp.queued" class="text-xs text-green-700">
+                <span x-text="grp.queued"></span>
+                — <a class="underline" :href="'/jobs/' + grp.job_id">job</a>.
+                Then complete each bundle's Delegation steps.
+              </div>
+            </div>
+
+            <div x-show="sets.length" class="mt-4 border border-gray-200 rounded-lg divide-y divide-gray-100">
+              <template x-for="s in sets" :key="s.id">
+                <div class="px-3 py-2 text-xs flex justify-between gap-2">
+                  <div><span class="font-medium" x-text="s.bundles.length + ' bundle(s)'"></span>
+                    <span class="ml-1" :class="s.status === 'active' ? 'text-green-700' : s.status === 'failed' ? 'text-red-600' : 'text-gray-500'" x-text="s.status"></span>
+                    <div class="text-gray-500" x-text="s.bundles.map(b => b.name).join(' · ')"></div>
+                    <div x-show="s.error" class="text-red-600" x-text="s.error"></div></div>
+                  <button x-show="!['applying','destroying'].includes(s.status)" @click="removeSet(s)"
+                          class="border border-red-200 text-red-600 rounded px-2 py-1 h-fit">Remove</button>
+                </div>
+              </template>
+            </div>
+            {% endcall %}
+          </div>
+
+          <!-- ── Machine identity (cloud-side JIT) — Phase 3 ─────────────── -->
+          <div class="mt-6 pt-5 border-t border-gray-200">
+            {% call collapsible("panelOpen.entMachine", "Machine identity (cloud-side JIT)",
+                                button_class="text-sm font-semibold text-gray-800 mb-1 hover:text-gray-900",
+                                body_class="space-y-3") %}
+            <p class="text-xs text-gray-500 mb-4">
+              Routes cloud SDK writes (EC2 deploy / Azure VM / GCP compute) through
+              Entitle-issued short-lived grants instead of baseline credentials.
+              Per-cloud opt-in lets you promote one cloud at a time.
+            </p>
+
+            <div class="flex items-center gap-3 mb-3">
+              <button @click="ciMatrix.gate_enabled = !ciMatrix.gate_enabled"
+                      class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors"
+                      :class="ciMatrix.gate_enabled ? 'bg-blue-600' : 'bg-gray-300'">
+                <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
+                      :class="ciMatrix.gate_enabled ? 'translate-x-6' : 'translate-x-1'"></span>
+              </button>
+              <span class="text-sm text-gray-700">Master gate <span class="text-xs text-gray-400">(cloud_identity_gate_enabled)</span></span>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4" :class="ciMatrix.gate_enabled ? '' : 'opacity-50 pointer-events-none'">
+              <template x-for="c in ['aws','azure','gcp']" :key="c">
+                <label class="flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" x-model="ciMatrix.flags[c]"
+                         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                  <span x-text="c.toUpperCase()"></span>
+                </label>
+              </template>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+              <div class="col-span-2">
+                <label class="block text-xs font-semibold text-gray-600 mb-1">Machine-identity email (behalfOf)</label>
+                <input type="email" x-model="ciMatrix.machine.identity_email"
+                       placeholder="dashboard-machine@example.com"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-200">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-gray-600 mb-1">TTL ceiling (min)</label>
+                <input type="number" min="1" max="1440" x-model.number="ciMatrix.machine.ttl_ceiling_minutes"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-200">
+              </div>
+            </div>
+
+            <div class="mb-3">
+              <div class="flex items-center justify-between mb-1">
+                <label class="block text-xs font-semibold text-gray-600">Operation matrix (JSON)</label>
+                <div class="flex items-center gap-3">
+                  <button @click="formatCiMatrix()"
+                          class="text-[11px] text-blue-600 hover:underline">Format JSON</button>
+                  <span class="text-[11px] text-gray-400" x-text="`${ciMatrix.count} entries`"></span>
+                </div>
+              </div>
+              <textarea x-model="ciMatrix.raw" rows="10" spellcheck="false"
+                        placeholder='{ "aws:ec2:deploy": { "bundle_id": "..." } }'
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-200"></textarea>
+              <p x-show="ciMatrix.parseError" x-cloak class="text-xs text-red-600 mt-1" x-text="ciMatrix.parseError"></p>
+              <p class="text-[11px] text-gray-400 mt-1">
+                Each entry: <code class="bg-gray-100 px-1 rounded">"cloud:resource:verb"</code> &rarr; <code class="bg-gray-100 px-1 rounded">{"bundle_id": "..."}</code> or <code class="bg-gray-100 px-1 rounded">{"role_id": "..."}</code>. Anything outside the matrix is denied (fail closed).
+              </p>
+            </div>
+
+            <div class="flex items-center justify-end gap-2">
+              <button @click="saveCiMatrix()" :disabled="ciMatrix.saving"
+                      class="px-3 py-1.5 text-xs bg-blue-700 hover:bg-blue-800 text-white rounded-lg disabled:opacity-50">
+                <span x-show="!ciMatrix.saving">Save machine-identity config</span>
+                <span x-show="ciMatrix.saving" x-cloak>Saving&hellip;</span>
+              </button>
+            </div>
+            {% endcall %}
+          </div>
+
+          <!-- ── User JIT — Phase 4 UI affordances ─────────────────────────── -->
+          <div class="mt-6 pt-5 border-t border-gray-200">
+            {% call collapsible("panelOpen.entUserJit", "User JIT (dashboard access)",
+                                button_class="text-sm font-semibold text-gray-800 mb-1 hover:text-gray-900",
+                                body_class="space-y-3") %}
+            <p class="text-xs text-gray-500 mb-4">
+              Surfaces a <strong>Request access</strong> link in the nav and deep-links from
+              the dashboard's 403 page to the matching Entitle resource so users can
+              self-serve missing permissions. Populate the resource map from the
+              <code>resource_ids</code> output of <code>terraform/entitle_user_jit/</code>.
+            </p>
+
+            <div class="flex items-center gap-3 mb-3">
+              <button @click="userJit.enabled = !userJit.enabled"
+                      class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors"
+                      :class="userJit.enabled ? 'bg-blue-600' : 'bg-gray-300'">
+                <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
+                      :class="userJit.enabled ? 'translate-x-6' : 'translate-x-1'"></span>
+              </button>
+              <span class="text-sm text-gray-700">User JIT enabled
+                <span class="text-xs text-gray-400">(entitle_user_jit_enabled)</span>
+              </span>
+            </div>
+
+            <div class="mb-3">
+              <label class="block text-xs font-semibold text-gray-600 mb-1">Request portal URL</label>
+              <input type="url" x-model="userJit.portal_url"
+                     placeholder="https://entitle.io/catalog/vm-dashboard"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-200">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Base URL of your Entitle portal's VM Dashboard bundle. The 403 page falls back
+                to this when a missing permission has no specific resource id in the map below.
+              </p>
+            </div>
+
+            <div class="mb-3">
+              <div class="flex items-center justify-between mb-1">
+                <label class="block text-xs font-semibold text-gray-600">Resource id map (JSON)</label>
+                <div class="flex items-center gap-3">
+                  <button @click="formatUserJitMap()" class="text-[11px] text-blue-600 hover:underline">Format JSON</button>
+                  <span class="text-[11px] text-gray-400" x-text="`${userJit.map_count} entries`"></span>
+                </div>
+              </div>
+              <textarea x-model="userJit.resource_ids_raw" rows="8" spellcheck="false"
+                        placeholder='{ "aws:read": "&lt;entitle-resource-id&gt;", "vms:write": "&lt;id&gt;" }'
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-200"></textarea>
+              <p x-show="userJit.parseError" x-cloak class="text-xs text-red-600 mt-1" x-text="userJit.parseError"></p>
+              <p class="text-[11px] text-gray-400 mt-1">
+                Paste the <code class="bg-gray-100 px-1 rounded">resource_ids</code> output of
+                <code class="bg-gray-100 px-1 rounded">terraform/entitle_user_jit/</code> (Phase 2).
+                Keys are <code class="bg-gray-100 px-1 rounded">"scope:level"</code>; e.g.
+                <code class="bg-gray-100 px-1 rounded">"aws:write"</code>.
+              </p>
+            </div>
+
+            <div class="text-[11px] text-gray-500 bg-amber-50 border border-amber-200 rounded p-2 mb-3">
+              <strong>JWT TTL tuning:</strong> tighter <code class="bg-amber-100 px-1 rounded">access_token_expire_minutes</code>
+              means a revoked Entitle grant takes effect on the user's next request rather than at the
+              token's natural expiry. The design recommends <strong>&le;30 minutes</strong> for
+              high-sensitivity tenants.
+            </div>
+
+            <div class="flex items-center justify-end gap-2">
+              <button @click="saveUserJit()" :disabled="userJit.saving"
+                      class="px-3 py-1.5 text-xs bg-blue-700 hover:bg-blue-800 text-white rounded-lg disabled:opacity-50">
+                <span x-show="!userJit.saving">Save User JIT config</span>
+                <span x-show="userJit.saving" x-cloak>Saving&hellip;</span>
+              </button>
+            </div>
+            {% endcall %}
+          </div>
+        </div>
+      </template>

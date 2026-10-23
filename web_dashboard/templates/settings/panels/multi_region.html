@@ -1,0 +1,66 @@
+{# Settings slide-over panel "multi_region". Included by settings.html inside settingsPage(); the state it binds (panelCfg, panelOpen, …) lives in that page's script. #}
+      <template x-if="panel?.key === 'multi_region' && !panelLoading">
+        <div class="space-y-6">
+          <p class="text-xs text-gray-500 leading-snug">
+            Run several regions in one account? Each region carries its own resource ids (subnets,
+            security groups, SSH secrets, networks). Blank fields fall back to the flat config keys, and
+            the <strong>default region</strong> always resolves to those — so single-region setups are
+            unchanged. The sandbox auto-populates these when you run its setup script in more than one region.
+          </p>
+
+          <template x-for="cloud in ['aws', 'gcp', 'azure']" :key="cloud">
+            <div class="border-t border-gray-100 pt-4">
+              <div class="flex items-center justify-between mb-3">
+                <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide" x-text="cloud.toUpperCase() + ' — per-region config sets'"></p>
+                <span class="text-[11px] text-gray-400" x-text="'default: ' + (regionSets[cloud].defaultRegion || '—')"></span>
+              </div>
+
+              <div x-show="regionSets[cloud].loaded">
+                <template x-if="Object.keys(regionSets[cloud].regions).length === 0">
+                  <p class="text-[11px] text-gray-400 italic mb-2">No region sets configured — every region resolves to the flat defaults.</p>
+                </template>
+
+                <template x-for="(cfg, loc) in regionSets[cloud].regions" :key="loc">
+                  <div class="border border-gray-200 rounded-lg p-3 mb-3">
+                    <div class="flex items-center justify-between mb-2">
+                      <span class="text-sm font-semibold text-gray-700 font-mono" x-text="loc"></span>
+                      <button type="button" @click="removeRegion(cloud, loc)"
+                              class="text-[11px] text-red-500 hover:text-red-700">Remove</button>
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <template x-for="field in regionSets[cloud].fields" :key="field">
+                        <div>
+                          <label class="block text-[11px] font-medium text-gray-500 mb-0.5" x-text="field"></label>
+                          <input type="text" x-model="regionSets[cloud].regions[loc][field]"
+                                 class="w-full border border-gray-300 rounded px-2 py-1 text-[11px] font-mono"
+                                 :placeholder="regionSets[cloud].fallbacks[field] || '(unset)'">
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+
+                <div class="flex items-center gap-2 mt-2">
+                  <input type="text" x-model="regionSets[cloud].newRegion"
+                         @keydown.enter.prevent="addRegion(cloud)"
+                         class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         :placeholder="'add a region (e.g. ' + (cloud === 'gcp' ? 'us-west1' : cloud === 'azure' ? 'westus2' : 'us-west-2') + ')'">
+                  <button type="button" @click="addRegion(cloud)"
+                          class="bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium px-3 py-2 rounded-lg">Add region</button>
+                </div>
+                <div class="flex items-center justify-end mt-3">
+                  <button type="button" @click="saveRegionSets(cloud)" :disabled="regionSets[cloud].saving"
+                          class="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg">
+                    <svg x-show="regionSets[cloud].saving" class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+                    </svg>
+                    <span x-text="(regionSets[cloud].saving ? 'Saving…' : 'Save ' + cloud.toUpperCase() + ' region sets')"></span>
+                  </button>
+                </div>
+                <p x-show="regionSets[cloud].error" class="text-[11px] text-red-500 mt-1" x-text="regionSets[cloud].error"></p>
+              </div>
+            </div>
+          </template>
+        </div>
+      </template>

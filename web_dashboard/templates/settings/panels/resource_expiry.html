@@ -1,0 +1,173 @@
+{# Settings slide-over panel "resource_expiry". Included by settings.html inside settingsPage(); the state it binds (panelCfg, panelOpen, …) lives in that page's script. #}
+      <template x-if="panel?.key === 'resource_expiry' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Give every new deployment an expiry, then <strong>permanently delete</strong> it
+            when that time passes — the same destroy path the Destroy button uses.
+            Terminated instances, deleted databases and destroyed clusters are
+            <strong>not recoverable</strong>. Resources you <em>registered</em> rather than
+            provisioned are never touched, and neither is anything that already existed
+            before you enabled this: a resource only has a timer once something stamps one.
+            See <a href="/docs/operations/auto-delete-timer" class="text-blue-600 underline">the auto-delete timer doc</a>.
+          </p>
+
+          <label class="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
+            <input type="checkbox" x-model="panelCfg.resource_expiry_dry_run"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            <span class="text-sm text-amber-900">
+              <span class="font-semibold">Observe only — log what would be deleted, delete nothing.</span>
+              <span class="block text-[11px] mt-1">
+                Leave this on for a full cycle and read the sweep report before you trust it.
+                Turning it off arms deletion for every resource whose timer has already
+                passed — <strong>including any that expired while you were in observe-only
+                mode</strong>.
+              </span>
+            </span>
+          </label>
+
+          <label class="flex items-start gap-2">
+            <input type="checkbox" x-model="panelCfg.resource_expiry_enforce"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            <span class="text-sm text-gray-700">
+              <span class="font-medium">Allow deletion</span>
+              <span class="block text-[11px] text-gray-400 mt-0.5">
+                A second, separate gate. With this off the timer is tracked and shown but
+                never acted on, whatever the setting above says.
+              </span>
+            </span>
+          </label>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Default lifetime for new deployments</label>
+            <input type="number" min="0" x-model.number="panelCfg.resource_expiry_default_hours"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                   placeholder="0 = no timer">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Hours. Applied to cloud VMs, databases and Kubernetes clusters the dashboard
+              provisions. <code>0</code> means new deploys get no timer and nothing is ever
+              deleted automatically — the safe way to enable this and watch it first.
+              The clock starts when the deploy is queued, so it includes provisioning time.
+            </p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Maximum total lifetime</label>
+            <input type="number" min="0" x-model.number="panelCfg.resource_expiry_max_total_hours"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                   placeholder="720 = 30 days; 0 = no ceiling">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Hours, counted from when the resource was created — not from the last
+              extension — so repeated extending can't outrun it. Admins are not capped.
+            </p>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Extend button adds</label>
+              <input type="number" min="1" x-model.number="panelCfg.resource_expiry_extend_hours"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">Hours per click, clamped by the ceiling above.</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Warn this long before</label>
+              <input type="number" min="1" x-model.number="panelCfg.resource_expiry_warn_hours"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Hours. A resource entering this window shows a warning on the dashboard,
+                and — if <button type="button" @click="openPanelByKey('notifications')"
+                class="underline text-blue-600">Notifications</button> is on — fires one
+                <span class="font-mono">resource.expiring</span> message per endpoint,
+                once each. Otherwise an operator has to open the dashboard to see it.
+              </p>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Grace</label>
+              <input type="number" min="15" x-model.number="panelCfg.resource_expiry_grace_minutes"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">Min past expiry (floor 15).</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Sweep every</label>
+              <input type="number" min="5" x-model.number="panelCfg.resource_expiry_sweep_interval_minutes"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">Minutes (floor 5).</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Max per sweep</label>
+              <input type="number" min="1" x-model.number="panelCfg.resource_expiry_max_per_pass"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">Cap 50.</p>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Keep sweep history</label>
+              <input type="number" min="0" x-model.number="panelCfg.resource_expiry_sweep_retention_days"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">Days, 0 = forever.</p>
+            </div>
+            <div class="col-span-2 flex items-end">
+              <p class="text-[11px] text-gray-400 mb-1">
+                A sweep records a job every interval whether or not it found anything —
+                48 a day at the default. Completed ones are dropped past this age and are
+                hidden on
+                <a href="/jobs" class="underline text-blue-600">Job History</a> unless you
+                tick "Show routine sweeps"; a <em>failed</em> pass is always kept and always
+                shown.
+              </p>
+            </div>
+          </div>
+
+          <label class="flex items-start gap-2">
+            <input type="checkbox" x-model="panelCfg.resource_expiry_allow_never"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            <span class="text-sm text-gray-700">
+              <span class="font-medium">Allow admins to remove a timer</span>
+              <span class="block text-[11px] text-gray-400 mt-0.5">
+                Lets an admin clear a resource's timer entirely ("never expires"). Off means
+                every stamped resource keeps a timer and the most anyone can do is extend it.
+              </span>
+            </span>
+          </label>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Exempt workstreams</label>
+            <input type="text" x-model="panelCfg.resource_expiry_exempt_workgroups"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="platform, shared-infra">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Comma-separated. Resources in these workstreams never get a timer and are never
+              deleted. <strong>VMs, cloud databases and Kubernetes clusters</strong> carry a
+              workstream; cloud functions and desktop seats don't, so use "never expires" for
+              those instead. A database or cluster left untagged has no workstream to match
+              here either. Blank = none.
+            </p>
+          </div>
+
+          <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-sm font-medium text-gray-700">Last sweep</span>
+              <button type="button" @click="runExpirySweep()" :disabled="expirySweeping"
+                      class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 font-medium disabled:opacity-50">
+                <span x-text="expirySweeping ? 'Queueing…' : 'Run a sweep now'"></span>
+              </button>
+            </div>
+            <p class="text-[11px] text-gray-500 font-mono whitespace-pre-wrap"
+               x-text="expirySweepSummary()"></p>
+          </div>
+
+          <p class="text-[11px] text-amber-600">
+            Deletion runs on a schedule, not instantly, so a resource may sit briefly past
+            its expiry. Two one-hour arming delays stand in the way and neither is
+            configurable: the first sweep after you enable the feature only starts the
+            clock, and turning <strong>Observe only</strong> off starts a second one — so
+            there is always an hour, with the full list visible on
+            <a href="/inventory" class="underline">Inventory</a>, before anything is
+            destroyed. Turning Observe only back on resets that second clock.
+          </p>
+        </div>
+      </template>

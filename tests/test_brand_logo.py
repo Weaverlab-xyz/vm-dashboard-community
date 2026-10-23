@@ -43,6 +43,7 @@ _TMPDB = os.path.join(tempfile.mkdtemp(prefix="brand-logo-test-"), "test.db")
 os.environ.setdefault("DATABASE_URL", f"sqlite:///{_TMPDB}")
 
 from web_dashboard.services import brand_logo, branding, config_service, ui_theme  # noqa: E402
+from _settings_src import settings_source
 
 _TPL = os.path.join(_ROOT, "web_dashboard", "templates")
 _MARK = os.path.join(_TPL, "_brand_mark.html")
@@ -464,7 +465,7 @@ def test_the_favicon_is_left_alone():
 def test_the_settings_panel_keeps_the_logo_out_of_the_colour_payload():
     """`branding` is PATCHed wholesale on Save. A logo in it would ride every colour save
     as base64."""
-    markup = _read(os.path.join(_TPL, "settings.html"))
+    markup = settings_source()
     declared = re.search(r"branding:\s*\{(.*?)\n    \},", markup, re.S).group(1)
     assert "logo" not in declared, "the logo is a member of the colour PATCH payload"
     assert "brandingLogo" in markup, "the panel has no logo state at all"

@@ -1,0 +1,694 @@
+{# Settings slide-over panel "ansible". Included by settings.html inside settingsPage(); the state it binds (panelCfg, panelOpen, …) lives in that page's script. #}
+{%- from "partials/collapsible.html" import collapsible %}
+      <template x-if="panel?.key === 'ansible' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Remote Worker runs three kinds of job — config-management (Ansible),
+            Kubernetes (kubectl/helm), and image-promote — either in-process or as a
+            one-shot cloud task (AWS ECS Fargate, Azure ACI, GCP Cloud Run) with clean
+            egress, chosen <strong>per the job's target cloud</strong>. All three share the
+            per-cloud network settings below. Configure <strong>one</strong> storage backend
+            for Ansible playbooks (S3 / Azure Blob / GCS).
+          </p>
+
+          <!-- ── Runner backends (per target cloud) ── -->
+          <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Runner backends</p>
+          <p class="text-xs text-gray-400 -mt-1">
+            Pick where each job runs <strong>by its target cloud</strong>: in-process on the
+            dashboard host (<em>Local</em>), or as a one-shot task in that cloud — clean egress,
+            for when a TLS-inspecting corporate proxy blocks direct access. Image-promote always
+            runs in its target cloud, so it needs no selector here.
+          </p>
+
+          <!-- Ansible runner — per target cloud -->
+          <div class="rounded-lg border border-gray-200 p-3 space-y-2">
+            <p class="text-sm font-semibold text-gray-700">Ansible (config-mgmt) runner</p>
+            <p class="text-xs text-gray-400 -mt-1">Runs playbooks on your VMs over SSH, chosen by the run's target cloud.</p>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">AWS targets</label>
+                <select x-model="panelCfg.ansible_runner_aws"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <option value="local">Local Docker</option>
+                  <option value="ecs">AWS ECS Fargate</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Azure targets</label>
+                <select x-model="panelCfg.ansible_runner_azure"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <option value="local">Local Docker</option>
+                  <option value="aci">Azure ACI</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">GCP targets</label>
+                <select x-model="panelCfg.ansible_runner_gcp"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <option value="local">Local Docker</option>
+                  <option value="gcp">GCP Cloud Run Jobs</option>
+                </select>
+              </div>
+            </div>
+            <!-- Portainer targets have no cloud: the play calls the configured
+                 Portainer's API, so what matters is which runner that server's
+                 firewall admits. A managed node allows the dashboard's own egress
+                 and not a transient task's. Blank inherits the global runner. -->
+            <div class="pt-1">
+              <label class="block text-sm font-medium text-gray-700 mb-1">
+                Portainer targets
+                <span class="text-gray-400 font-normal">(API plays — no SSH)</span>
+              </label>
+              <select x-model="panelCfg.ansible_runner_portainer"
+                      class="w-full sm:w-1/3 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="">Same as the default runner</option>
+                <option value="local">Local Docker</option>
+                <option value="ecs">AWS ECS Fargate</option>
+                <option value="aci">Azure ACI</option>
+                <option value="gcp">GCP Cloud Run Jobs</option>
+              </select>
+              <p class="text-xs text-gray-400 mt-1">
+                A managed Portainer node's firewall is fail-closed and admits the
+                dashboard's own egress — not a one-shot task's. If a Portainer play
+                times out, either pick <em>Local Docker</em> here or add the runner's
+                range to the node's allowed sources on the Portainer page.
+              </p>
+            </div>
+          </div>
+
+          <!-- Kubernetes runner — per cluster cloud -->
+          <div class="rounded-lg border border-gray-200 p-3 space-y-2">
+            <p class="text-sm font-semibold text-gray-700">Kubernetes (kubectl/helm) runner</p>
+            <p class="text-xs text-gray-400 -mt-1">Runs cluster-API ops (Entitle agent, ESO, mgmt-plane) chosen by the cluster's cloud.</p>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">EKS (AWS)</label>
+                <select x-model="panelCfg.k8s_runner_aws"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <option value="local">In-process</option>
+                  <option value="ecs">AWS ECS Fargate</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">AKS (Azure)</label>
+                <select x-model="panelCfg.k8s_runner_azure"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <option value="local">In-process</option>
+                  <option value="aci">Azure ACI</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">GKE (GCP)</label>
+                <select x-model="panelCfg.k8s_runner_gcp"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <option value="local">In-process</option>
+                  <option value="gcp">GCP Cloud Run Jobs</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <!-- Image-promote runner — always cloud-hosted (no selector): a one-shot
+               task in the *target* cloud, so each cloud's plumbing is configured below. -->
+          <div class="rounded-lg border border-gray-200 p-3 space-y-2">
+            <p class="text-sm font-semibold text-gray-700">Image-promote runner</p>
+            <p class="text-xs text-gray-400 -mt-1">A one-shot container (ECS / ACI / Cloud Run / Container Instances) that converts &amp; stages a promoted disk image in the target cloud. It reads the hub artefact over a short-lived presigned URL, then writes to that cloud's staging bucket.</p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Runner image</label>
+              <input type="text" x-model="panelCfg.promote_runner_image"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="chrweav/dashboard-promote-runner:latest">
+              <p class="text-xs text-gray-400 mt-1">Blank → the public Docker Hub image; set a full registry path to use a private mirror (e.g. your ACR). Used for all four target clouds.</p>
+            </div>
+
+            <!-- Per-target-cloud promote config. All four clouds are shown
+                 unconditionally: the promote runner always runs cloud-hosted
+                 regardless of the Ansible/K8s runner selections above, so gating
+                 these on those selectors would hide config the promote path needs.
+                 Fields bind to promote_runner_* on AnsibleFeatureConfig; the
+                 fallback keys named in the hints are resolved in
+                 promote_runner_service._resolve_*_runner_config. -->
+
+            <!-- AWS — ECS Fargate (image-promote target) -->
+            <div class="rounded-lg border border-gray-200 p-3 space-y-3">
+              {% call collapsible("panelOpen.promoteAws", "AWS — ECS Fargate",
+                                  button_class="text-sm font-semibold text-gray-700 hover:text-gray-900",
+                                  body_class="space-y-3") %}
+              <p class="text-xs text-gray-400 -mt-1">The task role is required and has no fallback — the Ansible runner's role can't write the S3 staging object. The rest falls back to the ECS Ansible-runner plumbing (cluster, subnet, SGs, execution role) and your S3 storage backend.</p>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Task role ARN <span class="text-gray-400 font-normal">(s3:PutObject on the staging bucket — required, no fallback)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_ecs_task_role_arn"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="arn:aws:iam::123456789012:role/promote-runner-task">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Execution role ARN <span class="text-gray-400 font-normal">(image pull + logs; blank → ansible_ecs_execution_role_arn)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_ecs_execution_role_arn"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="arn:aws:iam::123456789012:role/ecsTaskExecutionRole">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Subnet ID <span class="text-gray-400 font-normal">(needs egress to the presigned hub URL; blank → ansible_ecs_subnet_id)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_ecs_subnet_id"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="subnet-0abc1234">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Security Group IDs <span class="text-gray-400 font-normal">(comma-separated; blank → ansible_ecs_security_group_ids)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_ecs_security_group_ids"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="sg-0abc1234,sg-0def5678">
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Staging bucket <span class="text-gray-400 font-normal">(blank → storage_s3_bucket)</span></label>
+                  <input type="text" x-model="panelCfg.promote_runner_aws_staging_bucket"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="my-hub-bucket">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Staging prefix</label>
+                  <input type="text" x-model="panelCfg.promote_runner_aws_staging_prefix"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="promote-staging">
+                </div>
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">ECS cluster <span class="text-gray-400 font-normal">(blank → ansible_ecs_cluster)</span></label>
+                  <input type="text" x-model="panelCfg.promote_runner_ecs_cluster"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="bt-jumpoint">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Task family <span class="text-gray-400 font-normal">(auto-registered on first promote)</span></label>
+                  <input type="text" x-model="panelCfg.promote_runner_ecs_task_family"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="promote-runner">
+                </div>
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">CPU units</label>
+                  <input type="number" min="256" step="256" x-model="panelCfg.promote_runner_ecs_cpu"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="1024">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Memory (MiB)</label>
+                  <input type="number" min="512" step="512" x-model="panelCfg.promote_runner_ecs_memory"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="4096">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Disk (GiB) <span class="text-gray-400 font-normal">21-200</span></label>
+                  <input type="number" min="21" max="200" step="1" x-model="panelCfg.promote_runner_ecs_ephemeral_storage_gib"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="100">
+                  <p class="text-xs text-gray-400 mt-1">Must hold the source disk plus ~2 GiB for the offline image edit. Fargate's implicit default is 20 GiB.</p>
+                </div>
+              </div>
+              {% endcall %}
+            </div>
+
+            <!-- Azure — Container Instances (image-promote target) -->
+            <div class="rounded-lg border border-gray-200 p-3 space-y-3">
+              {% call collapsible("panelOpen.promoteAzure", "Azure — Container Instances",
+                                  button_class="text-sm font-semibold text-gray-700 hover:text-gray-900",
+                                  body_class="space-y-3") %}
+              <p class="text-xs text-gray-400 -mt-1">The runner writes the staged VHD with the dashboard's own Azure service principal, so no extra IAM plumbing is needed — only the resource group and staging account matter, and both fall back to your Azure configuration.</p>
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Staging storage account <span class="text-gray-400 font-normal">(blank → storage_azure_account)</span></label>
+                  <input type="text" x-model="panelCfg.promote_runner_azure_staging_account"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="btdashboardstorage">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Staging container <span class="text-gray-400 font-normal">(blank → storage_azure_container, then playbooks)</span></label>
+                  <input type="text" x-model="panelCfg.promote_runner_azure_staging_container"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="playbooks">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Staging prefix</label>
+                  <input type="text" x-model="panelCfg.promote_runner_azure_staging_prefix"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="promote-staging">
+                </div>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Resource group <span class="text-gray-400 font-normal">(runs the ACI container group; blank → azure_resource_group)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_azure_resource_group"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="bt-dashboard-rg">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Subnet ID <span class="text-gray-400 font-normal">(optional VNet binding for the container group)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_azure_subnet_id"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="/subscriptions/…/subnets/aci-subnet">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Target resource group <span class="text-gray-400 font-normal">(where the resulting managed image lands; blank → azure_resource_group)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_azure_target_resource_group"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="bt-dashboard-rg">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Target storage account ID <span class="text-gray-400 font-normal">(optional ARM ID Azure pins the image's OS disk to — compliance / BYOK)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_azure_target_storage_account_id"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="/subscriptions/…/storageAccounts/btimages">
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Location <span class="text-gray-400 font-normal">(blank → azure_location)</span></label>
+                  <input type="text" x-model="panelCfg.promote_runner_azure_location"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="centralus">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">vCPUs</label>
+                  <input type="number" min="1" step="1" x-model="panelCfg.promote_runner_azure_cpu"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="2">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Memory (GB)</label>
+                  <input type="number" min="1" step="1" x-model="panelCfg.promote_runner_azure_memory_gb"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="4">
+                </div>
+              </div>
+              {% endcall %}
+            </div>
+
+            <!-- GCP — Cloud Run Jobs (image-promote target) -->
+            <div class="rounded-lg border border-gray-200 p-3 space-y-3">
+              {% call collapsible("panelOpen.promoteGcp", "GCP — Cloud Run Jobs",
+                                  button_class="text-sm font-semibold text-gray-700 hover:text-gray-900",
+                                  body_class="space-y-3") %}
+              <p class="text-xs text-gray-400 -mt-1">The project comes from gcp_project_id. The runner needs roles/storage.objectAdmin on the staging bucket — either via the service account below or the dashboard's own SA.</p>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Staging bucket <span class="text-gray-400 font-normal">(holds the disk.raw tar.gz; blank → storage_gcs_bucket)</span></label>
+                  <input type="text" x-model="panelCfg.promote_runner_gcp_staging_bucket"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="my-hub-bucket">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Staging prefix</label>
+                  <input type="text" x-model="panelCfg.promote_runner_gcp_staging_prefix"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="promote-staging">
+                </div>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Runner service account <span class="text-gray-400 font-normal">(optional; email the Cloud Run job runs as)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_gcp_service_account"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="promote-runner@my-project.iam.gserviceaccount.com">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">VPC connector <span class="text-gray-400 font-normal">(optional Serverless VPC Access connector for private egress)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_gcp_vpc_connector"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="projects/my-project/locations/us-east1/connectors/bt-connector">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Image family <span class="text-gray-400 font-normal">(optional family label on the resulting custom image)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_gcp_image_family"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="bt-dashboard-images">
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Region <span class="text-gray-400 font-normal">(blank → gcp_region)</span></label>
+                  <input type="text" x-model="panelCfg.promote_runner_gcp_region"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="us-east1">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">CPU</label>
+                  <input type="text" x-model="panelCfg.promote_runner_gcp_cpu"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="4">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Memory</label>
+                  <input type="text" x-model="panelCfg.promote_runner_gcp_memory"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="16Gi">
+                </div>
+              </div>
+              <p class="text-xs text-gray-400">Cloud Run's /tmp is memory-backed and the GCP path materialises the VHD, a full raw disk, and the tar.gz there, so the default is 4 CPU / 16Gi — multi-GB images OOM at 4Gi. Jobs take whole vCPU only (1, 2, 4, 6, 8), and memory is capped by the CPU count, so raise both together: 2 CPU tops out at 8Gi, 4 at 16Gi, 6 at 24Gi, 8 at 32Gi.</p>
+              {% endcall %}
+            </div>
+
+            <!-- OCI — Container Instances (image-promote target). OCI has no
+                 Ansible/K8s runner, so this is its only remote-worker config.
+                 Shown unconditionally like the others (the OCI region catalog is
+                 static, so it can't gate on "OCI configured"). -->
+            <div class="rounded-lg border border-gray-200 p-3 space-y-3">
+              {% call collapsible("panelOpen.promoteOci", "OCI — Container Instances",
+                                  button_class="text-sm font-semibold text-gray-700 hover:text-gray-900",
+                                  body_class="space-y-3") %}
+              <p class="text-xs text-gray-400 -mt-1">OCI's only remote-worker task is the image-promote runner. The staging bucket is required; the rest fall back to your OCI configuration.</p>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Staging bucket <span class="text-gray-400 font-normal">(Object Storage bucket for the QCOW2 — required)</span></label>
+                  <input type="text" x-model="panelCfg.promote_runner_oci_staging_bucket"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="my-promote-bucket">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Staging prefix</label>
+                  <input type="text" x-model="panelCfg.promote_runner_oci_staging_prefix"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="promote-staging">
+                </div>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Compartment OCID <span class="text-gray-400 font-normal">(blank → uses oci_compartment_ocid)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_oci_compartment"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="ocid1.compartment.oc1..…">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Subnet OCID <span class="text-gray-400 font-normal">(runner VNIC; blank → uses oci_default_subnet_ocid)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_oci_subnet_ocid"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="ocid1.subnet.oc1..…">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Availability domain <span class="text-gray-400 font-normal">(blank → first AD in the compartment)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_oci_availability_domain"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="Uocm:PHX-AD-1">
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">OCPUs</label>
+                  <input type="number" min="1" step="1" x-model="panelCfg.promote_runner_oci_ocpus"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="2">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Memory (GB)</label>
+                  <input type="number" min="1" step="1" x-model="panelCfg.promote_runner_oci_memory_gbs"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="16">
+                </div>
+              </div>
+              {% endcall %}
+            </div>
+          </div>
+
+          <!-- ── Shared cloud infrastructure (only when a cloud runner is selected) ── -->
+          <template x-if="[panelCfg.ansible_runner_aws,panelCfg.ansible_runner_azure,panelCfg.ansible_runner_gcp,panelCfg.k8s_runner_aws,panelCfg.k8s_runner_azure,panelCfg.k8s_runner_gcp].some(v => v && v !== 'local')">
+            <div class="space-y-3">
+              <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Shared cloud infrastructure</p>
+              <p class="text-xs text-gray-400 -mt-1">
+                Used by the Ansible runner, the Kubernetes runner, and the image-promote
+                runner. Only the cloud(s) selected above are shown.
+              </p>
+
+              <!-- Cloud (k8s / database) Ansible image -->
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Cloud (k8s / database) Ansible Image
+                  <span class="text-gray-400 font-normal">— runs localhost plays against Kubernetes clusters &amp; databases</span></label>
+                <input type="text" x-model="panelCfg.ansible_cloud_image"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="chrweav/ansible-cloud:latest">
+                <p class="text-xs text-gray-400 mt-1">Carries kubernetes.core + community.postgresql/mysql/general. The winrm image lacks these, so k8s/DB runs always use this image.</p>
+              </div>
+
+              <!-- AWS — ECS Fargate -->
+              <div class="rounded-lg border border-gray-200 p-3 space-y-3"
+                   x-show="panelCfg.ansible_runner_aws==='ecs' || panelCfg.k8s_runner_aws==='ecs'" x-cloak>
+                <p class="text-sm font-semibold text-gray-700">AWS — ECS Fargate</p>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">ECS Cluster</label>
+                    <input type="text" x-model="panelCfg.ansible_ecs_cluster"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="bt-jumpoint">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">ECS Task Family</label>
+                    <input type="text" x-model="panelCfg.ansible_ecs_task_family"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="ansible-config-mgmt">
+                  </div>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Subnet ID <span class="text-gray-400 font-normal">(private subnet for the Fargate task)</span></label>
+                  <input type="text" x-model="panelCfg.ansible_ecs_subnet_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="subnet-0abc1234">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Security Group IDs <span class="text-gray-400 font-normal">(comma-separated, optional)</span></label>
+                  <input type="text" x-model="panelCfg.ansible_ecs_security_group_ids"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="sg-0abc1234, sg-0def5678">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Execution Role ARN <span class="text-gray-400 font-normal">(task execution role — required; allows image pull + log write)</span></label>
+                  <input type="text" x-model="panelCfg.ansible_ecs_execution_role_arn"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="arn:aws:iam::…:role/ecsTaskExecutionRole">
+                </div>
+              </div>
+
+              <!-- Azure — Container Instances -->
+              <div class="rounded-lg border border-gray-200 p-3 space-y-3"
+                   x-show="panelCfg.ansible_runner_azure==='aci' || panelCfg.k8s_runner_azure==='aci'" x-cloak>
+                <p class="text-sm font-semibold text-gray-700">Azure — Container Instances</p>
+                <p class="text-xs text-gray-400 -mt-1">Resource group + location come from the Azure configuration.</p>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Subnet ID <span class="text-gray-400 font-normal">(optional — for VNet access)</span></label>
+                  <input type="text" x-model="panelCfg.ansible_aci_subnet_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="/subscriptions/.../resourceGroups/.../providers/Microsoft.Network/virtualNetworks/.../subnets/...">
+                </div>
+                <p class="text-xs text-gray-400">ACR credentials <span class="font-normal">(only for a private registry image; blank for Docker Hub)</span>.</p>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">ACR Server</label>
+                    <input type="text" x-model="panelCfg.ansible_aci_acr_server"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="myorg.azurecr.io">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">ACR Username</label>
+                    <input type="text" x-model="panelCfg.ansible_aci_acr_username"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="myorg">
+                  </div>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">ACR Password</label>
+                  <input type="password" x-model="panelCfg.ansible_aci_acr_password"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="••••••••">
+                </div>
+              </div>
+
+              <!-- GCP — Cloud Run Jobs -->
+              <div class="rounded-lg border border-gray-200 p-3 space-y-3"
+                   x-show="panelCfg.ansible_runner_gcp==='gcp' || panelCfg.k8s_runner_gcp==='gcp'" x-cloak>
+                <p class="text-sm font-semibold text-gray-700">GCP — Cloud Run Jobs</p>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Cloud Run Region <span class="text-gray-400 font-normal">(blank = GCP region)</span></label>
+                  <input type="text" x-model="panelCfg.gcp_ansible_cloud_run_region"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="us-central1">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Direct VPC Egress — Network <span class="text-gray-400 font-normal">(preferred; reaches private targets with no standing infra)</span></label>
+                  <input type="text" x-model="panelCfg.gcp_run_network"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="dashboard-sandbox-vpc">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Direct VPC Egress — Subnetwork <span class="text-gray-400 font-normal">(subnet in the Cloud Run region; set with Network — wins over Connector)</span></label>
+                  <input type="text" x-model="panelCfg.gcp_run_subnetwork"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="dashboard-sandbox-vm-subnet">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">VPC Connector <span class="text-gray-400 font-normal">(legacy alternative to Direct VPC Egress)</span></label>
+                  <input type="text" x-model="panelCfg.gcp_ansible_vpc_connector"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="projects/proj/locations/region/connectors/name">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Runner Service Account <span class="text-gray-400 font-normal">(required for ephemeral secrets — the SA the job runs as)</span></label>
+                  <input type="text" x-model="panelCfg.gcp_ansible_runner_service_account"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="ansible-runner@project.iam.gserviceaccount.com">
+                </div>
+              </div>
+
+              <!-- Collect from the dashboard (managed-account checkout on ECS / Cloud Run,
+                   without a copy in the cloud store) -->
+              <div class="rounded-lg border border-emerald-200 bg-emerald-50 p-3 space-y-3"
+                   x-show="panelCfg.ansible_runner_aws==='ecs' || panelCfg.ansible_runner_gcp==='gcp'" x-cloak>
+                <label class="flex items-start gap-2">
+                  <input type="checkbox" x-model="panelCfg.ansible_runner_credential_callback" class="mt-1">
+                  <span>
+                    <span class="text-sm font-semibold text-gray-700">Collect credentials from the dashboard</span>
+                    <span class="block text-xs text-gray-600">Instead of copying a checked-out managed-account credential
+                    into the cloud store, the runner task proves its own cloud identity (ECS: its task role, via STS;
+                    Cloud Run: its service account, via a Google-signed ID token) and collects the credential from the
+                    dashboard, sealed to a key it made. Single-use, bound to the run. Needs the agent URL pinned
+                    (Remote Agents) — the task calls it — and the runner identity below. Takes precedence over
+                    Ephemeral cloud secrets when both are on and it is fully configured.</span>
+                  </span>
+                </label>
+                <div x-show="panelCfg.ansible_runner_credential_callback" x-cloak>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">ECS task role ARN <span class="text-gray-400 font-normal">(the task's own identity; it needs no permissions. Cloud Run uses the runner service account above)</span></label>
+                  <input type="text" x-model="panelCfg.ansible_ecs_task_role_arn"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="arn:aws:iam::123456789012:role/vm-dashboard-ansible-runner">
+                </div>
+              </div>
+
+              <!-- Ephemeral cloud secrets (managed-account checkout on ECS / Cloud Run) -->
+              <div class="rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-3"
+                   x-show="panelCfg.ansible_runner_aws==='ecs' || panelCfg.ansible_runner_gcp==='gcp'" x-cloak>
+                <label class="flex items-start gap-2">
+                  <input type="checkbox" x-model="panelCfg.ansible_cloud_ephemeral_secrets_enabled" class="mt-1">
+                  <span>
+                    <span class="text-sm font-semibold text-gray-700">Ephemeral cloud secrets</span>
+                    <span class="block text-xs text-gray-600">Allow a BeyondTrust managed-account checkout on the ECS / Cloud Run runners. The
+                    checked-out credential is written to the cloud secret store as a short-lived, RBAC-locked secret
+                    (readable only by the runner identity), injected via the provider's secret channel, then
+                    force-deleted after the run. <strong>This copies a PAM-vaulted credential into the cloud store for the
+                    run</strong> — pair it with "Change Password After Release" on the account (or rely on the best-effort
+                    rotate-on-check-in the dashboard applies).</span>
+                  </span>
+                </label>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3" x-show="panelCfg.ansible_cloud_ephemeral_secrets_enabled" x-cloak>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">GC TTL (min)</label>
+                    <input type="number" x-model.number="panelCfg.ansible_ephemeral_secret_ttl_min"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Request duration (min)</label>
+                    <input type="number" x-model.number="panelCfg.ansible_managed_request_duration_min"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  </div>
+                  <div class="col-span-2">
+                    <label class="block text-sm font-medium text-gray-700 mb-1">AWS KMS Key ID <span class="text-gray-400 font-normal">(optional — CMK for true read-restriction; grant Decrypt to the ECS execution role only)</span></label>
+                    <input type="text" x-model="panelCfg.ansible_ephemeral_kms_key_id"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="arn:aws:kms:…:key/… or alias/…">
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <!-- ── Ansible runner ── -->
+          <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Ansible runner</p>
+          <p class="text-xs text-gray-400 -mt-1">Config-management playbooks run on your VMs over SSH.</p>
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">AWS</label>
+              <input type="text" x-model="panelCfg.ansible_aws_user"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="ec2-user">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Azure</label>
+              <input type="text" x-model="panelCfg.ansible_azure_user"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="azureuser">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">GCP</label>
+              <input type="text" x-model="panelCfg.ansible_gcp_user"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="gcp-user">
+            </div>
+          </div>
+          <p class="text-xs text-gray-400 -mt-1">Default SSH login per cloud's stock image.</p>
+
+          <!-- ACI Ansible image (only when the Ansible runner is ACI) -->
+          <div x-show="panelCfg.ansible_runner_azure==='aci'" x-cloak class="space-y-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">ACI Ansible Image</label>
+              <input type="text" x-model="panelCfg.ansible_aci_image"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="willhallonline/ansible:latest">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">SSH Key Vault Secret <span class="text-gray-400 font-normal">(Key Vault secret holding the Ansible SSH private key)</span></label>
+              <input type="text" x-model="panelCfg.ansible_aci_ssh_key_secret_name"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="ansible-ssh-private-key">
+            </div>
+          </div>
+
+          <!-- GCP Ansible image (only when the Ansible runner is GCP) -->
+          <div x-show="panelCfg.ansible_runner_gcp==='gcp'" x-cloak>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Cloud Run Ansible Image</label>
+            <input type="text" x-model="panelCfg.gcp_ansible_image"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="willhallonline/ansible:latest">
+          </div>
+
+          <!-- ── Kubernetes runner (only when not local) ── -->
+          <div x-show="[panelCfg.k8s_runner_aws,panelCfg.k8s_runner_azure,panelCfg.k8s_runner_gcp].some(v => v && v !== 'local')" x-cloak class="space-y-3">
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Kubernetes runner</p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Runner Image <span class="text-gray-400 font-normal">(stock kubectl + helm; default for all clouds — override per-cloud below)</span></label>
+              <input type="text" x-model="panelCfg.k8s_runner_image"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="dtzar/helm-kubectl:latest">
+            </div>
+            <div x-show="panelCfg.k8s_runner_aws && panelCfg.k8s_runner_aws !== 'local'" x-cloak>
+              <label class="block text-sm font-medium text-gray-700 mb-1">AWS Runner Image <span class="text-gray-400 font-normal">(override for EKS; blank → the image above)</span></label>
+              <input type="text" x-model="panelCfg.k8s_runner_image_aws"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     :placeholder="panelCfg.k8s_runner_image || 'dtzar/helm-kubectl:latest'">
+            </div>
+            <div x-show="panelCfg.k8s_runner_azure && panelCfg.k8s_runner_azure !== 'local'" x-cloak>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Azure Runner Image <span class="text-gray-400 font-normal">(override for AKS; e.g. an ACR mirror to avoid Docker Hub)</span></label>
+              <input type="text" x-model="panelCfg.k8s_runner_image_azure"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="myacr.azurecr.io/dtzar/helm-kubectl:latest">
+            </div>
+            <div x-show="panelCfg.k8s_runner_gcp && panelCfg.k8s_runner_gcp !== 'local'" x-cloak>
+              <label class="block text-sm font-medium text-gray-700 mb-1">GCP Runner Image <span class="text-gray-400 font-normal">(override for GKE; blank → the image above)</span></label>
+              <input type="text" x-model="panelCfg.k8s_runner_image_gcp"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     :placeholder="panelCfg.k8s_runner_image || 'dtzar/helm-kubectl:latest'">
+            </div>
+          </div>
+
+          <!-- Storage backend pointer + prereq gate -->
+          <div class="rounded-lg border p-4"
+               :class="storageReady ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'">
+            <p class="text-xs font-semibold uppercase tracking-wide mb-1"
+               :class="storageReady ? 'text-emerald-700' : 'text-amber-700'">
+              Asset storage <span x-show="storageReady" x-cloak>— configured</span>
+              <span x-show="!storageReady" x-cloak>— required</span>
+            </p>
+            <p class="text-sm text-gray-700 mb-2" x-show="storageReady" x-cloak>
+              Active backend: <strong x-text="storageBackendLabel"></strong>. Enable
+              the Remote Worker feature flag below to start running playbooks.
+            </p>
+            <p class="text-sm text-gray-700 mb-2" x-show="!storageReady" x-cloak>
+              The Remote Worker feature flag can't be turned on until at least one
+              storage backend is configured and selected as active. Configure
+              storage on the dedicated <a href="/storage" class="text-blue-600 hover:underline">/storage</a>
+              page, then return here to enable Remote Worker.
+            </p>
+          </div>
+        </div>
+      </template>

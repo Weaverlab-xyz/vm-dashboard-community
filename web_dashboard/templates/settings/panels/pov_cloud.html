@@ -1,0 +1,732 @@
+{# Settings slide-over panel "pov_cloud". Included by settings.html inside settingsPage(); the state it binds (panelCfg, panelOpen, …) lives in that page's script. #}
+      <template x-if="panel?.key === 'pov_cloud' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Run POVs on a public cloud as well as Skytap. The dashboard builds the
+            environment from a cloud template you author here, gives it its own network,
+            suspends it on a schedule and reaps it when the evaluation ends.
+          </p>
+
+          <div class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+            <span class="font-medium">This is a POV-instance integration.</span>
+            On a demo instance it stays unavailable whatever this toggle says — the two
+            profiles are deliberately exclusive. See
+            <a href="/docs/profiles#the-gate" class="underline font-medium">POV Instance</a>.
+          </div>
+
+          <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Provider</p>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">POV cloud provider</label>
+            <select x-model="panelCfg.pov_cloud_platform"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="">None — Skytap only</option>
+              <option value="aws">AWS</option>
+              <option value="azure">Azure</option>
+              <option value="gcp">GCP</option>
+              <option value="oci">OCI</option>
+            </select>
+            <p class="text-xs text-gray-400 mt-1">
+              <strong>One at a time.</strong> A POV instance holds one cloud's credentials,
+              one cloud's quota to watch and one cloud's bill to explain. Switching this
+              does not touch POVs you already built on the old provider — they stay
+              visible, suspendable and destroyable.
+            </p>
+          </div>
+
+          <div class="text-sm text-gray-600 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+            Selecting a provider <span class="font-medium">does not</span> open the cloud
+            consoles. <code>/aws</code> and its API stay unavailable on a POV instance,
+            because their deploys resolve the global BeyondTrust tenant rather than this
+            POV's. Everything here is built through
+            <a href="/pov/templates" class="underline font-medium">POV templates</a>.
+          </div>
+
+          <template x-if="panelCfg.pov_cloud_platform === 'aws'">
+            <div class="space-y-4">
+              <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">AWS credentials</p>
+              <!-- Which credential: a stored key, or the dashboard's own SPIFFE identity
+                   (AssumeRoleWithWebIdentity, no secret stored). Derived on open from what
+                   is stored; see choosePovAwsSource. -->
+              <div class="flex flex-wrap gap-4 text-sm text-gray-700">
+                <label class="flex items-center gap-2">
+                  <input type="radio" name="pov-aws-source" value="key"
+                         :checked="povAwsSource === 'key'" @change="choosePovAwsSource('key')"
+                         class="border-gray-300 text-blue-600 focus:ring-blue-500">
+                  Stored access key
+                </label>
+                <label class="flex items-center gap-2">
+                  <input type="radio" name="pov-aws-source" value="spiffe"
+                         :checked="povAwsSource === 'spiffe'" @change="choosePovAwsSource('spiffe')"
+                         class="border-gray-300 text-blue-600 focus:ring-blue-500">
+                  SPIFFE identity <span class="text-[11px] text-gray-500">no stored secret</span>
+                </label>
+                <label class="flex items-center gap-2">
+                  <input type="radio" name="pov-aws-source" value="spiffe_wlc"
+                         :checked="povAwsSource === 'spiffe_wlc'" @change="choosePovAwsSource('spiffe_wlc')"
+                         class="border-gray-300 text-blue-600 focus:ring-blue-500">
+                  SPIFFE + Workload Credentials <span class="text-[11px] text-gray-500">privileged lease for jobs only</span> <span class="text-[11px] font-medium text-green-700">recommended</span>
+                </label>
+              </div>
+
+              <template x-if="povAwsSource === 'spiffe' || povAwsSource === 'spiffe_wlc'">
+                <div class="space-y-3 rounded-lg border border-gray-200 p-3">
+                  <p class="text-[11px] text-gray-500">
+                    The dashboard presents its own JWT-SVID
+                    (<code class="font-mono">spiffe://&lt;trust domain&gt;/dashboard</code>, audience
+                    <code class="font-mono">sts.amazonaws.com</code>) to AWS STS and assumes the role
+                    below. AWS fetches the issuer's keys from
+                    <code class="font-mono">&lt;issuer&gt;/keys</code>, so the issuer must be public.
+                    <code class="font-mono">terraform/dashboard_federation/aws</code> creates the
+                    OIDC provider and the role; <code class="font-mono">terraform/pov_cloud_aws_policy</code>
+                    holds the permissions a POV needs.
+                  </p>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Role to assume</label>
+                    <input type="text" x-model="panelCfg.aws_federation_role_arn"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="arn:aws:iam::123456789012:role/vm-dashboard-spiffe">
+                    <p class="text-[11px] text-gray-400 mt-1">
+                      The same setting as Settings → Remote Agents → the dashboard's own SPIFFE
+                      identity; the issuer and trust domain are set there too.
+                    </p>
+                  </div>
+                  <div x-show="povAwsStoredKey()"
+                       class="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 space-y-1">
+                    <p>
+                      <span class="font-medium">A stored access key still wins.</span>
+                      While one is stored, every AWS call uses it and the role above is never
+                      assumed. Remove it once Test connection succeeds without it — or remove it
+                      now, save, and test.
+                    </p>
+                    <button type="button" @click="removePovAwsStoredKey()"
+                            class="bg-white border border-amber-300 hover:bg-amber-100 text-amber-900 font-medium px-2.5 py-1 rounded-lg">
+                      Remove stored key
+                    </button>
+                  </div>
+                  <div class="text-[11px] space-y-1">
+                    <template x-if="spiffeIdentity">
+                      <div class="space-y-0.5">
+                        <div>
+                          <span class="text-gray-500">Issuer</span>
+                          <span class="font-mono text-gray-800" x-text="spiffeIdentity.issuer || '—'"></span>
+                        </div>
+                        <div>
+                          <span class="text-gray-500">AWS calls use</span>
+                          <span :class="(spiffeIdentity.sources || {}).aws === 'SPIFFE federation' ? 'text-green-700' : 'text-gray-700'"
+                                x-text="(spiffeIdentity.sources || {}).aws || '—'"></span>
+                          <span class="text-gray-400">(as last saved)</span>
+                        </div>
+                        <template x-if="(spiffeIdentity.tokens || {}).aws">
+                          <div>
+                            <span class="font-mono text-gray-800" x-text="spiffeIdentity.tokens.aws.path"></span>
+                            <span x-show="spiffeIdentity.tokens.aws.present && !spiffeIdentity.tokens.aws.error" class="text-green-700"
+                                  x-text="'valid until ' + new Date(spiffeIdentity.tokens.aws.expires_at * 1000).toLocaleTimeString()"></span>
+                            <span x-show="spiffeIdentity.tokens.aws.error" class="text-red-700" x-text="spiffeIdentity.tokens.aws.error"></span>
+                          </div>
+                        </template>
+                        <p x-show="spiffeIdentity.error" class="text-red-700" x-text="spiffeIdentity.error"></p>
+                      </div>
+                    </template>
+                    <div class="pt-1">
+                      <button type="button" @click="checkSpiffeIssuer()" :disabled="spiffeIssuerCheck.running"
+                              class="text-xs bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-2.5 py-1 rounded-lg disabled:opacity-50"
+                              x-text="spiffeIssuerCheck.running ? 'Checking…' : 'Check the issuer is reachable'"></button>
+                      <template x-for="c in (spiffeIssuerCheck.result ? spiffeIssuerCheck.result.checks : [])" :key="'pov-' + c.name">
+                        <div>
+                          <span :class="c.ok ? 'text-green-700' : 'text-red-700'" x-text="c.ok ? '✓' : '✗'"></span>
+                          <span class="font-medium text-gray-700" x-text="c.name"></span>
+                          <span class="text-gray-500" x-text="c.detail"></span>
+                        </div>
+                      </template>
+                      <p x-show="spiffeIssuerCheck.error" class="text-red-700" x-text="spiffeIssuerCheck.error"></p>
+                    </div>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Everyday = the SPIFFE role above (read-only); jobs = a Workload Credentials
+                   lease. Configuration stays on the Workload Credentials panel: this is its
+                   checklist and its live state, read-only. -->
+              <template x-if="povAwsSource === 'spiffe_wlc'">
+                <div class="space-y-2 rounded-lg border border-gray-200 p-3 text-[11px]">
+                  <p class="text-gray-500">
+                    Pages and API calls assume the role above, which needs only
+                    <code class="font-mono">pov-cloud-read</code>. Build, power and teardown jobs take a
+                    short-lived lease from Workload Credentials instead — its target role carries
+                    <code class="font-mono">pov-cloud-provision</code> — so no write credential is live
+                    between jobs. Workload Credentials authenticates the dashboard with the same SPIFFE
+                    identity (<code class="font-mono">wlc.jwt</code>), so no PAT is stored either.
+                  </p>
+                  <p class="font-medium text-gray-700">On the Workload Credentials panel:</p>
+                  <ul class="list-disc pl-5 text-gray-600 space-y-0.5">
+                    <li>Authentication <span class="font-mono">Workload identity</span>, platform <span class="font-mono">SPIRE</span>, its Service Name and identity audience;</li>
+                    <li>the <span class="font-mono">Workload Credentials</span> audience ticked under Remote Agents → the dashboard's SPIFFE identity;</li>
+                    <li><span class="font-medium">Use dynamic credentials for AWS</span> on, with the provisioning secret named (e.g. <span class="font-mono">dashboard-provision</span>).</li>
+                  </ul>
+                  <template x-if="povWlcSources">
+                    <div class="space-y-0.5 pt-1">
+                      <div>
+                        <span class="text-gray-500">AWS tier</span>
+                        <span :class="povWlcSources.source === 'dynamic' ? 'text-green-700' : 'text-amber-700'"
+                              x-text="povWlcSources.source === 'dynamic' ? 'dynamic (Workload Credentials)' : povWlcSources.source + ' — turn on dynamic AWS credentials on the Workload Credentials panel'"></span>
+                      </div>
+                      <p x-show="povWlcSources.problem" class="text-red-700" x-text="povWlcSources.problem"></p>
+                      <div x-show="povWlcSources.everyday">
+                        <span class="text-gray-500">Everyday</span>
+                        <span :class="povWlcSources.everyday && !povWlcSources.everyday.problem ? 'text-green-700' : 'text-red-700'"
+                              x-text="povWlcSources.everyday ? (povWlcSources.everyday.problem || povWlcSources.everyday.source) : ''"></span>
+                      </div>
+                      <template x-for="l in (povWlcSources.leases || [])" :key="'pov-lease-' + l.purpose">
+                        <div>
+                          <span class="text-gray-500" x-text="l.purpose === 'provision' ? 'Jobs' : l.purpose"></span>
+                          <span class="font-mono text-gray-700" x-text="l.secret_name || '—'"></span>
+                          <span x-show="l.last_error" class="text-red-700" x-text="l.last_error"></span>
+                          <span x-show="!l.last_error && l.usable" class="text-green-700"
+                                x-text="'lease live until ' + new Date(l.expires_at).toLocaleTimeString()"></span>
+                          <span x-show="!l.last_error && !l.usable" class="text-gray-500">minted when a job runs</span>
+                        </div>
+                      </template>
+                      <p class="text-gray-400">As last saved.</p>
+                    </div>
+                  </template>
+                  <button type="button" @click="openPanel(integrations.find(i => i.key === 'workload_credentials'))"
+                          class="text-xs bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-2.5 py-1 rounded-lg">
+                    Open Workload Credentials →
+                  </button>
+                  <p class="text-gray-400">Save this panel first — opening another discards unsaved changes here.</p>
+                </div>
+              </template>
+
+              <div x-show="povAwsSource === 'key'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Access key ID</label>
+                  <input type="text" x-model="panelCfg.aws_access_key_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="AKIA…">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Secret access key</label>
+                  <input type="password" x-model="panelCfg.aws_secret_access_key" autocomplete="new-password"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         :placeholder="(panelCfg._secrets_set || []).includes('aws_secret_access_key')
+                                       ? '•••••••• stored — leave blank to keep'
+                                       : 'Paste the secret access key'">
+                </div>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Default region</label>
+                <input type="text" x-model="panelCfg.aws_region"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="us-east-2">
+                <p class="text-xs text-gray-400 mt-1">
+                  Where a POV builds when its template names no region. A fresh account's
+                  vCPU quota is often lower than a multi-VM template needs — worth checking
+                  before the first build.
+                </p>
+              </div>
+              <p class="text-[11px] text-gray-400">
+                <span x-text="povAwsSource === 'key' ? 'Give this key its own IAM user,' : 'Give the role'"></span>
+                scoped to EC2 in one region. It creates and
+                deletes VPCs, subnets, security groups and instances tagged
+                <code>povManagedBy=vm-dashboard</code>, and nothing else.
+              </p>
+            </div>
+          </template>
+
+
+          <template x-if="panelCfg.pov_cloud_platform === 'azure'">
+            <div class="space-y-4">
+              <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Azure credentials</p>
+              <!-- Which credential: a stored client secret, or the dashboard's own SPIFFE
+                   identity presented as a client assertion to the app's federated
+                   credential. Derived on open; see choosePovAzureSource. -->
+              <div class="flex flex-wrap gap-4 text-sm text-gray-700">
+                <label class="flex items-center gap-2">
+                  <input type="radio" name="pov-azure-source" value="secret"
+                         :checked="povAzureSource === 'secret'" @change="choosePovAzureSource('secret')"
+                         class="border-gray-300 text-blue-600 focus:ring-blue-500">
+                  Stored client secret
+                </label>
+                <label class="flex items-center gap-2">
+                  <input type="radio" name="pov-azure-source" value="spiffe"
+                         :checked="povAzureSource === 'spiffe'" @change="choosePovAzureSource('spiffe')"
+                         class="border-gray-300 text-blue-600 focus:ring-blue-500">
+                  SPIFFE identity <span class="text-[11px] text-gray-500">no stored secret</span>
+                </label>
+                <label class="flex items-center gap-2">
+                  <input type="radio" name="pov-azure-source" value="spiffe_wlc"
+                         :checked="povAzureSource === 'spiffe_wlc'" @change="choosePovAzureSource('spiffe_wlc')"
+                         class="border-gray-300 text-blue-600 focus:ring-blue-500">
+                  SPIFFE + Workload Credentials <span class="text-[11px] text-gray-500">privileged password for jobs only</span> <span class="text-[11px] font-medium text-green-700">recommended</span>
+                </label>
+              </div>
+
+              <template x-if="povAzureSource === 'spiffe' || povAzureSource === 'spiffe_wlc'">
+                <div class="space-y-3 rounded-lg border border-gray-200 p-3">
+                  <p class="text-[11px] text-gray-500">
+                    The dashboard presents its own JWT-SVID
+                    (<code class="font-mono">spiffe://&lt;trust domain&gt;/dashboard</code>, audience
+                    <code class="font-mono">api://AzureADTokenExchange</code>) to Entra ID as a client
+                    assertion for the app registration in <span class="font-medium">Client ID</span>
+                    below, through a federated identity credential on that app. Entra fetches the
+                    issuer's keys from <code class="font-mono">&lt;issuer&gt;/keys</code>, so the issuer
+                    must be public. <code class="font-mono">terraform/dashboard_federation/azure</code>
+                    adds the federated credential; <code class="font-mono">terraform/pov_cloud_azure_role</code>
+                    holds the roles a POV needs.
+                  </p>
+                  <div x-show="povAzureStoredSecret()"
+                       class="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 space-y-1">
+                    <p>
+                      <span class="font-medium">A stored client secret still wins.</span>
+                      While one is stored, every Azure call uses it and the federated credential is
+                      never presented. Remove it once Test connection succeeds without it — or
+                      remove it now, save, and test.
+                    </p>
+                    <button type="button" @click="removePovAzureStoredSecret()"
+                            class="bg-white border border-amber-300 hover:bg-amber-100 text-amber-900 font-medium px-2.5 py-1 rounded-lg">
+                      Remove stored secret
+                    </button>
+                  </div>
+                  <div class="text-[11px] space-y-1">
+                    <template x-if="spiffeIdentity">
+                      <div class="space-y-0.5">
+                        <div>
+                          <span class="text-gray-500">Issuer</span>
+                          <span class="font-mono text-gray-800" x-text="spiffeIdentity.issuer || '—'"></span>
+                        </div>
+                        <div>
+                          <span class="text-gray-500">Azure calls use</span>
+                          <span :class="(spiffeIdentity.sources || {}).azure === 'SPIFFE federation' ? 'text-green-700' : 'text-gray-700'"
+                                x-text="(spiffeIdentity.sources || {}).azure || '—'"></span>
+                          <span class="text-gray-400">(as last saved)</span>
+                        </div>
+                        <template x-if="(spiffeIdentity.tokens || {}).azure">
+                          <div>
+                            <span class="font-mono text-gray-800" x-text="spiffeIdentity.tokens.azure.path"></span>
+                            <span x-show="spiffeIdentity.tokens.azure.present && !spiffeIdentity.tokens.azure.error" class="text-green-700"
+                                  x-text="'valid until ' + new Date(spiffeIdentity.tokens.azure.expires_at * 1000).toLocaleTimeString()"></span>
+                            <span x-show="spiffeIdentity.tokens.azure.error" class="text-red-700" x-text="spiffeIdentity.tokens.azure.error"></span>
+                          </div>
+                        </template>
+                        <p x-show="spiffeIdentity.error" class="text-red-700" x-text="spiffeIdentity.error"></p>
+                      </div>
+                    </template>
+                    <div class="pt-1">
+                      <button type="button" @click="checkSpiffeIssuer()" :disabled="spiffeIssuerCheck.running"
+                              class="text-xs bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-2.5 py-1 rounded-lg disabled:opacity-50"
+                              x-text="spiffeIssuerCheck.running ? 'Checking…' : 'Check the issuer is reachable'"></button>
+                      <template x-for="c in (spiffeIssuerCheck.result ? spiffeIssuerCheck.result.checks : [])" :key="'pov-az-' + c.name">
+                        <div>
+                          <span :class="c.ok ? 'text-green-700' : 'text-red-700'" x-text="c.ok ? '✓' : '✗'"></span>
+                          <span class="font-medium text-gray-700" x-text="c.name"></span>
+                          <span class="text-gray-500" x-text="c.detail"></span>
+                        </div>
+                      </template>
+                      <p x-show="spiffeIssuerCheck.error" class="text-red-700" x-text="spiffeIssuerCheck.error"></p>
+                    </div>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Everyday = the federated app (pov-cloud-read); jobs = a password Workload
+                   Credentials mints onto a SEPARATE target app (pov-cloud-provision).
+                   Configuration stays on the Workload Credentials panel. -->
+              <template x-if="povAzureSource === 'spiffe_wlc'">
+                <div class="space-y-2 rounded-lg border border-gray-200 p-3 text-[11px]">
+                  <p class="text-gray-500">
+                    Pages and API calls run as the app in <span class="font-medium">Client ID</span>,
+                    which needs only the <code class="font-mono">POV cloud read</code> role. Build,
+                    power and teardown jobs use a short-lived password Workload Credentials mints onto
+                    its own <span class="font-medium">target</span> app, which holds
+                    <code class="font-mono">POV cloud provision</code> — so no write-capable secret
+                    exists between jobs. Workload Credentials authenticates the dashboard with the
+                    same SPIFFE identity (<code class="font-mono">wlc.jwt</code>), so no PAT is stored.
+                  </p>
+                  <p class="font-medium text-gray-700">On the Workload Credentials panel:</p>
+                  <ul class="list-disc pl-5 text-gray-600 space-y-0.5">
+                    <li>Authentication <span class="font-mono">Workload identity</span>, platform <span class="font-mono">SPIRE</span>, its Service Name and identity audience;</li>
+                    <li>the <span class="font-mono">Workload Credentials</span> audience ticked under Remote Agents → the dashboard's SPIFFE identity;</li>
+                    <li><span class="font-medium">Use dynamic credentials for Azure</span> on, with the target app's dynamic secret named.</li>
+                  </ul>
+                  <template x-if="povWlcAzure">
+                    <div class="space-y-0.5 pt-1">
+                      <div>
+                        <span class="text-gray-500">Azure tier</span>
+                        <span :class="povWlcAzure.source === 'dynamic' ? 'text-green-700' : 'text-amber-700'"
+                              x-text="povWlcAzure.source === 'dynamic' ? 'dynamic (Workload Credentials)' : povWlcAzure.source + ' — turn on dynamic Azure credentials on the Workload Credentials panel'"></span>
+                      </div>
+                      <p x-show="povWlcAzure.problem" class="text-red-700" x-text="povWlcAzure.problem"></p>
+                      <div x-show="povWlcAzure.everyday">
+                        <span class="text-gray-500">Everyday</span>
+                        <span :class="povWlcAzure.everyday && !povWlcAzure.everyday.problem ? 'text-green-700' : 'text-red-700'"
+                              x-text="povWlcAzure.everyday ? (povWlcAzure.everyday.problem || povWlcAzure.everyday.source) : ''"></span>
+                      </div>
+                      <template x-for="l in (povWlcAzure.leases || [])" :key="'pov-az-lease-' + l.purpose">
+                        <div>
+                          <span class="text-gray-500" x-text="l.purpose === 'provision' ? 'Jobs' : l.purpose"></span>
+                          <span class="font-mono text-gray-700" x-text="l.secret_name || '—'"></span>
+                          <span x-show="l.last_error" class="text-red-700" x-text="l.last_error"></span>
+                          <span x-show="!l.last_error && l.usable" class="text-green-700"
+                                x-text="'lease live until ' + new Date(l.expires_at).toLocaleTimeString()"></span>
+                          <span x-show="!l.last_error && !l.usable" class="text-gray-500">minted when a job runs</span>
+                        </div>
+                      </template>
+                      <p class="text-gray-400">As last saved.</p>
+                    </div>
+                  </template>
+                  <button type="button" @click="openPanel(integrations.find(i => i.key === 'workload_credentials'))"
+                          class="text-xs bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-2.5 py-1 rounded-lg">
+                    Open Workload Credentials →
+                  </button>
+                  <p class="text-gray-400">Save this panel first — opening another discards unsaved changes here.</p>
+                </div>
+              </template>
+
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
+                  <input type="text" x-model="panelCfg.azure_client_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="00000000-0000-0000-0000-000000000000">
+                </div>
+                <div x-show="povAzureSource === 'secret'">
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Client secret</label>
+                  <input type="password" x-model="panelCfg.azure_client_secret" autocomplete="new-password"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         :placeholder="(panelCfg._secrets_set || []).includes('azure_client_secret')
+                                       ? '•••••••• stored — leave blank to keep'
+                                       : 'Paste the client secret'">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Tenant ID</label>
+                  <input type="text" x-model="panelCfg.azure_tenant_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="00000000-0000-0000-0000-000000000000">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Subscription ID</label>
+                  <input type="text" x-model="panelCfg.azure_subscription_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="00000000-0000-0000-0000-000000000000">
+                </div>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Default location</label>
+                <input type="text" x-model="panelCfg.azure_location"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="centralus">
+                <p class="text-xs text-gray-400 mt-1">
+                  Where a POV builds when its template names no region. A fresh
+                  subscription's vCPU quota is often lower than a multi-VM template needs.
+                </p>
+              </div>
+              <p class="text-[11px] text-gray-400">
+                <span x-show="povAzureSource === 'secret'">Give this service principal
+                <span class="font-medium">Contributor</span> on its own subscription, or the
+                <code>POV cloud provision</code> role from <code>terraform/pov_cloud_azure_role</code>.</span>
+                <span x-show="povAzureSource === 'spiffe'">Give the app in Client ID the
+                <code>POV cloud provision</code> role from <code>terraform/pov_cloud_azure_role</code>
+                on a subscription kept for POVs.</span>
+                <span x-show="povAzureSource === 'spiffe_wlc'">Give the app in Client ID
+                <code>POV cloud read</code>, and the Workload Credentials target app
+                <code>POV cloud provision</code>, both from <code>terraform/pov_cloud_azure_role</code>.</span>
+                Each POV becomes one resource group named <code>povenv-&lt;name&gt;</code>,
+                and destroying the POV deletes that group whole.
+              </p>
+              <p class="text-[11px] text-gray-400">
+                Azure requires an admin account on every VM it creates, so the dashboard
+                generates one per POV and stores it encrypted. It is the platform login the
+                Resource Broker install uses, and you can read it back from the POV page.
+              </p>
+            </div>
+          </template>
+
+
+          <template x-if="panelCfg.pov_cloud_platform === 'gcp'">
+            <div class="space-y-4">
+              <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">GCP credentials</p>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Project ID</label>
+                  <input type="text" x-model="panelCfg.gcp_project_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="my-pov-project">
+                  <p class="text-xs text-gray-400 mt-1">
+                    Recorded on every POV built here, so a teardown weeks later aims at
+                    the project the environment actually went into.
+                  </p>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Default region</label>
+                  <input type="text" x-model="panelCfg.gcp_region"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="us-central1">
+                  <p class="text-xs text-gray-400 mt-1">
+                    The zone is resolved from the region, not assembled — us-east1 and
+                    europe-west1 have no <code>-a</code> zone.
+                  </p>
+                </div>
+              </div>
+              <!-- Which credential: a stored service-account key, or the dashboard's own
+                   SPIFFE identity through workload identity federation. Derived on open;
+                   see choosePovGcpSource. -->
+              <div class="flex flex-wrap gap-4 text-sm text-gray-700">
+                <label class="flex items-center gap-2">
+                  <input type="radio" name="pov-gcp-source" value="key"
+                         :checked="povGcpSource === 'key'" @change="choosePovGcpSource('key')"
+                         class="border-gray-300 text-blue-600 focus:ring-blue-500">
+                  Stored service-account key
+                </label>
+                <label class="flex items-center gap-2">
+                  <input type="radio" name="pov-gcp-source" value="spiffe"
+                         :checked="povGcpSource === 'spiffe'" @change="choosePovGcpSource('spiffe')"
+                         class="border-gray-300 text-blue-600 focus:ring-blue-500">
+                  SPIFFE identity <span class="text-[11px] text-gray-500">no stored secret</span>
+                </label>
+                <label class="flex items-center gap-2">
+                  <input type="radio" name="pov-gcp-source" value="spiffe_entitle"
+                         :checked="povGcpSource === 'spiffe_entitle'" @change="choosePovGcpSource('spiffe_entitle')"
+                         class="border-gray-300 text-blue-600 focus:ring-blue-500">
+                  SPIFFE + Entitle <span class="text-[11px] text-gray-500">write role granted just in time</span> <span class="text-[11px] font-medium text-green-700">recommended</span>
+                </label>
+              </div>
+
+              <template x-if="povGcpSource === 'spiffe' || povGcpSource === 'spiffe_entitle'">
+                <div class="space-y-3 rounded-lg border border-gray-200 p-3">
+                  <p class="text-[11px] text-gray-500">
+                    The dashboard presents its own JWT-SVID
+                    (<code class="font-mono">spiffe://&lt;trust domain&gt;/dashboard</code>) to Google
+                    STS through the workload identity provider below, then acts as the service
+                    account. Google fetches the issuer's keys from
+                    <code class="font-mono">&lt;issuer&gt;/keys</code>.
+                    <code class="font-mono">terraform/dashboard_federation/gcp</code> creates the pool,
+                    provider and impersonation binding; <code class="font-mono">terraform/pov_cloud_gcp_role</code>
+                    holds the roles a POV needs.
+                  </p>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Workload identity provider</label>
+                    <input type="text" x-model="panelCfg.dashboard_spiffe_aud_gcp"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/vm-dashboard/providers/spiffe">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Service account to act as</label>
+                    <input type="text" x-model="panelCfg.gcp_federation_service_account"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="vm-dashboard-pov@my-pov-project.iam.gserviceaccount.com">
+                    <p class="text-[11px] text-gray-400 mt-1">
+                      The same settings as Remote Agents → the dashboard's own SPIFFE identity.
+                      With Entitle, this is the account assigned to the dashboard's Entitle user.
+                    </p>
+                  </div>
+                  <div x-show="povGcpStoredKey()"
+                       class="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 space-y-1">
+                    <p>
+                      <span class="font-medium">A stored service-account key still wins.</span>
+                      While one is stored, every GCP call uses it and the SPIFFE identity is never
+                      presented. Remove it once Test connection succeeds without it.
+                    </p>
+                    <button type="button" @click="removePovGcpStoredKey()"
+                            class="bg-white border border-amber-300 hover:bg-amber-100 text-amber-900 font-medium px-2.5 py-1 rounded-lg">
+                      Remove stored key
+                    </button>
+                  </div>
+                  <div class="text-[11px] space-y-1">
+                    <template x-if="spiffeIdentity">
+                      <div class="space-y-0.5">
+                        <div>
+                          <span class="text-gray-500">Issuer</span>
+                          <span class="font-mono text-gray-800" x-text="spiffeIdentity.issuer || '—'"></span>
+                        </div>
+                        <div>
+                          <span class="text-gray-500">GCP calls use</span>
+                          <span :class="(spiffeIdentity.sources || {}).gcp === 'SPIFFE federation' ? 'text-green-700' : 'text-gray-700'"
+                                x-text="(spiffeIdentity.sources || {}).gcp || '—'"></span>
+                          <span class="text-gray-400">(as last saved)</span>
+                        </div>
+                        <template x-if="(spiffeIdentity.tokens || {}).gcp">
+                          <div>
+                            <span class="font-mono text-gray-800" x-text="spiffeIdentity.tokens.gcp.path"></span>
+                            <span x-show="spiffeIdentity.tokens.gcp.present && !spiffeIdentity.tokens.gcp.error" class="text-green-700"
+                                  x-text="'valid until ' + new Date(spiffeIdentity.tokens.gcp.expires_at * 1000).toLocaleTimeString()"></span>
+                            <span x-show="spiffeIdentity.tokens.gcp.error" class="text-red-700" x-text="spiffeIdentity.tokens.gcp.error"></span>
+                          </div>
+                        </template>
+                        <p x-show="spiffeIdentity.error" class="text-red-700" x-text="spiffeIdentity.error"></p>
+                      </div>
+                    </template>
+                    <div class="pt-1">
+                      <button type="button" @click="checkSpiffeIssuer()" :disabled="spiffeIssuerCheck.running"
+                              class="text-xs bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-2.5 py-1 rounded-lg disabled:opacity-50"
+                              x-text="spiffeIssuerCheck.running ? 'Checking…' : 'Check the issuer is reachable'"></button>
+                      <template x-for="c in (spiffeIssuerCheck.result ? spiffeIssuerCheck.result.checks : [])" :key="'pov-gcp-' + c.name">
+                        <div>
+                          <span :class="c.ok ? 'text-green-700' : 'text-red-700'" x-text="c.ok ? '✓' : '✗'"></span>
+                          <span class="font-medium text-gray-700" x-text="c.name"></span>
+                          <span class="text-gray-500" x-text="c.detail"></span>
+                        </div>
+                      </template>
+                      <p x-show="spiffeIssuerCheck.error" class="text-red-700" x-text="spiffeIssuerCheck.error"></p>
+                    </div>
+                  </div>
+                </div>
+              </template>
+
+              <!-- The service account holds POV cloud read; each write asks Entitle for
+                   POV cloud provision on behalf of the machine user it is assigned to. -->
+              <template x-if="povGcpSource === 'spiffe_entitle'">
+                <div class="space-y-3 rounded-lg border border-gray-200 p-3">
+                  <p class="text-[11px] text-gray-500">
+                    The service account holds only <code class="font-mono">POV cloud read</code>.
+                    Before the first write of a build, power change or teardown, the dashboard asks
+                    Entitle for <code class="font-mono">POV cloud provision</code> on behalf of the
+                    Entitle user below, waits for GCP to report the permissions, and lets Entitle's
+                    duration end the grant. One grant serves later writes while it has a third of
+                    its time left. Nothing is revoked early: Entitle's revoke needs a person's token.
+                  </p>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div class="sm:col-span-2">
+                      <label class="block text-sm font-medium text-gray-700 mb-1">Entitle machine user</label>
+                      <input type="text" x-model="panelCfg.entitle_machine_identity_email"
+                             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                             placeholder="vm-dashboard-pov@example.com">
+                      <p class="text-[11px] text-gray-400 mt-1">
+                        A user in the IdP group Entitle syncs, assigned the service account above on
+                        the GCP integration. Requests are made on its behalf.
+                      </p>
+                    </div>
+                    <div>
+                      <label class="block text-sm font-medium text-gray-700 mb-1">Entitle target</label>
+                      <select x-model="panelCfg.pov_gcp_entitle_target_type"
+                              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="role">Role</option>
+                        <option value="bundle">Bundle</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label class="block text-sm font-medium text-gray-700 mb-1">Role or bundle id</label>
+                      <input type="text" x-model="panelCfg.pov_gcp_entitle_target_id"
+                             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                             placeholder="Entitle id of POV cloud provision on the project">
+                    </div>
+                    <div>
+                      <label class="block text-sm font-medium text-gray-700 mb-1">Grant duration (minutes)</label>
+                      <input type="number" min="10" max="1440" x-model.number="panelCfg.pov_gcp_entitle_grant_minutes"
+                             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+                      <p class="text-[11px] text-gray-400 mt-1">
+                        Must be a duration the target's workflow allows, and longer than your
+                        longest build.
+                      </p>
+                    </div>
+                  </div>
+                  <p class="text-[11px] text-gray-400">
+                    Make the target's Entitle workflow auto-approve for the machine user's group, or
+                    every build waits on a person. Test connection checks the user and that the
+                    service account has no standing write role; it never files a request.
+                  </p>
+                </div>
+              </template>
+
+              <div x-show="povGcpSource === 'key'">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Service account key (JSON)</label>
+                <textarea x-model="panelCfg.gcp_service_account_json" rows="4"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          :placeholder="(panelCfg._secrets_set || []).includes('gcp_service_account_json')
+                                        ? '•••••••• stored — leave blank to keep'
+                                        : 'Paste the full service-account JSON key'"></textarea>
+              </div>
+              <p class="text-[11px] text-gray-400">
+                The service account needs <span class="font-medium">Compute Admin</span>
+                (or <code>POV cloud provision</code> from <code>terraform/pov_cloud_gcp_role</code>;
+                with Entitle, only <code>POV cloud read</code> standing) on its project, and the
+                Compute Engine API enabled. Each POV builds its
+                own VPC network, subnet and firewall rule named
+                <code>povenv-&lt;name&gt;-*</code>, plus its VMs.
+              </p>
+            </div>
+          </template>
+
+
+          <template x-if="panelCfg.pov_cloud_platform === 'oci'">
+            <div class="space-y-4">
+              <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">OCI credentials</p>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Tenancy OCID</label>
+                  <input type="text" x-model="panelCfg.oci_tenancy_ocid"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="ocid1.tenancy.oc1..">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">User OCID</label>
+                  <input type="text" x-model="panelCfg.oci_user_ocid"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="ocid1.user.oc1..">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Key fingerprint</label>
+                  <input type="text" x-model="panelCfg.oci_fingerprint"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="aa:bb:cc:dd:..">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Default region</label>
+                  <input type="text" x-model="panelCfg.oci_region"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="us-ashburn-1">
+                </div>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Compartment OCID</label>
+                <input type="text" x-model="panelCfg.oci_compartment_ocid"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="blank = the tenancy root">
+                <p class="text-xs text-gray-400 mt-1">
+                  Recorded on every POV built here, so a teardown weeks later aims at the
+                  compartment the environment actually went into. A POV does
+                  <strong>not</strong> get a compartment of its own — see the docs for why
+                  the obvious analogy to an Azure resource group is the wrong one.
+                </p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">API signing private key (PEM)</label>
+                <textarea x-model="panelCfg.oci_private_key" rows="4"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          :placeholder="(panelCfg._secrets_set || []).includes('oci_private_key')
+                                        ? '•••••••• stored — leave blank to keep'
+                                        : 'Paste the private key PEM'"></textarea>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Key passphrase <span class="font-normal text-gray-400">(optional)</span></label>
+                <input type="password" x-model="panelCfg.oci_private_key_passphrase" autocomplete="new-password"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       :placeholder="(panelCfg._secrets_set || []).includes('oci_private_key_passphrase')
+                                     ? '•••••••• stored — leave blank to keep'
+                                     : 'Only if the key is encrypted'">
+              </div>
+              <p class="text-[11px] text-gray-400">
+                The user needs <span class="font-medium">manage</span> on instances,
+                VCNs, subnets, route tables, security lists and internet gateways in that
+                compartment. Most OCI shapes are Flex and need a size: a template's
+                instance type accepts <code>SHAPE</code>, <code>SHAPE:ocpus</code> or
+                <code>SHAPE:ocpus:memory_gb</code>.
+              </p>
+            </div>
+          </template>
+
+          <div class="mt-3 flex items-center gap-2">
+            <button type="button" @click="testPovCloudConnection()" :disabled="povCloudTest.running"
+                    class="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50">
+              <span x-text="povCloudTest.running ? 'Testing…' : 'Test connection'"></span>
+            </button>
+            <span x-show="povCloudTest.ok === true" x-cloak
+                  class="text-xs text-green-700" x-text="povCloudTest.message"></span>
+          </div>
+          <p x-show="povCloudTest.ok === false" x-cloak
+             class="text-xs text-red-600 mt-2" x-text="povCloudTest.error"></p>
+          <p class="text-[11px] text-gray-400 mt-1">
+            Proves the credential and that the region is enabled for the account. Tests the
+            <strong>saved</strong> values, so save first.
+          </p>
+        </div>
+      </template>

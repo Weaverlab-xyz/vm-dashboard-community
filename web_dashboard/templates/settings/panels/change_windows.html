@@ -1,0 +1,64 @@
+{# Settings slide-over panel "change_windows". Included by settings.html inside settingsPage(); the state it binds (panelCfg, panelOpen, …) lives in that page's script. #}
+      <template x-if="panel?.key === 'change_windows' && !panelLoading">
+        {# The windows editor is shared with the Schedules page, which is where anyone holding
+           change_windows:write manages them -- this drawer is admin-only. See
+           changeWindowsEditor() in static/js/app.js. #}
+        <div class="space-y-4" x-data="changeWindowsEditor()" x-init="cw.load()">
+          <p class="text-sm text-gray-500">
+            A change window is a recurring period during which changes may <strong>start</strong>.
+            Define one here and every run form can book a job into it by name.
+            See <a href="/docs/operations/scheduling/change-windows" class="text-blue-600 underline">the change windows doc</a>.
+          </p>
+
+          <div class="rounded-lg border border-gray-200 bg-gray-50 p-3 text-[11px] text-gray-600">
+            A job that has not started by the time its window closes is marked
+            <strong>missed</strong> and never runs late — that is the point of a window
+            rather than a delay timer. A job that has already <em>started</em> is left to
+            finish: interrupting a Terraform apply or a half-applied playbook is worse
+            than running a few minutes long, so the overrun is recorded instead.
+          </div>
+
+          <!-- The two real settings -->
+          <label class="flex items-start gap-2">
+            <input type="checkbox" x-model="panelCfg.change_approval_required"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            <span class="text-sm text-gray-700">
+              Require approval for scheduled changes
+              <span class="block text-[11px] text-gray-500">
+                A change booked into a window waits for someone holding
+                <span class="font-mono">change_windows:use</span> before it becomes
+                eligible to run. Immediate runs are unaffected — this gates booked
+                changes, not every button in the dashboard.
+              </span>
+            </span>
+          </label>
+
+          <label class="flex items-start gap-2"
+                 x-show="panelCfg.change_approval_required" x-cloak>
+            <input type="checkbox" x-model="panelCfg.change_approval_allow_self"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            <span class="text-sm text-gray-700">
+              Let people approve their own changes
+              <span class="block text-[11px] text-amber-700">
+                Off is the point of the gate — an approval the requester can grant
+                themselves is not an approval. Turn this on only for a single-operator
+                install, where the alternative is not being able to use windows at all.
+              </span>
+            </span>
+          </label>
+
+          <div>
+            <label class="block text-sm text-gray-700 mb-1">
+              Grace period for a one-off time (minutes)
+            </label>
+            <input type="number" min="1" x-model.number="panelCfg.change_window_grace_minutes"
+                   class="w-32 text-sm border border-gray-300 rounded-lg px-3 py-2">
+            <p class="text-[11px] text-gray-500 mt-1">
+              A change booked for a bare time rather than a named window gets this much
+              leeway before it counts as missed. Named windows use their own length.
+            </p>
+          </div>
+
+          {% include "partials/change_windows_editor.html" %}
+        </div>
+      </template>

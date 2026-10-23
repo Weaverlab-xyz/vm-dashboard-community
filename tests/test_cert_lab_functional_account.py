@@ -37,6 +37,7 @@ import os
 import re
 import sys
 import types
+from _settings_src import settings_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -711,7 +712,7 @@ def test_every_account_column_has_a_migration():
 def test_every_new_config_key_is_declared_bound_and_classified():
     conf = _src("web_dashboard/config.py")
     setup = _src("web_dashboard/api/setup.py")
-    panel = _src("web_dashboard/templates/settings.html")
+    panel = settings_source()
     model = setup.split("class CertLabFeatureConfig(")[1].split("\nclass ")[0]
     for key in ("cert_ps_bi_api_key", "cert_ps_bi_run_as_user",
                 "cert_ps_functional_account_mode", "cert_ps_bi_auth",
@@ -733,7 +734,7 @@ def test_the_auth_select_keeps_its_x_init_default():
     """Same trap as the mode select: an unset string key reads back "" from
     /api/setup/feature, not the model default, so a select without x-init renders blank
     and saves "" over it — which here would read as `auto` anyway, but only by accident."""
-    panel = _src("web_dashboard/templates/settings.html")
+    panel = settings_source()
     at = panel.index('x-model="panelCfg.cert_ps_bi_auth"')
     assert "x-init" in panel[at:at + 300]
 
@@ -786,7 +787,7 @@ def test_create_is_the_default_in_both_places_that_declare_it():
 def test_the_mode_select_keeps_its_x_init_default():
     """An unset string key reads back "" from /api/setup/feature, not the model default,
     so a select without x-init renders blank and saves "" over the mode."""
-    panel = _src("web_dashboard/templates/settings.html")
+    panel = settings_source()
     at = panel.index('x-model="panelCfg.cert_ps_functional_account_mode"')
     assert "x-init" in panel[at:at + 300]
 

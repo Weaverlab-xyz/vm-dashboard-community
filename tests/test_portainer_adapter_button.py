@@ -20,6 +20,7 @@ import ast
 import os
 import re
 import sys
+from _settings_src import settings_source
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.join(_HERE, "..")
@@ -521,8 +522,13 @@ def test_the_firewall_reapply_route_exists_and_needs_write():
 _REAPPLY_PAGES = (_PAGE, _SETTINGS)
 
 
+def _page(path):
+    """A reapply page as it renders: Settings with its slide-over panels inlined."""
+    return settings_source() if path == _SETTINGS else _read(path)
+
+
 def _handler(path, name="reapplyPortainerFirewall"):
-    src = _read(path)
+    src = _page(path)
     assert f"async {name}()" in src, f"{os.path.basename(path)}: no {name} handler"
     return src.split(f"async {name}()")[1].split("\n    async ")[0]
 
@@ -533,7 +539,7 @@ def test_the_reapply_button_posts_to_the_route_the_router_declares():
         body = _handler(path)
         assert "'/api/containers/portainer/node/firewall'" in body, os.path.basename(path)
         # And the button is actually rendered, not just defined.
-        assert 'reapplyPortainerFirewall()"' in _read(path), \
+        assert 'reapplyPortainerFirewall()"' in _page(path), \
             f"{os.path.basename(path)}: the handler has no button"
 
 

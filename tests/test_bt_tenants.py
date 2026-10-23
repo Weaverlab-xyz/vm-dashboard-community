@@ -38,6 +38,7 @@ d.Base.metadata.create_all(bind=d.engine)
 
 from web_dashboard.services import (bt_tenant_service as t,  # noqa: E402
                                     bt_tenant_verify, config_service, pov_env_service)
+from _settings_src import settings_source
 
 
 def _name(prefix="acme"):
@@ -433,8 +434,7 @@ def test_every_declaration_of_the_default_region_agrees():
         f"the shipped default {default!r} is not one of the known regions")
     assert EntitleFeatureConfig.model_fields["entitle_api_url"].default == default
 
-    panel = pathlib.Path(_ROOT, "web_dashboard", "templates", "settings.html").read_text(
-        encoding="utf-8")
+    panel = settings_source()
     assert f"this.panelCfg.entitle_api_url = '{default}'" in panel, (
         "the Settings panel prefills a different Entitle region than the app defaults to")
 

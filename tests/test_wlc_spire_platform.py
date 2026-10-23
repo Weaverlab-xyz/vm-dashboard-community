@@ -27,6 +27,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-wlc-spire")
 
 from web_dashboard.services import dashboard_identity  # noqa: E402
 from web_dashboard.services import workload_credentials_service as wlc  # noqa: E402
+from _settings_src import settings_source
 
 ON = {"wlc_auth_mode": "workload", "wlc_site_id": "SITE", "wlc_service_name": "svc",
       "wlc_identity_platform": "spire", "wlc_identity_audience": "beyondtrust-wlc",
@@ -106,8 +107,7 @@ def test_a_missing_file_says_how_to_get_it_written():
 
 
 def test_the_panel_offers_it_and_asks_for_its_audience():
-    html = open(os.path.join(_ROOT, "web_dashboard", "templates", "settings.html"),
-                encoding="utf-8").read()
+    html = settings_source()
     assert '<option value="spire">' in html
     # The audience field is shown on every platform but the projected-file ones.
     assert "x-show=\"!['aws', 'file'].includes(panelCfg.wlc_identity_platform)\"" in html

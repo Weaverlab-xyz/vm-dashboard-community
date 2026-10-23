@@ -21,12 +21,12 @@ import os
 import re
 import sys
 import types
+from _settings_src import settings_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-_SETTINGS_HTML = os.path.join(_ROOT, "web_dashboard", "templates", "settings.html")
 _STORAGE_API = os.path.join(_ROOT, "web_dashboard", "api", "storage.py")
 
 # Simulated config store. Unset keys resolve to "" — exactly what the real
@@ -173,7 +173,7 @@ def test_every_promote_runner_key_has_a_form_field():
     """A promote_runner_* key the API accepts but no form binds is dead config — the
     operator has to PATCH JSON to configure a promote. Pin that every key on the model
     is bound in the Remote Worker panel."""
-    html = open(_SETTINGS_HTML, encoding="utf-8").read()
+    html = settings_source()
     bound = set(re.findall(r"panelCfg\.(promote_runner_[a-z_0-9]+)", html))
     model_keys = {k for k in AnsibleFeatureConfig.model_fields if k.startswith("promote_runner_")}
     assert model_keys, "the panel model lost its promote_runner_* fields"
@@ -204,7 +204,7 @@ def test_every_bound_panel_key_exists_on_some_feature_model():
     equivalent to a per-panel one. It is also the check that matters — a key on the wrong
     panel's model still round-trips, a key on no model at all cannot.
     """
-    html = open(_SETTINGS_HTML, encoding="utf-8").read()
+    html = settings_source()
     # The regex only sees dotted access, so a LITERAL bracket key would slip past it —
     # fail loudly instead of quietly under-checking. Dynamic access (panelCfg[someVar])
     # is fine and deliberately allowed: savePanelConfig iterates the secret-field list
@@ -417,7 +417,7 @@ def test_rancher_and_portainer_ui_panels_are_symmetrical():
     Direction is both ways here, unlike that sweep: the features are mirrors, so a suffix
     bound for one and missing for the other is a gap in whichever panel lacks it, not a
     judgement about which came first."""
-    html = open(_SETTINGS_HTML, encoding="utf-8").read()
+    html = settings_source()
     bound = set(re.findall(r"panelCfg\.((?:rancher|portainer)_ui_[a-z_0-9]+)", html))
     suffixes = lambda prefix: {k[len(prefix):] for k in bound if k.startswith(prefix)}
     rancher, portainer = suffixes("rancher_ui_"), suffixes("portainer_ui_")
@@ -446,7 +446,7 @@ def test_bound_ui_keys_are_declared_on_the_model_their_prefix_names():
     to the other's model the easy copy-paste slip. The union sweep would pass; the panel
     binding it would still save nothing, since patch_feature_config validates against the
     model of the feature in the URL."""
-    html = open(_SETTINGS_HTML, encoding="utf-8").read()
+    html = settings_source()
     for prefix, fields in (("rancher_ui_", set(K8sManagementFeatureConfig.model_fields)),
                            ("portainer_ui_", set(PortainerFeatureConfig.model_fields))):
         bound = set(re.findall(rf"panelCfg\.({prefix}[a-z_0-9]+)", html))
@@ -591,7 +591,7 @@ def test_the_old_bullet_sentinel_is_still_refused():
 
 def test_the_panel_omits_untouched_secrets_and_declares_the_touch_list():
     """The server contract only holds if the client actually implements its half."""
-    html = open(_SETTINGS_HTML, encoding="utf-8").read()
+    html = settings_source()
     assert "_secrets_touched" in html, "the panel must tell the server it is touch-aware"
     assert "noteSecretEdit" in html, "nothing would populate the touch list"
     assert "delete body._secret_fields" in html and "delete body._secrets_set" in html, \
@@ -607,7 +607,7 @@ def test_every_secret_input_is_reachable_by_the_delegated_handler():
     """noteSecretEdit derives the field from x-model, so a panelCfg-bound password input
     with no x-model would silently never register an edit — and would then be
     unsavable. Pin that every masked panel input still carries one."""
-    html = open(_SETTINGS_HTML, encoding="utf-8").read()
+    html = settings_source()
     inputs = re.findall(r"<input\b[^>]*type=\"password\"[^>]*>", html)
     assert len(inputs) > 15, f"only found {len(inputs)} password inputs — did the regex break?"
     missing = [i for i in inputs if "x-model" not in i]

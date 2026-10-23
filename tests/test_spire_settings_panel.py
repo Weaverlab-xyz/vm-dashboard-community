@@ -14,6 +14,7 @@ Skips cleanly without fastapi. Standalone:  python tests/test_spire_settings_pan
 import os
 import re
 import sys
+from _settings_src import settings_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -58,9 +59,7 @@ def test_panel_fields_match_what_the_service_reads():
 
 def test_every_field_is_on_the_page_and_has_a_default():
     from web_dashboard.config import settings
-    with open(os.path.join(_ROOT, "web_dashboard", "templates", "settings.html"),
-              encoding="utf-8") as fh:
-        page = fh.read()
+    page = settings_source()
     for field in _panel_fields():
         assert f"panelCfg.{field}" in page, f"{field} has no input on the Settings page"
         assert hasattr(settings, field), f"{field} has no default in config.settings"

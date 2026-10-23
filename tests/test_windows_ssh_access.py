@@ -39,6 +39,7 @@ from web_dashboard.services import (config_service, ps_vm_hook,  # noqa: E402
                                     terraform_pra_service as pra,
                                     windows_admin_secret as was,
                                     windows_server_hook as wsh)
+from _settings_src import settings_source
 
 _SVC = os.path.join(_ROOT, "web_dashboard", "services")
 _TPL = os.path.join(_ROOT, "web_dashboard", "templates")
@@ -437,8 +438,7 @@ def test_settings_are_declared_and_bound():
     for key, default in (("windows_ssh_enabled", True), ("windows_rdp_default", False)):
         assert Settings.model_fields[key].default is default, key
         assert f"    {key}: bool = {default}" in _read("web_dashboard", "api", "setup.py"), key
-        assert f'x-model="panelCfg.{key}"' in _read("web_dashboard", "templates",
-                                                    "settings.html"), key
+        assert f'x-model="panelCfg.{key}"' in settings_source(), key
 
 
 def test_every_deploy_form_offers_rdp_and_sends_it():

@@ -48,6 +48,7 @@ from web_dashboard.services import entitle_persona_bundles as bundles  # noqa: E
 from web_dashboard.services import entitle_public_api as api  # noqa: E402
 from web_dashboard.services import entitle_registration_service as reg  # noqa: E402
 from web_dashboard.services import entitle_tiers  # noqa: E402
+from _settings_src import settings_source
 
 Base.metadata.create_all(bind=engine)
 
@@ -504,9 +505,7 @@ def test_the_settings_cards_start_with_every_target_bound():
     one blank pin per target and merges the server's answer over it. Its target list
     has to be this module's, or a target added here would render a card that throws."""
     import re
-    path = os.path.join(_ROOT, "web_dashboard", "templates", "settings.html")
-    with open(path, encoding="utf-8") as fh:
-        src = fh.read()
+    src = settings_source()
     m = re.search(r"const ENTITLE_TARGETS = \[([^\]]*)\];", src)
     assert m, "settings.html no longer declares ENTITLE_TARGETS"
     page = re.findall(r"'([a-z]+)'", m.group(1))
