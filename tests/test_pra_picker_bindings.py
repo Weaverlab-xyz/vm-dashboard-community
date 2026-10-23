@@ -67,15 +67,30 @@ def _read(path):
     return open(path, encoding="utf-8").read()
 
 
+# `{% from "partials/x.html" import ... %}` — the markup a page renders from a macro.
+_IMPORT = re.compile(r'\{%\s*from\s+"(partials/[^"]+)"\s+import')
+
+
+def _with_partials(src):
+    """A page's source plus the partials it imports that read ``praPickers``, so a
+    dropdown that moved into a macro is still checked against the page state it reads.
+    (vm_pra_modal keeps its own state, ``vmPraOpts``, and is left out.)"""
+    parts = (_read(os.path.join(_TEMPLATES, p)) for p in _IMPORT.findall(src))
+    return src + "".join(p for p in parts if "praPickers" in p)
+
+
 def _forms():
     """Every template with PRA picker dropdowns, discovered rather than listed — a
-    fifth cloud page gets these guards for free."""
+    fifth cloud page gets these guards for free. Partials hold no state of their own;
+    they are checked through the pages that import them."""
     found = []
     for dp, _, files in os.walk(_TEMPLATES):
+        if os.path.basename(dp) == "partials":
+            continue
         for f in sorted(files):
             if f.endswith(".html"):
                 p = os.path.join(dp, f)
-                src = _read(p)
+                src = _with_partials(_read(p))
                 if "praPickers" in src:
                     found.append((os.path.relpath(p, _ROOT).replace("\\", "/"), src))
     return found

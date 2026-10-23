@@ -276,9 +276,11 @@ def test_each_modal_offers_the_opt_in_and_folds_the_rest_away():
     for cloud, obj in (("aws", "deployForm"), ("azure", "deployModal"),
                        ("gcp", "deployForm"), ("oci", "deployForm")):
         src = _src("templates", cloud, "index.html")
-        box = f'x-model="{obj}.enable_pra"'
+        # The box itself is partials/deploy_options.html; the page names its form.
+        box = f'{{{{ pra_opt_in("{obj}"'
+        assert src.count(box) == 1, cloud
         # AWS's bulk form shares deployForm, so it carries a second box.
-        assert src.count(box) == (2 if cloud == "aws" else 1), cloud
+        assert src.count('{{ bulk_pra_opt_in("deployForm")') == (1 if cloud == "aws" else 0), cloud
         i = src.index(box)
         assert src.rfind("{% if pra_enabled %}", 0, i) > src.rfind("{% endif %}", 0, i), (
             f"{cloud}: the PRA checkbox must only render while PRA is enabled")
