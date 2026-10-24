@@ -16,7 +16,8 @@ three failure modes, none of which announces itself:
     so "it only reorders" has to be asserted rather than assumed.
 
 Source-shape assertions parse files and import nothing. The behavioural ones import
-personas, which needs only config_service and settings.
+personas, which reads config_service, so the file builds the schema in a database of its
+own first rather than relying on one an earlier file left behind.
 
 Runs under pytest, or standalone:
     python tests/test_persona_identity.py
@@ -24,10 +25,17 @@ Runs under pytest, or standalone:
 import os
 import re
 import sys
+import tempfile
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-persona-identity")
+os.environ.setdefault("DATABASE_URL", "sqlite:///" + os.path.join(
+    tempfile.mkdtemp(prefix="persona-identity-"), "test.db"))
+
+from web_dashboard.database import Base, engine  # noqa: E402
+
+Base.metadata.create_all(bind=engine)
 
 _DB = os.path.join(_ROOT, "web_dashboard", "database.py")
 _AUTH = os.path.join(_ROOT, "web_dashboard", "api", "auth.py")
