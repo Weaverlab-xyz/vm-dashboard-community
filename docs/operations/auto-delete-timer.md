@@ -342,7 +342,7 @@ reported the same thing twice.
 | `jobs_worker.py` | Claims `expiry_sweep` and runs the pass. |
 | `services/job_service.py` | `ROUTINE_JOB_TYPES` + the `include_routine` filter that hides completed sweeps on `/jobs`. |
 | `templates/inventory/list.html` | The Expires column and the Extend modal. |
-| `templates/settings/panels/resource_expiry.html` | The panel (its state and save live in `templates/settings.html`). |
+| `templates/settings/panels/resource_expiry.html` | The panel (its state and the sweep live in `templates/settings/script/operations.js`; its save is the shared panel save in `panels.js`). |
 | `jobs`, `cloud_databases`, `k8s_clusters` | Each carries `expires_at` + `expiry_warned_at`. |
 
 Deliberately not built: per-resource schedules, calendar-aware expiry, and any form of

@@ -3,10 +3,10 @@
 A toggle needs **three** things agreeing, in three different files, and getting any one
 wrong fails silently:
 
-1. an entry in the ``integrations[]`` array in ``settings.html`` — the row renders;
+1. an entry in the ``integrations[]`` array (``settings/script/integrations.js``) — the row renders;
 2. a matching key in ``_FEATURE_MODELS`` (``api/setup.py``) — ``PATCH
    /api/setup/feature/{key}`` 404s without it, so the switch throws an error toast;
-3. a matching key in the ``map`` inside ``loadIntegrations`` (``settings.html``) — this
+3. a matching key in the ``map`` inside ``loadIntegrations`` (the same file) — this
    is the nasty one. Miss it and the row renders, the switch saves, and the toggle
    **still shows OFF on every page load** regardless of the real config value, because
    the initial state comes from that map. Nothing errors; it just looks like the setting

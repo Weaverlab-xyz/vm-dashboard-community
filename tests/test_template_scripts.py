@@ -86,10 +86,13 @@ def _extract(text: str) -> list:
 
 
 def _blocks():
-    """(path, first_line_number, source) for every inline script in every template."""
+    """(path, first_line_number, source) for every inline script in every template, and
+    every script file a template includes into one (templates/settings/script/*.js)."""
     for path in sorted(TEMPLATES.rglob("*.html")):
         for line, src in _extract(path.read_text(encoding="utf-8")):
             yield path, line, src
+    for path in sorted(TEMPLATES.rglob("*.js")):
+        yield path, 1, path.read_text(encoding="utf-8")
 
 
 def _scan(src: str):
@@ -363,8 +366,10 @@ def test_static_js_actually_parses():
         print("   (skipped: node not installed)")
         return
     bad = []
-    for path in sorted((pathlib.Path(_ROOT) / "web_dashboard" / "static" / "js")
-                       .rglob("*.js")):
+    web = pathlib.Path(_ROOT) / "web_dashboard"
+    # And the script files a template includes inline (templates/settings/script/), each
+    # of which is whole JavaScript on its own.
+    for path in sorted([*(web / "static" / "js").rglob("*.js"), *(web / "templates").rglob("*.js")]):
         proc = subprocess.run([node, "--check", str(path)],
                               capture_output=True, text=True)
         if proc.returncode != 0:
