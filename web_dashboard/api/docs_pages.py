@@ -330,8 +330,9 @@ _INDEX_SECTIONS = {
 }
 
 
-# Heading text per section. Without this a nested section renders as
-# <h2>profiles/demo/personas</h2> — a directory path where the index wants a phrase.
+# Heading text per section, in the order the /docs index lists them: the app's own order.
+# Without this a nested section renders as <h2>profiles/demo/personas</h2> — a directory
+# path where the index wants a phrase.
 _SECTION_LABELS = {
     "General":                      "Platform reference",
     "getting-started":              "Getting started · per-cloud setup",
@@ -627,8 +628,8 @@ async def doc_index() -> HTMLResponse:
             indexes[section] = href if section == "General" else section
             # Registers the section even when the README is the only .md in it, which is the
             # case for docs/profiles/ -- otherwise that folder's index is unreachable from
-            # here. Also keeps the `sorted(groups)` loop below the one place sections are
-            # ordered.
+            # here. Also keeps the loop below, ordered by _SECTION_LABELS, the one place
+            # sections are ordered.
             groups.setdefault(section, [])
             continue
         title = (_TITLE_OVERRIDES.get(href)
@@ -658,7 +659,10 @@ async def doc_index() -> HTMLResponse:
     parts = ["<h1>Documentation</h1>",
              '<p>Shipped with this build. The API explorer lives at '
              '<a href="/swagger">/swagger</a>.</p>']
-    for section in sorted(groups):
+    # In _SECTION_LABELS's order, which is the app's: its menu groups, then the Settings
+    # groups, then the profiles. Every indexed section has a label (test_docs_conventions).
+    order = list(_SECTION_LABELS)
+    for section in sorted(groups, key=lambda s: (order.index(s) if s in order else len(order), s)):
         label = _html.escape(_SECTION_LABELS.get(section, section))
         index_href = indexes.get(section)
         if index_href:

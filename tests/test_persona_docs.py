@@ -233,11 +233,13 @@ def test_the_docs_shell_stays_persona_blind():
 
 
 def test_the_docs_index_is_not_reordered_by_anything():
-    """The index sorts by section then title, for everybody, always. A persona-ranked index
+    """The index lists its sections in one fixed order, for everybody, always: the order of
+    the _SECTION_LABELS literal, which is the app's menu order. A persona-ranked index
     would be the leak above wearing a different hat."""
     src = _read(_DOCS_PAGES)
-    idx = src.split("def docs_index", 1)[1] if "def docs_index" in src else src
-    assert "sorted(groups)" in idx, "the /docs index no longer sorts its sections plainly"
+    idx = src.split("async def doc_index", 1)[1].split("\n@router", 1)[0]
+    assert "order = list(_SECTION_LABELS)" in idx and "sorted(groups, key=" in idx, (
+        "the /docs index no longer orders its sections by the _SECTION_LABELS literal")
 
 
 def test_the_readme_documents_the_personas_pages():
