@@ -39,10 +39,12 @@ FROM willhallonline/ansible:latest@sha256:969f0990b1ce6669cb6c6096e45047011c99e0
 USER root
 
 # Fixes published after the pinned digest was cut. The nightly Images scan failed on them
-# (2026-10-22: expat CVE-2026-77214, sudo CVE-2026-96512, certifi GHSA-6q48-6c7w-9gw2)
+# (2026-10-22: expat CVE-2026-77214, sudo CVE-2026-96512, certifi GHSA-6q48-6c7w-9gw2;
+# 2026-10-24: brotli CVE-2026-111497, black CVE-2026-114134, filelock CVE-2026-112940)
 # with nothing changed in this repo. The floors make the build fail loudly rather than
 # silently install an older copy; drop a line once the base digest carries that version.
-RUN apk add --no-cache --upgrade "libexpat>=2.9.0-r0" "sudo>=1.9.17_p2-r2"
+RUN apk add --no-cache --upgrade "libexpat>=2.9.0-r0" "sudo>=1.9.17_p2-r2" \
+        "brotli-libs>=1.2.1-r0"
 
 # Upstream installs ansible itself with pip into the system Python, and the libraries its
 # modules import (pywinrm, paramiko, the BeyondTrust library) have to live in that same
@@ -59,6 +61,8 @@ RUN pip install --no-cache-dir \
         "pywinrm>=0.4.3" \
         "requests-ntlm>=1.2.0" \
         "certifi>=2026.10.19" \
+        "black>=26.10.1" \
+        "filelock>=4.2.1" \
  && python -c "import winrm, requests_ntlm; print('pywinrm', winrm.__version__, 'OK')"
 
 # paramiko is the SSH backend ansible.netcommon.network_cli needs for network devices --
