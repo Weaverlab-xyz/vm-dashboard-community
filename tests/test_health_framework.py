@@ -229,6 +229,117 @@ def test_tenants_are_verified_and_the_result_recorded():
     db.close()
 
 
+
+# ── POVs still on a PRA tenant's shared Asset Group ───────────────────────────
+#
+# pov_wireup.tenant_override falls back to the tenant's jump_group_name for a POV wired
+# before per-POV Asset Groups. These pin that Health counts exactly the POVs that fallback
+# still serves, so "zero" really means nothing reads it.
+
+def _pov(db, tenant_id, name, *, group=None, wired=True, status="ready"):
+    from web_dashboard.database import PovEnvironment, PovEnvironmentVM
+    env = PovEnvironment(id=str(uuid.uuid4()), platform="skytap", name=name, status=status,
+                         pra_tenant_id=tenant_id, pra_jump_group_name=group)
+    db.add(env)
+    db.add(PovEnvironmentVM(id=str(uuid.uuid4()), environment_id=env.id,
+                            platform_vm_id=f"vm-{name}",
+                            pra_jump_id="j-1" if wired else None))
+    db.commit()
+    return env
+
+
+def _clear_povs(db):
+    from web_dashboard.database import PovEnvironment, PovEnvironmentVM
+    db.query(PovEnvironmentVM).delete()
+    db.query(PovEnvironment).delete()
+    db.commit()
+
+
+def test_shared_group_povs_are_exactly_the_ones_the_fallback_serves():
+    from web_dashboard.services import pov_wireup
+    db = SessionLocal()
+    _clear_povs(db)
+    tenant, other = str(uuid.uuid4()), str(uuid.uuid4())
+    envs = [
+        _pov(db, tenant, "legacy"),                          # in: wired, no group
+        _pov(db, tenant, "blank", group="  "),               # in: whitespace is no group
+        _pov(db, tenant, "going", status="destroying"),      # in: teardown still reads it
+        _pov(db, tenant, "own", group="pov-own"),            # out: has its own group
+        _pov(db, tenant, "unwired", wired=False),            # out: nothing in any group
+        _pov(db, tenant, "gone", status="destroyed"),        # out: nothing left to resolve
+        _pov(db, other, "elsewhere"),                        # out: another tenant
+    ]
+    got = [e.name for e in pov_wireup.shared_group_povs(db, tenant)]
+    assert got == ["blank", "going", "legacy"], got
+    # The fleet query and the per-POV rule agree on every live POV of this tenant.
+    for env in envs:
+        if env.pra_tenant_id == tenant and env.status != "destroyed":
+            assert (env.name in got) == pov_wireup._on_shared_group(db, env), env.name
+    _clear_povs(db)
+    db.close()
+
+
+def test_the_shared_group_check_is_on_registered_pra_tenants_and_never_fails():
+    from web_dashboard.services import bt_tenant_verify, config_service
+    db = SessionLocal()
+    _clear_povs(db)
+    pra = BeyondTrustTenant(id=str(uuid.uuid4()), kind="pra", name="lab",
+                            base_url="pra.example.com", client_id="c",
+                            secret_enc=config_service.encrypt_value("s"), is_active=True)
+    ps = BeyondTrustTenant(id=str(uuid.uuid4()), kind="password_safe", name="vault",
+                           base_url="ps.example.com", client_id="c",
+                           secret_enc=config_service.encrypt_value("s"), is_active=True)
+    db.add_all([pra, ps])
+    db.commit()
+    for n in range(7):
+        _pov(db, pra.id, f"p{n}")
+    real = bt_tenant_verify.verify
+
+    async def fake(tenant):
+        return True, "issued a token."
+    try:
+        bt_tenant_verify.verify = fake
+        with _Flags("pra_enabled", "password_safe_enabled"):
+            items = asyncio.run(bt_tenants.collect(db))
+    finally:
+        bt_tenant_verify.verify = real
+    by = {i.name: i for i in items}
+    lab = by["Privileged Remote Access: lab"]
+    shared = [c for c in lab.checks if c["key"] == "shared_group"]
+    assert len(shared) == 1 and shared[0]["status"] == core.OK and shared[0]["shared"] == 7
+    assert "p0, p1, p2, p3, p4 and 2 more" in shared[0]["detail"], shared[0]["detail"]
+    assert lab.status == core.OK, "a POV on the shared group must not turn the tenant amber"
+    vault = [i for n, i in by.items() if n.endswith(": vault")][0]
+    assert all(c["key"] != "shared_group" for c in vault.checks), "Password Safe has no Asset Group"
+    _clear_povs(db)
+    db.delete(pra)
+    db.delete(ps)
+    db.commit()
+    db.close()
+
+
+def test_shared_group_note_totals_the_tenants():
+    assert bt_tenants.shared_group_note([]) is None
+    # Password Safe and legacy rows carry no such check, so they say nothing.
+    assert bt_tenants.shared_group_note([{"checks": [{"key": "credential"}]}]) is None
+    some = bt_tenants.shared_group_note([
+        {"checks": [{"key": "credential"}, {"key": "shared_group", "shared": 3}]},
+        {"checks": [{"key": "shared_group", "shared": 0}]},
+        {"checks": [{"key": "shared_group", "shared": 1}]}])
+    assert some["text"].startswith("4 POV(s) on 2 PRA tenant(s)"), some
+    assert some["href"] == bt_tenants.DOCS_HREF
+    none = bt_tenants.shared_group_note([{"checks": [{"key": "shared_group", "shared": 0}]}])
+    assert none["text"].startswith("Every wired POV has its own Asset Group"), none
+
+
+def test_the_shared_group_link_names_a_real_heading():
+    """The note links a docs anchor; a heading renamed there would 404 into the page top."""
+    page, anchor = bt_tenants.DOCS_HREF.removeprefix("/docs/").split("#")
+    with open(os.path.join(_ROOT, "docs", page + ".md"), encoding="utf-8") as fh:
+        headings = [line.lstrip("#").strip() for line in fh if line.startswith("#")]
+    slugs = {re.sub(r"[^a-z0-9 -]", "", h.lower()).replace(" ", "-") for h in headings}
+    assert anchor in slugs, f"no heading in docs/{page}.md slugs to #{anchor}"
+
 # ── PRA Gateways ──────────────────────────────────────────────────────────────
 
 def test_gateway_hosts_and_pra_gateways():
