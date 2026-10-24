@@ -69,7 +69,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover
 from sqlalchemy import inspect, text  # noqa: E402
 
 from web_dashboard import database as db_mod  # noqa: E402
-from web_dashboard import schema_migrations  # noqa: E402
+from web_dashboard import schema_legacy, schema_migrations  # noqa: E402
 from web_dashboard.database import Base, Job, engine, init_db  # noqa: E402
 from web_dashboard.services import job_service  # noqa: E402
 
@@ -97,15 +97,14 @@ def _recorded():
 
 
 def _added_columns():
-    """``[(table, column, rest_of_statement)]`` parsed from the real migration list.
+    """``[(table, column, rest_of_statement)]`` from the real legacy list.
 
-    Parsed from source rather than imported because ``_migrations`` is a local inside
-    ``init_db``, and the parse is the point: the test must see exactly the statements
-    that ship, not a copy of them that can drift.
+    Imported, not copied: the test must see exactly the statements that ship, not a copy
+    of them that can drift.
     """
-    src = open(os.path.join(_ROOT, "web_dashboard/database.py"), encoding="utf-8").read()
-    block = src.split("_migrations = [", 1)[1].split("\n        ]", 1)[0]
-    return re.findall(r'"ALTER TABLE (\w+) ADD COLUMN (\w+)([^"]*)"', block)
+    found = (re.match(r"ALTER TABLE (\w+) ADD COLUMN (\w+)(.*)", stmt)
+             for stmt in schema_legacy.STATEMENTS)
+    return [m.groups() for m in found if m]
 
 
 # ── The one this file exists for ─────────────────────────────────────────────

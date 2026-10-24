@@ -315,8 +315,8 @@ they act, and a raw `sql(...)` step has to be written that way. A failing step r
 migration back, stops the ones after it, and is retried next boot with a warning naming
 it. Never edit, rename or reorder a migration that has shipped.
 
-**Do not add to `init_db`'s `_migrations` list.** It is frozen
-(`tests/test_schema_migrations.py` holds its length). Each database runs it until one boot
+**Do not add to or edit the legacy list in `web_dashboard/schema_legacy.py`.** It is
+frozen (`tests/test_schema_migrations.py` holds its length and a hash of its statements). Each database runs it until one boot
 leaves everything it adds in place, with no statement skipped for lock contention, then
 records `ddl:legacy_statements_v1` and never reads it again. So a statement added there
 would run on new installs and never on upgraded ones. Until a database has recorded it,

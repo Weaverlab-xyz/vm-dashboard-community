@@ -50,7 +50,7 @@ docker compose exec db psql -U dashboardadmin -d vmclidashboard -c "\d users" | 
 If the column is missing the migration didn't run — check
 `docker compose logs app` for ALTER errors and confirm the
 `"ALTER TABLE users ADD COLUMN session_permissions TEXT"` entry is
-present in `database.py:_migrations`.
+present in `web_dashboard/schema_legacy.py`.
 
 ## Step 2 — Wire up test group mappings
 

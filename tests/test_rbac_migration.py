@@ -1,8 +1,8 @@
 """The role columns' migration, exercised against tables that PREDATE it.
 
 `Base.metadata.create_all` only ever proves the fresh-install path: it makes the whole table
-from the model, so every new column is present and no `ALTER TABLE` in `init_db`'s
-`_migrations` list is even reached. The upgrade path -- an existing install whose `users`
+from the model, so every new column is present and no `ALTER TABLE` in the legacy list
+(`web_dashboard/schema_legacy.py`) is even reached. The upgrade path -- an existing install whose `users`
 table was created before these columns existed -- is the one that can break, and it breaks
 differently on each backend:
 
@@ -76,13 +76,9 @@ def _read_database_py():
 
 
 def _migration_statements():
-    """The raw SQL strings in `init_db`'s `_migrations` list that mention a new column."""
-    src = _read_database_py()
-    block = src.split("_migrations = [", 1)[1].split("\n        ]", 1)[0]
-    stmts = re.findall(r'"((?:ALTER TABLE|CREATE INDEX)[^"]*)"', block)
-    assert len(stmts) > 100, (
-        "found only %d migration statements — the list parse broke" % len(stmts))
-    return stmts
+    """The ALTER TABLE / CREATE INDEX statements in the frozen legacy list."""
+    from web_dashboard.schema_legacy import STATEMENTS
+    return [s for s in STATEMENTS if s.startswith(("ALTER TABLE", "CREATE INDEX"))]
 
 
 def _ours():
