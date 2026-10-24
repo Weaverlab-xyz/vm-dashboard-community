@@ -4608,6 +4608,29 @@ _BACKFILL_V1_PHANTOM_ADMIN = (
 # deriving it live is worse, not better). After widening those rows, call
 # `role_service.reconcile()` so every assignee's materialised copy picks the change up --
 # widening the role alone changes nothing for anyone already holding it.
+def _commit_marked(db, key: str) -> bool:
+    """Commit a marker-guarded data migration. False when another process got there first.
+
+    These run outside init_db's advisory lock, so two processes booting together (the
+    image's two gunicorn workers, or app and worker) can both find the marker absent and
+    both do the work. The marker's primary key lets one commit; the other's whole
+    transaction rolls back, which is the right outcome -- but it used to surface as a
+    logged failure, and for the empty-permission migration as an ERROR saying users
+    were denied, when the work was done.
+    """
+    import logging as _logging
+    from sqlalchemy.exc import IntegrityError
+    try:
+        db.commit()
+        return True
+    except IntegrityError:
+        db.rollback()
+        if db.query(SchemaMarker).filter(SchemaMarker.key == key).first() is None:
+            raise
+        _logging.getLogger(__name__).info("%s: another process applied it first", key)
+        return False
+
+
 _BACKFILL_V1_MARKER = "rbac_scope_backfill_v1"
 
 
@@ -4689,8 +4712,7 @@ def _backfill_new_permission_scopes(db) -> int:
         key=_BACKFILL_V1_MARKER,
         detail=f"widened {changed} row(s) with {len(_BACKFILL_V1_SCOPES)} new scopes",
     ))
-    db.commit()
-    return changed
+    return changed if _commit_marked(db, _BACKFILL_V1_MARKER) else 0
 
 
 _EMPTY_MEANS_NOTHING_MARKER = "rbac_empty_means_nothing_v1"
@@ -4758,8 +4780,7 @@ def _materialise_empty_permission_maps(db) -> int:
         detail=(f"wrote the full-access map onto {users} user(s) and "
                 f"{mappings_changed} group mapping(s) that held an empty one"),
     ))
-    db.commit()
-    return users + mappings_changed
+    return users + mappings_changed if _commit_marked(db, _EMPTY_MEANS_NOTHING_MARKER) else 0
 
 
 _RETIRE_LEVELS_MARKER = "rbac_retire_unenforced_levels_v1"
@@ -4851,8 +4872,7 @@ def _retire_unenforced_levels(db) -> int:
         key=_RETIRE_LEVELS_MARKER,
         detail=f"stripped retired levels from {changed} stored map(s)",
     ))
-    db.commit()
-    return changed
+    return changed if _commit_marked(db, _RETIRE_LEVELS_MARKER) else 0
 
 
 _PRESENTER_OWN_POV_MARKER = "rbac_presenter_own_pov_v1"
@@ -4890,8 +4910,7 @@ def _grant_presenter_own_pov(db) -> int:
             changed = 1
     db.add(SchemaMarker(key=_PRESENTER_OWN_POV_MARKER,
                         detail=f"granted pov_own write+delete to {changed} built-in role(s)"))
-    db.commit()
-    return changed
+    return changed if _commit_marked(db, _PRESENTER_OWN_POV_MARKER) else 0
 
 
 _PRESENTER_OWN_ONLY_MARKER = "rbac_presenter_own_only_v1"
@@ -4926,8 +4945,7 @@ def _narrow_presenter_to_own_povs(db) -> int:
             changed = 1
     db.add(SchemaMarker(key=_PRESENTER_OWN_ONLY_MARKER,
                         detail=f"narrowed {changed} built-in presenter role(s) to own POVs"))
-    db.commit()
-    return changed
+    return changed if _commit_marked(db, _PRESENTER_OWN_ONLY_MARKER) else 0
 
 
 # How many times init_db re-runs create_all on SQLite after losing the race below.

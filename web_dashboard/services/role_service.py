@@ -524,7 +524,25 @@ def seed_builtins(db: Session) -> int:
     the literal is never an administrator's choice -- it is a release that corrected the
     wording, and without this the correction reached new installs only. POV Presenter's
     said "wake environments" for a role that cannot wake one.
+
+    Two processes booting together (the image's two gunicorn workers) can both find a
+    slug missing. The slower one's insert fails on the unique slug; that is the other
+    process having seeded it, so it rolls back and returns 0 rather than failing the
+    reconcile that follows it in init_db.
     """
+    from sqlalchemy.exc import IntegrityError
+    try:
+        return _insert_builtins(db)
+    except IntegrityError:
+        db.rollback()
+        slugs = {spec["slug"] for spec in _BUILTIN_ROLES}
+        have = {slug for (slug,) in db.query(AccessRole.slug).filter(AccessRole.slug.in_(slugs))}
+        if have != slugs:
+            raise
+        return 0
+
+
+def _insert_builtins(db: Session) -> int:
     created = 0
     refreshed = False
     for spec in _BUILTIN_ROLES:
