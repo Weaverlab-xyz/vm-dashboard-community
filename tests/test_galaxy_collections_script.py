@@ -40,7 +40,7 @@ def _run(fails, cached=()):
         bindir = os.path.join(work, "bin")
         os.makedirs(bindir)
         fake = os.path.join(bindir, "ansible-galaxy")
-        with open(fake, "w") as fh:
+        with open(fake, "w", encoding="utf-8") as fh:
             fh.write(_FAKE)
         os.chmod(fake, 0o755)
         dest = os.path.join(work, "collections")
@@ -54,8 +54,8 @@ def _run(fails, cached=()):
                    GITHUB_OUTPUT=out)
         proc = subprocess.run(["bash", _SCRIPT, *_COLLECTIONS], env=env,
                               capture_output=True, text=True, timeout=60)
-        calls = int(open(env["FAKE_STATE"]).read()) if os.path.exists(env["FAKE_STATE"]) else 0
-        output = open(out).read() if os.path.exists(out) else ""
+        calls = int(open(env["FAKE_STATE"], encoding="utf-8").read()) if os.path.exists(env["FAKE_STATE"]) else 0
+        output = open(out, encoding="utf-8").read() if os.path.exists(out) else ""
         return proc.returncode, proc.stdout + proc.stderr, calls, output
     finally:
         shutil.rmtree(work, ignore_errors=True)
