@@ -44,6 +44,7 @@ import itertools
 import os
 import re
 import sys
+from _pov_api_src import pov_api_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -55,7 +56,6 @@ _PERSONAS = os.path.join(_SVC, "personas.py")
 _CARDS = os.path.join(_SVC, "pov_cards.py")
 _SERVICE = os.path.join(_SVC, "pov_use_cases.py")
 _MAIN = os.path.join(_ROOT, "web_dashboard", "main.py")
-_API = os.path.join(_ROOT, "web_dashboard", "api", "pov.py")
 _DETAIL = os.path.join(_TPL, "pov", "detail.html")
 _LIST = os.path.join(_TPL, "pov", "index.html")
 _NAV = os.path.join(_TPL, "_nav_links.html")
@@ -708,7 +708,7 @@ def test_the_list_row_counts_only_what_this_pov_can_run():
 # ── the API ──────────────────────────────────────────────────────────────────
 
 def test_the_endpoints_exist_and_carry_the_same_auth_as_their_neighbours():
-    src = _read(_API)
+    src = pov_api_source()
     # Matched WITHOUT the closing paren: these decorators carry a `dependencies=[...]`
     # argument now, and an exact `")` marker silently stops matching -- which reads as
     # "missing route" when the route is right there.
@@ -732,7 +732,7 @@ def test_the_endpoints_exist_and_carry_the_same_auth_as_their_neighbours():
 
 
 def test_an_unknown_card_id_is_refused_rather_than_stored():
-    src = _read(_API)
+    src = pov_api_source()
     # Without the closing paren -- see the note in the auth test above.
     body = src.split('@router.post("/managed/{env_id}/use-cases/{card_id}"', 1)[1]
     body = body.split("\n@router.", 1)[0]
@@ -743,7 +743,7 @@ def test_an_unknown_card_id_is_refused_rather_than_stored():
 def test_the_list_endpoint_does_not_pay_for_the_wire_up_twice():
     """_serialize already computes pov_wireup.describe per row. Recomputing it for the
     summary would put a second per-VM query on the list endpoint for numbers it holds."""
-    src = _read(_API)
+    src = pov_api_source()
     block = src.split("def _serialize(", 1)[1].split("\ndef ", 1)[0]
     assert block.count("pov_wireup.describe(") == 1, \
         "_serialize computes the wire-up state more than once"

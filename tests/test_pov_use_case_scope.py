@@ -31,7 +31,6 @@ _TMPDB = os.path.join(tempfile.mkdtemp(prefix="pov-scope-test-"), "test.db")
 os.environ.setdefault("DATABASE_URL", f"sqlite:///{_TMPDB}")
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-pov-scope")
 
-_API = os.path.join(_ROOT, "web_dashboard", "api", "pov.py")
 _ACCESSOR_API = os.path.join(_ROOT, "web_dashboard", "api", "pov_accessor.py")
 _DETAIL = os.path.join(_ROOT, "web_dashboard", "templates", "pov", "detail.html")
 _LIST = os.path.join(_ROOT, "web_dashboard", "templates", "pov", "index.html")
@@ -55,6 +54,7 @@ from web_dashboard.database import (PovBlueprint, PovEnvironment,  # noqa: E402
                                     SessionLocal, init_db)
 from web_dashboard.services import (pov_blueprint_service, pov_cards,  # noqa: E402
                                     pov_runbooks, pov_use_case_scope as S, pov_use_cases)
+from _pov_api_src import pov_api_source
 
 
 def _read(path):
@@ -275,7 +275,7 @@ def test_the_scope_route_saves_refuses_and_404s():
 # ── wiring ───────────────────────────────────────────────────────────────────
 
 def test_the_scope_route_is_owner_gated_and_404s_like_the_tenants_route():
-    src = _read(_API)
+    src = pov_api_source()
     m = re.search(r'@router\.put\("/managed/\{env_id\}/use-case-scope", '
                   r'dependencies=_POV_WRITE_OWN\)\s*\ndef set_use_case_scope', src)
     assert m, "PUT /managed/{env_id}/use-case-scope is missing or not owner-gated"

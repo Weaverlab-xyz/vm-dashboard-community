@@ -825,8 +825,9 @@ def require_pov_env_access(request: Request, current_user: User = Depends(get_cu
     """Refuse a POV this user was not granted, for every route that names one.
 
     Deliberately a ROUTER-level dependency keyed on ``request.path_params`` rather than a
-    check inside each handler. ``api/pov.py`` has ~40 routes and ``{env_id}`` appears in
-    most of them; a per-handler check is a thing every future route has to remember, and
+    check inside each handler. The POV router (``api/pov.py`` and the route modules that
+    register on it) has ~40 routes and ``{env_id}`` appears in most of them; a per-handler
+    check is a thing every future route has to remember, and
     the one that forgets is silent. This way the guard is applied once, to the router, and
     a new route is covered the day it is written.
 

@@ -34,6 +34,7 @@ import sys
 import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
+from _pov_api_src import pov_api_source
 
 
 def _utcnow():
@@ -48,7 +49,7 @@ os.environ.setdefault("DATABASE_URL", f"sqlite:///{_TMPDB}")
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-pov-summary")
 
 _SVC = os.path.join(_ROOT, "web_dashboard", "services")
-_API = os.path.join(_ROOT, "web_dashboard", "api", "pov.py")
+_CLOSEOUT_API = os.path.join(_ROOT, "web_dashboard", "api", "pov_closeout.py")
 _SERVICE = os.path.join(_SVC, "pov_summary.py")
 _DETAIL = os.path.join(_ROOT, "web_dashboard", "templates", "pov", "detail.html")
 _LIST = os.path.join(_ROOT, "web_dashboard", "templates", "pov", "index.html")
@@ -147,7 +148,7 @@ def _fixture():
 def test_the_archive_route_is_declared_before_the_parameterised_one():
     """The third time this repo meets this trap. Below it, "archive" is captured as an
     environment id and the endpoint answers "No such POV environment" — wrong, and silent."""
-    src = _read(_API)
+    src = pov_api_source()
     assert src.index('@router.get("/managed/archive")') < \
         src.index('@router.get("/managed/{env_id}")'), \
         "/managed/archive is declared after /managed/{env_id} and would be shadowed"
@@ -187,7 +188,7 @@ def test_the_archive_is_a_light_projection_not_the_serializer():
 
 def test_the_summary_serves_a_finished_pov():
     """It is the endpoint written for after a POV is over."""
-    route = _code(_API, "get_summary")
+    route = _code(_CLOSEOUT_API, "get_summary")
     # `status_code=404` is not a status filter, so name the filter rather than the word.
     for filtering in ("STATUS_DESTROYED", "PovEnvironment.status", ".filter("):
         assert filtering not in route, \

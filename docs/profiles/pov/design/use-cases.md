@@ -159,8 +159,8 @@ until then; `database.py`'s migration list carries the rename.
 This is the first thing in the card stack that **writes**, which is worth naming: a card
 navigates and never starts work. A tick is not that — it spends nothing, builds nothing,
 reaches no tenant — and it does not live in the registry at all. `services/pov_cards` stays
-a pure read; the write lands in `api/pov.py`, behind the auth every other POV action
-already carries.
+a pure read; the write lands in `api/pov_closeout.py`, on the POV router and behind the
+auth every other POV action already carries.
 
 ## Choosing the POV's use cases
 

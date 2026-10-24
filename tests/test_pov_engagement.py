@@ -43,6 +43,7 @@ from web_dashboard.api import auth as auth_api  # noqa: E402
 from web_dashboard.api import pov as pov_api  # noqa: E402
 from web_dashboard.services import pov_engagement as eng  # noqa: E402
 from web_dashboard.services import pov_use_cases  # noqa: E402
+from _pov_api_src import pov_api_source
 
 NOW = datetime(2026, 10, 20, 12, 0, 0)
 
@@ -222,7 +223,7 @@ def test_a_page_of_povs_costs_a_fixed_number_of_queries():
 
 
 def test_the_list_and_detail_endpoints_carry_it():
-    src = open(pov_api.__file__, encoding="utf-8").read()
+    src = pov_api_source()
     body = src.split("def list_managed(", 1)[1].split("\n@router", 1)[0]
     assert "pov_engagement.describe_many(db, rows)" in body
     detail = src.split("def get_managed(", 1)[1].split("\n@router", 1)[0]

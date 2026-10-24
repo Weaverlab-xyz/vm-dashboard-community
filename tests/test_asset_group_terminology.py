@@ -20,6 +20,7 @@ Run: python tests/test_asset_group_terminology.py   (or under pytest)
 import os
 import re
 import sys
+from _pov_api_src import pov_api_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -86,7 +87,7 @@ def test_persisted_names_are_untouched():
     assert "bt_jump_group_name" in cfg, "the bt_jump_group_name setting was renamed"
     tenants = _read(os.path.join(_ROOT, "web_dashboard", "services", "bt_tenant_service.py"))
     assert '"jump_group_name"' in tenants, "the stored tenant option key was renamed"
-    wireup = _read(os.path.join(_ROOT, "web_dashboard", "api", "pov.py"))
+    wireup = pov_api_source()
     assert '"pov_env_jump_group_move"' in wireup, "a persisted job type was renamed"
 
 

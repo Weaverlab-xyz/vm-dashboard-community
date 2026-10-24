@@ -269,7 +269,8 @@ def test_every_row_field_the_band_reads_is_one_the_server_sends():
     which is the same shape as a tile pointed at an endpoint nobody wrote.
     """
     import glob
-    srcs = [os.path.join(_ROOT, "web_dashboard", "api", "pov.py")]
+    from _pov_api_src import pov_api_paths
+    srcs = pov_api_paths()
     srcs += glob.glob(os.path.join(_ROOT, "web_dashboard", "services", "pov_*.py"))
     # The spend and expiry halves of a row are described by services that are not named
     # for POVs, because both are shared with the estate inventory.
