@@ -69,6 +69,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover
 from sqlalchemy import inspect, text  # noqa: E402
 
 from web_dashboard import database as db_mod  # noqa: E402
+from web_dashboard import schema_migrations  # noqa: E402
 from web_dashboard.database import Base, Job, engine, init_db  # noqa: E402
 from web_dashboard.services import job_service  # noqa: E402
 
@@ -78,6 +79,21 @@ def _reset_schema():
     with engine.begin() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE"))
         conn.execute(text("CREATE SCHEMA public"))
+
+
+def _forget_legacy():
+    """An install from before the ledger: nothing records that the legacy list ran.
+
+    Without this the second init_db below would skip the list -- correctly, since the
+    first one recorded it -- and the upgrade would never be exercised."""
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM schema_markers WHERE key = :k"),
+                     {"k": schema_migrations.LEGACY_KEY})
+
+
+def _recorded():
+    with engine.connect() as conn:
+        return schema_migrations.LEGACY_KEY in schema_migrations.applied(conn)
 
 
 def _added_columns():
@@ -112,6 +128,7 @@ def test_every_migration_applies_on_an_upgrade():
     with engine.begin() as conn:
         for table, column, _rest in adds:
             conn.execute(text(f"ALTER TABLE {table} DROP COLUMN IF EXISTS {column}"))
+    _forget_legacy()
 
     init_db()                      # now every ALTER must genuinely run
 
@@ -128,6 +145,69 @@ def test_every_migration_applies_on_an_upgrade():
         "these migrations did not apply on PostgreSQL — each was swallowed by its "
         "savepoint as if it were a redundant 'column already exists', so the column is "
         "silently absent on every upgraded install:\n  " + "\n  ".join(missing))
+    assert _recorded(), "the upgrade applied every column but did not record the list"
+
+
+# ── The ledger (web_dashboard/schema_migrations.py) ──────────────────────────
+
+def _ddl_during(fn):
+    from sqlalchemy import event
+    seen = []
+
+    def listen(conn, cursor, statement, *args):
+        if re.match(r"\s*(ALTER TABLE|CREATE (UNIQUE )?INDEX)", statement, re.I):
+            seen.append(statement)
+    event.listen(engine, "before_cursor_execute", listen)
+    try:
+        fn()
+    finally:
+        event.remove(engine, "before_cursor_execute", listen)
+    return seen
+
+
+def test_a_recorded_database_boots_without_touching_a_table():
+    """The point of the ledger on PostgreSQL. Every legacy statement, no-op or not, takes
+    ACCESS EXCLUSIVE on its table until init_db commits -- the lock pile-up behind the
+    2026-09-16 outage and the 2026-09-25 deadlock. Once recorded, a boot takes none."""
+    _reset_schema()
+    init_db()
+    assert _recorded(), "a new PostgreSQL install did not record the legacy list"
+    issued = _ddl_during(init_db)
+    assert issued == [], f"a recorded boot still issued {len(issued)} DDL statement(s)"
+
+
+def test_lock_contention_leaves_the_list_unrecorded():
+    """A statement that times out never ran. The record waits for a boot where none did,
+    even though every column happens to be present (so the effect check alone passes)."""
+    import threading
+    _reset_schema()
+    init_db()
+    _forget_legacy()
+    holding, release = threading.Event(), threading.Event()
+
+    def hold_jobs():
+        with engine.connect() as other:
+            other.execute(text("BEGIN"))
+            other.execute(text("LOCK TABLE jobs IN ACCESS SHARE MODE"))
+            holding.set()
+            release.wait(60)
+            other.execute(text("ROLLBACK"))
+    t = threading.Thread(target=hold_jobs)
+    t.start()
+    holding.wait(10)
+    saved = db_mod._DDL_LOCK_TIMEOUT_MS
+    db_mod._DDL_LOCK_TIMEOUT_MS = 50          # each contended ALTER on jobs gives up fast
+    try:
+        init_db()
+    finally:
+        db_mod._DDL_LOCK_TIMEOUT_MS = saved
+        release.set()
+        t.join()
+    assert not _recorded(), (
+        "recorded the legacy list on a boot where ALTER TABLE jobs timed out -- that "
+        "statement never ran, and a recorded list is never read again")
+    init_db()                                 # uncontended: now it records
+    assert _recorded()
 
 
 # The static twin of the test above — "no BOOLEAN DEFAULT 0 anywhere in the migration
