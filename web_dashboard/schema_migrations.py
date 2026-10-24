@@ -54,9 +54,16 @@ def applied(conn) -> set:
 
 
 def _record(conn, key: str, detail: str) -> None:
+    """Record ``key``, or leave it as another process already recorded it.
+
+    SQLite has no advisory lock: the image's ``gunicorn -w 2`` boots two workers on the
+    same fresh file, both find the ledger empty, and both get here. A UNIQUE failure in
+    the slower one would abort its startup and take the container down with it.
+    """
     from .utils.clock import utcnow
     conn.execute(text("INSERT INTO schema_markers (key, applied_at, detail) "
-                      "VALUES (:k, :t, :d)"), {"k": key, "t": utcnow(), "d": detail})
+                      "VALUES (:k, :t, :d) ON CONFLICT (key) DO NOTHING"),
+                 {"k": key, "t": utcnow(), "d": detail})
 
 
 # ── the frozen legacy list ────────────────────────────────────────────────────
