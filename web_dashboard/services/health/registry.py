@@ -39,7 +39,10 @@ COLLECTORS = (
         interval_minutes=30, flags=("pra_enabled", "password_safe_enabled"),
         personas=("cloudops", "devops", "hypervisor", "itops", "ot", "dba", "sre",
                   "netadmin", "security", "idarch"),
-        description="Whether each PRA and Password Safe credential still gets a token."),
+        description="Whether each PRA and Password Safe credential still gets a token, and "
+                    "which POVs still keep their jump items in a PRA tenant's shared "
+                    "Asset Group.",
+        note=bt_tenants.shared_group_note),
     Collector(
         area="pra_gateways", label="PRA Gateways", collect=pra_gateways.collect,
         interval_minutes=15, flags=("pra_enabled",),

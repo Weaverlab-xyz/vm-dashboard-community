@@ -23,7 +23,7 @@ be bookmarked. **Only failing and degraded** hides the healthy rows in every tab
 | **Resources** | everything on [Inventory](../inventory.md) except directories: whether the cloud still has it and it is running, and its access wiring (see [below](#resources)) | 30 min | always |
 | **Cloud APIs and spend** | the dashboard's own cloud credentials: per provider, whether its reads keep failing (from the tile collector, so no extra call), the same for cost data, VMs at or near their spend cap, and the auto-delete timer's last pass | 15 min | always |
 | **Hypervisors** | each connection answers. Direct connections get the same read as **Test**, recorded on the connection. vSphere hosts disconnected or in maintenance, Proxmox nodes offline, Proxmox image storage under 15% free (failing under 5%). An agent-bound connection is never dialled; it shows its agent and whether the agent's sync is keeping up (more than three intervals late is degraded) | 15 min | any hypervisor is on |
-| **BeyondTrust tenants** | each PRA and Password Safe credential still gets a token, the same handshake as **Verify** on the tenant. The result is recorded on the tenant too | 30 min | PRA or Password Safe is on |
+| **BeyondTrust tenants** | each PRA and Password Safe credential still gets a token, the same handshake as **Verify** on the tenant. The result is recorded on the tenant too. Each registered PRA tenant also lists the POVs still in its shared Asset Group (see [below](#povs-on-a-shared-asset-group)) | 30 min | PRA or Password Safe is on |
 | **PRA Gateways** | each Gateway PRA knows about has a connected node, and each Gateway host the dashboard deployed is running (the reconcile pass's *degraded* and *missing* included) | 15 min | PRA is on |
 | **Password Safe accounts** | every account the dashboard onboarded still exists and is rotating: database accounts, Kubernetes tokens, directory administrators, lab and workload accounts | 60 min | Password Safe is on |
 | **Entitle** | the just-in-time reconciliation sweep is running, has no failing cloud leg and no orphaned grants, and the virtual applications and persona bundles the dashboard applied are not *failed* | 15 min | Entitle is on |
@@ -48,6 +48,21 @@ always healthy and the note never makes the area degraded or failing. To move an
 over, use **Migrate to SPIRE** on the Agents page; see
 [Attesting an agent through SPIRE](../remote-agents/spire-attestation.md). The note links
 to the workload identity guide when this build includes it.
+
+### POVs on a shared Asset Group
+
+Each registered PRA tenant has a **Shared Asset Group** line naming the POVs whose jump
+items are still in the tenant's appliance-wide Asset Group. Those POVs were wired before
+each POV got its own `pov-<name>` group, and they still work. But a vendor cannot be
+scoped to a group every POV on the appliance shares, so their Access tab offers **Move to
+its own Asset Group** instead of a vendor login; see
+[A POV wired before this will say so](../profiles/pov/customer-access.md#a-pov-wired-before-this-will-say-so).
+A POV being destroyed is still listed until it is gone, because its teardown finds its
+jump items through the same group; a destroyed one is not.
+
+Above the list, a blue note totals them across tenants. Like the agent identity note, it
+never makes the area degraded or failing. When it reads *Every wired POV has its own Asset
+Group*, nothing reads a tenant's appliance-wide Asset Group setting any more.
 
 ## Resources
 

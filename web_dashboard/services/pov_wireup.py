@@ -123,6 +123,28 @@ def _on_shared_group(db: Session, env: PovEnvironment) -> bool:
                           PovEnvironmentVM.pra_jump_id.isnot(None)).count())
 
 
+def shared_group_povs(db: Session, tenant_id: str) -> list:
+    """Every POV on this PRA tenant still in its appliance-wide Asset Group, by name.
+
+    :func:`_on_shared_group` asked of a whole tenant: these are the POVs the tenant's
+    ``jump_group_name`` is still the only record for, so while this is non-empty the
+    fallback in :func:`tenant_override` has a consumer. A destroyed POV is not one; a
+    destroying one still is, because its teardown resolves the group through that same
+    fallback. Health's BeyondTrust tenants area counts these, so the fallback can be
+    removed the day every one has been moved (Move to its own Asset Group) or destroyed.
+    """
+    from . import pov_env_service
+    wired = (db.query(PovEnvironmentVM.environment_id)
+               .filter(PovEnvironmentVM.pra_jump_id.isnot(None)))
+    rows = (db.query(PovEnvironment)
+              .filter(PovEnvironment.pra_tenant_id == tenant_id,
+                      PovEnvironment.status != pov_env_service.STATUS_DESTROYED,
+                      PovEnvironment.id.in_(wired))
+              .order_by(PovEnvironment.name).all())
+    # The name test in Python, so "blank" means exactly what _on_shared_group means by it.
+    return [env for env in rows if not (env.pra_jump_group_name or "").strip()]
+
+
 def _shared_group_unnamed(tenant) -> WireupError:
     """The refusal for a POV on the tenant's shared Asset Group when the tenant names none."""
     return WireupError(
