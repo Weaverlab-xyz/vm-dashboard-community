@@ -77,8 +77,8 @@ async def _attach_cloud_tags(items: list) -> None:
 
 def _ps_workgroup() -> str:
     """The workgroup filter Password Safe reads are scoped to, or "" for all."""
-    from ..services import config_service
-    return (config_service.get("passwordsafe_workgroup") or "").strip()
+    from ..services import ps_api_service
+    return ps_api_service.configured_workgroup()
 
 
 def _ps_enabled() -> bool:

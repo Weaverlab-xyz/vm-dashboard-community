@@ -775,6 +775,6 @@ async def verify_jobs_lease(cloud: str, run_in_thread) -> tuple[bool, str]:
         logger.warning("Workload Credentials session check failed", exc_info=True)
         return False, ("Jobs take a Workload Credentials lease, and Workload Credentials did "
                        "not answer. Check its API URL and site.")
-    name = leases.secret_name_for(cloud, leases.PURPOSE_PROVISION) or "(no secret named)"
+    name = leases.dynamic_name_for(cloud, leases.PURPOSE_PROVISION) or "(no secret named)"
     return True, (f"Jobs take a Workload Credentials lease from {name}: authenticated, "
                   f"not minted (a lease is billed; the first job mints it).")

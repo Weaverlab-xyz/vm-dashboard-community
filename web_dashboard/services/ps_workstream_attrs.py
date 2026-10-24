@@ -251,7 +251,7 @@ async def backfill(db, workgroup: str, *, offset: int = 0) -> dict:
             if (r.get("workgroup") or "").lower() == wanted]
 
     inventory = await ps_api_service.read_attribute_inventory(
-        workgroup=(config_service.get("passwordsafe_workgroup") or "").strip())
+        workgroup=ps_api_service.configured_workgroup())
     if not inventory.get("reachable"):
         raise RuntimeError(inventory.get("detail") or "Password Safe could not be read")
     index = pac.build_index(inventory["assets"]["rows"], inventory["managed_systems"]["rows"])
