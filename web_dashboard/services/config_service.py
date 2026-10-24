@@ -540,25 +540,7 @@ def set(key: str, value: str, workgroup: str | None = None) -> None:
     When workgroup is None, writes/updates the global row. When given,
     writes/updates the workgroup-scoped row, leaving the global one alone.
     """
-    from ..database import SessionLocal, AppConfig
-    db = SessionLocal()
-    try:
-        encrypted = _encrypt(value) if value else ""
-        q = db.query(AppConfig).filter(AppConfig.key == key)
-        if workgroup is None:
-            existing = q.filter(AppConfig.workgroup.is_(None)).first()
-        else:
-            existing = q.filter(AppConfig.workgroup == workgroup).first()
-        if existing:
-            existing.value = encrypted
-            existing.updated_at = utcnow()
-        else:
-            db.add(AppConfig(key=key, value=encrypted, workgroup=workgroup, updated_at=utcnow()))
-        db.commit()
-        with _cache_lock:
-            _cache[(key, workgroup)] = value
-    finally:
-        db.close()
+    _write({key: value}, workgroup)
 
 
 def set_many(pairs: dict, workgroup: str | None = None) -> None:
@@ -567,27 +549,47 @@ def set_many(pairs: dict, workgroup: str | None = None) -> None:
     All pairs land in the same workgroup row-set; call repeatedly with
     different workgroup args if you need to write across scopes.
     """
+    _write(pairs, workgroup)
+
+
+def _write(pairs: dict, workgroup: str | None) -> None:
+    """Update each row, or insert it. One retry when an insert loses to another process.
+
+    Two processes can both find a key absent -- the image's two gunicorn workers each run
+    the background sweepers, which record their last result here -- and the slower
+    insert fails on the primary key. The retry finds the row the other one wrote and
+    updates it: last write wins, as it does whenever both rows already exist.
+    """
+    from sqlalchemy.exc import IntegrityError
     from ..database import SessionLocal, AppConfig
-    db = SessionLocal()
-    try:
-        for key, value in pairs.items():
-            encrypted = _encrypt(value) if value else ""
-            q = db.query(AppConfig).filter(AppConfig.key == key)
-            if workgroup is None:
-                existing = q.filter(AppConfig.workgroup.is_(None)).first()
-            else:
-                existing = q.filter(AppConfig.workgroup == workgroup).first()
-            if existing:
-                existing.value = encrypted
-                existing.updated_at = utcnow()
-            else:
-                db.add(AppConfig(key=key, value=encrypted, workgroup=workgroup, updated_at=utcnow()))
-        db.commit()
+    for attempt in (1, 2):
+        db = SessionLocal()
+        try:
+            for key, value in pairs.items():
+                encrypted = _encrypt(value) if value else ""
+                q = db.query(AppConfig).filter(AppConfig.key == key)
+                if workgroup is None:
+                    existing = q.filter(AppConfig.workgroup.is_(None)).first()
+                else:
+                    existing = q.filter(AppConfig.workgroup == workgroup).first()
+                if existing:
+                    existing.value = encrypted
+                    existing.updated_at = utcnow()
+                else:
+                    db.add(AppConfig(key=key, value=encrypted, workgroup=workgroup,
+                                     updated_at=utcnow()))
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            if attempt == 2:
+                raise
+            continue
+        finally:
+            db.close()
         with _cache_lock:
             for k, v in pairs.items():
                 _cache[(k, workgroup)] = v
-    finally:
-        db.close()
+        return
 
 
 def delete(key: str, workgroup: str | None = None) -> None:
