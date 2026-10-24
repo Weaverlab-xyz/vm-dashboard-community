@@ -10,7 +10,7 @@ any other reason is swallowed just the same.
 So schema changes now go through the same ledger the one-time data fixes already use
 (``database.SchemaMarker``), under keys prefixed ``ddl:``:
 
-**The legacy list** (``init_db``'s ``_migrations``) is frozen. It still runs on every boot
+**The legacy list** (``schema_legacy.STATEMENTS``) is frozen. It still runs on every boot
 until one boot leaves the database with everything it adds -- every model column, every
 index it creates, the one column it retypes -- and no statement skipped for lock
 contention or a deadlock. That boot records :data:`LEGACY_KEY` and later boots skip the

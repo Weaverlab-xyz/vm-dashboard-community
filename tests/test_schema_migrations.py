@@ -19,7 +19,7 @@ lock-contention case that SQLite cannot produce.
 
 Run: python tests/test_schema_migrations.py   (or under pytest)
 """
-import ast
+import hashlib
 import logging
 import os
 import re
@@ -37,20 +37,17 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-schema-migrations-" + "
 from sqlalchemy import event, inspect, text  # noqa: E402
 
 from web_dashboard import database as D  # noqa: E402
+from web_dashboard import schema_legacy as L  # noqa: E402
 from web_dashboard import schema_migrations as M  # noqa: E402
 
 #: The legacy list's length when it was frozen. A schema change is a numbered Migration.
 _FROZEN_AT = 222
+#: sha256 of its statements joined by newlines: an edit that keeps the count is caught too.
+_FROZEN_SHA256 = "4572ceb842dbcb9640548997eb1fefe49d3c10c0b948f3c34b93dd09a2b6a9a5"
 
 
 def _legacy_statements():
-    tree = ast.parse(open(os.path.join(_ROOT, "web_dashboard", "database.py"),
-                          encoding="utf-8").read())
-    init_db = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
-                   and n.name == "init_db")
-    lst = next(n for n in ast.walk(init_db) if isinstance(n, ast.Assign)
-               and getattr(n.targets[0], "id", None) == "_migrations")
-    return [e.value for e in lst.value.elts]
+    return list(L.STATEMENTS)
 
 
 def _fresh():
@@ -239,10 +236,15 @@ def test_a_failing_migration_rolls_back_and_stops_the_rest():
 def test_the_legacy_list_is_frozen():
     n = len(_legacy_statements())
     assert n == _FROZEN_AT, (
-        f"init_db's legacy list has {n} statements, not {_FROZEN_AT}. A database that "
+        f"schema_legacy.STATEMENTS has {n} statements, not {_FROZEN_AT}. A database that "
         f"has recorded {M.LEGACY_KEY} never reads it again, so a statement added there "
         f"runs on new installs only. Add a Migration to schema_migrations.MIGRATIONS "
         f"instead.")
+    digest = hashlib.sha256("\n".join(_legacy_statements()).encode()).hexdigest()
+    assert digest == _FROZEN_SHA256, (
+        "a statement in schema_legacy.STATEMENTS changed. A database that has recorded "
+        f"{M.LEGACY_KEY} never runs it again, so the edit reaches new installs only. Put "
+        "the change in a Migration in schema_migrations.MIGRATIONS instead.")
 
 
 def test_numbered_migrations_are_well_formed():

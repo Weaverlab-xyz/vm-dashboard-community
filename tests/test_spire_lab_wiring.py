@@ -607,17 +607,18 @@ def test_the_new_columns_are_text_and_every_one_has_a_migration():
     not the columns. Text for the refs because a bt_safe:// ref has no bounded length
     (issue #830: SQLite enforces no VARCHAR width and PostgreSQL does)."""
     db = _read("web_dashboard", "database.py")
+    legacy = _read("web_dashboard", "schema_legacy.py")
     cls = db.split("class SpireLab(Base):")[1].split("\nclass ")[0]
     for col in ("ansible_secret_ssh_key_source", "ansible_managed_account"):
         assert f"{col} = Column(Text" in cls, f"{col} should be Text, not VARCHAR(n)"
-        assert f"ALTER TABLE spire_labs ADD COLUMN {col} TEXT" in db
+        assert f"ALTER TABLE spire_labs ADD COLUMN {col} TEXT" in legacy
     assert "ansible_managed_become_self = Column(Boolean" in cls
     assert "login_user = Column(String(104)" in cls
-    assert "ALTER TABLE spire_labs ADD COLUMN login_user VARCHAR(104)" in db
+    assert "ALTER TABLE spire_labs ADD COLUMN login_user VARCHAR(104)" in legacy
     # A bare BOOLEAN: PostgreSQL rejects an integer default on a boolean column, the
     # per-statement savepoint rolls the ALTER back, and the column silently never
     # appears -- invisible to a SQLite run.
-    assert "ADD COLUMN ansible_managed_become_self BOOLEAN\"" in db
+    assert "ADD COLUMN ansible_managed_become_self BOOLEAN\"" in legacy
 
 
 def test_the_cloud_runner_refuses_a_run_with_no_usable_credential():

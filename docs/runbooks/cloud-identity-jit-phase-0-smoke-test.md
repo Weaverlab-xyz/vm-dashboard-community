@@ -171,7 +171,7 @@ full phase breakdown.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `relation "entitle_activations" does not exist` | Migration didn't run — likely a SQL syntax error in `_migrations` | Check `docker compose logs app` around startup; each ALTER runs inside a savepoint so the failure should be logged but won't crash the app |
+| `relation "entitle_activations" does not exist` | Migration didn't run — likely a SQL syntax error in the legacy list (`web_dashboard/schema_legacy.py`) | Check `docker compose logs app` around startup; each ALTER runs inside a savepoint so the failure should be logged but won't crash the app |
 | `principal_kind` column missing on `approvals` | Same — savepoint swallowed the failure | Same check; usually the column was already present from a previous test run |
 | `ImportError: cannot import name 'elevate'` from cloud_identity_service | The new module wasn't included in the image | Rebuild: `docker compose up --build app` |
 | Step 4 doesn't raise — elevate just returns | The gate flag isn't being read; verify `config_service.invalidate()` was called before the test | Re-run Step 4 after `invalidate()` |
