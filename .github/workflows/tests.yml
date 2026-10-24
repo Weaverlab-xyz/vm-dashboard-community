@@ -136,10 +136,18 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Galaxy answers the occasional 500 on a collection download, and ansible-galaxy
+      # does not retry one: a single blip failed this job on two PRs that touch no
+      # playbook. Four tries over about two minutes, then the error stands.
       - name: Install Ansible and the BeyondTrust collections
         run: |
           pip install ansible
-          ansible-galaxy collection install beyondtrust.secrets_safe beyondtrust.password_safe
+          for attempt in 1 2 3 4; do
+            ansible-galaxy collection install beyondtrust.secrets_safe beyondtrust.password_safe && break
+            if [ "$attempt" = 4 ]; then exit 1; fi
+            echo "::warning::Galaxy collection install failed (attempt $attempt of 4); retrying"
+            sleep $((attempt * 20))
+          done
           ansible --version
 
       - name: Syntax-check every playbook
