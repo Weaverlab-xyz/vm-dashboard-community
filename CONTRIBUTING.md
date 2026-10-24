@@ -195,9 +195,13 @@ A test that reads the Settings page as text reads it through
 `tests/_settings_src.py`'s `settings_source()`, not `settings.html` itself. Each
 integration's slide-over form is its own file, `templates/settings/panels/<key>.html`,
 included by `settings.html`, and `settings_source()` puts them back in place. The page's
-tabs, the `integrations[]` list and the `settingsPage()` script stay in `settings.html`.
-A new panel is a new file there plus one `{%- include %}` line, and its state goes in the
-script.
+script is split the same way: `settingsPage()` in `settings.html` spreads one function per
+feature (`...settingsPanels()`, `...settingsRegions()`, ...), each in its own
+`templates/settings/script/<feature>.js`, included into the page's one `<script>`. A new
+panel is a new file under `panels/` plus one `{%- include %}` line, and its state and
+methods go in the feature file they belong to, or a new one with its include and spread
+line. `tests/test_settings_script.py` fails if two of them define the same name, because
+the later spread would silently replace the earlier.
 
 ### Other checks CI runs
 

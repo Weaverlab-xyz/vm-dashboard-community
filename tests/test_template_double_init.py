@@ -39,6 +39,8 @@ _INIT = re.compile(r"^\s*(?:async\s+)?init\s*\(\s*\)\s*\{|^\s*init\s*:\s*(?:asyn
 
 def _sources():
     yield from sorted((_WEB / "templates").rglob("*.html"))
+    # A page's script split into included files (templates/settings/script/).
+    yield from sorted((_WEB / "templates").rglob("*.js"))
     yield from sorted((_WEB / "static" / "js").rglob("*.js"))
 
 

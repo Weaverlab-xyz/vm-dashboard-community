@@ -40,7 +40,11 @@ def test_all_templates_parse():
         return
     env = Environment(loader=FileSystemLoader(_TEMPLATES))
     failures = []
-    for rel, full in _template_files():
+    # The script files a page includes are Jinja templates too (templates/settings/script/).
+    scripts = [(os.path.relpath(os.path.join(r, f), _TEMPLATES).replace("\\", "/"),
+                os.path.join(r, f))
+               for r, _d, fs in os.walk(_TEMPLATES) for f in fs if f.endswith(".js")]
+    for rel, full in [*_template_files(), *scripts]:
         with open(full, encoding="utf-8") as fh:
             src = fh.read()
         try:
