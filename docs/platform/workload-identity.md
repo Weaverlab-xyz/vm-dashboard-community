@@ -64,7 +64,7 @@ calls, Terraform and Packer included. Setup is
 
 | Today | Recommended | Target | Status |
 |---|---|---|---|
-| IAM user access key | the SPIFFE identity assumes a role with `AssumeRoleWithWebIdentity` | that role holds read only, and jobs take a [Workload Credentials](../preview/workload-lab/workload-credentials.md) lease (`wlc_aws_everyday_source = federation`) | proven live (2026-10-15) |
+| IAM user access key | the SPIFFE identity assumes a role with `AssumeRoleWithWebIdentity` | that role holds read only, and jobs take a [Workload Credentials](../beyondtrust/workload-credentials.md) lease (`wlc_aws_everyday_source = federation`) | proven live (2026-10-15) |
 
 #### Dashboard to Azure
 

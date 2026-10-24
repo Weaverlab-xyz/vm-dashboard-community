@@ -2103,7 +2103,7 @@ class WorkloadCredentialLease(Base):
     cloud = Column(String(16), primary_key=True)
     # provision | readonly. Splitting by lifecycle rather than by operation is what lets
     # the request path hold a read-only credential while write privilege exists only for
-    # the duration of a job. See docs/preview/workload-lab/workload-credentials.md.
+    # the duration of a job. See docs/beyondtrust/workload-credentials.md.
     purpose = Column(String(32), primary_key=True)
 
     # ── last-known-good (written ONLY on a successful generate) ──────────────

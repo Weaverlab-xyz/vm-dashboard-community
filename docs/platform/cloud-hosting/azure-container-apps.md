@@ -333,7 +333,7 @@ That copy *can* go stale when Azure grows the pool. The symptom is the same
 
 ## No PAT: authenticate to Pathfinder with a workload identity
 
-> **Applies to:** an install using [Workload Credentials](../../preview/workload-lab/workload-credentials.md).
+> **Applies to:** an install using [Workload Credentials](../../beyondtrust/workload-credentials.md).
 > Skip this if you do not. **Status:** run end to end on the Azure Container
 > Apps install on 2026-09-15, so the walkthrough below is a transcript rather
 > than a sketch. Two legs are still unproven: the *worker* minting under a real

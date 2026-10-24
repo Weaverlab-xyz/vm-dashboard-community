@@ -9,13 +9,13 @@
 > generally available and has its own toggle under Settings → Integrations → BeyondTrust;
 > it is off by default, and each cloud is opted in separately.
 
-The metered half of [Workload Credentials](workload-credentials.md). Instead of the
+The metered half of [Workload Credentials](../../beyondtrust/workload-credentials.md). Instead of the
 dashboard holding a standing AWS access key or Azure client secret, WC mints one per
 lease, hands it over for a bounded window, and takes it back. **Every issuance on this
 page bills** — which is the argument for reading it before enabling it, and the reason the
 static-secret backend was deliberately shipped first.
 
-Read [Workload Credentials](workload-credentials.md) for the product itself, the
+Read [Workload Credentials](../../beyondtrust/workload-credentials.md) for the product itself, the
 prerequisites, and how the dashboard authenticates to it. None of the dynamic tier works
 until that part does.
 
@@ -198,7 +198,7 @@ would drift from them. See the module's README.
 The dashboard needs a broad set of cloud permissions because it provisions VMs,
 databases, clusters, functions, images and container runners. When you move a
 cloud to the dynamic tier — and it is
-[a choice, not a migration](workload-credentials.md#this-is-a-choice-not-a-migration) —
+[a choice, not a migration](../../beyondtrust/workload-credentials.md#this-is-a-choice-not-a-migration) —
 the credential WC mints must carry the same set the
 static credential carries today.
 
@@ -332,7 +332,7 @@ Practical consequences:
 
 ## Related
 
-* [Workload Credentials](workload-credentials.md) — the product, the prerequisites, and how
+* [Workload Credentials](../../beyondtrust/workload-credentials.md) — the product, the prerequisites, and how
   the dashboard authenticates to it.
 * [Short-lived cloud credentials](cloud.md) — the Workload Lab tab that hands a lease to a
   workload rather than consuming one itself.

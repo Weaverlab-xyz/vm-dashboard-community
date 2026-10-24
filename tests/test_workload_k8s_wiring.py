@@ -282,11 +282,12 @@ def test_the_docs_and_persona_are_wired():
     # The tab guides live in docs/preview/workload-lab/, indexed by the sibling hub
     # docs/preview/workload-lab.md rather than by a README -- doc_page resolves <page>.md before
     # <page>/README.md, so a folder cannot carry both. Both halves are asserted, because
-    # either one going missing orphans this page: the root index carries the hub, and the
-    # hub links every spoke.
-    assert "workload-lab.md" in _read("docs", "README.md"), "the hub is in no index"
-    assert "workload-lab/kubernetes.md" in _read("docs", "workload-lab.md"),         "the hub does not link this tab's guide"
-    guide = _read("docs", "workload-lab", "kubernetes.md")
+    # either one going missing orphans this page: the root index carries the Preview
+    # section, that section's hub carries this one, and this hub links every spoke.
+    assert "](preview.md)" in _read("docs", "README.md"), "the Preview section is in no index"
+    assert "](preview/workload-lab.md)" in _read("docs", "preview.md"), "the hub is in no index"
+    assert "workload-lab/kubernetes.md" in _read("docs", "preview", "workload-lab.md"),         "the hub does not link this tab's guide"
+    guide = _read("docs", "preview", "workload-lab", "kubernetes.md")
     # The four boundaries the design says to state plainly. Each is a claim somebody would
     # otherwise make wrongly in a demo.
     assert "rotation does not revoke" in guide.lower()
@@ -295,7 +296,7 @@ def test_the_docs_and_persona_are_wired():
     assert "cannot revoke certificates" in guide.lower()
     # And it cross-links with the SPIFFE guide both ways.
     assert "spiffe.md" in guide
-    assert "kubernetes.md" in _read("docs", "workload-lab", "spiffe.md")
+    assert "kubernetes.md" in _read("docs", "preview", "workload-lab", "spiffe.md")
     personas = _read("web_dashboard", "services", "personas.py")
     assert "devops-workload-cluster-token" in personas
     assert "/workload-lab#kubernetes" in personas

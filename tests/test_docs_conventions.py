@@ -342,6 +342,19 @@ def test_every_indexed_section_has_a_heading_label():
     assert not missing, f"_SECTION_LABELS has no entry for: {missing}"
 
 
+def test_every_title_override_names_a_real_page():
+    """A key left behind by a move overrides nothing: the page lists under its filename
+    ("Azure Container Apps" becomes "Azure-Container-Apps" title-cased) and nothing fails.
+    Every key must name a doc that exists, as ``<key>.md`` or ``<key>/README.md``."""
+    src = _read(_DOCS_PAGES)
+    keys = re.findall(r'^\s*"([^"]+)":',
+                      src.split("_TITLE_OVERRIDES = {", 1)[1].split("\n}", 1)[0], re.M)
+    stale = [k for k in keys
+             if not os.path.isfile(os.path.join(_DOCS, k + ".md"))
+             and not os.path.isfile(os.path.join(_DOCS, k, "README.md"))]
+    assert keys and not stale, f"_TITLE_OVERRIDES keys that name no doc: {stale}"
+
+
 def test_every_indexed_section_is_a_real_folder():
     """A stale member is a section that silently never renders, which looks exactly like
     the folder being deliberately hidden."""

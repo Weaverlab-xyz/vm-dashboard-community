@@ -2516,7 +2516,7 @@ class Settings(BaseSettings):
     # a community install with no BeyondTrust products is untouched and keeps
     # using the static keys in app_config. Turning this on is what UNLOCKS
     # retiring an install's own static credentials — it never retires them for
-    # anyone else. See docs/preview/workload-lab/workload-credentials.md.
+    # anyone else. See docs/beyondtrust/workload-credentials.md.
     workload_credentials_enabled: bool = False
     wlc_api_base_url: str = "https://api.beyondtrust.io"
     wlc_site_id: str = ""                           # site (tenant) GUID — the `tenant_id` claim in your access JWT

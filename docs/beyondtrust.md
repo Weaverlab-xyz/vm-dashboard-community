@@ -35,7 +35,7 @@ in the `beyondtrust/` folder beside this page.
 credentials minted on demand, and a `wlc://` secrets backend.
 `workload_credentials_enabled`. It is not a product the dashboard drives so much as a
 credential source the other pages use, so its guide lives with the other workload
-mechanisms: [Workload Credentials](preview/workload-lab/workload-credentials.md).
+mechanisms: [Workload Credentials](beyondtrust/workload-credentials.md).
 
 All four, plus Workload Credentials, can authenticate with the dashboard's own
 **workload identity** instead of a stored token or client secret — one Pathfinder
@@ -52,7 +52,7 @@ registration scoped to each product. See
 | Privileged Remote Access | `pra_enabled` | Settings → Integrations → **Privileged Remote Access** | [privileged-remote-access.md](beyondtrust/privileged-remote-access.md) |
 | EPM for Linux | `epml_enabled` | Settings → Integrations → **EPM for Linux** | [epml.md](beyondtrust/epml.md) |
 | Entitle | `entitle_enabled` | Settings → Integrations → **Entitle** | [entitle.md](beyondtrust/entitle.md) |
-| Workload Credentials | `workload_credentials_enabled` | Settings → Integrations → **Workload Credentials** | [workload-credentials.md](preview/workload-lab/workload-credentials.md) |
+| Workload Credentials | `workload_credentials_enabled` | Settings → Integrations → **Workload Credentials** | [workload-credentials.md](beyondtrust/workload-credentials.md) |
 
 Password Safe, PRA and EPM-L used to share a single `beyondtrust_enabled` flag and a
 single Settings panel. They are now independent, because customers routinely license one

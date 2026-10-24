@@ -41,7 +41,7 @@ Nothing in the repository, nothing in the inventory file, nothing on disk when i
 Replace a long-lived access key with a short-lived one the workload requests when it needs
 it — the secret nobody can leak because nobody is holding it.
 
-**Guide:** [Workload Credentials](../../../preview/workload-lab/workload-credentials.md)
+**Guide:** [Workload Credentials](../../../beyondtrust/workload-credentials.md)
 
 ### SSH accounts that exist only for the run
 

@@ -258,7 +258,7 @@ The section that keeps this page honest. Each of these is true of a named file o
   nothing else, while the worker offers five identity platforms — and now calls
   `generate` on all five, not just the static reads. The worker is further ahead of the
   app than it was — see
-  [Workload Credentials](workload-credentials.md#how-the-dashboard-authenticates).
+  [Workload Credentials](../../beyondtrust/workload-credentials.md#how-the-dashboard-authenticates).
 - **Nothing consumes a subordinate CA.** The bundle format is settled and the suite checks
   the passphrase opens the key, but uploading it to a real PRA, minting a client
   certificate beneath it and connecting is untested — as is which PKCS#8 ciphers PRA's PEM

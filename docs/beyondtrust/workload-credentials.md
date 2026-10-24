@@ -19,7 +19,7 @@ cares about:
 
 The dynamic half — what a lease actually is, what it may do, and what an issuance
 costs — is a page of its own:
-[Dynamic AWS and Azure credentials](dynamic-credentials.md). Everything on this page is
+[Dynamic AWS and Azure credentials](../preview/workload-lab/dynamic-credentials.md). Everything on this page is
 free and unmetered; everything on that one bills.
 
 ---
@@ -30,9 +30,9 @@ free and unmetered; everything on that one bills.
 |---|---|
 | Static secrets as a `wlc://` secrets backend (list / read / create / update / delete, staleness metadata) | **Implemented, verified live** |
 | Migrating the database's own secrets into it in one step | **Implemented** — see [Emptying the database](#emptying-the-database-wc-as-the-secrets-backend); not yet run live |
-| [Dynamic AWS credentials](dynamic-credentials.md) for the dashboard's own cloud calls | **Implemented, verified live** |
-| [Splitting AWS into an everyday and a provisioning lease](dynamic-credentials.md#the-optional-two-lease-split) | **Implemented, verified live** — opt-in |
-| [Dynamic Azure credentials](dynamic-credentials.md#how-azure-differs) | **Implemented** — not yet exercised against a live dynamic secret |
+| [Dynamic AWS credentials](../preview/workload-lab/dynamic-credentials.md) for the dashboard's own cloud calls | **Implemented, verified live** |
+| [Splitting AWS into an everyday and a provisioning lease](../preview/workload-lab/dynamic-credentials.md#the-optional-two-lease-split) | **Implemented, verified live** — opt-in |
+| [Dynamic Azure credentials](../preview/workload-lab/dynamic-credentials.md#how-azure-differs) | **Implemented** — not yet exercised against a live dynamic secret |
 | Authenticating to WC with a **workload identity** instead of a stored PAT | **Implemented** — Azure run end to end 2026-09-15; GCP and AWS client paths unit-tested, not yet pointed at a live registration |
 | In-cluster workload identity (a pod federating its ServiceAccount token) | **Implemented** — the `file` platform reads the projected token; not yet run live |
 
@@ -55,16 +55,16 @@ selects its own:
 
 Turning WC on is what *unlocks* retiring **your** static credentials. It never
 retires them for anyone else, and never as a side effect of an upgrade. See
-[Secrets management](../../admin/secrets-management.md) for the wider tiered model.
+[Secrets management](../admin/secrets-management.md) for the wider tiered model.
 
 The **recommended** pairing is WC for jobs only, with the dashboard's SPIFFE identity as
 the everyday read credential (`wlc_aws_everyday_source` / `wlc_azure_everyday_source` =
 `federation`): nothing stored, and write privilege only while a job runs. See
-[Workload identity](../../platform/workload-identity.md).
+[Workload identity](../platform/workload-identity.md).
 
 **GCP is absent on purpose.** WC mints AWS and Azure credentials only. GCP still needs
 no stored key: the dashboard's SPIFFE identity covers reads, and an Entitle grant covers
-writes ([Workload identity](../../platform/workload-identity.md#dashboard-to-gcp)). Without
+writes ([Workload identity](../platform/workload-identity.md#dashboard-to-gcp)). Without
 those, a GCP deployment stays on the static tier. A mixed install is the normal case,
 not a gap.
 
@@ -156,11 +156,11 @@ The identity settings below (platform, service name, audience, token file, clien
 ID) are no longer on this panel. They are on **Settings → Integrations →
 BeyondTrust platform identity**, because PRA, Password Safe, EPM-L and Entitle can
 use the same identity. The keys are unchanged. See
-[BeyondTrust platform identity](../../beyondtrust/platform-identity.md).
+[BeyondTrust platform identity](platform-identity.md).
 The registration's **Product Scopes** must include **Secrets** for this product.
 
 **It is not Azure-only.** `wlc_identity_platform` selects which platform is
-asked, because [cloud-hosting.md](../../platform/cloud-hosting.md) documents this dashboard
+asked, because [cloud-hosting.md](../platform/cloud-hosting.md) documents this dashboard
 running as a managed container on Azure Container Apps, GCP Cloud Run or AWS ECS:
 
 | Platform | Token source | Note |
@@ -169,7 +169,7 @@ running as a managed container on Azure Container Apps, GCP Cloud Run or AWS ECS
 | `gcp` | the metadata server's instance identity endpoint | returns the JWT as **plain text** |
 | `aws` | a projected token file — `AWS_WEB_IDENTITY_TOKEN_FILE` (IRSA) or `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` (Pod Identity) | **EKS only**, see below |
 | `file` | any other projected token on disk | the Kubernetes ServiceAccount token every cluster mounts |
-| `spire` | `wlc.jwt`, which the dashboard's own SPIRE server mints | **no cloud needed**: on-prem, Docker on a VM, ECS. See [the dashboard's own identity](../../platform/oidc/dashboard-identity.md#beyondtrust-workload-credentials) |
+| `spire` | `wlc.jwt`, which the dashboard's own SPIRE server mints | **no cloud needed**: on-prem, Docker on a VM, ECS. See [the dashboard's own identity](../platform/oidc/dashboard-identity.md#beyondtrust-workload-credentials) |
 
 > **ECS cannot use the `aws` platform.** An ECS task and a plain EC2 instance get
 > SigV4 credentials and a signed instance identity document — neither is an OIDC
@@ -205,7 +205,7 @@ included, registers as a Custom IDP.
 
 Full walkthrough, including the v1-versus-v2 issuer trap that makes a perfectly
 valid token silently fail to match:
-[Cloud hosting → No PAT](../../platform/cloud-hosting/azure-container-apps.md#no-pat-authenticate-to-pathfinder-with-a-workload-identity).
+[Cloud hosting → No PAT](../platform/cloud-hosting/azure-container-apps.md#no-pat-authenticate-to-pathfinder-with-a-workload-identity).
 
 **Assign the identity to the worker too.** `dash-worker` is where credentials are
 minted, so an identity on the web app alone yields a panel that tests green and
@@ -247,7 +247,7 @@ Two things to know before you do it:
   back.
 - **The JWT root key is not part of this** and never can be — it derives the key
   that encrypts the very rows a vault credential lives in. See
-  [why the JWT root key cannot be migrated](../../admin/secrets-management.md#why-the-jwt-root-key-cannot-be-migrated).
+  [why the JWT root key cannot be migrated](../admin/secrets-management.md#why-the-jwt-root-key-cannot-be-migrated).
 
 Secrets already living in another external vault are left untouched; the
 migration only moves database-stored values.
@@ -372,11 +372,11 @@ Integrations → BeyondTrust. `secrets_wlc_folder` is also on the Secrets page.
 | `wlc_identity_token_file` | blank: the platform default | `workload` mode on `aws` and `file`: where the projected token is mounted |
 | `wlc_entra_resource` | blank | The older name for `wlc_identity_audience`, still read when that is blank |
 | `wlc_entra_client_id` | blank: system-assigned | Azure only: a user-assigned managed identity's client id |
-| `wlc_aws_enabled` / `wlc_azure_enabled` | off | Per-cloud opt-in for [dynamic credentials](dynamic-credentials.md). GCP is not covered by WC |
+| `wlc_aws_enabled` / `wlc_azure_enabled` | off | Per-cloud opt-in for [dynamic credentials](../preview/workload-lab/dynamic-credentials.md). GCP is not covered by WC |
 | `wlc_aws_folder` / `wlc_azure_folder` | blank | The folder holding that cloud's dynamic secret |
 | `wlc_aws_secret_name` / `wlc_azure_secret_name` | blank | The provisioning dynamic secret |
 | `wlc_aws_everyday_source` | `lease` | `federation`: AWS calls outside jobs assume the role in `aws_federation_role_arn` with the dashboard's SPIFFE identity, and the provisioning lease is minted only inside jobs. No everyday dynamic secret is needed. Fails closed when federation is not usable |
-| `wlc_azure_everyday_source` | `lease` | `federation`: Azure calls outside jobs use the dashboard's SPIFFE identity (the app in `azure_client_id`), and the lease is minted only inside jobs. Fails closed when federation is not usable. See [the everyday credential from the SPIFFE identity](dynamic-credentials.md#the-everyday-credential-from-the-spiffe-identity) |
+| `wlc_azure_everyday_source` | `lease` | `federation`: Azure calls outside jobs use the dashboard's SPIFFE identity (the app in `azure_client_id`), and the lease is minted only inside jobs. Fails closed when federation is not usable. See [the everyday credential from the SPIFFE identity](../preview/workload-lab/dynamic-credentials.md#the-everyday-credential-from-the-spiffe-identity) |
 | `azure_everyday_principal_id` | blank | With `federation`: the everyday app's service principal object id, granted AKS cluster admin on clusters a job builds |
 | `wlc_aws_readonly_secret_name` | blank | Optional read-only dynamic secret for the job-boundary split |
 | `wlc_refresh_margin_pct` | `50` | Regenerate a lease once less than this percentage of its TTL remains (1–99) |
@@ -389,7 +389,7 @@ integrations, AWS and Azure dynamic secrets, and workload-identity (OIDC issuer
 trust) registrations — so the whole configuration side can be provisioned as
 code rather than clicked through the console.
 
-Related: [Dynamic AWS and Azure credentials](dynamic-credentials.md) ·
-[Secrets management](../../admin/secrets-management.md) ·
-[Machine-identity JIT design](../../design/cloud-identity-jit.md) ·
-[Password Safe](../../beyondtrust/password-safe.md) · [Entitle](../../beyondtrust/entitle.md)
+Related: [Dynamic AWS and Azure credentials](../preview/workload-lab/dynamic-credentials.md) ·
+[Secrets management](../admin/secrets-management.md) ·
+[Machine-identity JIT design](../design/cloud-identity-jit.md) ·
+[Password Safe](password-safe.md) · [Entitle](entitle.md)

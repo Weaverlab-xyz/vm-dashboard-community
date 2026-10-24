@@ -423,7 +423,7 @@ the container mints a short-lived Entra token from its own managed identity, and
 with references only. The migration refuses to move the PAT on the token mode,
 and reports it as a skipped bootstrap credential.
 
-See [workload-lab/workload-credentials.md](../preview/workload-lab/workload-credentials.md).
+See [workload-lab/workload-credentials.md](../beyondtrust/workload-credentials.md).
 
 ### Hypervisor credentials for a remote agent
 

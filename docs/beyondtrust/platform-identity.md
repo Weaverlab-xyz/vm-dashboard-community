@@ -139,6 +139,6 @@ stored credentials were never cleared.
 
 ## Related
 
-- [Workload Credentials](../preview/workload-lab/workload-credentials.md)
+- [Workload Credentials](workload-credentials.md)
 - [Privileged Remote Access](privileged-remote-access.md) ·
   [Password Safe](password-safe.md) · [EPM-L](epml.md) · [Entitle](entitle.md)

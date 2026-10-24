@@ -46,7 +46,7 @@ tab's authority is a product in its own right.
 |---|---|
 | [The Certificate Lab](workload-lab/certificate-lab.md) | you are standing a private CA up and tearing it down — the prerequisites, the build form, the timer, and the AD CS variant for a CA you already run. |
 | [Onboarding a subordinate CA](workload-lab/subordinate-ca.md) | the thing that will hold the credential mints its own certificates beneath it, so the question is rotation rather than delivery. |
-| [BeyondTrust Workload Credentials](workload-lab/workload-credentials.md) | the product behind the Cloud tab — what it is, how the dashboard authenticates to it, and how to empty the database into it. |
+| [BeyondTrust Workload Credentials](../beyondtrust/workload-credentials.md) | the product behind the Cloud tab — what it is, how the dashboard authenticates to it, and how to empty the database into it. |
 | [Dynamic AWS and Azure credentials](workload-lab/dynamic-credentials.md) | you are moving a cloud off its standing access key, and need the lease behaviour, the IAM chain and what an issuance costs. |
 | [What consumes these credentials](workload-lab/consumers.md) | somebody asks what actually spends what the lab issues. |
 
@@ -169,7 +169,7 @@ rendering fault.
 ## Related
 
 * [Password Safe](../beyondtrust/password-safe.md) — the authority behind three of the five
-  tabs. The Cloud tab's is [Workload Credentials](workload-lab/workload-credentials.md),
+  tabs. The Cloud tab's is [Workload Credentials](../beyondtrust/workload-credentials.md),
   and the Agent tab's is this dashboard itself.
 * [Agent Demo Cell](../profiles/demo/agent-demo-cell.md) — the feature guide for the fifth
   tab: the non-human principal this lab was aligned to, and the consumer that holds

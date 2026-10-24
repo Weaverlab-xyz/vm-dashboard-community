@@ -467,7 +467,7 @@ def test_the_settings_panel_is_registered_in_the_ui():
 
 
 def test_the_feature_is_documented():
-    doc = os.path.join(_ROOT, "docs", "operations", "notifications.md")
+    doc = os.path.join(_ROOT, "docs", "admin", "notifications.md")
     assert os.path.isfile(doc), "docs/admin/notifications.md is missing"
     src = _src(doc).lower()
     assert "outbound" in src, (

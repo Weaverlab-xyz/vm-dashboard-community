@@ -261,7 +261,7 @@ _CLOUDOPS = Persona(
                     "under management before anyone could have logged into it.",
             target="/aws#instances",
             minutes=10,
-            docs="cloud/vms",
+            docs="clouds/vms",
             requires_flags=("pra_enabled", "password_safe_enabled"),
             requires_clouds=("aws", "azure", "gcp", "oci"),
         ),
@@ -273,7 +273,7 @@ _CLOUDOPS = Persona(
                     "Command on Azure, ssh-keys metadata on GCP.",
             target="/aws#instances",
             minutes=8,
-            docs="integrations/beyondtrust/password-safe",
+            docs="beyondtrust/password-safe",
             requires_flags=("password_safe_enabled",),
             requires_clouds=("aws", "azure", "gcp"),
         ),
@@ -296,7 +296,7 @@ _CLOUDOPS = Persona(
                     "baseline.",
             target="/images",
             minutes=15,
-            docs="cloud/image-management",
+            docs="operations/image-management",
             requires_clouds=("aws", "azure", "gcp", "oci"),
         ),
         UseCase(
@@ -333,7 +333,7 @@ _DEVOPS = Persona(
                     "inventory file, nothing on disk when it finishes.",
             target="/config-mgmt",
             minutes=10,
-            docs="integrations/ansible",
+            docs="platform/ansible",
             requires_flags=("ansible_enabled", "password_safe_enabled"),
         ),
         UseCase(
@@ -344,7 +344,7 @@ _DEVOPS = Persona(
                     "nobody is holding it.",
             target="/secrets",
             minutes=12,
-            docs="workload-lab/workload-credentials",
+            docs="beyondtrust/workload-credentials",
             requires_flags=("password_safe_enabled",),
         ),
         UseCase(
@@ -366,7 +366,7 @@ _DEVOPS = Persona(
                     "handshake — then rotate and show the build never notices.",
             target="/workload-lab#certificates",
             minutes=15,
-            docs="workload-lab/certificates",
+            docs="preview/workload-lab/certificates",
             requires_flags=("cert_lab_enabled",),
         ),
         UseCase(
@@ -378,7 +378,7 @@ _DEVOPS = Persona(
                     "the one consumer that cannot run an agent.",
             target="/workload-lab#spire",
             minutes=20,
-            docs="workload-lab/spiffe",
+            docs="preview/workload-lab/spiffe",
             requires_flags=("spire_lab_enabled",),
         ),
         UseCase(
@@ -391,7 +391,7 @@ _DEVOPS = Persona(
                     "SPIFFE route above cannot be configured at all.",
             target="/workload-lab#kubernetes",
             minutes=10,
-            docs="workload-lab/kubernetes",
+            docs="preview/workload-lab/kubernetes",
             # THREE flags, and `spire_lab_enabled` is the one that looks wrong. The tab
             # needs k8s + Password Safe, but /workload-lab itself is gated on the derived
             # `workload_lab_enabled` — either PREVIEW flag — so a card that named only the
@@ -412,7 +412,7 @@ _DEVOPS = Persona(
                     "rotating anything.",
             target="/workload-lab#cloud",
             minutes=10,
-            docs="workload-lab/cloud",
+            docs="preview/workload-lab/cloud",
             # The Workload Credentials integration's own flag plus a PREVIEW flag, for the
             # reason test_personas.py enforces: /workload-lab is gated on the derived
             # `workload_lab_enabled`, so a card naming only the first would link to a page
@@ -428,7 +428,7 @@ _DEVOPS = Persona(
                     "what it needs from the vault on first invocation.",
             target="/functions",
             minutes=10,
-            docs="integrations/cloud-functions",
+            docs="cloud-services/functions",
             requires_flags=("cloud_functions_enabled",),
         ),
         UseCase(
@@ -470,7 +470,7 @@ _HYPERVISOR = Persona(
                     "the work and never learns the password.",
             target="/vsphere",
             minutes=8,
-            docs="integrations/beyondtrust/privileged-remote-access",
+            docs="beyondtrust/privileged-remote-access",
             requires_flags=("pra_enabled", "vsphere_enabled"),
         ),
         UseCase(
@@ -481,7 +481,7 @@ _HYPERVISOR = Persona(
                     "manager shared by six people.",
             target="/connections",
             minutes=10,
-            docs="integrations/beyondtrust/password-safe",
+            docs="beyondtrust/password-safe",
             requires_flags=("password_safe_enabled", "vsphere_enabled"),
         ),
         UseCase(
@@ -491,7 +491,7 @@ _HYPERVISOR = Persona(
                     "Gateway that only ever makes outbound connections.",
             target="/connections",
             minutes=8,
-            docs="integrations/beyondtrust/privileged-remote-access",
+            docs="beyondtrust/privileged-remote-access",
             requires_flags=("pra_enabled",),
             # /connections guards itself on any-of these six, inline in the route body.
             requires_any_flag=("proxmox_enabled", "vsphere_enabled", "hyperv_enabled",
@@ -504,7 +504,7 @@ _HYPERVISOR = Persona(
                     "that makes every other item on this list possible.",
             target="/containers#gateways",
             minutes=12,
-            docs="integrations/beyondtrust/gateways",
+            docs="beyondtrust/gateways",
             requires_flags=("pra_enabled",),
         ),
         UseCase(
@@ -515,7 +515,7 @@ _HYPERVISOR = Persona(
                     "the dashboard.",
             target="/agents",
             minutes=10,
-            docs="remote-agents",
+            docs="admin/remote-agents",
             requires_flags=("remote_agents_enabled",),
         ),
     ),
@@ -540,7 +540,7 @@ _ITOPS = Persona(
                     "— no sudo entry, no local admin group, and a record of what ran.",
             target="/settings",
             minutes=10,
-            docs="integrations/beyondtrust/epml",
+            docs="beyondtrust/epml",
             requires_flags=("epml_enabled",),
         ),
         UseCase(
@@ -550,7 +550,7 @@ _ITOPS = Persona(
                     "— with the session recorded and no credential shared.",
             target="/desktops",
             minutes=12,
-            docs="integrations/beyondtrust/privileged-remote-access",
+            docs="beyondtrust/privileged-remote-access",
             requires_flags=("vdesktops_enabled", "pra_enabled"),
         ),
         UseCase(
@@ -560,7 +560,7 @@ _ITOPS = Persona(
                     "since imaging, brought under management and rotated per machine.",
             target="/vms",
             minutes=8,
-            docs="integrations/beyondtrust/password-safe",
+            docs="beyondtrust/password-safe",
             requires_flags=("password_safe_enabled", "vmware_enabled"),
         ),
         UseCase(
@@ -570,7 +570,7 @@ _ITOPS = Persona(
                     "who can manage the endpoint without any standing access to it.",
             target="/vms",
             minutes=6,
-            docs="remote-agents",
+            docs="admin/remote-agents",
             requires_flags=("remote_agents_enabled", "vmware_enabled"),
         ),
         UseCase(
@@ -580,7 +580,7 @@ _ITOPS = Persona(
                     "through an outbound-only broker.",
             target="/vms",
             minutes=8,
-            docs="integrations/beyondtrust/privileged-remote-access",
+            docs="beyondtrust/privileged-remote-access",
             requires_flags=("pra_enabled", "vmware_enabled"),
         ),
     ),
@@ -680,7 +680,7 @@ _OT = Persona(
                     "a diagram.",
             target="/containers#gateways",
             minutes=8,
-            docs="integrations/beyondtrust/gateways",
+            docs="beyondtrust/gateways",
             requires_flags=("pra_enabled",),
         ),
     ),
@@ -706,7 +706,7 @@ _DBA = Persona(
                     "the database exists with an unmanaged password.",
             target="/databases",
             minutes=15,
-            docs="databases",
+            docs="cloud-services/databases",
             requires_flags=("cloud_database_enabled", "password_safe_enabled"),
         ),
         UseCase(
@@ -728,7 +728,7 @@ _DBA = Persona(
                     "rotation projects.",
             target="/databases",
             minutes=10,
-            docs="integrations/beyondtrust/password-safe",
+            docs="beyondtrust/password-safe",
             requires_flags=("cloud_database_enabled", "password_safe_enabled"),
         ),
         UseCase(
@@ -738,7 +738,7 @@ _DBA = Persona(
                     "listener, through a brokered tunnel.",
             target="/databases",
             minutes=10,
-            docs="databases",
+            docs="cloud-services/databases",
             requires_flags=("cloud_database_enabled", "pra_enabled"),
         ),
         UseCase(
@@ -783,7 +783,7 @@ _SECURITY = Persona(
                     "turns up — it always turns something up.",
             target="/secrets",
             minutes=8,
-            docs="access/secrets-management",
+            docs="admin/secrets-management",
         ),
         UseCase(
             id="security-admission-control",
@@ -803,7 +803,7 @@ _SECURITY = Persona(
                     "so the record lives in the tool the team already watches.",
             target="/settings",
             minutes=8,
-            docs="operations/notifications",
+            docs="admin/notifications",
             requires_flags=("notifications_enabled",),
         ),
         UseCase(
@@ -839,7 +839,7 @@ _SRE = Persona(
                     "afterwards — no permanent cluster-admin group.",
             target="/k8s",
             minutes=12,
-            docs="oidc/k8s-federation/entra",
+            docs="platform/oidc/k8s-federation/entra",
             requires_flags=("k8s_management_enabled", "entitle_enabled"),
         ),
         UseCase(
@@ -849,7 +849,7 @@ _SRE = Persona(
                     "brokered tunnel rather than a bastion nobody patches.",
             target="/k8s",
             minutes=10,
-            docs="kubernetes",
+            docs="cloud-services/kubernetes",
             requires_flags=("k8s_management_enabled", "pra_enabled"),
         ),
         UseCase(
@@ -870,7 +870,7 @@ _SRE = Persona(
                     "instead of per-cluster identity nobody deprovisions.",
             target="/k8s",
             minutes=12,
-            docs="oidc/k8s-federation/entra",
+            docs="platform/oidc/k8s-federation/entra",
             requires_flags=("k8s_management_enabled",),
         ),
         UseCase(
@@ -881,7 +881,7 @@ _SRE = Persona(
                     "usually has a shared login.",
             target="/containers#rancher",
             minutes=12,
-            docs="integrations/rancher",
+            docs="cloud-services/rancher",
             requires_flags=("k8s_management_enabled", "pra_enabled"),
         ),
     ),
@@ -934,7 +934,7 @@ _NETADMIN = Persona(
                     "so there is nothing inbound to attack.",
             target="/containers#gateways",
             minutes=8,
-            docs="integrations/beyondtrust/gateways",
+            docs="beyondtrust/gateways",
             requires_flags=("pra_enabled",),
         ),
         UseCase(
@@ -961,7 +961,7 @@ _NETADMIN = Persona(
                     "currently answers with a config diff and a guess.",
             target="/inventory",
             minutes=6,
-            docs="access/audit-log",
+            docs="admin/audit-log",
         ),
     ),
 )
@@ -998,7 +998,7 @@ _FINOPS = Persona(
                     "that exist without anyone here having decided they should.",
             target="/aws#instances",
             minutes=8,
-            docs="cloud/vms",
+            docs="clouds/vms",
             requires_flags=("cloud_unmanaged_discovery_enabled",),
             requires_clouds=("aws", "azure", "gcp", "oci"),
         ),
@@ -1011,7 +1011,7 @@ _FINOPS = Persona(
                     "a runaway instead of stopping one.",
             target="/aws#instances",
             minutes=8,
-            docs="cloud/vms",
+            docs="clouds/vms",
             requires_flags=("vm_spend_cap_enabled",),
             requires_clouds=("aws", "azure", "gcp", "oci"),
         ),
@@ -1027,7 +1027,7 @@ _FINOPS = Persona(
                     "permanent owner.",
             target="/rbac",
             minutes=12,
-            docs="integrations/beyondtrust/entitle-dashboard-permissions",
+            docs="beyondtrust/entitle-dashboard-permissions",
             requires_flags=("entitle_user_jit_enabled",),
         ),
         UseCase(
@@ -1038,7 +1038,7 @@ _FINOPS = Persona(
                     "an answer that does not start with exporting a billing CSV.",
             target="/costs",
             minutes=8,
-            docs="operations/cloud-hosting",
+            docs="platform/cloud-hosting",
             requires_flags=("cost_explorer_enabled",),
         ),
         UseCase(
@@ -1050,7 +1050,7 @@ _FINOPS = Persona(
                     "woke from being put back to sleep on the next sweep.",
             target="/aws#instances",
             minutes=6,
-            docs="cloud/vms",
+            docs="clouds/vms",
             requires_flags=("vm_suspend_schedule_enabled",),
             requires_clouds=("aws", "azure", "gcp", "oci"),
         ),
@@ -1104,7 +1104,7 @@ _AIOPS = Persona(
                     "deleting the registration entry is enough to make it anonymous.",
             target="/workload-lab#spire",
             minutes=10,
-            docs="workload-lab/spiffe",
+            docs="preview/workload-lab/spiffe",
             # The constituent, not the derived `workload_lab_enabled`. The page gate is
             # `cert_lab OR spire_lab`, so requiring the derived flag would leave a card
             # reading `ready` on an instance where only the Certificate lab is on and the
@@ -1121,7 +1121,7 @@ _AIOPS = Persona(
                     "cell refuses to mint one against an administrator.",
             target="/rbac",
             minutes=10,
-            docs="integrations/mcp-server",
+            docs="platform/mcp-server",
             requires_flags=("mcp_server_enabled",),
         ),
         UseCase(
@@ -1132,7 +1132,7 @@ _AIOPS = Persona(
                     "Three records that agree, for a principal nobody was watching.",
             target="/audit",
             minutes=8,
-            docs="access/audit-log",
+            docs="admin/audit-log",
         ),
         UseCase(
             id="aiops-not-a-secret",
@@ -1143,7 +1143,7 @@ _AIOPS = Persona(
                     "the TTL is the only control there is.",
             target="/workload-lab#cloud",
             minutes=10,
-            docs="workload-lab/cloud",
+            docs="preview/workload-lab/cloud",
             # `spire_lab_enabled` is here for the PAGE, not the tab: with every flag in
             # feature_flags._DERIVED["workload_lab_enabled"] off the whole Workload Lab
             # 404s and the Cloud tab is unreachable however its own flag is set -- which
@@ -1175,7 +1175,7 @@ _IAMOPS = Persona(
                     "Terraform state stops working before anyone could have read it.",
             target="/directories",
             minutes=15,
-            docs="directories/active-directory",
+            docs="preview/directories/active-directory",
             requires_flags=("directories_enabled", "password_safe_enabled"),
         ),
         UseCase(
@@ -1187,7 +1187,7 @@ _IAMOPS = Persona(
                     "replication, FSMO, clock, SYSVOL and LDAPS state of every DC.",
             target="/directories/health",
             minutes=6,
-            docs="directories/health",
+            docs="preview/directories/health",
             requires_flags=("directories_enabled",),
         ),
         UseCase(
@@ -1198,7 +1198,7 @@ _IAMOPS = Persona(
                     "account password typed into another tool.",
             target="/directories",
             minutes=8,
-            docs="directories/on-premises",
+            docs="preview/directories/on-premises",
             requires_flags=("directories_enabled", "password_safe_enabled"),
         ),
         UseCase(
@@ -1209,7 +1209,7 @@ _IAMOPS = Persona(
                     "network, with the bind credential checked out for that run only.",
             target="/config-mgmt",
             minutes=10,
-            docs="directories/on-premises",
+            docs="preview/directories/on-premises",
             requires_flags=("ansible_enabled", "directories_enabled",
                             "remote_agents_enabled"),
         ),
@@ -1221,7 +1221,7 @@ _IAMOPS = Persona(
                     "written to the audit log with the tenant, group and user.",
             target="/directories",
             minutes=8,
-            docs="directories/identity-providers",
+            docs="preview/directories/identity-providers",
             requires_flags=("directories_enabled",),
         ),
         UseCase(
@@ -1232,7 +1232,7 @@ _IAMOPS = Persona(
                     "who change the directory are not standing admins of it either.",
             target="/rbac",
             minutes=10,
-            docs="integrations/beyondtrust/entitle-dashboard-permissions",
+            docs="beyondtrust/entitle-dashboard-permissions",
             requires_flags=("entitle_user_jit_enabled",),
         ),
     ),
@@ -1258,7 +1258,7 @@ _IDARCH = Persona(
                     "identity estate as a map rather than a list of consoles.",
             target="/directories",
             minutes=8,
-            docs="directories",
+            docs="preview/directories",
             requires_flags=("directories_enabled", "entitle_enabled"),
         ),
         UseCase(
@@ -1269,7 +1269,7 @@ _IDARCH = Persona(
                     "forest, no new tier-0 asset to protect.",
             target="/directories",
             minutes=15,
-            docs="directories/on-premises",
+            docs="preview/directories/on-premises",
             requires_flags=("directories_enabled", "remote_agents_enabled"),
         ),
         UseCase(
@@ -1280,7 +1280,7 @@ _IDARCH = Persona(
                     "architect specifies, applied to the console that enforces it.",
             target="/rbac",
             minutes=10,
-            docs="integrations/beyondtrust/entitle-dashboard-permissions",
+            docs="beyondtrust/entitle-dashboard-permissions",
             requires_flags=("entitle_user_jit_enabled",),
         ),
         UseCase(
@@ -1302,7 +1302,7 @@ _IDARCH = Persona(
                     "identity governance review asks for, without an export.",
             target="/audit",
             minutes=6,
-            docs="access/audit-log",
+            docs="admin/audit-log",
         ),
     ),
 )
