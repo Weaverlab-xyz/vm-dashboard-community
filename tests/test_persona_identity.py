@@ -35,6 +35,7 @@ from _schema import build_schema  # noqa: E402
 build_schema("persona-identity")
 
 _DB = os.path.join(_ROOT, "web_dashboard", "database.py")
+_LEGACY = os.path.join(_ROOT, "web_dashboard", "schema_legacy.py")
 _AUTH = os.path.join(_ROOT, "web_dashboard", "api", "auth.py")
 _USER_MODEL = os.path.join(_ROOT, "web_dashboard", "models", "user.py")
 _PERSONAS = os.path.join(_ROOT, "web_dashboard", "services", "personas.py")
@@ -71,7 +72,7 @@ def test_both_user_columns_exist_and_are_migrated():
     for col in ("persona", "session_persona"):
         assert re.search(r"^    %s = Column\(String\(32\)" % col, src, re.M), \
             f"users.{col} is not a String(32) column"
-        assert f'"ALTER TABLE users ADD COLUMN {col} VARCHAR(32)"' in src, \
+        assert f'"ALTER TABLE users ADD COLUMN {col} VARCHAR(32)"' in _read(_LEGACY), \
             f"users.{col} has no migration entry — existing databases never get it"
 
 
@@ -80,8 +81,9 @@ def test_the_group_mapping_carries_a_persona_and_a_priority():
     block = src.split("class OAuthGroupMapping(Base)", 1)[1].split("\nclass ", 1)[0]
     assert "persona = Column(String(32)" in block
     assert "persona_priority = Column(Integer" in block
-    assert '"ALTER TABLE oauth_group_mappings ADD COLUMN persona VARCHAR(32)"' in src
-    assert '"ALTER TABLE oauth_group_mappings ADD COLUMN persona_priority INTEGER"' in src
+    legacy = _read(_LEGACY)
+    assert '"ALTER TABLE oauth_group_mappings ADD COLUMN persona VARCHAR(32)"' in legacy
+    assert '"ALTER TABLE oauth_group_mappings ADD COLUMN persona_priority INTEGER"' in legacy
 
 
 def test_the_two_user_columns_are_documented_as_separate_writers():

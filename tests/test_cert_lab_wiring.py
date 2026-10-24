@@ -215,7 +215,8 @@ def test_the_path_length_rides_the_row_the_form_and_both_modules():
     # INTEGER DEFAULT 0, not NULL. A NULL backfill would read as "unknown" and let the
     # identity form offer a subordinate against a root that refuses one — and every root
     # built before the column existed genuinely has a path length of 0.
-    assert "ALTER TABLE cert_labs ADD COLUMN ca_path_length INTEGER DEFAULT 0" in db
+    assert ("ALTER TABLE cert_labs ADD COLUMN ca_path_length INTEGER DEFAULT 0"
+            in _read("web_dashboard", "schema_legacy.py"))
     assert "ca_max_path_length" in svc and "ca_path_length" in svc
     assert "path_length: int = cert_lab_service.CA_PATH_LENGTH_LEAF_ONLY" in api, \
         "a default other than leaf-only would widen what the button already produces"

@@ -231,9 +231,9 @@ def test_the_list_and_detail_endpoints_carry_it():
 
 
 def test_both_columns_have_their_retrofit():
-    src = open(d.__file__, encoding="utf-8").read()
-    assert "ALTER TABLE users ADD COLUMN last_login_at TIMESTAMP" in src
-    assert "ALTER TABLE pov_accessors ADD COLUMN last_login_at TIMESTAMP" in src
+    from web_dashboard.schema_legacy import STATEMENTS
+    assert "ALTER TABLE users ADD COLUMN last_login_at TIMESTAMP" in STATEMENTS
+    assert "ALTER TABLE pov_accessors ADD COLUMN last_login_at TIMESTAMP" in STATEMENTS
 
 
 if __name__ == "__main__":

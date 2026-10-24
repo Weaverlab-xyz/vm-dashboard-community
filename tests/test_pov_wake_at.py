@@ -334,8 +334,8 @@ def test_the_route_refuses_what_it_cannot_do():
 
 
 def test_the_column_has_its_retrofit():
-    src = open(d.__file__, encoding="utf-8").read()
-    assert "ALTER TABLE pov_environments ADD COLUMN wake_at TIMESTAMP" in src
+    from web_dashboard.schema_legacy import STATEMENTS
+    assert "ALTER TABLE pov_environments ADD COLUMN wake_at TIMESTAMP" in STATEMENTS
 
 
 if __name__ == "__main__":

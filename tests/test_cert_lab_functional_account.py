@@ -702,7 +702,7 @@ def test_the_retry_reads_the_credential_back_out_of_the_state():
 
 
 def test_every_account_column_has_a_migration():
-    src = _src("web_dashboard/database.py")
+    src = _src("web_dashboard/schema_legacy.py")
     for col in ("ps_functional_account", "ps_functional_account_id",
                 "ps_subca_functional_account", "ps_subca_functional_account_id"):
         assert f"ALTER TABLE cert_labs ADD COLUMN {col} " in src, \
