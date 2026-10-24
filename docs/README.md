@@ -17,110 +17,41 @@ applies just as much to infrastructure you run in production. See
 
 | You are… | Go to |
 |---|---|
-| **installing or running** the dashboard — an **operator** | [Onboarding](ONBOARDING.md), then the platform reference below |
-| **running your own infrastructure** with it | the platform reference below — you want the `demo` profile, whatever its name suggests |
-| **showing** it to someone — a **presenter** | [Demo profile](profiles/demo/README.md) |
-| running **customer proof-of-value** work | [POV profile](profiles/pov/README.md) |
-| **evaluating** a POV somebody handed you — a **customer** | [What the customer sees](profiles/pov/customer-access.md) |
+| **installing or running** the dashboard — an **operator** | [Getting started](getting-started.md), then the sections below |
+| **running your own infrastructure** with it | the sections below — you want the `demo` profile, whatever its name suggests |
+| **showing** it to someone, or running **customer proof-of-value** work | [Demo and POV profiles](profiles/README.md) |
 | **changing the code** — a **contributor** | [Design notes](design/README.md), [runbooks](runbooks/README.md), [notes](notes/README.md), and [CONTRIBUTING.md](../CONTRIBUTING.md) |
 
-## Platform reference
+## Sections
 
-What the dashboard does, and the discipline it expects from you. These are written once
-and shared: the page describing how to deploy a cloud VM is the same page whether you are
-demoing, running a lab, or running production.
+The sections follow the app. Six mirror the groups of its navigation menu, two mirror the
+Settings → Integrations groups that have no menu of their own, and one is first-run setup.
+Each is a hub page naming which page answers what, and a folder of the pages themselves,
+so this index links the hubs and each hub links its own pages.
 
-Each group below is a **section**: a hub page that says which page answers what, and a
-folder of the pages themselves. A page that stands alone is a row on its own.
+| Section | In the app | Read it when |
+|---|---|---|
+| [Getting started](getting-started.md) | first run | you are setting the dashboard up for the first time and want the shortest path to a running instance, then the per-cloud setup |
+| [Hypervisors](hypervisors.md) | menu → Hypervisors | your VMs run on VMware, Proxmox, Hyper-V, Nutanix or XCP-ng |
+| [Clouds](clouds.md) | menu → Clouds | you are putting workloads on AWS, Azure, GCP or OCI: how a deploy works, a sandbox to run it in, VMs and Windows servers |
+| [Cloud services](cloud-services.md) | menu → Cloud services | you are running containers, databases, Kubernetes or functions |
+| [Preview](preview.md) | menu → Preview | you are trying virtual desktops, directories or the Workload Lab |
+| [Operations](operations.md) | menu → Operations | you are running it day to day: Config Management, scheduling, images, storage, inventory, jobs, costs and clean-up |
+| [Admin](admin.md) | menu → Admin | you are deciding who may use it, where its secrets live and how you would prove what happened, or running its agents, health checks and notifications |
+| [BeyondTrust](beyondtrust.md) | Settings → BeyondTrust | you are wiring it into Privileged Remote Access, Password Safe, EPM for Linux or Entitle |
+| [Platform](platform.md) | Settings → Platform | you are deciding how people sign in, how the dashboard proves its own identity, where it is hosted, or how its runners and AI clients connect |
+| [Editions](editions.md) | — | you are choosing between running the dashboard yourself and a hosted edition |
 
-### Get started
+## Collections
 
-| Page | Read this when |
-|---|---|
-| [Onboarding Guide](ONBOARDING.md) | you are setting the dashboard up for the first time and want the shortest path to a running instance. The per-cloud setup pages are under [`onboarding/`](ONBOARDING.md). |
-
-### Cloud
-
-| Page | Read this when |
-|---|---|
-| [Cloud](cloud.md) | you are putting workloads on AWS, Azure, GCP or OCI and want to know which page covers which part. |
-| [Infrastructure as Code](cloud/infrastructure-as-code.md) | you are about to deploy your first cloud resource and want to know what is actually running underneath. |
-| [Cloud Sandbox](cloud/sandbox.md) | you want an isolated cloud account for the dashboard's labs, bootstrapped rather than hand-built. |
-| [Cloud VMs](cloud/vms.md) | you are deploying cloud VMs, or want the dashboard to see and power ones it did not deploy. |
-| [Windows servers](cloud/windows-servers.md) | you are deploying a Windows server on AWS, Azure or GCP: where its administrator password goes, how PRA reaches it, and joining Entra ID or Active Directory. |
-| [Cloud Containers](cloud/containers.md) | you want a containerised app on a cloud runtime without standing up Portainer. |
-| [Virtual Desktops](cloud/virtual-desktops.md) | you need a pool of private desktop VMs that reps reach through the PRA Gateway rather than over the internet. |
-| [Image Management](cloud/image-management.md) | you are about to build a custom image and need to know how it will reach the other clouds. |
-| [Cloud Costs](cloud/costs.md) | you want month-to-date cloud spend on the dashboard, a budget alert, or a budget in the cloud that alerts while the dashboard is down. |
-
-### Platforms and workloads
-
-| Page | Read this when |
-|---|---|
-| [Databases](databases.md) | you are standing up a managed database, or want to manage one you already run. |
-| [Kubernetes](kubernetes.md) | you are managing Kubernetes clusters and the privileged access into them, and want to know which of the three kinds the dashboard builds you need. |
-| [Managed Kubernetes](kubernetes/k8s.md) | you are provisioning an EKS, AKS, GKE or OKE cluster from the dashboard, or registering one you already run in a cloud. |
-| [k3s](kubernetes/k3s.md) | you are building an on-prem cluster with the dashboard, or working with the k3s it creates in the OT demo cell or the Workload Lab. |
-| [KubeSolo](kubernetes/kubesolo.md) | you need the Entitle agent on an edge or plant-floor host that will not carry a real cluster. |
-| [Inventory](inventory.md) | you want one list of everything across every cloud and hypervisor, to filter it by tag or Password Safe attribute, or to act on a selection. |
-| [Remote Agents](remote-agents.md) | your hypervisors, databases or clusters live somewhere the dashboard cannot reach. The pages are under [`remote-agents/`](remote-agents.md). |
-
-### Identity and access
-
-| Page | Read this when |
-|---|---|
-| [Identity and access](access.md) | you are deciding who and what may use the dashboard, how it keeps credentials, or how you would prove what happened. |
-| [Permissions](access/permissions.md) | you are deciding what a user may see or do — and especially before ticking "Full access", or handing a POV to a customer stakeholder. |
-| [Service Accounts](access/service-accounts.md) | something that is not a person — a CI job, an MCP agent, a script — needs to call the API, and you would otherwise hand it a PAT. OAuth 2.0 client credentials, built in, no IdP needed. |
-| [Workload identity](access/workload-identity.md) | you still store a cloud key, a product token or an agent's signing key — the recommended model replaces each with an identity, and grants write privilege just in time. |
-| [Secrets Management](access/secrets-management.md) | you are deciding where to store cloud credentials, and how to evolve that over time. |
-| [Audit Log](access/audit-log.md) | you need to show who did what, or to satisfy yourself that the record has not been edited. |
-| [Directories](directories.md) | you want Windows servers joined to an Active Directory domain (built in a cloud, one you already run, or your on-premises domain), want to manage an on-prem AD or LDAP directory through a remote agent, or want to browse and change group membership in Entra ID, Okta or PingOne. The pages are under [`directories/`](directories.md). |
-| [OIDC and single sign-on](oidc.md) | you want single sign-on, Dex in front of your clusters, Entra federation to Kubernetes, or the dashboard reaching AWS, Azure, GCP and k3s with its own short-lived identity instead of a stored key. The pages are under [`oidc/`](oidc.md). |
-| [SPIFFE and SPIRE](spiffe.md) | you are running the dashboard's own SPIRE server — on Docker Compose or as a sidecar on Azure Container Apps, Cloud Run, ECS or Kubernetes — or want the map of every feature that uses SPIFFE: agent attestation, the dashboard's own identity, service accounts, demo cells and the Workload Lab. |
-| [Workload Lab](workload-lab.md) | something that is not a person needs a credential — a certificate, a SPIFFE identity, a cluster token or a cloud key — and you want to pick the mechanism before reading any one guide. The per-tab guides, the Workload Credentials product pages and the register of what consumes each credential are all under [`workload-lab/`](workload-lab.md). |
-
-### Operations
-
-| Page | Read this when |
-|---|---|
-| [Operations](operations.md) | the dashboard is installed and you are running it day to day: managing the infrastructure that already exists and what you built with it, and keeping the dashboard itself healthy. |
-| [Config Management](operations/config-management.md) | you are about to run an Ansible job and want to know how the runner handles secrets and isolation. |
-| [Scheduling](operations/scheduling.md) | you want a change to run later, run repeatedly, or run only inside an approved window, or it has to wait for a second person to sign it off. The hub tells the three kinds of "schedule" apart; the full reference, [Change Windows](operations/scheduling/change-windows.md), and its other half, [Action Guardrails](operations/scheduling/policy-guardrails.md) — disallowed changes blocked before they start — are under [`scheduling/`](operations/scheduling.md). |
-| [Storage Management](operations/storage-management.md) | you are enabling a feature that needs a storage backend, which several of them do. |
-| [Cloud Hosting](operations/cloud-hosting.md) | you want the dashboard reachable from outside your LAN, or fronting remote agents. |
-| [Job Worker](operations/job-worker.md) | a long job is sitting queued, or you are sizing the worker for more of them. |
-| [Notifications](operations/notifications.md) | you want to hear about expiring resources and failed jobs without opening the dashboard. |
-| [Auto-delete Timer](operations/auto-delete-timer.md) | you want lab resources to clean themselves up — read it before enabling it, because it deletes infrastructure. |
-| [Config Migration](operations/config-migration.md) | you are standing up a second instance and do not want to re-type months of configuration. |
-
-### Editions
-
-| Page | Read this when |
-|---|---|
-| [Editions](editions.md) | you are choosing between running the dashboard yourself and a hosted edition, or want to know why a feature is not in this one. |
-| [Community vs. hosted](editions/comparison.md) | you are choosing between running this yourself and a managed edition. |
-| [SaaS Roadmap](editions/roadmap.md) | you want to know which capabilities are reserved for the hosted edition, and why. |
-
-## The rest of the tree
-
-Two kinds of folder, indexed two ways. A **section** (a feature with several pages) is
-indexed by a hub page of the same name beside it, so `cloud.md` indexes `cloud/`, and the
-hub is also the section's own entry page. A **collection** (pages that share a kind, not a
-feature) is indexed by its own `README.md`.
+Folders of pages that share a kind rather than a feature, each indexed by its own `README.md`.
 
 | Folder | What's in it |
 |---|---|
-| [profiles/](profiles/README.md) | The `demo` / `pov` gate, the per-feature matrix, and everything specific to one profile or the other. |
-| [integrations/](integrations/README.md) | One page per external system the dashboard talks to — the BeyondTrust products, the hypervisors, the runners. |
+| [profiles/](profiles/README.md) | The `demo` / `pov` gate, the per-feature matrix, and everything specific to one profile or the other: the personas, the demo cells, what a POV customer sees. |
 | [design/](design/README.md) | Why a subsystem is shaped the way it is. Facts that are not recoverable from reading the code. |
 | [runbooks/](runbooks/README.md) | Procedures to run against a real instance, usually to prove a phase of work landed. |
 | [notes/](notes/README.md) | Dated investigations, kept for their conclusions rather than their narrative. |
-
-The sections — [`onboarding/`](ONBOARDING.md), [`cloud/`](cloud.md), [`access/`](access.md),
-[`oidc/`](oidc.md), [`directories/`](directories.md), [`workload-lab/`](workload-lab.md), [`remote-agents/`](remote-agents.md),
-[`operations/`](operations.md) (with [`operations/scheduling/`](operations/scheduling.md) inside it), [`kubernetes/`](kubernetes.md)
-and [`editions/`](editions.md) — are listed with their hubs above.
 
 Outside `docs/`: [CONTRIBUTING.md](../CONTRIBUTING.md), [SECURITY.md](../SECURITY.md), and
 a `README.md` beside most directories that ships something —

@@ -5,7 +5,7 @@
 > **Legacy mechanism.** This runbook covers Entitle granting dashboard
 > permissions through **Entra groups**. The current mechanism is a REST
 > integration that works for any user and takes effect immediately — see
-> [`../integrations/beyondtrust/entitle-dashboard-permissions.md`](../integrations/beyondtrust/entitle-dashboard-permissions.md).
+> [`../integrations/beyondtrust/entitle-dashboard-permissions.md`](../beyondtrust/entitle-dashboard-permissions.md).
 
 Operator walk-through for the `terraform/entitle_user_jit/` module +
 `web_dashboard/scripts/bootstrap_entitle_app.py` wrapper. Validates
@@ -194,7 +194,7 @@ the new scope declared — not always three. The new resources now carry the
 > non-admin with an explicit map could already reach: the full level set
 > for a previously ungated route, and *nothing* for one that required the
 > Admin flag. See
-> [Permissions → Adding a scope](../access/permissions.md#adding-a-scope-for-contributors).
+> [Permissions → Adding a scope](../admin/permissions.md#adding-a-scope-for-contributors).
 
 ## Step 9 — Where this fits
 

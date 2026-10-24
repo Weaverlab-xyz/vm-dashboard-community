@@ -28,7 +28,7 @@
 #
 # On a managed container runtime (Azure Container Apps, Cloud Run, ECS, Kubernetes) there
 # is no compose and no shared volume: run examples/cloud-spire as a sidecar of the app
-# instead. docs/spiffe.md#on-a-managed-container-runtime
+# instead. docs/platform/spiffe.md#on-a-managed-container-runtime
 #
 # Images are pinned by digest, from the same table as the SPIRE lab
 # (examples/playbooks/spire/spire-docker-server.yml); tests/test_spire_overlay.py keeps

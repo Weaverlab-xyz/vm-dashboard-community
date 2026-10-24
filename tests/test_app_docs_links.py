@@ -10,8 +10,8 @@ with ``/``, because those are app routes rather than filesystem paths::
 That was the right call there and it left a hole: the links an operator actually
 clicks are written in ``web_dashboard/templates/``, which nothing walked at all,
 and they are *all* app routes. Three of them pointed at
-``/docs/remote-agents.md`` — with the ``.md`` suffix. ``doc_page`` appends its
-own, so the route looked for ``docs/remote-agents.md.md`` and returned 404 on
+``/docs/admin/remote-agents.md`` — with the ``.md`` suffix. ``doc_page`` appends its
+own, so the route looked for ``docs/admin/remote-agents.md.md`` and returned 404 on
 every click, from the Remote Agents page banner, its policy-file modal, and the
 Settings panel warning about terminating TLS.
 

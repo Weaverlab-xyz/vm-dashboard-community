@@ -10,7 +10,7 @@
 #
 # This overlay bind-mounts the HOST's system CA bundle over the container's.
 # The host bundle already contains your corp CA if you followed the WSL trust
-# setup in docs/ONBOARDING.md (update-ca-certificates). The image's
+# setup in docs/getting-started.md (update-ca-certificates). The image's
 # SSL_CERT_FILE / REQUESTS_CA_BUNDLE / PIP_CERT already point at this path,
 # and terraform (Go) honors SSL_CERT_FILE — so the mount alone fixes Go,
 # Python/requests, and pip. AWS_CA_BUNDLE is added for boto3, which reads

@@ -8,7 +8,7 @@ Password Safe plugins: the three **`{engine} Azure Run Command Plugin`**s, the t
 Covers what must exist before the settings panel is useful, exactly what to put in each
 field, and how to prove the plugin ran.
 
-Feature reference: [Databases → Layer 2](../databases.md#layer-2--password-safe-aws--azure--gcp).
+Feature reference: [Databases → Layer 2](../cloud-services/databases.md#layer-2--password-safe-aws--azure--gcp).
 Panel: **Settings → Integrations → Password Safe → Configure → Databases tab → Database Onboarding**.
 
 **Scope:** AWS, Azure and GCP. OCI databases provision and get a tunnel, but have no

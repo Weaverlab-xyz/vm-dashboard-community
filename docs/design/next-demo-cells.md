@@ -107,14 +107,14 @@ air gap is the OT cell's.
   agents authenticate and the honest reply is a long-lived key in an environment
   variable.
 - The machinery mostly exists. **`remote_agents` is already a container that runs inside
-  a private network and dials out** ([Remote Agents](../remote-agents.md)) — that is an
+  a private network and dials out** ([Remote Agents](../admin/remote-agents.md)) — that is an
   agent in a box with the network story solved. `workload_credentials`, the SPIRE lab and
   `cloud_functions` give it an identity.
 - It fits the cheap shape: a Shell Jump plus a workload identity. No Web Jump, no tunnel,
   so teardown stays inherited.
 
 **Scope it honestly.** The MCP server at `/mcp` is **read-only access to dashboard data**
-([MCP Server](../integrations/mcp-server.md)). It demonstrates an AI client *reading* an
+([MCP Server](../platform/mcp-server.md)). It demonstrates an AI client *reading* an
 estate; it is not an agent with privileged access to infrastructure, and a card implying
 otherwise would be overclaiming. The cell is new work that can *reuse* the MCP server as
 one surface, not a wiring exercise over it.
@@ -193,11 +193,11 @@ access* — but a `security` card pointing at the same listing would not be wron
 **Role:** `itops` already exists. This is a cell for an existing persona.
 
 The gap is sharper than "no cloud VDI" — cloud VDI is built and reasonably mature
-([Virtual Desktops](../cloud/virtual-desktops.md), preview). The gap is that
+([Virtual Desktops](../preview/virtual-desktops.md), preview). The gap is that
 **"remove local admin from a Windows endpoint and elevate per-application" — among the
 most recognisable demos BeyondTrust has — has no home in this dashboard**, because
 `epml_enabled` is the only EPM flag in the registry and
-[`integrations/beyondtrust/epml.md`](../integrations/beyondtrust/epml.md) is EPM **for Linux**.
+[`integrations/beyondtrust/epml.md`](../beyondtrust/epml.md) is EPM **for Linux**.
 
 **To be clear about what that is and is not.** EPM for Windows is a shipping BeyondTrust
 product and there is nothing preventing its use — what is missing is the *dashboard
@@ -215,7 +215,7 @@ than it looks, because **every surrounding piece is already here**:
 
 The agent goes **into the image**, and this is a settled pattern rather than a new idea.
 EPM-L states the constraint and the resolution in one sentence
-([`integrations/beyondtrust/epml.md`](../integrations/beyondtrust/epml.md#getting-an-installation-token)):
+([`integrations/beyondtrust/epml.md`](../beyondtrust/epml.md#getting-an-installation-token)):
 
 > Because the package is installed at build time but activation can't be — a token
 > expires hours after issue, so one baked into an image is already dead — activation is a
@@ -384,7 +384,7 @@ Three named gaps, none of them a property of the design:
   they are.
 * **The Password Safe account has to exist and be requestable.** The `ps` source needs an
   API-enabled managed account, the Requestor role, and an access policy that auto-releases
-  — the same out-of-band prerequisites `docs/integrations/beyondtrust/password-safe.md` already
+  — the same out-of-band prerequisites `docs/beyondtrust/password-safe.md` already
   records for every other request path.
 
 So `file` stays the default, and every line the worker logs names which mode produced its
@@ -399,7 +399,7 @@ one §5b used.
 
 §5b argued from capability — *OIDC federation for non-human identities is available in all
 three clouds*, which is true and is not quite a reason to build anything. The reason is in
-`docs/operations/cloud-hosting.md`, which has said all along that this dashboard runs as a managed
+`docs/platform/cloud-hosting.md`, which has said all along that this dashboard runs as a managed
 container on **Azure Container Apps, GCP Cloud Run or AWS ECS**. Wiring only Azure left two
 of the three *documented hosting options* unable to use the mode that stores nothing —
 not because the mechanism belonged to Azure, but because nothing here asked the other
@@ -526,7 +526,7 @@ both certificate packages:
    else — no `Text`, no `Password`. `--decrypt` cannot help, because it only adds a
    query parameter and there is no payload field for it to fill. The body comes from a
    separate call that takes **only a GUID**, so even the happy path is two round trips.
-   See [Password Safe → Troubleshooting](../integrations/beyondtrust/password-safe.md#troubleshooting).
+   See [Password Safe → Troubleshooting](../beyondtrust/password-safe.md#troubleshooting).
 2. **On the leaf package it is binary — which rules out ps-cli, not the API.** `bundle`
    defaults to `Pkcs12` for `Certificate` and `PemBundle` for `Subordinate CA`. The
    endpoint returns `application/octet-stream` and is byte-faithful; every route ps-cli
@@ -541,7 +541,7 @@ both certificate packages:
    downloaded through the API came back larger than the original and did not match the
    web console's copy, so a non-human identity would have retrieved a corrupt bundle no
    matter how careful the client was. That floor is already a
-   [Certificate Lab prerequisite](../workload-lab/certificate-lab.md#password-safe).
+   [Certificate Lab prerequisite](../preview/workload-lab/certificate-lab.md#password-safe).
 
 None of this is a structural objection of the kind `cloud` has — a certificate is a
 credential a workload legitimately spends, and an agent answerable for one is a coherent
@@ -565,7 +565,7 @@ can take away**, and the arc is the reason to build it at all:
 | cluster access | a Workload Lab token | **gated at retrieval**; once released it lives out its TTL |
 | certificate use | a PKCS#12 identity | **neither** |
 
-`docs/workload-lab/certificates.md` states the third position plainly: *"No revocation
+`docs/preview/workload-lab/certificates.md` states the third position plainly: *"No revocation
 checking. The plugin consults neither CRLs nor OCSP. Short lifetimes are the mitigation,
 and that is a deliberate design position."* So the closing beat is deliberately
 uncomfortable — disable the managed account, which revokes the certificate, run the agent
@@ -690,7 +690,7 @@ came back empty, so a tenant that disagrees says so in one line.
 **And a floor §5d already records applies here too:** below BeyondInsight 26.1.0.878, file
 secrets downloaded through the API came back larger than the original, so this episode
 would retrieve a corrupt bundle however careful the client is. It is already a
-[Certificate Lab prerequisite](../workload-lab/certificate-lab.md#password-safe), which is
+[Certificate Lab prerequisite](../preview/workload-lab/certificate-lab.md#password-safe), which is
 why it is not a new one — but it is the version this episode silently depends on, and the
 DER check is not a guard against it: a too-large bundle still starts `0x30`.
 

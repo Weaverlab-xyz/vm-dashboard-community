@@ -2103,7 +2103,7 @@ class WorkloadCredentialLease(Base):
     cloud = Column(String(16), primary_key=True)
     # provision | readonly. Splitting by lifecycle rather than by operation is what lets
     # the request path hold a read-only credential while write privilege exists only for
-    # the duration of a job. See docs/workload-lab/workload-credentials.md.
+    # the duration of a job. See docs/preview/workload-lab/workload-credentials.md.
     purpose = Column(String(32), primary_key=True)
 
     # ── last-known-good (written ONLY on a successful generate) ──────────────
@@ -2922,7 +2922,7 @@ class SpireLab(Base):
     # diagnostic — which is why it is recorded rather than rebuilt from parts each time.
     k8s_issuer_url = Column(String(255), nullable=True)
 
-    # SPIFFE federation with the dashboard's own SPIRE server (docs/workload-lab/spiffe.md,
+    # SPIFFE federation with the dashboard's own SPIRE server (docs/preview/workload-lab/spiffe.md,
     # "Federating with the dashboard"): federating | federated | failed, or NULL for never.
     # Separate from `status` for the reason k8s_status is: a failed federation must not
     # make a working trust domain read as broken.
@@ -3218,7 +3218,7 @@ class WorkloadK8sToken(Base):
     credential with no expiry and no audit trail, which is the artefact this feature
     exists to remove. The consumer assembles one at run time from what it retrieved.
 
-    **The timer is not about cost.** It is the same argument ``docs/workload-lab/spiffe.md`` makes for
+    **The timer is not about cost.** It is the same argument ``docs/preview/workload-lab/spiffe.md`` makes for
     the SPIRE lab: a forgotten workload token keeps authenticating, and this row is the
     only page it appears on.
     """
@@ -3436,7 +3436,7 @@ class CloudFunction(Base):
 
 class K8sCluster(Base):
     """Inventory of dashboard-managed Kubernetes clusters — Kubernetes
-    management (docs/kubernetes.md).
+    management (docs/cloud-services/kubernetes.md).
 
     One row per managed cluster. **Phase 1** records a cluster the dashboard
     can reach (provisioned out-of-band or registered from an existing

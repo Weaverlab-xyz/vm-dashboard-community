@@ -23,7 +23,7 @@
 # On a Windows host none of the SELinux half applies — the flag is inert and bind mounts
 # arrive with permissive ownership, so an unreadable file means Docker Desktop file sharing
 # rather than a label. The Agents page emits both flavours; pick the shell with the toggle.
-# See docs/remote-agents.md, "Running on Windows".
+# See docs/admin/remote-agents.md, "Running on Windows".
 
 # ── What may be touched ───────────────────────────────────────────────────────
 # The agent refuses any address:port not matched here. Matching happens on the

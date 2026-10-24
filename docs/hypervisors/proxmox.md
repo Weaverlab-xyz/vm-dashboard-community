@@ -1,0 +1,259 @@
+# Proxmox VE Integration
+
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** your VMs live on Proxmox VE.
+
+## What is it?
+
+The Proxmox VE integration connects the dashboard to one or more
+[Proxmox Virtual Environment](https://www.proxmox.com/en/proxmox-ve) nodes or
+clusters via the Proxmox REST API. It adds a **Proxmox** tab to the dashboard
+where you can see all your QEMU VMs and LXC containers, check resource usage,
+and start, stop, or reboot them — without opening the Proxmox web UI.
+
+---
+
+## Use cases
+
+- **Unified on-prem + cloud view** — see Proxmox VMs alongside AWS EC2, Azure
+  VMs, and GCP instances in a single dashboard without switching between tools.
+- **Lab and homelab management** — start and stop VMs before a demo or test
+  session from the same interface used for cloud resources.
+- **Multi-node visibility** — view all VMs and containers across every node in
+  a Proxmox cluster, grouped by node, from one screen.
+
+---
+
+## Prerequisites
+
+| Requirement | Notes |
+|---|---|
+| Proxmox VE 7.x or 8.x | The REST API is available on all recent Proxmox versions |
+| API token or user account | API token is strongly recommended (see setup below) |
+| Network access | The dashboard container must be able to reach the Proxmox host on port 8006 |
+
+---
+
+## Setup
+
+### Step 1 — Create an API token (recommended)
+
+API tokens are the preferred auth method: they are revokable, auditable, and do
+not require session management.
+
+1. Log in to the **Proxmox web UI** → **Datacenter** → **Permissions** →
+   **API Tokens** → **Add**.
+2. Select the user (e.g. `root@pam`), enter a Token ID (e.g. `dashboard`),
+   and uncheck **Privilege Separation** if you want the token to inherit the
+   user's full permissions.
+3. Click **Add** and copy the **Token Secret** — it is shown only once.
+
+The full token identifier shown in Proxmox is `USER@REALM!TOKENID`
+(e.g. `root@pam!dashboard`). In the dashboard, enter:
+- **Username**: `root@pam`
+- **Token ID**: `dashboard`
+- **Token Secret**: the UUID shown after creation
+
+### Step 2 — Grant the API token read and power permissions
+
+The minimum required privileges on the `/` path (or the relevant pool):
+
+| Privilege | Purpose |
+|---|---|
+| `VM.Audit` | List VMs and containers, read status |
+| `VM.PowerMgmt` | Start, stop, shutdown, reboot |
+| `Sys.Audit` | List nodes and cluster resources |
+
+Assign via **Datacenter → Permissions → Add → API Token Permission**:
+- Path: `/`
+- Token: `root@pam!dashboard`
+- Role: **PVEVMAdmin** (includes all of the above) or a custom role
+
+### Step 3 — Enable and configure in the dashboard
+
+Turning it on sets the `proxmox_enabled` feature flag, and the **Proxmox** page appears in
+the navigation at `/proxmox`.
+
+**Turn it on** in **Settings → Integrations → Proxmox VE**.
+
+**Then add the connection on the Connections tab** of the Remote Agents page
+(`/connections`) → **Add connection**, kind **Proxmox VE**. That is where connection details
+have lived since a dashboard could hold more than one of each kind; see
+[Multiple connections](#multiple-connections).
+
+| Field | Description |
+|---|---|
+| Name | Your name for it, such as `dc1` |
+| Host | Hostname or IP of a Proxmox node (or the cluster VIP) |
+| Port | Default `8006` |
+| Username | e.g. `root@pam` |
+| API token id | The full token id, e.g. `root@pam!dashboard`. Blank means password authentication |
+| Password | The token secret (the UUID), or the account password for password auth. Prefer a **Password Safe managed account** or a **secret reference** (`bt_safe://`, `aws_sm://`, `azure_kv://`, `gcp_sm://`): a password stored here is the weakest of the three |
+| Verify the TLS certificate | Untick for self-signed certificates (common in home labs) |
+| Site | Optional label |
+| Make this the default | The connection every page and API call uses unless told otherwise. The first one of a kind becomes the default |
+
+Click **Save**. No container restart is required. For a Proxmox VE the dashboard cannot reach,
+tick **Reached through a remote agent** instead; see [Over a remote agent](#over-a-remote-agent).
+
+The old **Settings → Integrations → Proxmox VE** fields (`proxmox_host`, `proxmox_port`, `proxmox_user`, `proxmox_token_id`, `proxmox_token_secret`, `proxmox_verify_ssl`) are read only as a fallback
+while no Proxmox VE connection exists, and were copied into the first connection on upgrade.
+Editing them after that changes nothing.
+
+### Step 4 — Verify
+
+The **Proxmox** link appears under **Hypervisors** in the navigation menu (the ☰ button in the top bar). Click it — you should see
+your nodes as tabs and all VMs and containers listed within a few seconds.
+
+---
+
+## What it enables in the dashboard
+
+| Feature | Description |
+|---|---|
+| **Proxmox tab** | Lists all QEMU VMs and LXC containers across all nodes |
+| **Node tabs** | Filter the resource list by node |
+| **Start / Shutdown / Force Off** | One-click power controls per VM or container |
+| **Reboot** | Graceful reboot for QEMU VMs |
+| **Status and resource usage** | CPU %, memory, running/stopped state |
+| **VM detail** | IP addresses (via QEMU guest agent), OS type, tags, description |
+| **Bulk power** | Tick several rows and send Start, Shutdown, Force Off or Reboot to the whole selection from the toolbar — one job per VM, sharing a batch you watch on one page. VMs already in the target state are skipped and the dialog says how many; fifty per operation is the cap. See [Powering a selection](../admin/remote-agents/hypervisors.md#powering-a-selection) |
+
+Templates are automatically hidden from the resource list.
+
+### Tags
+
+Proxmox tags show as chips under each VM's name, and the **Filter by tag** box narrows the
+list, select-all and bulk power with it. The same tags appear on
+[Inventory](../operations/inventory.md), where one filter covers every provider at once.
+
+**Tags** on a row, or **Edit tags** on the bulk toolbar, adds and removes them. A directly
+dialled connection is written immediately. An agent-bound one is queued as a job for the
+agent. Proxmox tags are bare labels with no values. Chip colours, the refused
+dashboard-owned keys, and the audit entry are all in
+[Cloud VMs — Editing tags](../clouds/vms.md#editing-tags). The agent path is described in
+[Agent-brokered hypervisors](../admin/remote-agents/hypervisors.md#the-verbs).
+
+**Scheduling power.** On a connection bound to a
+[remote agent](../admin/remote-agents/hypervisors.md), the bulk power toolbar's **Schedule**
+tick books the operation for a time or a change window. A directly dialled connection
+cannot be booked, and each of its VMs is refused by name. See [Scheduling](../operations/scheduling.md).
+
+---
+
+## Password auth (alternative)
+
+If you cannot create an API token, you can authenticate with a username and
+password instead. Leave **Token ID** and **Token Secret** blank and set
+**Password**. Note that password auth creates a ticket that expires; the
+dashboard will re-authenticate on each request, which is slightly slower and
+adds one API call per operation.
+
+```
+PROXMOX_USER=root@pam
+PROXMOX_PASSWORD=<your-root-password>
+```
+
+---
+
+## Cluster vs single-node setup
+
+The integration works identically for a single-node Proxmox installation and a
+full Proxmox cluster. Point `PROXMOX_HOST` at any node in the cluster — Proxmox
+returns resources across all cluster members from any single node's API. The
+node tabs in the UI reflect the actual cluster topology.
+
+---
+
+## IP address display (QEMU guest agent)
+
+The VM detail panel shows IP addresses when the **QEMU Guest Agent** is
+installed and running inside the VM. Without it, IP addresses cannot be read
+from the API.
+
+To install the agent inside a Debian/Ubuntu VM:
+```bash
+apt-get install -y qemu-guest-agent
+systemctl enable --now qemu-guest-agent
+```
+
+Then enable it in Proxmox: **VM → Options → QEMU Guest Agent → Enabled**.
+
+---
+
+## Troubleshooting
+
+**Proxmox tab is missing** — verify `PROXMOX_ENABLED=true` and that the stack
+restarted after the change (or that you saved via Settings → Integrations).
+
+**"no proxmox connection is configured — add one on the Connections page"** — add a
+Proxmox connection on the **Connections** tab of the Remote Agents page (`/connections`).
+
+**"Connection refused" or timeout** — confirm port 8006 is reachable from
+inside the container:
+```bash
+docker compose exec app curl -sk https://proxmox.local:8006/api2/json/version
+```
+If the request times out, check firewall rules between the Docker host and the
+Proxmox node.
+
+**"401 Unauthorized"** — the token ID or secret is incorrect, or the token
+has been deleted. Regenerate the token in Proxmox → Datacenter → API Tokens.
+
+**"403 Forbidden" on power operations** — the API token lacks `VM.PowerMgmt`.
+Reassign the token to a role that includes that privilege (e.g. `PVEVMAdmin`).
+
+**SSL certificate errors** — for self-signed certificates, untick **Verify the TLS
+certificate** on the connection. For production with a valid cert, leave it on.
+
+**IP addresses not showing** — install and enable the QEMU Guest Agent inside
+the VM and ensure **QEMU Guest Agent** is checked under VM → Options in the
+Proxmox UI.
+
+## Multiple connections
+
+Connection details used to live in Settings as a single set of fields, so there could
+only ever be one Proxmox cluster. They now live on the **Connections** tab of the Remote Agents page (`/connections`),
+which holds as many as you like — a second Proxmox cluster at another site, or the same one
+under a read-only and a privileged service account.
+
+* The **default** connection is what every page and API call uses when not told
+  otherwise. The first connection of a kind becomes the default automatically.
+* Pass `?connection_id=<id>` to any `/api/proxmox` endpoint to target a specific one.
+* Job-backed operations (deploys, power verbs) record the connection at **enqueue**, so
+  changing the default while one is queued cannot redirect it.
+
+Your existing Settings values were copied into the first connection on upgrade. The old
+panel is still there, read-only, with a banner pointing here — editing it no longer
+changes what the dashboard connects to. It is kept so that rolling back to a previous
+image still works.
+
+## Over a remote agent
+
+A Proxmox cluster the dashboard has no network route to can be reached through a
+[remote agent](../admin/remote-agents/hypervisors.md#hypervisor-connections) instead. Tick *Reached
+through a remote agent* when adding the connection and give it the name that connection
+has in the agent's own `connections.yaml`.
+
+The dashboard then stores **no host and no credential** for it — only the name. The
+agent uses the `/api2/json` REST API with an API token, which needs no dependency the agent does not already have.
+
+Three separate grants must line up: the dashboard grants the agent the
+`agent_hypervisor` job type, your `policy.yaml` grants the individual verbs on that
+connection, and your `connections.yaml` defines it. Withhold any one and nothing runs.
+
+### When the connection is reached through an agent
+
+The dashboard has no route to an agent-bound connection — that is the point of binding it
+to an agent — so this page cannot query it live. It shows the **last synced inventory**
+instead, with a banner saying so and how old it is. Live-only figures (CPU usage, uptime,
+disk) are blank there rather than zero: they were never measured, and a fabricated 0 is
+worse than an empty cell.
+
+Power actions still work: they are dispatched to the agent as jobs and appear on `/jobs`
+with Live Output, exactly like a discovery scan. Every button this page offers — Start,
+Stop, Shutdown and Reboot — maps to a verb, so nothing here is refused; see
+[the verbs](../admin/remote-agents/hypervisors.md#the-verbs) for how the other products differ.
+
+One upgrade note: Shutdown and Reboot use the `shutdown` and `reboot` verbs, which are
+newer than the agent image many installs are running. Until an agent is re-pulled it
+refuses them by name in Live Output, pointing at its `policy.yaml`.

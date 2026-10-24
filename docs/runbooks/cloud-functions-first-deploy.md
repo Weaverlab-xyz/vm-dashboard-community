@@ -7,7 +7,7 @@ The first end-to-end run of Cloud Functions on a cloud. **GCP is proven** — th
 Server managed database there, which is what took the feature out of preview. AWS and
 Azure have not been run end to end, so for those two treat this as a bring-up: the
 goal of each stage is to retire one class of risk, not to reach a working Entitle
-grant on the first attempt. See [`../integrations/cloud-functions.md`](../integrations/cloud-functions.md)
+grant on the first attempt. See [`../integrations/cloud-functions.md`](../cloud-services/functions.md)
 for the reference and [`../design/cloud-functions.md`](../design/cloud-functions.md)
 for why it is built this way.
 

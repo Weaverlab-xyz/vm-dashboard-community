@@ -936,7 +936,7 @@ class RemoteAgentsFeatureConfig(BaseModel):
     ``public_base_url`` lives on this panel rather than somewhere more general because
     it is the single most common way an agent deployment breaks. The signing audience is
     pinned from it, and an audience pinned as ``http://`` makes every agent 401 in a way
-    that looks exactly like a revoked agent — see docs/remote-agents.md. The operator
+    that looks exactly like a revoked agent — see docs/admin/remote-agents.md. The operator
     turning this feature on is the operator who needs to set it.
 
     Both fields are bool/str on purpose: an unset *int* field reads back as ``""`` from
@@ -1028,7 +1028,7 @@ class PasswordSafeFeatureConfig(BaseModel):
     ot_ps_pravault_platform: str = ""
     ot_ps_pravault_functional_account: str = ""
     # Cloud VM → PRA Vault key sync: the key the cloud-native SSH plugins rotate, mirrored
-    # into a PRA Vault Private Key account via SyncedAccounts (docs/integrations/beyondtrust/password-safe.md).
+    # into a PRA Vault Private Key account via SyncedAccounts (docs/beyondtrust/password-safe.md).
     passwordsafe_vault_sync_enabled: bool = False
     passwordsafe_vault_sync_converge: bool = True   # one Change through the new link, so PRA holds a real key now
     passwordsafe_vault_sync_platform: str = "PRA Vault Private Key"
@@ -2200,7 +2200,7 @@ class SpireLabFeatureConfig(BaseModel):
     spire_lab_ps_safe: str = "Automation"
     spire_lab_secret_root: str = "spire"
     spire_lab_asset_backend: str = ""
-    # Deployment modes and supply chain (docs/workload-lab/spiffe.md). Blank chart versions
+    # Deployment modes and supply chain (docs/preview/workload-lab/spiffe.md). Blank chart versions
     # fall back to the pins in spire_lab_service (SPIRE_CHART_VERSION, 0.30.2 / 0.6.1),
     # never to "latest"; blank k3s version is whatever get.k3s.io serves (>= 1.34 enforced).
     spire_lab_k3s_version: str = ""

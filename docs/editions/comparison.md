@@ -33,7 +33,7 @@ encrypted store**, because the dashboard would need a credential to fetch
 it — and that credential would live in the same encrypted database the
 root key unlocks.
 
-See [secrets-management.md → Why the JWT root key cannot be migrated](../access/secrets-management.md#why-the-jwt-root-key-cannot-be-migrated)
+See [secrets-management.md → Why the JWT root key cannot be migrated](../admin/secrets-management.md#why-the-jwt-root-key-cannot-be-migrated)
 for the loop in detail.
 
 ## How the hosted topology breaks the cycle (shipping today)

@@ -430,7 +430,7 @@ def open_sealed(private_b64: str, envelope: dict, *, agent_id: str, audience: st
 # prints it; the operator pastes the result into `password_sealed:` and deletes the
 # plaintext. `_secret_for` opens it per job.
 #
-# BE PRECISE ABOUT WHAT THIS DEFENDS AGAINST, because docs/remote-agents.md argues the
+# BE PRECISE ABOUT WHAT THIS DEFENDS AGAINST, because docs/admin/remote-agents.md argues the
 # opposite for identity.json and both statements have to stay true. This is NOT
 # protection from root on this host: the key is on the same machine, which is unavoidable
 # for a process that must restart unattended. What it protects is the file TRAVELLING.
@@ -877,7 +877,7 @@ def _policy_unreadable(path: str, exc: OSError) -> str:
     principle, while the real cause — Docker Desktop file sharing — goes unmentioned.
     :func:`_in_docker_desktop_vm` is what lets the message pick, and it is the runtime
     counterpart of the Linux-only qualification on the same rows in
-    ``docs/remote-agents.md``.
+    ``docs/admin/remote-agents.md``.
     """
     base = (f"Cannot read the policy file at {path}: {exc}. The agent refuses all "
             f"work without one — mount it read-only and restart.")
@@ -1153,7 +1153,7 @@ class Policy:
                 "this agent's policy.yaml does not enable Config Management. Add an "
                 "`ansible:` block with `enabled: true`, the image(s) for the kinds of run "
                 "you want, and a `targets:` list — see "
-                "docs/remote-agents/config-runs.md#agent-executed-config-management. Note this is a separate "
+                "docs/admin/remote-agents/config-runs.md#agent-executed-config-management. Note this is a separate "
                 "grant from `targets:` and `sibling:` on purpose: it allows a playbook to "
                 "be applied to a host, not merely a port to be probed.")
         images = {"vm": ("vm_image", self.ansible_vm_image),
@@ -1184,7 +1184,7 @@ class Policy:
             raise PolicyRefusal(
                 "this agent's policy.yaml does not enable the BeyondTrust Gateway. Add a "
                 "`gateway:` block with `enabled: true`, the image, and "
-                "`privileged: true` — see docs/remote-agents/enrolment.md#the-beyondtrust-gateway. "
+                "`privileged: true` — see docs/admin/remote-agents/enrolment.md#the-beyondtrust-gateway. "
                 "It needs the Docker socket, like the other runners.")
         if not self.gateway_image_name:
             raise PolicyRefusal(
@@ -2484,7 +2484,7 @@ class HypervisorConnections:
         except OSError as exc:
             raise AgentFatal(
                 f"Cannot read the connections file at {path}: {exc}. Mount it :ro,Z — "
-                f"see docs/remote-agents.md.")
+                f"see docs/admin/remote-agents.md.")
         except yaml.YAMLError as exc:
             raise AgentFatal(f"connections.yaml is not valid YAML: {exc}")
         if not isinstance(doc, dict):
@@ -2543,7 +2543,7 @@ class FileShares:
         except OSError as exc:
             raise AgentFatal(
                 f"Cannot read the shares file at {path}: {exc}. Mount it :ro,Z — "
-                f"see docs/remote-agents.md.")
+                f"see docs/admin/remote-agents.md.")
         except yaml.YAMLError as exc:
             raise AgentFatal(f"shares.yaml is not valid YAML: {exc}")
         if not isinstance(doc, dict):
@@ -2625,7 +2625,7 @@ class PasswordSafe:
         except OSError as exc:
             raise PolicyRefusal(
                 f"a connection asks for a Password Safe checkout but {path} cannot be "
-                f"read: {exc}. Mount it :ro,Z — see docs/remote-agents.md.")
+                f"read: {exc}. Mount it :ro,Z — see docs/admin/remote-agents.md.")
         except yaml.YAMLError as exc:
             raise PolicyRefusal(f"{path} is not valid YAML: {exc}")
         if not isinstance(doc, dict) or not doc.get("api_url"):
@@ -2635,7 +2635,7 @@ class PasswordSafe:
         # the same reasons: sealed beats a leftover literal, and a sealed value found in a
         # plaintext field is refused rather than sent. This file is the remaining plaintext
         # credential on a host that has otherwise moved to `ps_managed_account` — the gap
-        # docs/remote-agents.md names — so it gets the same treatment, or the strongest
+        # docs/admin/remote-agents.md names — so it gets the same treatment, or the strongest
         # local configuration still ships a secret in the clear.
         #
         # Sealed is checked FIRST rather than last, so an unreadable leftover
@@ -3412,7 +3412,7 @@ def _vmrest(conn: dict, method: str, path: str, *, body=None, checkins=None,
             f"does policy.yaml allow this connection to reach it? Note that vmrest does "
             f"NOT restart with this container — it dies with its console window and does "
             f"not come back after a reboot, and this agent cannot start it. See "
-            f"docs/integrations/vmware.md#1a-keep-it-running-reboots-logouts-closed-windows")
+            f"docs/hypervisors/vmware.md#1a-keep-it-running-reboots-logouts-closed-windows")
     try:
         return json.loads(raw.decode("utf-8", "replace")) if raw else {}
     except ValueError:
@@ -3976,7 +3976,7 @@ def _run_sibling(policy: "Policy", env: dict, emit, cancelled,
         raise PolicyRefusal(
             "this agent's policy.yaml does not enable the sibling runner. Set "
             "`sibling: {enabled: true, image: chrweav/hypervisor-runner:latest}` and "
-            "mount the Docker socket — see docs/remote-agents/hypervisors.md#the-sibling-runner.")
+            "mount the Docker socket — see docs/admin/remote-agents/hypervisors.md#the-sibling-runner.")
 
     # The credential rides in Env in the create body: not in argv (where it would show
     # in `ps` on the host) and not in a file (which would need a bind mount).

@@ -6,7 +6,7 @@ The dashboard can stand up a simulated **OT/ICS plant cell** — Modbus, Siemens
 S7comm, Rockwell EtherNet/IP and OPC UA PLC simulators plus the FUXA web SCADA/HMI —
 inside a cloud sandbox's **private,
 egress-less subnet**, then layer the BeyondTrust PAM stack on top. Same
-**provisioning + three layers** model as [Cloud VMs](../../cloud/vms.md); the OT twist is
+**provisioning + three layers** model as [Cloud VMs](../../clouds/vms.md); the OT twist is
 that the air-gapped subnet *is* the plant network, and every path in is PRA-brokered:
 
 - **Provisioning** *(stand it up)* — deploy a VM from the Packer-baked **`ot-sim`**
@@ -85,7 +85,7 @@ everything that runs beside a demo is Kubernetes-native, and this dashboard itse
 a lot of containers. k3s brings its own containerd and CNI and runs beside Docker's,
 so the cell keeps both: the plant workloads on the cluster, and an engine for anything
 else. KubeSolo is still documented as an edge option for hosts where it fits
-([KubeSolo](../../kubernetes/kubesolo.md)); it is no longer what the cell runs.
+([KubeSolo](../../cloud-services/kubernetes/kubesolo.md)); it is no longer what the cell runs.
 
 Tick **Kubernetes API (k3s)** on the deploy form and the cell gets a tunnel to `:6443`
 beside its fieldbus ones, named `ot-<cell>-k3s`. With that jump started in the rep

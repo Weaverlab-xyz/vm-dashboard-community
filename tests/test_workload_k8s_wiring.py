@@ -279,8 +279,8 @@ def test_the_model_stores_no_credential_and_no_kubeconfig():
 
 
 def test_the_docs_and_persona_are_wired():
-    # The tab guides live in docs/workload-lab/, indexed by the sibling hub
-    # docs/workload-lab.md rather than by a README -- doc_page resolves <page>.md before
+    # The tab guides live in docs/preview/workload-lab/, indexed by the sibling hub
+    # docs/preview/workload-lab.md rather than by a README -- doc_page resolves <page>.md before
     # <page>/README.md, so a folder cannot carry both. Both halves are asserted, because
     # either one going missing orphans this page: the root index carries the hub, and the
     # hub links every spoke.

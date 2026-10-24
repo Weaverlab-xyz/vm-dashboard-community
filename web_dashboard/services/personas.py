@@ -1147,7 +1147,7 @@ _AIOPS = Persona(
             # `spire_lab_enabled` is here for the PAGE, not the tab: with every flag in
             # feature_flags._DERIVED["workload_lab_enabled"] off the whole Workload Lab
             # 404s and the Cloud tab is unreachable however its own flag is set -- which
-            # docs/workload-lab.md states as a deliberate
+            # docs/preview/workload-lab.md states as a deliberate
             # property rather than a gap. This persona's other cards need the SPIRE lab
             # anyway, so naming it costs nothing an operator was not already turning on.
             requires_flags=("spire_lab_enabled", "workload_credentials_enabled"),

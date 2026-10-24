@@ -752,7 +752,7 @@ def test_the_profile_doc_says_the_name_is_narrower_than_the_profile():
 # tree until the docs adopted "estate instance", and each one told a community operator
 # running real infrastructure that this tool thought their estate was pretend.
 #
-# "demo tenant" is deliberately absent: docs/oidc/k8s-federation/entra.md means an
+# "demo tenant" is deliberately absent: docs/platform/oidc/k8s-federation/entra.md means an
 # ENTRA tenant used for lab work there, which is a different thing wearing the same word.
 _NOT_AN_INSTANCE = ("demo instance", "demo-owned", "demo-only", "demo stack", "demo estate")
 
@@ -819,7 +819,7 @@ def test_the_page_header_still_names_the_stored_profile_value():
     assert len(carriers) >= 20, (
         f"only {len(carriers)} pages carry {header!r}; the header names the stored "
         f"install_profile value and is not what the prose rename was about")
-    for expected in ("docs/kubernetes.md", "docs/databases.md", "docs/cloud/vms.md"):
+    for expected in ("docs/cloud-services/kubernetes.md", "docs/cloud-services/databases.md", "docs/clouds/vms.md"):
         assert expected in carriers, f"{expected} no longer names its profile"
 
 

@@ -90,7 +90,7 @@ die() { echo "[ot-sim] ERROR: $*" >&2; exit 1; }
 # `kubesolo` is refused rather than mapped. The cell ran KubeSolo once, and KubeSolo
 # refuses any host that still carries Docker, so the bake purged it — but much of what
 # runs beside a demo is not Kubernetes-native. KubeSolo is still documented as an edge
-# option (docs/kubernetes/kubesolo.md); it is just not what this image is.
+# option (docs/cloud-services/kubernetes/kubesolo.md); it is just not what this image is.
 OT_RUNTIME="$(echo "${OT_RUNTIME:-k3s}" | tr '[:upper:]' '[:lower:]')"
 case "$OT_RUNTIME" in
   k3s|docker) ;;

@@ -2,7 +2,7 @@
 # Target: a host running a SPIRE agent — the lab's linked k3s node, run by the dashboard;
 # or an agent cell's host, run by hand. Read-only.
 #
-# docs/workload-lab/spiffe.md, "Federating with the dashboard". A federation relationship
+# docs/preview/workload-lab/spiffe.md, "Federating with the dashboard". A federation relationship
 # makes a SERVER hold the other trust domain's bundle; an entry's federatesWith is what
 # hands that bundle to a WORKLOAD, in its SVID response. This asks the agent's Workload API
 # for exactly that, as the workload (its uid is the attestation), and asserts the federated

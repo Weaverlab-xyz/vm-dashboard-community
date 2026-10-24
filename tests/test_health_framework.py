@@ -507,7 +507,7 @@ def test_identity_note_links_the_docs_only_when_the_page_exists():
     finally:
         agents._DOCS_PAGE = real
     page, _, frag = agents.DOCS_HREF.partition("#")
-    assert page == "/docs/access/workload-identity" and frag == "remote-agents"
+    assert page == "/docs/platform/workload-identity" and frag == "remote-agents"
 
 
 def test_the_identity_note_reaches_the_snapshot_without_changing_counts():

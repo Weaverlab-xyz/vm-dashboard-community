@@ -99,7 +99,7 @@ def _links():
     the existence check below can't trip over one.
 
     A leading ``/`` is skipped along with the URL schemes: those are *app routes*
-    (``/docs/integrations/beyondtrust/entitle``), which the docs viewer serves and which are not
+    (``/docs/beyondtrust/entitle``), which the docs viewer serves and which are not
     filesystem paths. Resolving them against the repo root would fail a link that works
     in the product.
     """
@@ -232,7 +232,7 @@ _REF_EXCLUDED = {
      "docs/resources/protocol_tunnel_jump.md"),
     # The docstring explaining the ``.md.md`` 404 this viewer used to serve: the dead
     # path *is* the example. "Fixing" it would delete the thing being documented.
-    ("web_dashboard/api/docs_pages.py", "docs/cloud/vms.md.md"),
+    ("web_dashboard/api/docs_pages.py", "docs/clouds/vms.md.md"),
 }
 
 
@@ -265,7 +265,7 @@ def test_every_doc_page_named_outside_a_link_exists():
     """A runner prints one of these AT AN OPERATOR, at the moment it refuses their job.
 
     ``runners/agent/agent.py`` refused a Config Management run with "see
-    docs/remote-agents.md#agent-executed-ansible" long after that heading had been renamed
+    docs/admin/remote-agents.md#agent-executed-ansible" long after that heading had been renamed
     to "Agent-executed Config Management" — so the operator being told why their job
     failed was sent to a page that scrolled nowhere.
 

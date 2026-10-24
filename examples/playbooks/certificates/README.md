@@ -4,7 +4,7 @@ The two halves of the lab for the Password Safe **Certificate** custom plugin: a
 endpoint that demands a client certificate, and a consumer that fetches one out of
 Password Safe and authenticates with it.
 
-Feature reference: [docs/workload-lab/certificates.md](../../../docs/workload-lab/certificates.md).
+Feature reference: [docs/preview/workload-lab/certificates.md](../../../docs/preview/workload-lab/certificates.md).
 The ADCS half lives next door in
 [`windows/adcs-pipeline-template.yml`](../windows/adcs-pipeline-template.yml), because it
 targets a Windows CA over WinRM rather than a Linux host over SSH.
@@ -48,7 +48,7 @@ population, or the weaker of the two is your real access boundary.
 
 Credentials are auto-injected into every runner (`PASSWORD_SAFE_API_URL` / `_CLIENT_ID` /
 `_CLIENT_SECRET`) when Password Safe is enabled, so there is nothing to configure here —
-see [the Ansible integration doc](../../../docs/integrations/ansible.md).
+see [the Ansible integration doc](../../../docs/platform/ansible.md).
 
 **The `reason` string carries `build_id` into the audit trail**, so the audit record
 answers *which build* used the certificate rather than merely that something did. And with

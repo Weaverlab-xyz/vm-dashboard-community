@@ -41,7 +41,7 @@ Nothing below removes a working path:
 this identity over a stored key, paired with a Workload Credentials lease or an Entitle
 grant for writes so it holds no standing write privilege. The rules above are unchanged:
 stored keys still work, still win, and nothing became on by default. See
-[Workload identity: the recommended credential model](../access/workload-identity.md).
+[Workload identity: the recommended credential model](../platform/workload-identity.md).
 
 ## Slice 1: the dashboard gets an identity of its own
 
@@ -52,7 +52,7 @@ Everything else depends on this slice.
 (`/spiffe/.well-known/openid-configuration`, `/spiffe/keys`, `/api/spiffe-identity`); the
 `_spiffe_token_loop` in `main.py`; `jwt_issuer` and the `spiffe_tokens` volume in the
 overlay; `/spiffe/*` on the agent gateway. Settings → Remote Agents. Operator guide:
-[The dashboard's own SPIFFE identity](../oidc/dashboard-identity.md). Two
+[The dashboard's own SPIFFE identity](../platform/oidc/dashboard-identity.md). Two
 differences from the sketch below, both deliberate:
 
 - **Its own loop, every minute,** not a step in the hourly SPIRE refresh loop. Fifteen-minute
@@ -184,7 +184,7 @@ the lab rehearses.
 - Needs an `admin_ids` identity for the plugin in `server.conf`, and `tcp/8081` reachable
   from the Password Safe resource broker.
 - **Blocked on the lab's open question:** whether the gateway populates managed system
-  attributes for a plugin action at all ([SPIFFE and SPIRE](../workload-lab/spiffe.md)).
+  attributes for a plugin action at all ([SPIFFE and SPIRE](../preview/workload-lab/spiffe.md)).
   Answer it in the lab first; this follows from the answer.
 - **How it gets answered.** On a governed lab, **Prepare probe** sets `SpiffeTrustDomain`
   on the managed system: it creates the type and value if the tenant lacks them, assigns
@@ -228,7 +228,7 @@ used. Without it, those two modes signed tokens with no `iss`, which a Kubernete
 authenticator refuses, so their k3s link most likely accepted nothing. That reading comes
 from the Kubernetes spec, not a live lab. `server.conf` carries commented `aws_kms`,
 `azure_key_vault` and `gcp_kms` blocks, and
-[the identity doc](../oidc/dashboard-identity.md#protect-the-spire-servers-ca-key)
+[the identity doc](../platform/oidc/dashboard-identity.md#protect-the-spire-servers-ca-key)
 says when and how to switch.
 
 - **`jwt_issuer`**: set on the dashboard's server (Slice 1). The lab's server should set
@@ -265,7 +265,7 @@ every major cloud can federate with.
 | **AWS** | `AWS_ROLE_ARN` + `AWS_WEB_IDENTITY_TOKEN_FILE` → `sts:AssumeRoleWithWebIdentity` | role trust: `<issuer>:sub` = `spiffe://<td>/dashboard`, `<issuer>:aud` = `sts.amazonaws.com` | **None.** `aws_service._aws_kwargs` passes no credentials when none are stored, so boto3's default chain picks the variables up. `terraform_provider_env.aws_env` returns `None` the same way. (Its docstring says it never falls back; the code does. Fix the docstring.) |
 | **GCP** | `GOOGLE_APPLICATION_CREDENTIALS` → an `external_account` config whose `credential_source.file` is the token file | provider attribute condition on `assertion.sub` | **Mostly none.** `gcp_service._gcp_creds` and `secrets_backend_service._gcp_client` fall back to ADC. **`packer_service` does not:** its GCS upload reads `gcp_service_account_json` unconditionally. It also derives the project from the key's `project_id`, so federation needs `gcp_project_id` set explicitly. |
 | **Azure** | a federated credential on the app registration → `ClientAssertionCredential` reading the token file; Terraform `ARM_USE_OIDC=true` + `ARM_OIDC_TOKEN_FILE_PATH` | issuer, subject `spiffe://<td>/dashboard`, audience `api://AzureADTokenExchange` | **Yes, small.** Every `ClientSecretCredential(` site (`azure_service`, `storage_service`, `secrets_backend_service`, `packer_service`) needs the assertion branch, and `terraform_provider_env.azure_env` the OIDC variables |
-| **Workload Credentials** | `wlc_identity_platform=spire` → `wlc.jwt` in the token directory | a Custom IDP registration for the dashboard's issuer: `sub` and `aud` conditions | **Built.** A `spire` platform, because `file` hides the audience the token needs. See [the operator steps](../oidc/dashboard-identity.md#beyondtrust-workload-credentials) |
+| **Workload Credentials** | `wlc_identity_platform=spire` → `wlc.jwt` in the token directory | a Custom IDP registration for the dashboard's issuer: `sub` and `aud` conditions | **Built.** A `spire` platform, because `file` hides the audience the token needs. See [the operator steps](../platform/oidc/dashboard-identity.md#beyondtrust-workload-credentials) |
 | **OCI** | — | — | No clean fit. OCI's token exchange is tied to identity domains and is not worth the code here. Stays on its signing key or Password Safe |
 
 Three things apply across the table:
@@ -319,7 +319,7 @@ audience-bound token passed to the task, exchanged for a credential sealed to th
 (the `dashboard_secret` pattern), keeps the credential out of a second store. **Be honest
 about SPIFFE's part:** a Fargate or Cloud Run task cannot run a SPIRE agent, so that token
 would be *minted*, not attested, which is the downgrade
-[SPIFFE and SPIRE](../workload-lab/spiffe.md#minting-is-a-deliberate-downgrade-and-the-honest-version-matters)
+[SPIFFE and SPIRE](../preview/workload-lab/spiffe.md#minting-is-a-deliberate-downgrade-and-the-honest-version-matters)
 warns about. It still beats copying the real credential, but the win comes from
 seal-and-exchange, not from SPIFFE. It also needs the runner to reach the dashboard, which
 the current design does not assume.
@@ -338,7 +338,7 @@ minutes. The Secrets Manager copy stays as the fallback setting.
 have no `dashboard_secret` option, unlike `connections.yaml`. For a SPIRE-attested agent
 the same per-job sealed fetch, under the same **Release dashboard-held credentials only to
 SPIRE-attested agents** setting, completes
-[central storage with SPIRE](../remote-agents/credentials.md#central-storage-with-spire-the-recommended-model).
+[central storage with SPIRE](../admin/remote-agents/credentials.md#central-storage-with-spire-the-recommended-model).
 
 **Built** (agent 2.7.0). `dashboard_secret: true` on a `shares.yaml` entry, and one
 dashboard-held password, `storage_agent_password`, for the one share the storage backend is

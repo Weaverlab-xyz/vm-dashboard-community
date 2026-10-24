@@ -33,7 +33,7 @@ missing capability: access that ends by itself.
 Stand up Postgres, MySQL or SQL Server and have its admin account onboarded and rotated as
 part of the same job — no window in which the database exists with an unmanaged password.
 
-**Guide:** [Databases](../../../databases.md)
+**Guide:** [Databases](../../../cloud-services/databases.md)
 
 ### Request, approve, grant, expire
 
@@ -49,14 +49,14 @@ Rotate the account an application depends on, and show the application keep work
 live: it is the objection that stops most rotation projects, and a demo answers it better than
 an argument.
 
-**Guide:** [Password Safe](../../../integrations/beyondtrust/password-safe.md)
+**Guide:** [Password Safe](../../../beyondtrust/password-safe.md)
 
 ### Reach a private database with no public endpoint
 
 Connect an ordinary SQL client to a database that has no internet-facing listener, through a
 brokered tunnel — so "private" stops meaning "inconvenient".
 
-**Guide:** [Databases](../../../databases.md)
+**Guide:** [Databases](../../../cloud-services/databases.md)
 
 ### Rotate the token a service uses to reach the database
 
@@ -80,4 +80,4 @@ Be precise about scope, because they will be. A grant is against a specific cata
 not "the database", and getting that wrong in a demo costs credibility immediately. Note also
 that "database name" means two different things in this product — the catalog a grant applies
 to, and the database an administrative session connects to — and they are not always the same
-value; see [Databases](../../../databases.md) before improvising.
+value; see [Databases](../../../cloud-services/databases.md) before improvising.

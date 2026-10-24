@@ -35,22 +35,22 @@ Open the vSphere or Proxmox web console with the root credential injected and th
 session recorded. The administrator does the work and never learns the password — which is
 the single most convincing thing you can show this buyer.
 
-**Guide:** [Privileged Remote Access](../../../integrations/beyondtrust/privileged-remote-access.md) ·
-[vSphere](../../../integrations/vsphere.md) · [Proxmox](../../../integrations/proxmox.md)
+**Guide:** [Privileged Remote Access](../../../beyondtrust/privileged-remote-access.md) ·
+[vSphere](../../../hypervisors/vsphere.md) · [Proxmox](../../../hypervisors/proxmox.md)
 
 ### Onboard and rotate the hypervisor root account
 
 Bring an ESXi or Proxmox root credential under management and rotate it. Worth doing live,
 because the objection is always "what breaks when it changes" and the answer is visible.
 
-**Guide:** [Password Safe](../../../integrations/beyondtrust/password-safe.md)
+**Guide:** [Password Safe](../../../beyondtrust/password-safe.md)
 
 ### Reach a guest VM with no inbound firewall rule
 
 Shell Jump to a VM on an isolated management network through a Gateway that only ever makes
 outbound connections.
 
-**Guide:** [Privileged Remote Access](../../../integrations/beyondtrust/privileged-remote-access.md)
+**Guide:** [Privileged Remote Access](../../../beyondtrust/privileged-remote-access.md)
 
 ### Stand up a Gateway and watch it register
 
@@ -58,21 +58,21 @@ Build the gateway, see it appear, and use it. This is the piece that makes every
 possible, and showing it built rather than pre-existing answers "how much work is this to
 deploy".
 
-**Guide:** [Gateways](../../../integrations/beyondtrust/gateways.md)
+**Guide:** [Gateways](../../../beyondtrust/gateways.md)
 
 ### Discover an on-prem estate from the outside
 
 An agent inside the datacentre polls outward and reports what is there — no inbound access to
 the management network, and no credentials stored anywhere the dashboard can reach.
 
-**Guide:** [Remote Agents](../../../remote-agents.md)
+**Guide:** [Remote Agents](../../../admin/remote-agents.md)
 
 ## What to enable
 
 **Privileged Remote Access**, plus whichever hypervisors are real for the customer
-([vSphere](../../../integrations/vsphere.md), [Proxmox](../../../integrations/proxmox.md),
-[Hyper-V](../../../integrations/hyperv.md), [Nutanix](../../../integrations/nutanix.md),
-[XCP-ng](../../../integrations/xcpng.md)). Add **Password Safe** for rotation and **Remote agents**
+([vSphere](../../../hypervisors/vsphere.md), [Proxmox](../../../hypervisors/proxmox.md),
+[Hyper-V](../../../hypervisors/hyperv.md), [Nutanix](../../../hypervisors/nutanix.md),
+[XCP-ng](../../../hypervisors/xcpng.md)). Add **Password Safe** for rotation and **Remote agents**
 for the discovery card.
 
 **This focus needs an estate instance.** Every hypervisor integration is estate-owned, because

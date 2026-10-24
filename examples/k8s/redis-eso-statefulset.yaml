@@ -7,7 +7,7 @@
 #
 # PREREQUISITE: the dashboard's secret-delivery action must have installed ESO +
 # the BeyondTrust `beyondtrust-store` ClusterSecretStore on this cluster
-# (POST /clusters/{id}/secret-delivery, kind=eso; see docs/kubernetes.md). Without
+# (POST /clusters/{id}/secret-delivery, kind=eso; see docs/cloud-services/kubernetes.md). Without
 # the CRDs + store, the ExternalSecret won't reconcile and the pod gets no password.
 ---
 apiVersion: external-secrets.io/v1

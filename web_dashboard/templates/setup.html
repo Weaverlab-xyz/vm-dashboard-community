@@ -252,7 +252,7 @@
         <p class="text-gray-500 text-sm mt-1">
           Used to deploy EC2 instances. Create a dedicated IAM user with a
           <em>customer-managed</em> policy &mdash; see Part A of
-          <code class="bg-gray-100 px-1 rounded text-xs">docs/ONBOARDING.md</code>,
+          <code class="bg-gray-100 px-1 rounded text-xs">docs/getting-started.md</code>,
           as the AWS-managed policies do not grant enough (read-only S3 cannot
           write Terraform state) &mdash; then generate an access key.
         </p>
@@ -261,7 +261,7 @@
         A stored access key gets you started and stays supported. <strong>Recommended once
         you're running:</strong> switch this cloud to the dashboard's own workload identity
         and remove the access key, so none is stored.
-        <a href="/docs/access/workload-identity#dashboard-to-aws" target="_blank" class="underline">How</a>
+        <a href="/docs/platform/workload-identity#dashboard-to-aws" target="_blank" class="underline">How</a>
       </p>
       <div class="space-y-4">
         <div>
@@ -344,7 +344,7 @@
           <p>From a clone of the dashboard repo, with the AWS CLI logged in:</p>
           <pre class="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-xs font-mono text-gray-700 whitespace-pre-wrap">aws login                                   # or: aws configure
 ./scripts/sandbox/Linux/setup-aws.sh        # Windows: .\scripts\sandbox\Windows\Setup-AwsSandbox.ps1</pre>
-          <p class="text-xs text-gray-500">Provisions an isolated VPC, a scoped IAM user, and an SSH-key secret, then prints an <code class="bg-gray-100 px-1 rounded">aws_*</code> config block to paste here. Tear it down later with <code class="bg-gray-100 px-1 rounded">rollback.sh --cloud aws</code>. Full walkthrough in <code class="bg-gray-100 px-1 rounded">docs/ONBOARDING.md</code> (Quick path: cloud sandbox).</p>
+          <p class="text-xs text-gray-500">Provisions an isolated VPC, a scoped IAM user, and an SSH-key secret, then prints an <code class="bg-gray-100 px-1 rounded">aws_*</code> config block to paste here. Tear it down later with <code class="bg-gray-100 px-1 rounded">rollback.sh --cloud aws</code>. Full walkthrough in <code class="bg-gray-100 px-1 rounded">docs/getting-started.md</code> (Quick path: cloud sandbox).</p>
         </div>
       </div>
 
@@ -364,7 +364,7 @@
         A stored client secret gets you started and stays supported. <strong>Recommended once
         you're running:</strong> switch this cloud to the dashboard's own workload identity
         and remove the client secret, so none is stored.
-        <a href="/docs/access/workload-identity#dashboard-to-azure" target="_blank" class="underline">How</a>
+        <a href="/docs/platform/workload-identity#dashboard-to-azure" target="_blank" class="underline">How</a>
       </p>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
@@ -648,7 +648,7 @@
           <p>From a clone of the dashboard repo, with the Azure CLI logged in:</p>
           <pre class="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-xs font-mono text-gray-700 whitespace-pre-wrap">az login
 ./scripts/sandbox/Linux/setup-azure.sh      # Windows: .\scripts\sandbox\Windows\Setup-AzureSandbox.ps1</pre>
-          <p class="text-xs text-gray-500">Provisions a resource group, VNet, a scoped service principal, and a Key Vault, then prints an <code class="bg-gray-100 px-1 rounded">azure_*</code> config block to paste here. Tear it down later with <code class="bg-gray-100 px-1 rounded">rollback.sh --cloud azure</code>. Full walkthrough in <code class="bg-gray-100 px-1 rounded">docs/ONBOARDING.md</code> (Quick path: cloud sandbox).</p>
+          <p class="text-xs text-gray-500">Provisions a resource group, VNet, a scoped service principal, and a Key Vault, then prints an <code class="bg-gray-100 px-1 rounded">azure_*</code> config block to paste here. Tear it down later with <code class="bg-gray-100 px-1 rounded">rollback.sh --cloud azure</code>. Full walkthrough in <code class="bg-gray-100 px-1 rounded">docs/getting-started.md</code> (Quick path: cloud sandbox).</p>
         </div>
       </div>
     </div>
@@ -674,7 +674,7 @@ gcloud iam service-accounts keys create sa-key.json \
         A stored service-account key gets you started and stays supported. <strong>Recommended once
         you're running:</strong> switch this cloud to the dashboard's own workload identity
         and remove the service-account key, so none is stored.
-        <a href="/docs/access/workload-identity#dashboard-to-gcp" target="_blank" class="underline">How</a>
+        <a href="/docs/platform/workload-identity#dashboard-to-gcp" target="_blank" class="underline">How</a>
       </p>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
@@ -792,7 +792,7 @@ gcloud iam service-accounts keys create sa-key.json \
           <p>From a clone of the dashboard repo, with gcloud logged in:</p>
           <pre class="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-xs font-mono text-gray-700 whitespace-pre-wrap">gcloud auth login
 ./scripts/sandbox/Linux/setup-gcp.sh        # Windows: .\scripts\sandbox\Windows\Setup-GcpSandbox.ps1</pre>
-          <p class="text-xs text-gray-500">Provisions a VPC, a scoped service account, and a Secret Manager secret, then prints a <code class="bg-gray-100 px-1 rounded">gcp_*</code> config block to paste here. Tear it down later with <code class="bg-gray-100 px-1 rounded">rollback.sh --cloud gcp</code>. Full walkthrough in <code class="bg-gray-100 px-1 rounded">docs/ONBOARDING.md</code> (Quick path: cloud sandbox).</p>
+          <p class="text-xs text-gray-500">Provisions a VPC, a scoped service account, and a Secret Manager secret, then prints a <code class="bg-gray-100 px-1 rounded">gcp_*</code> config block to paste here. Tear it down later with <code class="bg-gray-100 px-1 rounded">rollback.sh --cloud gcp</code>. Full walkthrough in <code class="bg-gray-100 px-1 rounded">docs/getting-started.md</code> (Quick path: cloud sandbox).</p>
         </div>
       </div>
     </div>

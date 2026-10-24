@@ -28,7 +28,7 @@ document.addEventListener('alpine:init', () => {
 
         // Does the viewer hold `level` on `scope`? An administrator holds everything. An
         // empty map holds nothing -- the server's rule since empty stopped meaning
-        // unrestricted (docs/access/permissions.md) -- so a stale or missing copy hides a
+        // unrestricted (docs/admin/permissions.md) -- so a stale or missing copy hides a
         // link rather than showing one.
         can(scope, level) {
             if (this.isAdmin) return true;

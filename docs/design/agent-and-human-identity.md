@@ -16,7 +16,7 @@ There are two problems, and they are different enough that one tool should not s
 
 1. **The remote agent keeps a long-lived private key on disk.**
    - `runners/agent/agent.py` generates an Ed25519 key at enrolment and writes it, unencrypted, to `/var/lib/dashboard-agent/identity.json`.
-   - [`docs/remote-agents/agent-host.md`](../remote-agents/agent-host.md) is honest about this: whoever can read the volume *is* the agent until someone re-issues it.
+   - [`docs/admin/remote-agents/agent-host.md`](../admin/remote-agents/agent-host.md) is honest about this: whoever can read the volume *is* the agent until someone re-issues it.
 2. **People reach Kubernetes six different ways.**
    - EKS, AKS, GKE and OKE each have their own token exec plugin and their own user model.
    - k3s and other on-prem clusters have whatever the operator set up.
@@ -51,7 +51,7 @@ The dashboard *recommends* SPIRE with a banner. It never forces it. See [The ban
 the **recommended** agent identity rather than an option, and Ed25519 as the compatibility
 default. Nothing above changes: Ed25519 is still the enrolment default, still permanent, and
 no setting's default moved. See
-[Workload identity: the recommended credential model](../access/workload-identity.md).
+[Workload identity: the recommended credential model](../platform/workload-identity.md).
 
 ---
 
@@ -118,7 +118,7 @@ node attestation ──── mTLS gRPC :8081 ───────────�
 - **Signing in the other direction is unchanged too.** Job envelopes are still signed with the dashboard's own key, and the agent learns that public key from the attest response, as it does at enrolment today.
 - **On restart the agent attests again.** It writes nothing to `identity.json`.
 - **Workload attestor: `unix`, selector `uid:10001`.** The two containers share a PID namespace (`pid: "service:spire-agent"`), so the SPIRE agent can see the caller's uid.
-  - The alternative, the `docker` workload attestor, needs `/var/run/docker.sock` mounted into the sidecar. That is root on the host, and the agent's whole hardening story (`docs/remote-agents/agent-host.md`) is that nothing on this host has it.
+  - The alternative, the `docker` workload attestor, needs `/var/run/docker.sock` mounted into the sidecar. That is root on the host, and the agent's whole hardening story (`docs/admin/remote-agents/agent-host.md`) is that nothing on this host has it.
 
 ### How each side picks a mode
 
@@ -290,7 +290,7 @@ k3s takes one `--authentication-config` file. That file holds a list of JWT auth
 
 ## Phase 2: what is specified here and not built
 
-**Built since:** the on-prem Dex kubeconfig. For `cloud="local"` clusters the API-tunnel download is a `kubectl oidc-login` kubeconfig against Dex (`k8s_service._onprem_dex_tunnel_kubeconfig`), gated on the Dex settings (`dex_issuer_url`, `dex_k8s_client_id`, `dex_ca_pem`) and the per-cluster **Trusts Dex** flag (`POST /api/k8s/clusters/{id}/dex-trust`). Without either it refuses with the missing step. The stored admin kubeconfig is never returned. See `docs/kubernetes.md`.
+**Built since:** the on-prem Dex kubeconfig. For `cloud="local"` clusters the API-tunnel download is a `kubectl oidc-login` kubeconfig against Dex (`k8s_service._onprem_dex_tunnel_kubeconfig`), gated on the Dex settings (`dex_issuer_url`, `dex_k8s_client_id`, `dex_ca_pem`) and the per-cluster **Trusts Dex** flag (`POST /api/k8s/clusters/{id}/dex-trust`). Without either it refuses with the missing step. The stored admin kubeconfig is never returned. See `docs/cloud-services/kubernetes.md`.
 
 **Also built:** SPIRE attestation for agents.
 - `POST /api/agent/attest` (`agent_service.attest`, verification by `spiffe_assertion.verify` + `consume`), off unless **Settings → Remote agents → Let agents attest through SPIRE** (`spire_attest_enabled`) is on, and checking the SVID audience against the **pinned** audience only.
@@ -299,7 +299,7 @@ k3s takes one `--authentication-config` file. That file holds a list of JWT auth
 
 **Also built:** the one-click **Migrate to SPIRE** action and the banner (`services/dashboard_spire.py`, `POST /api/agents/{id}/migrate-spire`).
 - It drives the dashboard's SPIRE server with `docker exec <spire_server_container> spire-server … -output json`, the way the SPIRE lab drives its Docker-mode server. The Docker socket and CLI were already in the app image, so there is no gRPC dependency, and the compose overlay's admin-socket mount is not needed for it.
-- On a managed container runtime there is no Docker socket, so the same CLI calls run another way. The app runs the `spire-server` binary it carries against a **sidecar's** admin socket (`SPIRE_SERVER_SOCKET`; `examples/cloud-spire`). The worker, a separate deployment with no volume in common, **relays** each call through the database to an app process (`services/spire_relay`). One argv and one set of result checks serve all three transports. See [On a managed container runtime](../spiffe.md#on-a-managed-container-runtime).
+- On a managed container runtime there is no Docker socket, so the same CLI calls run another way. The app runs the `spire-server` binary it carries against a **sidecar's** admin socket (`SPIRE_SERVER_SOCKET`; `examples/cloud-spire`). The worker, a separate deployment with no volume in common, **relays** each call through the database to an app process (`services/spire_relay`). One argv and one set of result checks serve all three transports. See [On a managed container runtime](../platform/spiffe.md#on-a-managed-container-runtime).
 - One click: a one-use join token for `spiffe://<td>/node/<agent-id>`, the workload entry `spiffe://<td>/agent/<agent-id>` selecting `unix:uid:10001` under it (reused if it exists), the trust domain registered from `bundle show -format spiffe`, and the binding. The modal shows the token once, the `.env` lines and the trust bundle for `spire/bootstrap.crt`.
 - The trust domain row is owned (`created_by="dashboard-spire"`) and re-synced daily by the existing SPIRE refresh loop, because SPIRE rotates JWT keys within `ca_ttl`. A row a SPIRE lab or an admin registered under the same name is never overwritten.
 - The banner lists active Ed25519 agents when attestation is on, says "update the image first" below agent 2.6.0, and is dismissible per agent.

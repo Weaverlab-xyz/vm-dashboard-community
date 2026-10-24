@@ -1,7 +1,7 @@
 # Cloud Function examples
 
 Sample request payloads for the built-in workloads, plus a template for writing your
-own. See [docs/integrations/cloud-functions.md](../../docs/integrations/cloud-functions.md).
+own. See [docs/cloud-services/functions.md](../../docs/cloud-services/functions.md).
 
 > **Note:** deployable handler source lives in `web_dashboard/functions/fnworkloads/`,
 > **not here** — that tree is copied into the dashboard image, this one is not. To add

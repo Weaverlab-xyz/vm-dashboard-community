@@ -1,0 +1,691 @@
+# Cloud Sandbox Guide
+
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** you want an isolated cloud account for the dashboard's labs, bootstrapped rather than hand-built.
+
+Part of [Cloud](../clouds.md).
+
+A walkthrough of `scripts/sandbox/` — bash and PowerShell scripts that
+provision **isolated lab environments** in AWS, Azure, and GCP for the
+VM Dashboard. Target audience: testers and lab operators who want a
+production-style network topology without hand-clicking through three
+cloud consoles.
+
+Each cloud has both a bash variant (WSL / Linux / macOS) and a
+PowerShell variant (Windows). Both variants are functionally equivalent
+— same resources, same tags, same idempotency, same printed config
+block — so pick whichever fits your shell.
+
+> If you're onboarding for the first time and just want to deploy VMs to
+> your own clouds without isolation guarantees, the
+> [main onboarding guide](../getting-started.md) Parts A–C is the simpler path.
+> Use the sandbox scripts when you want repeatable, fully isolated lab
+> infra you can tear down with one command.
+
+> **Looking for a one-line summary of each script?** See
+> [`scripts/sandbox/README.md`](../../scripts/sandbox/README.md). This guide
+> goes deeper — what each script creates, how it isolates traffic, cost,
+> verification, and tear-down. Read the script README first if you just
+> want the file inventory; read this doc when you're about to run them.
+
+- [What you get](#what-you-get)
+- [Prerequisites](#prerequisites)
+- [Quick start](#quick-start)
+- [What each script creates](#what-each-script-creates)
+  - [AWS](#aws)
+  - [Azure](#azure)
+  - [GCP](#gcp)
+- [Wire the sandbox into the dashboard](#wire-the-sandbox-into-the-dashboard)
+- [Verifying isolation](#verifying-isolation)
+- [Cost](#cost)
+- [Tearing it all down](#tearing-it-all-down)
+- [Customising](#customising)
+- [Caveats](#caveats)
+- [Troubleshooting](#troubleshooting)
+
+## What you get
+
+A consistent topology across all three clouds:
+
+| Layer | Purpose | Internet egress |
+|---|---|---|
+| **Gateway segment** | Hosts the BeyondTrust SRA Gateway container so it can phone home to PRA's relay. | ✅ Yes |
+| **VM segment** | Hosts the lab [VMs you deploy](vms.md) via the dashboard. | ❌ No — only the Gateway can reach them, and they cannot reach the internet directly. |
+| **DB segment** | Dedicated private subnets for [managed cloud databases](../cloud-services/databases.md) (AWS shown; Azure/GCP/OCI have their own DB subnets below). | ❌ No — brokered only through the PRA tunnel. |
+| **[Managed Kubernetes](../cloud-services/kubernetes.md)** | Clusters build their **own** network — the dashboard's Terraform creates each cluster's VPC/VNet + subnets + egress (AWS: a small NAT instance) and destroys it on decommission. No sandbox k8s subnet. The AWS EKS build additionally VPC-peers back to the sandbox VPC and opens the DB/VM SGs for direct access. | Cluster-owned (per-cluster NAT). Management-plane access via Entitle/PRA + the AWS peering. |
+| **[Cloud Functions](../cloud-services/functions.md)** | `network_mode=vpc` functions reach private resources. Azure gets a dedicated `functions-subnet` delegated to `Microsoft.Web/serverFarms`; AWS reuses the private subnet plus a Secrets Manager interface endpoint (without which a vpc-mode Lambda cannot read its bearer secret and 500s on every invoke); GCP uses Direct VPC egress into the VM subnet — no connector, nothing billed while idle. **No OCI support.** | ❌ No on AWS (no NAT unless a VM is up). Azure: Storage + Key Vault via service endpoints only — generic egress needs a NAT gateway. |
+| **Desktops segment** (Azure) | Dedicated **non-delegated** subnet (`10.99.6.0/24`) for VDI desktop pools, separate from the VM segment because the RS jump client must register with the appliance at first boot. Azure alone needs its own segment: its `aci-subnet` is delegated and cannot host a VM NIC, so there is nothing safe to inherit. AWS and GCP pools default to `aws_desktops_subnet_id` / `gcp_desktops_subnetwork` and fall back to the ordinary VM subnet, which the sandbox already creates. | ⚠️ **443 only** — the NSG allows outbound HTTPS (jump-client registration + Windows activation/updates) but denies other Internet; RDP brokered in via the Gateway. |
+
+Per-cloud isolation mechanism:
+
+| Cloud | Gateway host | VM isolation |
+|---|---|---|
+| **AWS** | ECS Fargate task in a public subnet (IGW-routed) | Private subnet with no IGW route + restrictive security group (egress to VPC only) |
+| **Azure** | ACI container in a delegated subnet | NSG denies `Internet` outbound, allows `VirtualNetwork` |
+| **GCP** | COS-on-GCE VM in a Cloud-NAT-attached subnet | Sibling subnet has no NAT mapping + firewall egress-deny on tagged VMs |
+
+Each setup script also creates:
+
+- A managed-by-dashboard service principal / IAM role / service account
+  with the minimum permissions the dashboard needs.
+- An SSH key pair stored as `{public_key, private_key}` JSON in the cloud's
+  secret manager (Secrets Manager / Key Vault / Secret Manager).
+- (Azure only) A storage account + file share for the Gateway container's
+  `/jpt` persistence volume.
+
+Every resource is tagged `managed-by=dashboard-sandbox` and named with a
+`dashboard-sandbox-` prefix. Rollback enumerates by tag, so a lost state
+file or partial setup doesn't strand resources.
+
+## Prerequisites
+
+The scripts run on WSL Ubuntu, bare Linux, macOS (bash variants in
+[`scripts/sandbox/Linux/`](../../scripts/sandbox/Linux)) or Windows
+PowerShell 7 (variants in [`scripts/sandbox/Windows/`](../../scripts/sandbox/Windows)).
+Pick whichever fits your shell.
+
+```bash
+# Bash (WSL / Linux / macOS)
+./scripts/sandbox/Linux/00-prereqs.sh
+```
+
+```powershell
+# PowerShell (Windows)
+.\scripts\sandbox\Windows\Test-SandboxPrereqs.ps1
+```
+
+Both prereq scripts verify the same things:
+
+- `aws` (CLI v2)
+- `az`
+- `gcloud`
+- `docker` + `docker compose v2`
+- `jq`, `ssh-keygen`
+
+…and print install hints (`apt` / `curl` on Linux, `winget` on Windows)
+for anything missing. After installing whatever they flag, authenticate
+the CLIs you plan to use:
+
+```
+aws configure                                            # or: aws sso login
+az login
+gcloud auth login && gcloud auth application-default login
+```
+
+Each setup script verifies its own CLI is authenticated before doing
+anything destructive — running the Azure setup without `az login` fails
+fast with a "not authenticated" message.
+
+## Quick start
+
+Stand up the dashboard, then configure it one of two ways — **Path B: one script,
+no wizard**, or **Path A: per-cloud scripts + the `/setup` wizard**.
+
+```bash
+# Bash — check prereqs, then bring up the dashboard
+./scripts/sandbox/Linux/00-prereqs.sh
+./scripts/onboard.sh                       # see the README for the pull-based run
+
+# Path B — one script: provision your cloud(s) AND configure the dashboard (no wizard)
+./scripts/sandbox/Linux/onboard-sandbox.sh --cloud all
+
+# — or — Path A: provision per-cloud, then paste each printed block into /setup
+./scripts/sandbox/Linux/setup-aws.sh
+./scripts/sandbox/Linux/setup-azure.sh
+./scripts/sandbox/Linux/setup-gcp.sh
+```
+
+```powershell
+# PowerShell — check prereqs, then bring up the dashboard
+.\scripts\sandbox\Windows\Test-SandboxPrereqs.ps1
+.\scripts\Onboard-Dashboard.ps1
+
+# Path B — one script (provision + configure, no wizard):
+.\scripts\sandbox\Windows\Onboard-Sandbox.ps1 -Cloud all
+
+# — or — Path A: provision per-cloud, then paste each printed block into /setup
+.\scripts\sandbox\Windows\Setup-AwsSandbox.ps1
+.\scripts\sandbox\Windows\Setup-AzureSandbox.ps1
+.\scripts\sandbox\Windows\Setup-GcpSandbox.ps1
+```
+
+Open `http://localhost:8001` (the community edition's default port). With **Path B**
+you just log in — `onboard-sandbox` already pushed the config to the dashboard's
+setup API. With **Path A** you paste each script's printed block into the `/setup`
+wizard (see [Wire the sandbox into the dashboard](#wire-the-sandbox-into-the-dashboard)).
+`onboard-sandbox` runs the per-cloud `setup-*.sh` for you, so use one path or the
+other — not both.
+
+Each setup script is **idempotent** — re-running picks up where it left
+off and reuses anything tagged `managed-by=dashboard-sandbox`. Safe to
+re-run after a partial failure or a network blip.
+
+## What each script creates
+
+### AWS
+
+```
+VPC dashboard-sandbox-vpc (10.99.0.0/16)
+  ├─ public subnet  10.99.1.0/24  → IGW → internet      [ECS Gateway task]
+  ├─ private subnet 10.99.2.0/24  → local VPC only      [user EC2 instances]
+  ├─ db subnet a    10.99.3.0/24  (AZ a) → local only   [managed databases]
+  └─ db subnet b    10.99.4.0/24  (AZ b) → local only   [managed databases]
+
+RDS:
+  db subnet group dashboard-sandbox-db (spans db subnet a + b — RDS needs >= 2 AZs)
+    private Postgres/MySQL/SQL-Server instances deploy here (no public endpoint;
+    reached only through the PRA tunnel)
+
+Security groups:
+  dashboard-sandbox-jumpoint-sg
+    egress: 0.0.0.0/0 (so PRA relay is reachable)
+    ingress: none — egress-only; the Gateway dials out, nothing connects in
+  dashboard-sandbox-vm-sg
+    egress: 10.99.0.0/16 only — no internet
+    ingress: tcp/22 and tcp/3389 from dashboard-sandbox-jumpoint-sg  (Shell Jump; Windows RDP jump)
+  dashboard-sandbox-fn-vpce-sg
+    ingress: tcp/443 from 10.99.0.0/16  (Secrets Manager interface endpoint)
+
+VPC endpoints:
+  dashboard-sandbox-secretsmanager-vpce   Interface, private subnet, private DNS
+    Lets a network_mode=vpc Cloud Function read its bearer secret at cold start.
+    Private DNS is VPC-WIDE, so the Gateway task and ECS runners resolve through
+    it too — hence the /16 ingress. ~$7.30/mo; SANDBOX_SKIP_FN_VPCE=1 to skip.
+  (the three SSM endpoints are created ON DEMAND by the dashboard, not here)
+
+ECS:
+  cluster bt-jumpoint
+  IAM role ecsTaskExecutionRole (sandbox-tagged) with the AWS-managed
+    AmazonECSTaskExecutionRolePolicy attached
+
+Secrets Manager:
+  dashboard/sandbox/ssh-keypair   {public_key, private_key} JSON
+
+IAM (sandbox-tagged, deleted by rollback):
+  role ecsTaskExecutionRole                      ECS task pull + logs
+  role vmimport                                  vmie.amazonaws.com → S3 + EC2
+  role dashboard-sandbox-promote-runner-task     ECS task → S3 PutObject
+  user dashboard-sandbox-app                     Dashboard programmatic creds
+    managed policy dashboard-app-policy          EC2 / ECS / SM / S3 / Logs / RDS /
+                                                 Lambda / EKS / Cost Explorer
+    access key cached at ~/.dashboard-sandbox/aws/secret_access_key (0600)
+```
+
+**Idempotency**: re-running `setup-aws.sh` looks up resources by tag and
+reuses anything already present. The IGW, route tables, subnet associations,
+SG rules, IAM policy attachments are all conditional inserts. The dashboard
+IAM user is reused on re-runs and a new default version of the managed policy
+is created each time, so policy edits in the script land without rotating the
+access key. AWS allows at most 2 access keys per user, so the script never
+rotates blindly;
+if the cached secret is missing but a key still exists in AWS, it warns
+with recovery paths rather than minting a third key.
+
+### Azure
+
+```
+Resource group dashboard-sandbox-rg
+  └─ VNet dashboard-sandbox-vnet (10.99.0.0/16)
+       ├─ aci-subnet 10.99.1.0/24 (delegated to Microsoft.ContainerInstance)
+       │    → internet egress (default)            [ACI Gateway]
+       ├─ vm-subnet  10.99.2.0/24
+       │    NSG dashboard-sandbox-vm-nsg:
+       │      outbound: allow VirtualNetwork (priority 100)
+       │                deny  Internet (priority 200)
+       │      inbound:  allow VirtualNetwork
+       │    → no internet egress                   [user Azure VMs]
+       ├─ k8s-subnet 10.99.3.0/24                   [managed Kubernetes / AKS]
+       ├─ db-subnet  10.99.4.0/24                   [managed databases]
+       │    (delegated to Microsoft.DBforPostgreSQL/flexibleServers)
+       │    → private VNet-integrated Flexible Server
+       ├─ jumpoint-subnet 10.99.5.0/24              [tunnel-capable VM Gateway]
+       │    → internet egress (no deny NSG; phones home to PRA)
+       ├─ functions-subnet 10.99.9.0/24             [vpc-mode Cloud Functions]
+       │    (delegated to Microsoft.Web/serverFarms)
+       │    service endpoints: Microsoft.Storage, Microsoft.KeyVault
+       │    NO NSG, deliberately — the module routes ALL app egress here, so an
+       │    Internet deny would also block AzureWebJobsStorage and
+       │    WEBSITE_RUN_FROM_PACKAGE and the app would index zero functions
+       │    → Azure backbone only; generic egress needs a NAT gateway (~$32/mo)
+       └─ desktops-subnet 10.99.6.0/24              [VDI desktop pools]
+            NSG dashboard-sandbox-desktops-nsg:
+              outbound: allow 443 → Internet  (priority 100)
+                        allow VirtualNetwork   (priority 110)
+                        deny  Internet         (priority 200)
+              inbound:  allow RDP 3389 from VirtualNetwork
+            → 443 egress only; for RS jump-client first-boot registration
+
+Private DNS zone dashboard-sandbox.private.postgres.database.azure.com
+  linked to the VNet → the Flexible Server's private FQDN resolves inside it.
+  (The Azure analog of the AWS private DB subnet group / GCP private-services
+  access. The DB is private-only; only the gateway VM reaches it.)
+
+Storage account dashboard-sandbox-…  (Standard_LRS, file share `jpt`)
+  for the ACI Gateway /jpt persistence volume
+
+Key Vault dashboard-sandbox-kv-…
+  Secret azureVM-ssh-keypair    {public_key, private_key} JSON
+
+Service principal dashboard-sandbox-sp
+  Contributor on the resource group
+  Storage Blob Data Contributor on the storage account (Terraform state and the
+    azure_blob backend are DATA-plane writes; Contributor alone cannot do them)
+  User Access Administrator on the resource group (so the AKS module can create
+    its own role assignment — Contributor lacks roleAssignments/write)
+  Cost Management Reader on the SUBSCRIPTION (Cloud Costs; best-effort, warns
+    rather than aborting if you lack Owner/UAA at subscription scope)
+  Key Vault access policy: secrets get/list/set/delete (write is needed so
+    per-VM admin passwords can be vaulted and removed again on teardown)
+  AcrPull on the container registry (so the ACI runners can pull the mirrors)
+  Dashboard Image Promoter custom role on the gallery RG (only when
+    AZURE_IMAGE_GALLERY_RG is set; override with AZURE_IMAGE_GALLERY_ROLE)
+  Credentials cached at ~/.dashboard-sandbox/azure/sp.json (mode 600)
+
+Container registry dashboardsandboxacr…  (Basic SKU)
+  Mirrors 4 public images so deploy-time pulls come from ACR, not Docker Hub
+  (which rate-limits anonymous pulls):
+    beyondtrust/sra-jumpoint:latest          [ACI Shell-Jump Gateway]
+    chrweav/ansible-winrm:latest             [ACI config-mgmt runner; has pywinrm]
+    chrweav/dashboard-promote-runner:latest  [ACI cross-cloud image promote]
+    dtzar/helm-kubectl:latest                [ACI AKS k8s runner]
+  One registry serves every region (globally pullable); per-region re-runs reuse it.
+  Opt out with SANDBOX_SKIP_ACR=1. The VM-based tunnel Gateway still pulls from
+  Docker Hub — its cloud-init docker-runs without a registry login.
+```
+
+**Naming caveat**: Key Vault, storage account, and container registry names
+must be globally unique. The script appends a hash of your subscription ID to
+keep them collision-safe.
+
+### GCP
+
+```
+VPC dashboard-sandbox-vpc (custom mode)
+  ├─ dashboard-sandbox-jumpoint-subnet 10.99.1.0/24
+  │    → Cloud NAT → internet                     [Gateway COS GCE VM]
+  └─ dashboard-sandbox-vm-subnet       10.99.2.0/24
+       (no Cloud NAT mapping)
+       → no internet egress                       [user GCE instances]
+
+Cloud Router dashboard-sandbox-router
+Cloud NAT    dashboard-sandbox-nat
+  --nat-custom-subnet-ip-ranges dashboard-sandbox-jumpoint-subnet
+  (only the gateway subnet gets NAT — the VM subnet is genuinely cut off)
+
+Firewall rules:
+  dashboard-sandbox-allow-internal
+    ingress, all protos, source 10.99.0.0/16
+  dashboard-sandbox-allow-ssh-from-jumpoint
+    ingress tcp/22, source-tag bt-jumpoint, target-tag dashboard-sandbox-vm
+  dashboard-sandbox-allow-rdp-from-jumpoint                [Windows RDP jump]
+    ingress tcp/3389, source-tag bt-jumpoint, target-tag dashboard-sandbox-vm
+  dashboard-sandbox-allow-ssh-from-k8s                   [co-located GKE agent]
+    ingress tcp/22, source = k8s node subnet + GKE pod range, target-tag dashboard-sandbox-vm
+  dashboard-sandbox-deny-vm-egress
+    egress, all protos, target-tag dashboard-sandbox-vm, dest 0.0.0.0/0
+  dashboard-sandbox-allow-vm-egress-vpc
+    egress, all protos, target-tag dashboard-sandbox-vm, dest 10.99.0.0/16
+  dashboard-sandbox-allow-db-from-jumpoint              [managed databases]
+    egress tcp/5432, target-tag bt-jumpoint, dest = PSA range
+  dashboard-sandbox-allow-db-from-k8s                   [co-located GKE agent]
+    egress tcp/5432,3306,1433, target-tag dashboard-sandbox-k8s, dest = PSA range
+
+Private Services Access (managed databases):
+  dashboard-sandbox-psa-range  (/20 VPC_PEERING address)
+  servicenetworking peering on the VPC → Cloud SQL private IP path.
+  The instance is private-IP-only; its IP lands in the peered range
+  (outside 10.99.0.0/16), so deny-vm-egress already blocks user VMs —
+  only the gateway reaches it (GCP analog of the AWS private DB subnets).
+
+Service account dashboard-sandbox-sa@<project>.iam.gserviceaccount.com
+  Roles: 21 project-level bindings — see the `for role in ...` loop in
+         scripts/sandbox/Linux/setup-gcp.sh, which carries a why-comment per
+         role. (Listing them here just went stale; the script is the source
+         of truth.) Cloud Functions adds cloudfunctions.developer,
+         secretmanager.admin, cloudbuild.builds.builder and
+         artifactregistry.writer, plus the cloudfunctions +
+         artifactregistry APIs.
+  Key cached at ~/.dashboard-sandbox/gcp/sa-key.json (mode 600)
+
+Secret Manager:
+  dashboard-sandbox-ssh-keypair    {public_key, private_key} JSON
+```
+
+**Auto-tagging**: the dashboard automatically attaches the `bt-jumpoint`
+network tag to its Gateway COS VM and the `dashboard-sandbox-vm` tag (read
+from the `gcp_default_network_tag` config key the sandbox script provides)
+to every user VM it deploys. The firewall rules' source/target tags match
+those automatically — no manual tagging in the deploy form.
+
+## Wire the sandbox into the dashboard
+
+Each setup script ends with a config block formatted like this:
+
+```
+═══════════════════════════════════════════════════════════════
+  GCP sandbox configuration — paste into /setup or Settings
+═══════════════════════════════════════════════════════════════
+
+gcp_project_id=my-lab-project
+gcp_region=us-central1
+gcp_zone=us-central1-a
+gcp_network=dashboard-sandbox-vpc
+gcp_subnetwork=dashboard-sandbox-vm-subnet
+gcp_jumpoint_subnetwork=dashboard-sandbox-jumpoint-subnet
+gcp_ssh_key_secret_name=dashboard-sandbox-ssh-keypair
+gcp_jumpoint_image=beyondtrust/sra-jumpoint:latest
+gcp_jumpoint_machine_type=e2-micro
+gcp_default_network_tag=dashboard-sandbox-vm
+gcp_service_account_json=$(cat …/sa-key.json | jq -c .)
+
+# Managed databases (Cloud SQL private IP via the PRA tunnel):
+gcp_db_network=projects/my-lab-project/global/networks/dashboard-sandbox-vpc
+
+# Cloud Functions — gen2 sources reuse the image-hub bucket:
+cloud_functions_enabled=true
+function_package_gcs_bucket=my-lab-project-dashboard-sandbox-storage
+gcp_functions_service_account=dashboard-sandbox-sa@my-lab-project.iam.gserviceaccount.com
+gcp_functions_network=dashboard-sandbox-vpc
+gcp_functions_subnetwork=dashboard-sandbox-vm-subnet
+
+# BeyondTrust deploy key — set in /setup or /secrets:
+gcp_cloud_run_docker_deploy_key=…
+```
+
+Note that `cloud_functions_enabled=true` rides along in the import, so **Cloud
+Functions is already switched on** under Settings → Integrations when the
+dashboard comes up — no restart and no extra click.
+
+Three ways to apply these to a running dashboard:
+
+**Automatic — `onboard-sandbox` (Path B, no wizard).** `onboard-sandbox.sh --cloud all`
+(PowerShell `Onboard-Sandbox.ps1 -Cloud all`) provisions the cloud(s) **and** reads
+what each `setup-*.sh` produced, then POSTs it to the dashboard's setup API
+(`POST /api/setup/import`) — creating your admin and marking setup complete. You
+never open `/setup`; you just log in. On a fresh dashboard it needs the one-time setup
+token (`--setup-token` / `-SetupToken`, or `SETUP_TOKEN` in your shell; it is
+`SETUP_TOKEN` in the dashboard's `.env`, else `/app/data/setup_token` in its container).
+
+**Setup wizard (Path A, first run, manual paste).** Open the dashboard, walk
+through `/setup`, and paste the matching values into Step 2 (AWS), Step 3 (Azure),
+or Step 4 (GCP). Some keys are exposed under **Advanced** within each step.
+
+**Settings panel (after first run, manual paste).** Open `/settings`, expand the
+relevant cloud panel, paste the values, and **Save**. Each cloud panel patches the
+same encrypted config DB the wizard writes to. Restarts are not needed — config is
+read per-request.
+
+For the sandbox specifically, you'll want to also paste the BeyondTrust
+deploy key into the relevant cloud's step in `/setup` (under **Advanced**), or into
+`/secrets` if you're using an external
+secrets backend) — the setup scripts can't generate that for you because
+it's issued by your PRA tenant.
+
+## Verifying isolation
+
+After a deploy, sanity-check that the VM segment really is cut off from
+the internet. From the dashboard's job log, identify your VM's private
+IP, then:
+
+**AWS / GCP** (via the Gateway as a jump host, or the dashboard's Shell
+Jump if BT is wired):
+
+```bash
+# From the lab VM
+curl -m 5 https://example.com   # should hang/fail — no internet route
+ip route                         # should show no default route, or only VPC routes
+
+# Confirm the Gateway side has internet
+curl -m 5 https://example.com   # should succeed from the Gateway container
+```
+
+**Azure**:
+
+The NSG rule denies `Internet` outbound. You can verify from the Azure
+portal: **VM → Networking → Outbound port rules → Effective security
+rules** should show your `deny-internet-out` rule active. From the VM
+itself, `curl https://example.com` should fail at TCP, not at TLS.
+
+## Cost
+
+Estimates if you leave the sandbox sitting idle (no VMs deployed). The
+cloud free tiers cover most of this. For the full audit behind these figures —
+including per-cluster costs and which standing resources can and can't move into
+per-resource Terraform — see
+[sandbox-provisioning-cost-audit](../notes/sandbox-provisioning-cost-audit.md).
+
+| Cloud | Idle / month | Why |
+|---|--:|---|
+| AWS   | ~$7.70  | VPC, subnets, IGW, SGs, IAM are free; ECS cluster has no charge until a task runs. Secrets Manager: ~$0.40. No NAT gateway or Elastic IP is created. SSM interface VPC endpoints are created on-demand per running EC2/DB (~$7/mo each, ~$22/mo for all three) and removed automatically when the last one is decommissioned — nothing while idle. **The Secrets Manager interface endpoint (~$7.30) is the one that does stand: `network_mode=vpc` Cloud Functions read their bearer secret through it, so unlike the SSM three it cannot be on-demand.** Opt out with `SANDBOX_SKIP_FN_VPCE=1` if you only need public-mode functions. |
+| Azure | ~$6.60  | RG, VNet, NSGs, Key Vault, SP free. Container registry (Basic): ~$5/mo — opt out with `SANDBOX_SKIP_ACR=1`. **Three private DNS zones (Postgres, MySQL, SQL Server): ~$0.50/mo each.** Those are what make VNet-integrated managed databases resolvable; they're created unconditionally, with no opt-out, and `rollback.sh --cloud azure` removes them with the resource group. Storage account file share: ~$0.05. |
+| GCP   | ~$1.56  | Cloud NAT bills hourly even when idle. Secret Manager: ~$0.06 per active version. VPC, subnets, Cloud Router, firewall rules and the PSA reserved range are free. |
+| OCI   | ~$0.10  | KMS vault (the shared `DEFAULT` type, not the ~$1/hr `VIRTUAL_PRIVATE`) plus one key version and one secret; skip with `OCI_SKIP_VAULT=1`. VCN, subnets, gateways, security lists and IAM are free — and unlike AWS, an OCI NAT gateway carries no hourly charge. **Cloud Functions is not supported on OCI**, so `setup-oci.sh` provisions nothing for it. |
+
+Once `cost_explorer_enabled` is on, **`/costs` reports this baseline as its own
+"sandbox" scope**, separate from resources the dashboard provisioned — the two are
+distinguished by the `managed-by` tag value (`dashboard-sandbox` vs `vm-dashboard`).
+Two caveats worth knowing, both surfaced as notes on the page itself:
+
+- **Azure** tags don't inherit from a resource group to its children, so untagged
+  children (disks, NICs, ACI) land in "unattributed". Enabling *Cost Management →
+  Manage tag inheritance* at subscription scope fixes it with no config change here.
+- **GCP** Cloud Router and Cloud NAT — i.e. the entire GCP idle cost — accept no
+  labels at all. To attribute them, label the project itself (forward-only; past
+  billing-export rows are immutable):
+  ```bash
+  gcloud projects update "$PROJECT_ID" --update-labels managed-by=dashboard-sandbox
+  ```
+
+Running infrastructure adds the obvious things:
+
+- AWS Fargate Gateway task: ~$10/mo (256 CPU / 512 MB).
+- Azure ACI Gateway: ~$10/mo (1 vCPU / 2 GB).
+- GCP `e2-micro` Gateway: ~$5/mo.
+- User VMs: standard EC2 / VM / GCE pricing for whatever you deploy.
+
+If GCP idle cost matters, tear down between sessions:
+
+```bash
+# Bash
+./scripts/sandbox/Linux/rollback.sh --cloud gcp -y
+```
+
+```powershell
+# PowerShell
+.\scripts\sandbox\Windows\Rollback-Sandbox.ps1 -Cloud gcp -Yes
+```
+
+## Tearing it all down
+
+```bash
+# Bash
+./scripts/sandbox/Linux/rollback.sh --cloud aws         # one cloud
+./scripts/sandbox/Linux/rollback.sh --cloud azure
+./scripts/sandbox/Linux/rollback.sh --cloud gcp
+./scripts/sandbox/Linux/rollback.sh --cloud all -y      # all three, skip prompts
+```
+
+```powershell
+# PowerShell
+.\scripts\sandbox\Windows\Rollback-Sandbox.ps1 -Cloud aws
+.\scripts\sandbox\Windows\Rollback-Sandbox.ps1 -Cloud azure
+.\scripts\sandbox\Windows\Rollback-Sandbox.ps1 -Cloud gcp
+.\scripts\sandbox\Windows\Rollback-Sandbox.ps1 -Cloud all -Yes
+```
+
+What rollback does:
+
+- Enumerates resources by `managed-by=dashboard-sandbox` tag/label and the
+  `dashboard-sandbox-` name prefix.
+- **Refuses to delete** if user VMs are still running in the sandbox network
+  — terminate them via the dashboard first. This is intentional; the
+  rollback won't silently destroy lab work in progress.
+- Deletes resources in dependency order (Secrets/secrets first, then DB subnet
+  groups, VPC endpoints, SGs, RTs, NAT, subnets, IGW, VPC) so each delete
+  succeeds. (VPC endpoints hold ENIs that pin the subnet/SG, so they're swept
+  before those — and any left behind keep billing.)
+- Wipes the local state directory (`~/.dashboard-sandbox/<cloud>/`) on
+  success.
+
+Azure rollback uses `az group delete --no-wait` (cascade) — the entire RG
+goes away in one call. AWS and GCP delete resource-by-resource.
+
+For **GCP**, a single run tears down the shared VPC across **all** regions:
+it discovers every region that still has a subnet or router on the VPC and
+removes each region's subnets/router/NAT, releases orphaned Cloud Run
+serverless egress IPs, removes the PSA range + `servicenetworking` peering,
+and sweeps any leftover VPC firewall rules before deleting the global VPC.
+Like the running-VM guard, it also **refuses** if a live Rancher management
+node or an active GKE↔sandbox-VPC peering is still attached — decommission
+those via the dashboard first.
+
+For **Azure** the whole resource group goes in one call, which cascades everything
+in it — so that arm **refuses** while a managed Portainer/Rancher node VM, or an
+orphaned node data disk, is still present. A data disk is meant to outlive its VM,
+so it can be the only thing left, and cascading over it would destroy the node's
+only copy of its users, environments and settings. Tear the node down via the
+dashboard (which asks about the disk separately) first.
+
+Service principals (Azure) and service accounts (GCP) are also deleted.
+The AWS `ecsTaskExecutionRole` is only deleted if it was tagged by us; an
+existing role created outside the sandbox is preserved.
+
+## Customising
+
+Common environment-variable overrides — both variants honour the same
+env vars:
+
+```bash
+# Bash
+# Region on a FIRST run. To add a second region to an existing sandbox these are
+# not enough on their own — see "A second region is a second sandbox" below.
+AWS_REGION=us-west-2          ./scripts/sandbox/Linux/setup-aws.sh
+AZURE_LOCATION=westus2        ./scripts/sandbox/Linux/setup-azure.sh
+GCP_PROJECT_ID=my-proj GCP_REGION=us-east1 ./scripts/sandbox/Linux/setup-gcp.sh
+SANDBOX_STATE_DIR=/path/to/state ./scripts/sandbox/Linux/setup-aws.sh
+SANDBOX_SKIP_ACR=1            ./scripts/sandbox/Linux/setup-azure.sh   # skip the ACR image mirror
+# Authenticated Docker Hub import (dodges the anonymous pull limit during az acr import):
+DOCKERHUB_USERNAME=me DOCKERHUB_TOKEN=dckr_pat_… ./scripts/sandbox/Linux/setup-azure.sh
+```
+
+```powershell
+# PowerShell
+$env:AWS_REGION = 'us-west-2';       .\scripts\sandbox\Windows\Setup-AwsSandbox.ps1
+$env:AZURE_LOCATION = 'westus2';     .\scripts\sandbox\Windows\Setup-AzureSandbox.ps1
+$env:GCP_PROJECT_ID = 'my-proj'
+$env:GCP_REGION = 'us-east1';        .\scripts\sandbox\Windows\Setup-GcpSandbox.ps1
+$env:SANDBOX_STATE_DIR = 'C:\state'; .\scripts\sandbox\Windows\Setup-AwsSandbox.ps1
+$env:SANDBOX_SKIP_ACR = '1';         .\scripts\sandbox\Windows\Setup-AzureSandbox.ps1   # skip the ACR mirror
+```
+
+CIDRs (10.99.0.0/16), subnet sizes, machine types, and IAM scope are
+intentionally hard-coded. The sandbox is opinionated. Edit the script
+directly if you need a different topology.
+
+`SANDBOX_NAME_PREFIX` (env var) renames every resource if you want multiple
+isolated sandboxes in one cloud account; the `SANDBOX_TAG_VALUE` constant in
+`scripts/sandbox/Linux/lib/common.sh` (or `Windows/lib/Common.ps1`) renames the tag
+that rollback enumerates by. Most users need neither.
+
+### A second region is a second sandbox
+
+Changing only the region **is not enough**, and this is the one customisation that
+bites. Nothing the scripts create is region-scoped by *name* — the resource group,
+VNet/VPC, NSGs and clusters are all `${SANDBOX_NAME_PREFIX}-…` — and the cloud APIs
+they call are idempotent PUTs that will not relocate an existing resource. So
+`AZURE_LOCATION=westus2` on its own reuses the centralus resource group and VNet,
+then writes `azure_region.westus2.*` config keys pointing at **centralus** subnets.
+The dashboard resolves them faithfully and the deploy fails at apply
+(`VnetWithDifferentLocationNotSupported`, or `DBSubnetGroupNotFound` on AWS).
+`setup-azure.sh` refuses this outright; give each region its own prefix and state
+dir instead:
+
+```bash
+SANDBOX_NAME_PREFIX=sandbox-westus2 \
+  SANDBOX_STATE_DIR="$HOME/.sandbox-westus2" \
+  AZURE_LOCATION=westus2 ./scripts/sandbox/Linux/setup-azure.sh
+```
+
+```powershell
+$env:SANDBOX_NAME_PREFIX = 'sandbox-westus2'
+$env:SANDBOX_STATE_DIR   = "$HOME\.sandbox-westus2"
+$env:AZURE_LOCATION      = 'westus2';  .\scripts\sandbox\Windows\Setup-AzureSandbox.ps1
+```
+
+Both runs import into the **same** dashboard: the flat keys stay the first (default)
+region's and the second run merges its ids in under `azure_region.westus2.*`. Roll a
+region back by re-exporting the same prefix and state dir before running
+`rollback.sh`.
+
+## Caveats
+
+- **Azure NSG service tag `Internet`** blocks the IPs Microsoft has
+  classified as internet-routable. A handful of Azure-platform endpoints
+  (DNS, NTP, the Azure metadata service at 169.254.169.254) are reachable
+  via separate `AzurePlatform*` service tags — by design, since Azure VMs
+  legitimately need DNS and metadata. Add explicit deny rules for those if
+  your threat model excludes them.
+- **AWS `vpc`-mode Cloud Functions depend on the Secrets Manager endpoint.**
+  A VPC-attached Lambda resolves its bearer secret from Secrets Manager at cold
+  start, and the private subnet has no internet route unless the on-demand NAT
+  instance happens to be up for an unrelated VM. Skip the endpoint
+  (`SANDBOX_SKIP_FN_VPCE=1`) and a vpc-mode function deploys cleanly, then **fails
+  auth closed — a 500 on every invoke**, including the dashboard's own Test invoke.
+  It reads like a bad bearer secret; it is a missing network path.
+- **The Azure `functions-subnet` carries no NSG on purpose.** The function module
+  turns on `vnet_route_all_enabled` whenever a subnet is attached, so *all* app
+  egress leaves through that subnet — including the Functions host's own calls to
+  `AzureWebJobsStorage` and `WEBSITE_RUN_FROM_PACKAGE`. Attaching the VM NSG (which
+  denies the `Internet` service tag) would starve the host and the app would boot
+  with zero indexed functions. `Microsoft.Storage` + `Microsoft.KeyVault` service
+  endpoints keep those hops on the Azure backbone instead.
+- **Cloud Functions is AWS / Azure / GCP only.** There is no
+  `terraform/cloud_function/oci_*` module and no `oci` branch in
+  `cloud_function_service`, so the four-cloud tables above do not imply OCI support.
+- **AWS public subnet is the Gateway's only home.** The dashboard's
+  printed config sets the *private* subnet as the deploy default, but if
+  someone overrides the deploy form's subnet to the public one, the
+  resulting EC2 instance will get internet access. The sandbox doesn't
+  prevent that mistake — it relies on the default.
+- **GCP Cloud NAT and tags are scoped to the VPC.** If you delete the VPC
+  out from under the dashboard while VMs are still attached, rollback
+  exits early with the running-VMs warning. Always terminate via the
+  dashboard first.
+- **The setup scripts don't install or configure the dashboard itself.**
+  They only wire the cloud-side scaffolding. Run `./scripts/onboard.sh`
+  separately to bring the app stack up.
+
+## Troubleshooting
+
+**"`aws` is not authenticated"** — run `aws configure` (or `aws sso login`
+if you use AWS SSO) and retry. The script verifies via `sts get-caller-identity`.
+
+**"Insufficient privileges" on Azure SP creation** — your account needs
+`Application.ReadWrite.OwnedBy` on Entra and `Owner` (or equivalent) on
+the subscription. Ask your tenant admin to grant or run the script as a
+user with those scopes.
+
+**GCP setup hangs at "Cloud NAT created"** — first NAT in a region can
+take 60–90 s to propagate. The script polls; if it hangs longer than 5
+minutes, check the GCP console under **VPC network → Cloud NAT** for the
+real status.
+
+**Rollback says "instances still running" but the dashboard shows none**
+— the dashboard tracks by job extra_data; some manually-created instances
+may exist outside its view. Run `aws ec2 describe-instances --filters
+'Name=vpc-id,Values=…'` (or the equivalent for Azure/GCP) to find
+strays, then terminate them and re-run rollback.
+
+**"docker daemon not reachable" in WSL** — Docker Desktop's WSL
+integration may be off for your distro. Open Docker Desktop settings →
+**Resources → WSL integration** → enable for the right distro. Or run
+Docker Engine natively in WSL: `sudo apt install docker.io docker-compose-v2`.
+
+**Re-running `setup-*.sh` after a partial failure leaves orphans** — the
+scripts are idempotent at the resource-name level; if a name conflict from
+a prior failed run blocks creation, run `rollback.sh --cloud <cloud>` to
+clean up and try again.
+
+---
+
+For the script reference (one-line file summary), see
+[`scripts/sandbox/README.md`](../../scripts/sandbox/README.md).

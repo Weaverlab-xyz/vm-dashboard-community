@@ -134,7 +134,7 @@
             <p class="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-900">
               <span class="font-medium" x-text="'SPIFFE federation is ready for ' + cloud.toUpperCase() + ', but the stored key still wins.'"></span>
               An administrator removes the stored key to go keyless; until then every call uses it.
-              <a href="/docs/access/workload-identity#moving-a-surface-over" class="underline">How</a>
+              <a href="/docs/platform/workload-identity#moving-a-surface-over" class="underline">How</a>
             </p>
           </template>
           <template x-for="entry in Object.entries(spiffe.tokens || {})" :key="entry[0]">

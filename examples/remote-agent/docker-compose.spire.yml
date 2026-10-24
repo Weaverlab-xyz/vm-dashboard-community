@@ -152,7 +152,7 @@ services:
     #
     # Once this agent attests, prefer `dashboard_secret: true` in connections.yaml over a
     # sealed or plain password: the credential then stays on the dashboard and is fetched
-    # per job by a key that exists only in memory. See docs/remote-agents/credentials.md,
+    # per job by a key that exists only in memory. See docs/admin/remote-agents/credentials.md,
     # "Central storage with SPIRE". (An identity.json left from the Ed25519 life is no
     # threat: attesting replaced its public key on the dashboard, so it no longer signs in.)
 

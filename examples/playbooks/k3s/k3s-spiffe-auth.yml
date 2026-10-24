@@ -39,7 +39,7 @@
 # THE USERNAME PREFIX IS MANDATORY AND IT BECOMES PART OF EVERY BINDING. Kubernetes
 # requires a prefix on any claim mapping that is not `email`, so the RBAC subject is
 # "<prefix><spiffe id>" — by default "spiffe:spiffe://td/path", which looks odd and is
-# correct. Read the binding rather than assuming the name; docs/kubernetes.md records the
+# correct. Read the binding rather than assuming the name; docs/cloud-services/kubernetes.md records the
 # same trap costing hours when Entitle silently rewrote an email into its subject.
 #
 # extra_vars:

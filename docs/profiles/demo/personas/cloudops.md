@@ -34,7 +34,7 @@ Deploy a cloud VM and watch Shell Jump, Password Safe onboarding and an Entitle 
 themselves in a single job. The machine is under management before anyone could have logged
 into it.
 
-**Guide:** [Cloud VMs](../../../cloud/vms.md)
+**Guide:** [Cloud VMs](../../../clouds/vms.md)
 
 ### Onboard a cloud VM with nothing installed on it
 
@@ -42,7 +42,7 @@ Rotate the admin credential on a VM with no agent and no inbound port, over the 
 control plane — Systems Manager on AWS, Run Command on Azure, ssh-keys metadata on GCP. The
 objection this answers is "we cannot install anything on those images".
 
-**Guide:** [Password Safe](../../../integrations/beyondtrust/password-safe.md)
+**Guide:** [Password Safe](../../../beyondtrust/password-safe.md)
 
 ### Time-boxed access to the cloud console itself
 
@@ -57,7 +57,7 @@ standing administrators in the cloud IAM.
 Build a hardened image with Packer in one cloud and promote it to the others, so every VM in
 every region starts from the same audited baseline.
 
-**Guide:** [Image Management](../../../cloud/image-management.md)
+**Guide:** [Image Management](../../../operations/image-management.md)
 
 ### Guardrails: refuse the deploy, then reap it
 

@@ -5,8 +5,8 @@
 The dashboard can authenticate to AWS, Azure and GCP with short-lived tokens from its own
 SPIRE server instead of a stored key. With Workload Credentials, the same identity can be
 the everyday credential while jobs take a lease. Feature reference:
-[The dashboard's own identity](../oidc/dashboard-identity.md) and
-[dynamic credentials](../workload-lab/dynamic-credentials.md). Trust modules:
+[The dashboard's own identity](../platform/oidc/dashboard-identity.md) and
+[dynamic credentials](../preview/workload-lab/dynamic-credentials.md). Trust modules:
 [`terraform/dashboard_federation`](../../terraform/dashboard_federation/README.md).
 
 Unit tests, `terraform validate` and `packer validate` against the real azure plugin pass.
@@ -226,7 +226,7 @@ Prerequisites: §1 passed, including from outside your network. You have a Pathf
 and an admin who can register Workload Identities. Workload Credentials currently works on
 a stored Personal Access Token (PAT), so you have a known-good baseline to compare with.
 Pathfinder is hosted, so it fetches the issuer's documents from the internet, as AWS and
-Azure do. Reference: [BeyondTrust Workload Credentials](../oidc/dashboard-identity.md#beyondtrust-workload-credentials).
+Azure do. Reference: [BeyondTrust Workload Credentials](../platform/oidc/dashboard-identity.md#beyondtrust-workload-credentials).
 
 1. Pick an audience, for example `beyondtrust-wlc`. Enter it as **Token audience** under
    **Settings → Integrations → Workload Credentials**, and save. Leave the authentication on
@@ -303,6 +303,6 @@ Copy this into the PR or issue that closes out the test, one row per section you
 | — | Key-less install looks configured | §9 | | | |
 
 Once a cloud has accepted a token, update the *Preview* note at the top of
-[The dashboard's own identity](../oidc/dashboard-identity.md) to say which clouds are proven.
+[The dashboard's own identity](../platform/oidc/dashboard-identity.md) to say which clouds are proven.
 Once Pathfinder has, drop the *Not yet run against a live Pathfinder tenant* note under
-[BeyondTrust Workload Credentials](../oidc/dashboard-identity.md#beyondtrust-workload-credentials).
+[BeyondTrust Workload Credentials](../platform/oidc/dashboard-identity.md#beyondtrust-workload-credentials).

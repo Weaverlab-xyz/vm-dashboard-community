@@ -75,7 +75,7 @@ RULE_NAME = "allow-spire-api"
 
 # The SPIRE server's federation bundle endpoint (server.conf `federation.bundle_endpoint`),
 # which the dashboard's own SPIRE server fetches this trust domain's bundle from once the
-# lab is federated with it (docs/workload-lab/spiffe.md). Public keys only, served over
+# lab is federated with it (docs/preview/workload-lab/spiffe.md). Public keys only, served over
 # https_spiffe — TLS with the server's own SVID — so nothing may terminate TLS in front of
 # it either. The dashboard's SPIRE server serves its bundle on the same port number.
 FEDERATION_PORT = 8082
@@ -1164,7 +1164,7 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str,
 # accepts the result, because nothing in this dashboard has ever presented a JWT-SVID to a
 # relying party. This links a second VM — a small k3s node — into the same trust domain and
 # makes its API server accept those tokens, so the lab finally demonstrates the path
-# docs/workload-lab/spiffe.md argues for rather than only the vaulted downgrade.
+# docs/preview/workload-lab/spiffe.md argues for rather than only the vaulted downgrade.
 #
 # WHY THIS IS A SEPARATE JOB, not extra stages on provision:
 #   * the governance half is what most labs are built for and it stands on its own. A k3s
@@ -2560,7 +2560,7 @@ async def run_upgrade(db: Session, *, lab_id: str, job_id: str) -> None:
 
 
 # ── SPIFFE federation with the dashboard's own SPIRE server ───────────────────
-# docs/design/dashboard-workload-identity.md, L4; docs/workload-lab/spiffe.md, "Federating
+# docs/design/dashboard-workload-identity.md, L4; docs/preview/workload-lab/spiffe.md, "Federating
 # with the dashboard". Each SPIRE server serves its trust bundle on tcp/8082 (https_spiffe)
 # and holds a federation relationship naming the other's, so each FETCHES the other's
 # bundle and keeps it current through rotation on its own. Nothing here is secret.

@@ -28,7 +28,7 @@ demo leans on, and the worst row sets the badge, which also shows in the page he
 
 **Opening the tab makes no calls.** Every row is read from what is already stored:
 - the reconcile's last runstate
-- the [Health](../../operations/health.md) page's rows for this POV's tenants
+- the [Health](../../admin/health.md) page's rows for this POV's tenants
 - the last PRA to Password Safe count
 - the last full check
 

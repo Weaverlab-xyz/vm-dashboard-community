@@ -110,7 +110,7 @@ Things to know:
 * **Cloud pages** (AWS, Azure, GCP, OCI) can book any selection.
 * **On-premises pages** (Proxmox, vSphere, Hyper-V, XCP-ng, VMware Workstation) can book
   only VMs on an **agent-bound** connection. There the job waits in the queue and the
-  [remote agent](../../remote-agents/hypervisors.md) is simply not offered it until its time.
+  [remote agent](../../admin/remote-agents/hypervisors.md) is simply not offered it until its time.
   A connection the dashboard dials **directly** runs a power operation in the dashboard
   process, right now — a booking there would create a scheduled-looking job and power the
   machine off immediately. So each direct-connection VM in the selection is refused on its
@@ -123,7 +123,7 @@ Things to know:
   VM instead of failing — so every Nutanix target is direct, and a booking would be a lie.
 * **For a recurring power schedule, use Repeat instead** — open the resulting job and
   repeat it in a window. And for plain business hours, the
-  [suspend schedule](../../cloud/vms.md) is the better tool: it understands per-VM
+  [suspend schedule](../../clouds/vms.md) is the better tool: it understands per-VM
   eligibility, which a generic power booking does not.
 
 ### Bulk deploys book as a unit
@@ -228,7 +228,7 @@ change window is about. Two consequences worth knowing:
   window and still allow everything, if no action is gated.
 * **Power operations are not on it by default**, so a window does not block start/stop
   unless an administrator adds them. That is usually right — powering a VM off is
-  reversible, and the [suspend schedule](../../cloud/vms.md) is the better tool for it.
+  reversible, and the [suspend schedule](../../clouds/vms.md) is the better tool for it.
 
 You do **not** need to enable the policy engine. `admission_control_enabled` switches
 *OPA* on; a maintenance window is enforced in the dashboard and needs no Rego.
@@ -271,7 +271,7 @@ the job page and presses **Approve**.
 The permission is deliberately separate from `config_mgmt:write`: maintaining the
 maintenance calendar (`change_windows:write`) and signing off a production change
 (`change_windows:use`) are different authorities from being allowed to run a playbook. See
-[Permissions](../../access/permissions.md).
+[Permissions](../../admin/permissions.md).
 
 ---
 
@@ -361,7 +361,7 @@ zone you meant.
 * [Config Management](../config-management.md) — what a scheduled run actually does, and how
   its credentials are handled.
 * [Job Worker](../job-worker.md) — why a job might not get a turn inside its window.
-* [Permissions](../../access/permissions.md) — the `change_windows` scope and its two levels.
-* [Notifications](../notifications.md) — routing `job.window_missed` somewhere you will see it.
+* [Permissions](../../admin/permissions.md) — the `change_windows` scope and its two levels.
+* [Notifications](../../admin/notifications.md) — routing `job.window_missed` somewhere you will see it.
 * [Auto-delete Timer](../auto-delete-timer.md) — the other time-based feature, and the one
   that destroys things.

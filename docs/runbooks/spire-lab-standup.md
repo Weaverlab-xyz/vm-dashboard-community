@@ -7,7 +7,7 @@ Password Safe against the **SPIFFE SVID** custom plugin. **§5 is the point of t
 exercise** — it answers the one question the plugin's configuration model rests on, and
 it takes about two minutes once §1–§4 are done.
 
-Feature reference: [SPIFFE and SPIRE](../workload-lab/spiffe.md).
+Feature reference: [SPIFFE and SPIRE](../preview/workload-lab/spiffe.md).
 Playbooks: [`examples/playbooks/spire/`](../../examples/playbooks/spire/README.md).
 
 **Scope: Azure.** The playbooks are cloud-agnostic — they configure a Linux host over
@@ -17,7 +17,7 @@ SSH — so GCP and AWS differ only in §1 and §2. Those sections name what chan
 > the build as one job and opens the cloud ACL first, on any of the three clouds, and in
 > any of three deployment modes — systemd on the VM (what this runbook does by hand),
 > Docker, or k3s + Helm. It also publishes the trust domain's OIDC provider and registers
-> it with the dashboard — see [SPIFFE and SPIRE](../workload-lab/spiffe.md#building-it-from-the-dashboard). Its
+> it with the dashboard — see [SPIFFE and SPIRE](../preview/workload-lab/spiffe.md#building-it-from-the-dashboard). Its
 > *Onboarding* panel then resolves every value §5 asks you to paste. This runbook remains
 > the by-hand path and the explanation of *why* each step is what it is; read §0, §2 and
 > §5 either way.

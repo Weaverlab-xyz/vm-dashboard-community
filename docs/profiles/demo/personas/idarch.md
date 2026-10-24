@@ -36,7 +36,7 @@ The Directories page holds cloud and on-prem domains beside Entra ID, Okta and P
 can be pinned to the Entitle integration that grants access to it. The identity estate reads as a
 map of sources and grant paths rather than a list of consoles.
 
-**Guide:** [Directories](../../../directories.md)
+**Guide:** [Directories](../../../preview/directories.md)
 
 ### Extend the forest to the cloud without a domain controller there
 
@@ -45,7 +45,7 @@ VPN. Then declare the domain as Entra hybrid and confirm each server's hybrid jo
 Graph. That is one forest with no new domain controller in a cloud account, which means no new
 tier-0 asset to protect.
 
-**Guide:** [On-premises directories](../../../directories/on-premises.md)
+**Guide:** [On-premises directories](../../../preview/directories/on-premises.md)
 
 ### Zero standing privilege, including in the tool itself
 
@@ -53,7 +53,7 @@ Every dashboard scope, administrator included, can be requested through Entitle.
 revoked the moment it ends, through the REST mechanism. The access model the architect writes
 down is applied to the console that enforces it.
 
-**Guide:** [Entitle dashboard permissions](../../../integrations/beyondtrust/entitle-dashboard-permissions.md)
+**Guide:** [Entitle dashboard permissions](../../../beyondtrust/entitle-dashboard-permissions.md)
 
 ### Machine identities elevated per action, not per year
 
@@ -70,7 +70,7 @@ The `directories` permission scope decides who may write, and the audit log reco
 membership change (`directory_member_add`, `directory_member_remove`) and each Entitle pin
 (`directory_entitle_pin`). An identity governance review gets the evidence without an export.
 
-**Guide:** [Audit Log](../../../access/audit-log.md)
+**Guide:** [Audit Log](../../../admin/audit-log.md)
 
 ## What to enable
 

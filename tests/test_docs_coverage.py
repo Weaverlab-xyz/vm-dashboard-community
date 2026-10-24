@@ -27,7 +27,7 @@ gap, so a new entry here is a new undocumented surface, not old debt.
      accepts a booking -- has a row, naming its platform, in change-windows.md's
      "Where you can book one" table. ``_SCHEDULABLE`` below maps each one; an unmapped
      class fails, and so does a mapped class that no longer exists.
-  5. The hub pages the audit created stay linked from the docs index.
+  5. The hub pages the audit created stay linked from their section's hub, operations.md.
 
 The PR-level companion is ``scripts/ci/docs_gate.sh``, which asks the coarser question
 "code changed -- did docs change?". This file asks the precise one, and only for surfaces
@@ -48,7 +48,6 @@ _MAIN = os.path.join(_WEB, "main.py")
 _NAV = os.path.join(_WEB, "templates", "_nav_links.html")
 _FLAGS = os.path.join(_WEB, "services", "feature_flags.py")
 _CHANGE_WINDOWS = os.path.join(_DOCS, "operations", "scheduling", "change-windows.md")
-_INDEX = os.path.join(_DOCS, "README.md")
 
 # Page routes that are not a feature an operator reads about. Each needs a reason.
 _ROUTE_EXEMPT = {
@@ -60,11 +59,11 @@ _ROUTE_EXEMPT = {
 # Where an undocumented page or flag most likely belongs -- only used to make the failure
 # message actionable. A miss here just falls back to the index.
 _HINTS = {
-    "hyperv": "docs/integrations/hyperv.md", "proxmox": "docs/integrations/proxmox.md",
-    "vsphere": "docs/integrations/vsphere.md", "nutanix": "docs/integrations/nutanix.md",
-    "xcpng": "docs/integrations/xcpng.md", "schedule": "docs/operations/scheduling.md",
-    "inventory": "docs/inventory.md", "desktop": "docs/cloud/virtual-desktops.md",
-    "workgroup": "docs/access/permissions.md", "notification": "docs/operations/notifications.md",
+    "hyperv": "docs/hypervisors/hyperv.md", "proxmox": "docs/hypervisors/proxmox.md",
+    "vsphere": "docs/hypervisors/vsphere.md", "nutanix": "docs/hypervisors/nutanix.md",
+    "xcpng": "docs/hypervisors/xcpng.md", "schedule": "docs/operations/scheduling.md",
+    "inventory": "docs/operations/inventory.md", "desktop": "docs/preview/virtual-desktops.md",
+    "workgroup": "docs/admin/permissions.md", "notification": "docs/admin/notifications.md",
     "ansible": "docs/operations/config-management.md",
 }
 
@@ -96,7 +95,7 @@ for _path, _cls, _word in (("web_dashboard/models/aws.py", "CreateImageRequest",
                            ("web_dashboard/models/aws.py", "CopyAMIRequest", "AMI copy")):
     _SCHEDULABLE[(_path, _cls)] = ("Image export", _word)
 
-_HUBS = ("operations/scheduling.md", "inventory.md")
+_HUBS = ("operations/scheduling.md", "operations/inventory.md")
 
 
 def _read(path):
@@ -260,10 +259,12 @@ def test_every_schedulable_surface_has_a_booking_row():
 
 
 def test_hub_pages_exist_and_are_indexed():
-    index = _read(_INDEX)
+    # Linked from their section's hub, not from docs/README.md: an index links one level
+    # down, and these are a level below the Operations hub.
+    index = _read(os.path.join(_DOCS, "operations.md"))
     for hub in _HUBS:
         assert os.path.isfile(os.path.join(_DOCS, hub)), f"docs/{hub} is missing"
-        assert f"]({hub})" in index, f"docs/README.md does not link {hub}"
+        assert f"]({hub})" in index, f"docs/operations.md does not link {hub}"
 
 
 if __name__ == "__main__":

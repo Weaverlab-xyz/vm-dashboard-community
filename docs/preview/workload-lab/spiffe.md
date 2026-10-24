@@ -1,0 +1,646 @@
+# SPIFFE and SPIRE
+
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** you need a SPIRE trust domain to govern non-human identities against, and want it gone again when the demo ends.
+
+This page is about the SPIRE trust domains the **Workload Lab** builds for demos, and the
+Password Safe plugin that governs them. The dashboard's **own** SPIRE server, and every
+feature that uses it, is on [SPIFFE and SPIRE](../../platform/spiffe.md).
+
+> **Preview.** The plugin's own suite covers everything above the SPIRE API, and its
+> 16-step harness runs green against a live SPIRE 1.15.3 server — but **nothing here has
+> been proven through a live BeyondInsight**. The single open question is whether the
+> gateway populates managed system and managed account *attributes* at all, and the
+> whole configuration model turns on the answer. That is what this lab exists to settle
+> cheaply. Off by default; enable it under **Settings → Preview features**.
+
+This page is about the lab for the Password Safe **SPIFFE SVID** custom platform plugin,
+which brings a SPIRE trust domain into BeyondInsight as a Managed System. **There is no
+human in this workflow by design** — every identity here belongs to a machine, and the
+consumer is a pipeline, not a person.
+
+It is the **SPIRE** tab of the **Workload Lab** page (`/workload-lab`), alongside
+[Certificates](certificates.md) — both labs govern identities that belong to machines, so
+they share a page. Each still has its own preview toggle and its own Settings panel.
+
+The lab has a second half, on this same tab:
+[Reaching a Kubernetes cluster with a JWT-SVID](#reaching-a-kubernetes-cluster-with-a-jwt-svid).
+Everything else here is about identities that are *minted and vaulted*, which
+[Minting is a deliberate downgrade](#minting-is-a-deliberate-downgrade-and-the-honest-version-matters)
+is explicit about being a downgrade. That section is the un-downgraded path — a workload
+attests itself and reaches a real relying party with a token stored nowhere.
+
+The companion docs:
+
+- [`examples/playbooks/spire/`](../../../examples/playbooks/spire/README.md) — the playbooks
+  that build the lab, and what each one is actually proving
+- [Config Management](../../operations/config-management.md) — how those playbooks get run
+- [Cloud VMs](../../clouds/vms.md) — where the SPIRE server lives
+- [Certificates](certificates.md) — the sibling feature, for a plugin that has a human
+  approval in its path
+
+---
+
+## What the plugin does, in one paragraph
+
+SPIRE is an issuance engine and a very good one. It is **not** an identity governance
+system and does not claim to be: it has no inventory, no ownership model, no review
+workflow, and `spire-server entry show` is a CLI dump on a box most of the people who
+need the answer cannot log into. The plugin does two separate jobs with very different
+risk. **Governance** discovers every registration entry as a Managed Account and raises
+attestation-policy findings on every verification — it mints nothing and holds no
+workload credential, so there is no trade-off to weigh. **Distribution** mints an
+audience-scoped JWT-SVID for consumers that cannot run a SPIRE agent, and stores it as
+the Managed Account credential.
+
+Deploy the governance half first. It stands on its own.
+
+**The dashboard now runs a SPIRE server of its own** (for remote agents). This lab keeps
+its own server on purpose: its seeded weak entries must never go into a real trust domain.
+Which lab demos could move to the dashboard's trust domain instead, and what else that
+server should be used for, is in
+[The dashboard as a SPIFFE workload](../../design/dashboard-workload-identity.md).
+
+## Minting is a deliberate downgrade, and the honest version matters
+
+Minting **bypasses SPIRE node attestation and workload attestation**. That is SPIFFE's
+core security property, set aside on purpose. A vault-issued SVID is an exportable
+bearer token at rest in a database rather than a non-exportable, attested,
+continuously-rotating one — so **if a workload can reach the Workload API, it should use
+the Workload API**, and using this plugin instead is a strict downgrade.
+
+It is legitimate for three cases: consumers that genuinely cannot be attested
+(mainframes, appliances, SaaS-hosted CI, partner systems), break-glass and debugging,
+and a phased SPIFFE rollout. It is not legitimate for any workload that can be attested,
+for any SPIFFE ID also issued to attested workloads, or for control-plane identities.
+The plugin enforces that structurally: `SpiffeMintablePathPrefix` is unset by default and
+**unset means refuse**, so minting is inert until an operator names the namespace that
+may be minted.
+
+## What the lab is for
+
+Standing a SPIRE server up by hand takes an afternoon and produces something that lives
+on one laptop and disappears on reboot. The plugin was developed against exactly that,
+which is why every Password Safe interaction it documents is expected behaviour rather
+than observed.
+
+The lab replaces it with one Linux VM built from playbooks, seeded with the population a
+real trust domain accumulates — weak selectors, inflated TTLs, a leftover `-admin` entry
+— so the findings have something to catch. Unlike a private CA, the lab has **no standing
+cost beyond the VM itself**, which the auto-delete timer already reaps. The reason it
+still gets its own record and its own timer is different: a forgotten trust domain keeps
+minting identities that relying services keep accepting, and it appears on no other page.
+
+## Building it from the dashboard
+
+The **Workload Lab** page's **SPIRE** tab (preview; enable `spire_lab_enabled` under Settings → Preview
+features) does the steps below as one job. Configure it under **Settings → SPIRE Lab**,
+and upload the playbooks on the **Storage** page first — the `spire-*.yml` set, plus
+`install-docker.yml` or `k3s-server-init.yml` for the Docker and Kubernetes modes. A run
+fetches assets *by filename from the storage backend*, never from `examples/`, and the
+build form names the ones each mode is missing. Storage is where assets are uploaded; Config
+Management only *runs* them.
+
+**It attaches to a VM you already deployed rather than creating one.** That is not a
+shortcut: the page re-derives the host from this dashboard's own deploy rows rather than
+trusting an address it is handed, because four privileged playbooks against a host of the
+caller's choosing is not something it should accept. So a VM built by hand in the portal
+will not be offered as a host at all. The VM also keeps its own auto-delete timer and its
+own Destroy, which is why tearing the lab down closes `tcp/8081` and leaves the host
+alone.
+
+**How the runs log in is yours to choose.** By default the Ansible runner resolves the
+host's SSH key from that VM's own *deploy job*, which needs nothing from you. The build
+form also takes either a **Password Safe managed account** (checked out just-in-time) or
+a **Secrets-Management SSH-key secret**, plus an optional login user — the same two
+pickers Config Management has, reading the same two endpoints. Two things worth knowing
+before you pick an account:
+
+- Every playbook runs with `become`, and the form has no separate sudo credential, so
+  tick **"also use this account for sudo"** unless the account is root or has passwordless
+  sudo. It reuses the same Password Safe request rather than opening a second one.
+- A `[SSH key]` (DSS-managed) account has a private key and not necessarily a password, so
+  it cannot supply a sudo password — the checkbox is disabled for those.
+- A managed account works on the local and Azure (ACI) runners directly. On ECS or Cloud
+  Run it needs *Ephemeral cloud secrets* enabled in Settings; an SSH-key secret works on
+  every runner.
+
+Choosing nothing keeps the auto-derived key. If that resolves to nothing, the stage now
+fails saying so, rather than shipping an empty key file to the runner and surfacing as
+`Permission denied (publickey)` — which reads like the host rejected a key rather than
+like there was none.
+
+What the build does, in order:
+
+0. Creates the credential's Secrets Safe folder tree (`<root>/<lab>` under the safe) if it
+   is absent — a pre-flight, before anything is touched. The identity playbook runs
+   after the install and seed stages and writes into a folder it does not create, so without this a
+   missing folder surfaces only after the server is installed and seeded, as an error that
+   reads like a credential fault. The **safe** is never created: it carries its own ACL.
+1. Opens `tcp/8081` and `tcp/8443` on the cloud ACL — an NSG rule on Azure, a VPC
+   firewall rule plus an instance tag on GCP, a security-group permission on AWS — to the
+   sources named in `spire_lab_source_cidrs`. **Blank opens nothing**, which is correct
+   for a broker already inside the VNet and is the first thing to check otherwise.
+2. The mode's install stages (see [Deployment modes](#deployment-modes-vm-docker-or-kubernetes)):
+   `spire-server-install.yml` in `vm` mode — SPIRE under systemd, one trust domain, and
+   `admin_ids`.
+3. `spire-open-ports.yml`, with the same source set, so the two gates cannot disagree.
+4. `spire-seed-entries.yml` — 11 entries, of which discovery should return **8**.
+5. `spire-admin-identity.yml` — mints the admin credential into Secrets Safe.
+6. `spire-oidc-provider.yml` (`vm` and `docker`; the chart runs it in `k8s`) — the OIDC
+   Discovery Provider on `tcp/8443`, after which the lab registers its trust domain with
+   the dashboard by JWKS URL.
+
+Each playbook gets its own job row, so a failed stage's Ansible output is somewhere you
+can read it; the page links every one. The first failure stops the sequence, because every
+later stage asserts the server is up.
+
+**Govern** writes the managed system. A trust domain nothing governs demonstrates SPIRE
+rather than governance of machine identities, which is what this page is for — so the
+deterministic half of the onboarding is a button, and the two parts that are not
+deterministic are named rather than guessed at:
+
+| | Who | Why |
+|---|---|---|
+| Asset + **Managed System** on `SPIFFE SVID` at port 8081 | **Govern** | deterministic: the address, the port and the platform are all known |
+| **Functional Account** whose *name is a SPIFFE ID* (`spiffe://<trust-domain>/password-safe/admin`), PKCS#12 as its DSS key | you | its DSS-key field holds the administrative credential, and creating it here would mean the dashboard reading that credential out of Secrets Safe to push it back in. `spire-admin-identity.yml` writes it there under `no_log`; nothing in the app ever reads it |
+| **`SpiffeTrustDomain`** attribute on the managed system | **Prepare probe** | the plugin takes its whole configuration from BeyondInsight *attributes*, and whether the gateway populates them for a plugin action **has never been observed**, which is the question this lab exists to answer. Setting the attribute is the probe's setup, not a bet on the answer. It is created if the tenant lacks it, assigned, and read back |
+| **The answer**: Verify Functional Account's `Attributes received:` line | you | there is no API for running Verify Functional Account or reading its activity record. Record what the line said on the probe panel; the panel shows that answer's next step |
+
+**No managed account is created, deliberately.** The plugin's accounts are SPIRE
+registration entries and they arrive by *discovery*; one created here would sit beside
+them, indistinguishable, and move the number the next section measures — the number that
+caught a real plugin bug.
+
+The **Onboarding** panel still resolves every value, and after Govern it shows what ran
+and what is left. `SpiffeTrustBundlePem` comes from the **Bundle** button.
+
+Then press **Prepare probe**, run *Verify Functional Account*, read the
+`Attributes received:` line, and record it on the same panel.
+[The standup runbook](../../runbooks/spire-lab-standup.md) §5 is that procedure and what each
+answer means.
+
+### Deployment modes: VM, Docker or Kubernetes
+
+The build form's **Deployment** select picks how SPIRE runs on the lab host. Everything
+downstream — seed entries, the admin credential, Govern, the Kubernetes link, the agent
+cell, JWT-SVID client assertions — is the same in all three.
+
+| Mode | Install stages | then |
+|---|---|---|
+| `vm` (default) | `spire-server-install.yml` — SPIRE under systemd | ports, seed, identity, oidc |
+| `docker` | `linux/install-docker.yml`, `spire-docker-server.yml` — `ghcr.io/spiffe/spire-server` and the OIDC Discovery Provider under Docker Compose | ports, seed, identity, oidc |
+| `k8s` | `k3s/k3s-server-init.yml`, `spire-helm.yml` — k3s on the lab host and the `spiffe/helm-charts-hardened` charts (server, agent, CSI driver, controller manager, OIDC provider) | ports, seed, identity |
+
+A mode whose playbooks are not on the Storage page is disabled in the select and names
+them. The shared stages reach the server through a command prefix (`docker exec
+spire-server` / `k3s kubectl exec … spire-server-0`), and in the container modes the admin
+credential is minted to stdout and split on the host, so no key is written inside a
+container. One mode per host: the Docker play refuses a host already running the `vm`-mode
+systemd server.
+
+**Every mode publishes the OIDC Discovery Provider on `tcp/8443`**, and the build opens it
+on the cloud ACL and the host firewall to the same sources as 8081. After a successful
+build the lab **registers its trust domain with the dashboard by JWKS URL** —
+`https://<host>:8443/keys`, verified as `oidc.<trust-domain>` (the row's *TLS name*) against
+the lab's own trust bundle — so the token endpoint verifies JWT-SVIDs with current keys. A
+trust domain another lab or an operator already registered is never re-pointed.
+
+**Refresh keys** on a lab's row re-reads the JWT and X.509 bundles, renews the provider's
+serving certificate (`vm`/`docker`; the chart rotates its own) and updates the registration.
+The dashboard also runs it hourly-checked, for any available lab whose registration is
+older than a third of `ca_ttl`. If the URL cannot be fetched, a stored bundle is used as a
+fallback.
+
+**Destroy** closes 8081 and 8443 and deletes the lab's own trust-domain registration. The
+host is still left alone unless you confirm **also remove SPIRE from the host**, which runs
+`spire-remove.yml`: systemd units / `docker compose down -v` / `helm uninstall`, and deletes
+`/opt/spire` including the CA key. k3s and Docker Engine stay installed.
+
+**Nothing runs as root.** In every mode SPIRE runs the way upstream ships it:
+
+| | Server | OIDC provider |
+|---|---|---|
+| `vm` | `spire` system user; systemd sandbox (no capabilities, `ProtectSystem=strict`, writable only `/opt/spire/data` and its socket directory, syscall filter) | `spire-oidc`, in the `spire` group only to reach the socket; same sandbox, writes nothing |
+| `docker` | uid 1000 (the image's own user); read-only root, all capabilities dropped, `no-new-privileges`, pid limit | uid 1001 with group 1000; same restrictions |
+| `k8s` | the chart's recommended settings (`global.spire.recommendations.enabled`): 1000:1000, read-only root, all capabilities dropped, no privilege escalation, RuntimeDefault seccomp; the `spire-server` namespace enforces the *restricted* Pod Security Standard | same |
+
+The server makes its API socket `0770`, so the provider reaches it through the group and
+nothing else can. The datastore and CA keys are `0700` to the server user; the provider's
+serving key is root-owned and readable by the provider's group only. Binaries are
+root-owned. `systemd-analyze security spire-server` scores the VM units.
+
+**Every download is verified.** The plays pin, per SPIRE version, the SHA-256 of the
+release tarballs (server and agent, `spire-extras` for the VM provider; amd64 and arm64,
+checked against upstream's own `*_sha256sum.txt`), the Kubernetes exec credential plugin
+(`k8s-spiffe-workload-jwt-exec-auth` 0.3.0, against its release `checksums.txt`) and the
+digests of the
+`ghcr.io/spiffe/*` multi-arch images, which the compose file runs as
+`<image>:<tag>@<digest>` — Docker then refuses a re-pointed tag, or any local image with
+that tag. A version with no pin is **refused**, not warned about: add its values to the
+tables in the plays (a test holds all four plays and the lab's default version equal), or
+set `spire_lab_allow_unpinned` to take it on TLS alone, deliberately. The charts are pinned
+too (below). Helm itself publishes checksums only on `get.helm.sh`, so none is shipped:
+set `spire_lab_helm_sha256` to verify it.
+
+All of these are on **Settings → SPIRE Lab**: the chart and CRDs versions (blank = the pins),
+the k3s version, extra chart values, the Helm checksum and **Allow unpinned downloads** (off).
+
+**Upgrading SPIRE.** Change the SPIRE version on **Settings → SPIRE Lab** (and, for `k8s`,
+the chart pins with it), then press **Upgrade** on the lab's row. It appears whenever the
+lab's recorded release differs from the configured one, and the row shows both. It re-runs
+the stages that install software, server before agents, as SPIRE requires:
+
+1. the mode's install play — `spire-server-install.yml` restarts onto the new binary,
+   `spire-docker-server.yml` recreates on the new pinned image, `spire-helm.yml` is a
+   `helm upgrade` to the pinned chart and images;
+2. the OIDC provider (vm/docker): each version installs into `/opt/spire/oidc/bin/<version>/`
+   behind the symlink the unit runs, the link is re-pointed with a restart, and the old
+   version is pruned only after the new one has served the discovery document;
+3. a linked k3s node's agent — the entry stage first, since the agent play needs a fresh
+   one-use join token.
+
+Seeded entries, the admin credential, the trust domain and the ACL are kept. The first
+failed stage stops the upgrade (an agent is never moved past a server that did not make
+it); the lab stays available so it can be retried, and its row names the stages that
+completed and the job holding the failure. A version the playbooks hold no checksum pin
+for is refused. While an upgrade runs, **Refresh keys**, a second upgrade and **Destroy**
+are refused; an auto-delete timer simply retries on its next pass.
+
+The VM-mode provider also follows the configured version on its own at the next **Refresh
+keys**, which re-runs its stage.
+
+**What has been run:** the Docker mode, end to end, against images built from the 1.15.3
+release binaries exactly as upstream's Dockerfile builds them — server, seed entries, the
+OIDC provider as uid 1001 reaching the socket, the discovery document and JWKS over TLS,
+a JWT-SVID minted by SPIRE and verified by the dashboard through the JWKS URL by address
+and TLS name, and `spire-remove.yml`. That also confirmed the `x509 mint` stdout layout the
+container modes split.
+
+**The Kubernetes mode is pinned** to `spire` chart **0.30.2** and `spire-crds` **0.6.1**.
+0.30.2 ships SPIRE 1.15.3, and no chart release ships a later SPIRE yet (0.30.3 still
+carries appVersion 1.15.3), so the play sets the chart's server, agent and OIDC provider
+images to `spire_lab_version` by digest: all three modes run the same server. That
+override has been rendered, not run. `spire_lab_helm_chart_version` / `spire_lab_helm_crds_chart_version` override
+the pin (blank falls back to it); move them together with `spire_version`. The play's
+values were checked by rendering 0.30.2 with `helm template`: `adminIDs`, `caTTL` and the
+SVID TTLs reach `server.conf`, the provider's domains include `oidc.<trust-domain>`, and its
+serving certificate is issued for that name (the chart's default is
+`oidc-discovery.<trust-domain>`, which the dashboard would refuse). Extra values go in
+`spire_lab_helm_values_extra`.
+
+**Not yet run:** the VM units' sandbox under a real systemd, and a Kubernetes build on a
+real k3s node.
+
+### By hand
+
+Full detail, including what each playbook proves, is in
+[`examples/playbooks/spire/`](../../../examples/playbooks/spire/README.md). The playbooks are
+cloud-agnostic — they configure a Linux host over SSH — so only step 1 differs between
+Azure, GCP and AWS. Run them from Config Management on the **`ansible-winrm`** runner
+image: `spire-open-ports.yml` needs `ansible.posix` and `spire-admin-identity.yml` needs
+`beyondtrust.secrets_safe`, and neither is in `ansible-cloud`.
+
+## Two numbers to check, because both have already been wrong
+
+**Discovery must return 8 of 11.** Not "discovery succeeded" — the count. The plugin
+shipped with discovery defaulting its path filter to the mintable prefix, so configuring
+minting silently narrowed the governance inventory to the vaulted namespace and the two
+showcase findings disappeared, while every run still reported success. Read the exclusion
+counts in the activity record: node/agent, admin, downstream, and outside-prefix are
+reported separately, and that is what tells you which one bit.
+
+**The admin credential is shorter than you asked for.** `ca_ttl` caps every SVID the
+server issues, so `-ttl 720h` against the default 168h gives a ~7-day credential and
+SPIRE says so rather than failing. Once it lapses, every action fails
+`PERMISSION_DENIED`, which reads exactly like an `admin_ids` misconfiguration. Schedule
+off the real expiry the playbook prints — or off the date the SPIRE tab shows, which
+is the same number: the playbook publishes it, and the trust bundle, as text secrets
+alongside the credential so the dashboard reads them as *values* rather than scraping a
+job log. Both are public by construction; the credential itself never leaves Secrets
+Safe.
+
+## Reaching a Kubernetes cluster with a JWT-SVID
+
+Everything above is about identities that are **minted and vaulted**, which
+[Minting is a deliberate downgrade](#minting-is-a-deliberate-downgrade-and-the-honest-version-matters)
+is explicit about being a downgrade. This is the un-downgraded path: a workload attests
+itself, fetches a token that lives five minutes, and reaches a Kubernetes API server with it.
+Nothing is stored in a vault, on disk, or anywhere else. (The dashboard's own token
+endpoint is the other relying party — see
+[Service accounts → SPIFFE workloads](../../admin/service-accounts.md#spiffe-workloads-authenticate-with-the-svid-hold-nothing).)
+
+The linked k3s node is also **the one host in the lab that runs a SPIRE agent**, which
+makes it where the [agent demo cell](../../profiles/demo/agent-demo-cell.md)'s worker goes.
+
+**Preview.** Run so far, against SPIRE 1.15.3 locally: the exec credential plugin
+(`k8s-spiffe-workload-jwt-exec-auth` 0.3.0) against a real agent on the lab's socket path
+returned a `client.authentication.k8s.io/v1` ExecCredential carrying the workload's
+JWT-SVID. **Nobody has yet watched the whole chain against a live pair** — the API server
+accepting that token is the part still to prove. Treat the first run as the validation.
+
+### Building it: one button, two VMs
+
+**Kubernetes**, on the lab's row, once the lab is `available`. It takes a **second host**
+and runs five playbooks alternating between the two machines, passing the join token and the
+trust bundle between them so nothing is copied by hand.
+
+| | |
+|---|---|
+| The SPIRE VM | the one the lab was already built on |
+| The k3s VM | a second, plain VM — k3s is installed by the run. 2 vCPU / 4 GB is plenty |
+
+**Both are attached, not created**, exactly as the SPIRE host always was: deploy them from
+the normal cloud page first, and each keeps its own SSH key, auto-delete timer and Destroy.
+The dashboard re-derives both from its own deploy rows rather than trusting an address it is
+handed, and it **refuses the SPIRE host as the k3s node** — an agent attesting over loopback
+proves the mechanism but not that it crosses a network, which is the half worth showing.
+
+Upload these on the **Storage** page too; the build form's prerequisite list covers the
+four `spire-*` plays, and these are the ones this action adds:
+
+| Order | Play | Host |
+|---|---|---|
+| 1 | `k3s-server-init.yml` | k3s node |
+| 2 | `spire-oidc-provider.yml` | SPIRE |
+| 3 | `spire-k8s-entry.yml` | SPIRE |
+| 4 | `spire-agent-install.yml` | k3s node |
+| 5 | `k3s-spiffe-auth.yml` | k3s node |
+
+Each stage is its own `ansible_local` job row, so a failed stage's Ansible output is
+somewhere you can read it, and the panel links all five. Three things worth knowing:
+
+- **A failed link leaves the trust domain alone.** It stays `available` and goes on
+  governing everything it did before — the governance half is what most labs are built for,
+  and it stands on its own. Only the link is marked failed, and **Retry the link** re-runs it.
+- **The firewall change is on the SPIRE host only**, opening tcp/8081 and tcp/8443 to the
+  k3s node's private address. The k3s node needs nothing inbound, because the workload runs
+  on it.
+- **The lab has never had a SPIRE agent before.** `spire-server-install.yml` installs none,
+  because the plugin only ever talks to the server's API. Stage 4 is what makes the
+  un-vaulted path possible at all, and it proves itself by fetching a JWT-SVID *as the
+  workload account* before reporting success.
+
+**The two VMs do not share an SSH key, and the panel asks separately.** Leaving its
+credential fields blank is the normal case and already correct: the runner derives a keypair
+from the deploy job of the host it is *connecting to*, and the Kubernetes stages target the
+k3s node. What it deliberately does **not** do is inherit whatever the SPIRE host was given
+at build time — that would connect to one VM with another VM's credential, and the failure is
+`Permission denied (publickey)` several stages into a run that looked configured. The same
+either/or rule applies: a Password Safe managed account **or** an SSH-key secret, not both.
+
+### The two upstream halves
+
+Both are Apache-2.0 projects in the **SPIFFE GitHub org**, and both carry a "Development
+Phase" badge with single-digit stars — real and officially owned, not production-proven.
+That belongs in front of a customer rather than in a footnote.
+
+| | |
+|---|---|
+| [`k8s-spiffe-workload-jwt-exec-auth`](https://github.com/spiffe/k8s-spiffe-workload-jwt-exec-auth) | A client-go **exec credential plugin**. Reads a JWT-SVID over the Workload API socket and hands it to `kubectl` as the bearer token. Audience from `SPIFFE_JWT_AUDIENCE`. |
+| [`k8s-spiffe-workload-auth-config`](https://github.com/spiffe/k8s-spiffe-workload-auth-config) | The server half: the kube-apiserver `AuthenticationConfiguration`, with the SPIFFE trust bundle as `certificateAuthority` and the OIDC Discovery Provider as the issuer. |
+
+The workload's entire kubeconfig user is four lines, and holds no credential:
+
+```yaml
+user:
+  exec:
+    apiVersion: "client.authentication.k8s.io/v1"
+    command: "k8s-spiffe-workload-jwt-exec-auth"
+    args: ["-timeout=10s"]
+    interactiveMode: Never
+```
+
+`-timeout` is there because the plugin's default waits forever for the Workload API, and
+`kubectl` would hang rather than fail. The play installs **0.3.0** from upstream's
+goreleaser archive (`…_Linux_x86_64.tar.gz` / `…_Linux_arm64.tar.gz`, pinned by SHA-256),
+into its own version directory behind a symlink. That version was run against a SPIRE
+1.15.3 agent on the lab's socket path and returned a `client.authentication.k8s.io/v1`
+ExecCredential carrying the workload's JWT-SVID.
+
+It also takes `SPIFFE_JWT_SOURCE=server-admin-api` to mint from the server's admin API
+instead. **Do not use that mode here.** It is the same attestation bypass this page spends a
+section refusing to make the default, and choosing it would demonstrate the downgrade while
+claiming to demonstrate the upgrade.
+
+### Why it is k3s, and why that is a real limit
+
+`--authentication-config` is a **kube-apiserver flag**. EKS, AKS and GKE do not expose it, so
+none of the clusters on the [Kubernetes](../../cloud-services/kubernetes.md) page can do this at all — k3s takes
+arbitrary API server flags, which is why the lab's second VM runs k3s. Structured
+Authentication is GA in Kubernetes **1.34** (`apiserver.config.k8s.io/v1`), and the play
+refuses an older cluster rather than writing a config the API server will reject and fail to
+start on.
+
+State that limit plainly. A customer running only managed clusters cannot adopt this
+pattern, and finding that out mid-demonstration is worse than saying it first.
+
+### What it is being compared against
+
+The dashboard already ships a short-lived Kubernetes token: `POST /clusters/{id}/ps-token`
+in **Bound mode**, described in [Kubernetes](../../cloud-services/kubernetes.md#access--identity) with its
+reasoning in [the design note](../../design/k8s-sa-token-rotation.md). This does **not** replace
+it — a cluster whose broker needs a vaulted credential still needs Bound mode. The two
+answer different questions, and the interesting claim is not "short-lived tokens are good"
+but *what each one still leaves lying around*:
+
+| | Bound-mode SA token | JWT-SVID over the Workload API |
+|---|---|---|
+| Where the credential rests | Password Safe, and PRA Vault via the synced account | **Nowhere** — process memory, for minutes |
+| Who can replay it | Anyone who can retrieve it from either vault | A caller on the attested workload's own machine |
+| What binds it | The ServiceAccount's `uid` claim | Node and workload attestation |
+| Works on EKS / AKS / GKE | Yes | **No** — needs a self-managed API server |
+| Governed as an inventory row | Yes | No — there is no credential to govern |
+
+Showing both, on one page, is a stronger demonstration than either alone.
+
+The Workload Lab's **Kubernetes tab** is the Bound-mode column made operable against a
+cluster you already have, with the scoping this comparison leaves implicit: two profiles, a
+namespace-scoped Deployer and a cluster-wide Reader that cannot read Secrets, neither of
+them `cluster-admin`. See [Workload access to Kubernetes](kubernetes.md). It is the
+path to reach for when the fourth row above rules this one out — which it does on every
+managed cluster.
+
+### Proving it, and the two failures worth rehearsing
+
+Run as the workload account on the k3s node:
+
+```bash
+sudo -u deploy-bot kubectl get pods -A
+```
+
+Then break it deliberately, because both of these are the interesting part:
+
+1. **A wrong audience must be refused.**
+   `sudo -u deploy-bot env SPIFFE_JWT_AUDIENCE=wrong kubectl get pods -A`
+   The audience is the only thing stopping a token minted for another relying party being
+   replayed at this API server.
+2. **Stop the SPIRE agent and wait out the TTL.** Access stops within five minutes, with no
+   revocation step anywhere. That is the whole argument for a short-lived token, and it is
+   also the boundary in [Boundaries](#boundaries) below: containment is only as fast as the
+   TTL.
+
+A 401 on the *first* attempt is almost always the issuer string or clock skew, not RBAC:
+
+```bash
+journalctl -u k3s | grep -i 'authentication\|oidc\|jwt'
+```
+
+**Labs built before the server set an issuer.** The API server matches a token's `iss`
+against the issuer it was given, exactly. Every mode's server now signs with the OIDC
+provider's URL (`jwt_issuer` in vm and docker mode, `jwtIssuer` in the Helm values). A vm
+or docker lab built earlier signs with no `iss`, and its k3s link refuses every token. It
+picks the setting up the next time its install stage runs: **Upgrade** does that when the
+SPIRE version changes. Otherwise, re-run the mode's install play by hand with
+`-e jwt_issuer=https://oidc.<trust domain>:8443`. Seeded entries, the admin credential
+and the CA are kept.
+
+The full argument, including the four traps the playbooks encode, is in
+[the design note](../../design/workload-k8s-short-lived-token.md).
+
+## Federating with the dashboard
+
+**Preview, every deployment mode.** A lab's trust domain can be federated with the
+dashboard's own SPIRE server ([the dashboard's SPIFFE identity](../../platform/oidc/dashboard-identity.md)),
+two trust domains that each trust the other. That is the setup customers who run more than
+one trust domain ask about. Press **Federate** on an available lab's row.
+
+Each SPIRE server serves its trust bundle on **tcp/8082** from a SPIFFE bundle endpoint
+(`https_spiffe`, which is TLS with the server's own SVID). Each holds a federation
+relationship naming the other's endpoint, so each fetches the other's bundle and keeps it
+current through key rotation on its own. The job runs in this order:
+
+1. **The lab's half.** It re-applies the lab's install playbook, which adds the bundle
+   endpoint to a lab built before this feature and restarts its server. It opens tcp/8082
+   on the lab's ACL and host firewall to the lab's existing sources, then runs
+   `spire-federation.yml`. That playbook creates the relationship, seeded with the
+   dashboard's current bundle, and refreshes it once to prove the lab can fetch.
+2. **The dashboard's half.** It creates the mirror relationship on the dashboard's SPIRE
+   server, seeded with the bundle **Refresh keys** captured, and refreshes it once.
+
+It needs both directions open:
+
+| From | To | Port | Opened by |
+|---|---|---|---|
+| the lab host | the dashboard's SPIRE host | tcp/8082 | you: `docker-compose.spire.yml` publishes it (`SPIRE_FEDERATION_PORT`); firewall it to the lab hosts |
+| the dashboard host | the lab host | tcp/8082 | the lab's ACL, to its existing sources, which must include the dashboard's egress, as they already do for 8443 |
+
+A failed refresh names the direction that is closed. **Unfederate** (the **Federated ✓**
+button) removes both relationships and both federated bundles. Decommissioning a lab
+removes the dashboard's relationship with it.
+
+The playbook is `spire-federation.yml`. Upload it with the rest of the `spire-*.yml` set on
+the Storage page. Bundles are public keys, so nothing secret moves in either direction.
+
+### Helm-mode (k8s) labs
+
+The same button and the same job. Three things differ:
+
+- **The bundle endpoint.** `spire-helm.yml` turns on the chart's `spire-server.federation`
+  (an `https_spiffe` bundle endpoint on 8082) and publishes it on the lab host's tcp/8082
+  with a third ServiceLB Service, `spire-federation-lab`, beside the API and OIDC ones.
+  The play reads the rendered server config back and fails, naming the fix, if the chart
+  did not take the values. Federating re-applies this install (a `helm upgrade`), so a
+  k8s lab built before this gets the endpoint then.
+- **The relationship is declared, not created.** The chart's controller manager
+  reconciles federation relationships from `ClusterFederatedTrustDomain` resources and
+  deletes any relationship no resource declares, within about 10 seconds. A CLI
+  `federation create` would be undone, so `spire-federation.yml` applies a
+  `ClusterFederatedTrustDomain` instead, with the controller manager's own `className`
+  read from its ConfigMap (the chart ignores a resource without it). It then waits for the
+  server to report the relationship and refreshes it, as in the other modes. The seed
+  bundle is used once, at creation. The manager compares only the URL and profile, so it
+  never overwrites a bundle SPIRE has refreshed since.
+- **Unfederate** deletes the resource, waits for the manager to remove the relationship,
+  then deletes the federated bundle. Decommissioning deletes the lab's resources and its
+  `spire-federation-lab` Service before uninstalling the charts.
+
+The workload's `federatesWith` is still written through the CLI: that entry belongs to the
+k3s link, not to the controller manager, which leaves entries it did not create alone.
+
+### The workloads, and the proof
+
+A relationship makes a **server** hold the other trust domain's bundle. A registration
+entry's `federatesWith` is what hands that bundle to a **workload** in its SVID response,
+which is what lets the workload authenticate a peer from the other trust domain over mTLS.
+**Federate** sets it on both sides:
+
+- **The lab's k8s workload** (`deploy-bot`, when Kubernetes is linked) gets the
+  dashboard's trust domain. An existing entry is updated by `spire-federation.yml`, and a
+  link made after federating creates the entry that way (`spire-k8s-entry.yml`).
+- **Agent cells on the dashboard's trust domain** get the lab's trust domain. Existing
+  cells are updated on the dashboard's server, and a cell minted later federates with
+  every federated lab from the start. Revoked cells are left alone.
+
+**The proof** runs on the linked k3s node, as the workload: `spire-federation-proof.yml`
+asks the agent's Workload API for the workload's X.509-SVID response and checks that
+`spiffe://<dashboard trust domain>` is among its federated bundles. The row's **Federated ✓**
+shows the result. That response carries the workload's private key, so the fetch is never
+logged and the play reports trust domain names only.
+
+The dashboard does not run playbooks on an agent cell's host, so prove that side by hand,
+on the cell's host, as the cell's worker user:
+
+```bash
+ansible-playbook -i <cell host>, examples/playbooks/spire/spire-federation-proof.yml \
+  -e federated_trust_domain=<lab trust domain> -e workload_user=<worker user>
+```
+
+```powershell
+ansible-playbook -i '<cell host>,' examples/playbooks/spire/spire-federation-proof.yml `
+  -e federated_trust_domain=<lab trust domain> -e workload_user=<worker user>
+```
+
+**Unfederate** removes the trust domain from both sides' workloads first, then the
+relationships.
+
+Neither SPIRE server has fetched the other's bundle, and no workload has run the proof, in
+a live run yet.
+
+## Settings
+
+**Settings → SPIRE Lab**, plus the preview toggle `spire_lab_enabled` under **Settings →
+Preview features**. Nothing here is a secret.
+
+| Setting | Key | Default | What it does |
+|---|---|---|---|
+| Allowed source CIDRs | `spire_lab_source_cidrs` | blank | Who may reach tcp/8081, and 8443 and 8082 with it. Blank changes no cloud ACL: it does not open anything |
+| SPIRE version | `spire_lab_version` | `1.15.5` | What every mode installs (for `k8s`, the chart's images), and what **Upgrade** moves to |
+| CA TTL | `spire_lab_ca_ttl` | `168h` | Caps every SVID the server issues, the admin credential included |
+| Admin SVID TTL | `spire_lab_admin_ttl` | `720h` | What the admin mint asks for; the CA TTL decides what it gets |
+| Secrets Safe safe | `spire_lab_ps_safe` | `Automation` | Where the admin credential lands. It must exist already, with create rights |
+| Folder root | `spire_lab_secret_root` | `spire` | Four titles land under `<root>/<lab>`: the PKCS#12, its passphrase, the trust bundle and the granted expiry |
+| Playbook storage backend | `spire_lab_asset_backend` | blank: the active storage backend | Where a run fetches the `spire-*.yml` playbooks by filename |
+| SPIRE chart version | `spire_lab_helm_chart_version` | blank: the pin, `0.30.2` | `k8s` mode. Never "latest" |
+| SPIRE CRDs chart version | `spire_lab_helm_crds_chart_version` | blank: the pin, `0.6.1` | `k8s` mode |
+| k3s version | `spire_lab_k3s_version` | blank: what get.k3s.io serves | `k8s` mode and the k3s link. At least 1.34; the playbook refuses older |
+| Helm tarball SHA-256 | `spire_lab_helm_sha256` | blank, which warns | `k8s` mode. From `get.helm.sh/helm-v<ver>-linux-<arch>.tar.gz.sha256sum` |
+| Extra chart values (YAML) | `spire_lab_helm_values_extra` | blank | `k8s` mode. Merged over the play's values, so it can undo them, hardening included |
+| Allow unpinned downloads | `spire_lab_allow_unpinned` | off | Takes a SPIRE version the plays hold no checksum for, on TLS alone. Leave off |
+
+Two more are read but not shown on the page. Set them with the headless import
+(`POST /api/setup/import`) if a Password Safe admin has renamed something:
+
+| Key | Default | What it does |
+|---|---|---|
+| `spire_ps_platform` | `SPIFFE SVID` | The platform name **Govern** looks for, if the imported `.psplugin`'s platform was renamed |
+| `spire_ps_workgroup` | blank: `passwordsafe_workgroup` | The workgroup **Govern** creates the managed system in |
+
+## Boundaries
+
+- **No revocation.** Deleting a registration entry stops renewal; an SVID already in a
+  consumer's memory stays valid until it expires. Containment is only as fast as the
+  TTL. That is SPIRE's design, not the plugin's.
+- **No kill switch.** The plugin implements neither Enable nor Disable Managed Account,
+  so removing the Managed System — or the entry in SPIRE — is how an identity is stopped.
+- **No self-rotation, permanently.** A workload cannot mint its own replacement: the
+  server API requires an admin caller, and the Workload API is reachable only from the
+  attested workload's own machine. The action is declared unsupported so BeyondInsight
+  refuses it early.
+- **No just-in-time issuance.** Password Safe returns what is stored rather than calling
+  the plugin at retrieval time, so TTL planning is scheduling arithmetic:
+  `jwt_svid_ttl >= rotation_interval + max_checkout_duration + clock skew`.
+- **JWT-SVIDs only.** An X509-SVID is three artefacts and the credential field has
+  nowhere to put the bundle.
+- **No discovery of SVIDs already in circulation.** The plugin inventories registration
+  entries, which is what SPIRE knows about. A JWT-SVID pasted into a config file two
+  years ago is invisible to it and to SPIRE alike.

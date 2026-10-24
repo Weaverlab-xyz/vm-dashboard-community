@@ -14,7 +14,7 @@
               the only API here that serves callers outside your own network.
               <strong>Terminate TLS in front of the dashboard first.</strong> Signing gives the
               agent protocol integrity and replay protection, not confidentiality; see
-              <a href="/docs/remote-agents" class="underline">the remote agent docs</a> and
+              <a href="/docs/admin/remote-agents" class="underline">the remote agent docs</a> and
               <code class="font-mono">docker-compose.agent.yml</code>.
             </p>
           </div>
@@ -46,7 +46,7 @@
                 supported for sites that cannot: a TLS-inspecting proxy usually blocks a SPIRE
                 server. See
                 <code class="font-mono">examples/remote-agent/docker-compose.spire.yml</code> and
-                <a href="/docs/access/workload-identity#remote-agents" target="_blank" class="text-blue-600 hover:underline">why</a>.
+                <a href="/docs/platform/workload-identity#remote-agents" target="_blank" class="text-blue-600 hover:underline">why</a>.
               </span>
             </span>
           </label>
@@ -193,7 +193,7 @@
                     <p class="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-900">
                       <span class="font-medium" x-text="'SPIFFE federation is ready for ' + cloud.toUpperCase() + ', but the stored key still wins.'"></span>
                       Remove the stored key to go keyless; until then every call uses it.
-                      <a href="/docs/access/workload-identity#moving-a-surface-over" target="_blank" class="underline">How</a>
+                      <a href="/docs/platform/workload-identity#moving-a-surface-over" target="_blank" class="underline">How</a>
                     </p>
                   </template>
                   <template x-for="entry in Object.entries(spiffeIdentity.tokens || {})" :key="entry[0]">

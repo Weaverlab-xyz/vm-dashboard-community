@@ -15,7 +15,7 @@
 # Only ever CREATES or updates the description of an ent-* group. It never sets
 # members, never removes a group, and refuses any name outside the ent-* convention, so
 # it cannot be pointed at a built-in group. A new group grants nothing until its rights
-# are delegated — see docs/integrations/beyondtrust/entitle-persona-bundles.md.
+# are delegated — see docs/beyondtrust/entitle-persona-bundles.md.
 - name: Ensure the Entitle persona-bundle groups exist
   hosts: all
   gather_facts: false

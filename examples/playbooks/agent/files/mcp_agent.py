@@ -897,7 +897,7 @@ def password_safe_episode(*, api_url: str, client_id: str, client_secret: str,
 # ── Proving the token is SCOPED, not merely that it works ────────────────────
 #
 # The two beats examples/playbooks/k8s/ci-*-with-ps-token.yml assert, in the same shape
-# and for the same reason. docs/workload-lab/kubernetes.md is explicit that
+# and for the same reason. docs/preview/workload-lab/kubernetes.md is explicit that
 # steps 3 and 4 -- the REFUSALS -- are the ones that prove something, and that they are
 # written as assertions rather than runbook steps because "a step in a runbook gets
 # skipped, and an assertion does not".
@@ -926,7 +926,7 @@ def k8s_probe(*, api_server: str, token: str, profile: str, namespace: str,
     **The refusal has to fail with 403 specifically.** A wrong API server, an expired
     token or a typo in the path also fail, and a check that only asserted "it failed"
     would report a passing demonstration on any of them -- the trap
-    ``docs/workload-lab/kubernetes.md`` records the plays encoding with
+    ``docs/preview/workload-lab/kubernetes.md`` records the plays encoding with
     ``failed_when: false`` rather than ``ignore_errors``.
 
     ``verify`` is honoured rather than assumed: a lab cluster's API server is often
@@ -996,7 +996,7 @@ def probe_summary(result: dict) -> str:
 # Retrieving one without the other yields nothing usable, which is the point of the split.
 #
 # WHY NOT ps-cli, WHICH IS WHAT THE DASHBOARD USES. Because it cannot carry these bytes.
-# docs/integrations/beyondtrust/password-safe.md establishes it and services/secrets_backend_service
+# docs/beyondtrust/password-safe.md establishes it and services/secrets_backend_service
 # REFUSES on it: the endpoint returns application/octet-stream faithfully, but every route
 # ps-cli offers decodes the body to text before anyone sees it -- the library hands back
 # `response.text`, and `raw` falls through its JSON parse to print `response.text` too. A
@@ -1191,7 +1191,7 @@ def cert_probe_summary(result: dict) -> str:
 # did not exist a second before this worker asked for it.
 #
 # What that buys over a key in a CI secret store is the three properties
-# docs/workload-lab/cloud.md names as the ones nobody chose: it expires, the issuance is
+# docs/preview/workload-lab/cloud.md names as the ones nobody chose: it expires, the issuance is
 # recorded against THIS workload, and nothing sits on the host between runs.
 #
 # WHAT IT DOES NOT BUY IS SCOPE. `services/workload_cloud_service` states it plainly --
@@ -1424,7 +1424,7 @@ def revoke_wlc_lease(*, base_url: str, site_id: str, service_name: str,
 # ── Proving a cloud credential is SCOPED, not merely that it authenticated ───
 #
 # The same two beats `PROBES` above runs against a cluster, and for the same stated
-# reason: docs/workload-lab/kubernetes.md is explicit that THE REFUSALS are the steps
+# reason: docs/preview/workload-lab/kubernetes.md is explicit that THE REFUSALS are the steps
 # that prove something. One call the credential must be able to make, one it must be
 # refused — and the refusal written as an assertion rather than a runbook step, because
 # a step gets skipped and an assertion does not.
@@ -2069,7 +2069,7 @@ def run_cert_episode(args) -> int:
       * the **PAT** is revocable — pull it and the loop stops mid-poll;
       * the **cluster token** is gated at retrieval — a person decides, and once released
         it lives out its TTL;
-      * a **certificate** is neither. docs/workload-lab/certificates.md is blunt about it:
+      * a **certificate** is neither. docs/preview/workload-lab/certificates.md is blunt about it:
         "No revocation checking. The plugin consults neither CRLs nor OCSP. Short
         lifetimes are the mitigation, and that is a deliberate design position."
 

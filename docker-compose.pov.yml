@@ -50,7 +50,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://dashboardadmin:${POSTGRES_PASSWORD:-devpassword}@db:5432/vmclipov
       - JWT_SECRET_KEY_FILE=/run/secrets/jwt_key_pov
-      # Optional: a separate key for stored secrets (docs/operations/cloud-hosting.md).
+      # Optional: a separate key for stored secrets (docs/platform/cloud-hosting.md).
       # Give app and worker the same one, e.g. CONFIG_ENCRYPTION_KEY_FILE=/run/secrets/config_key
       # The gate. Everything else in this file follows from it.
       - INSTALL_PROFILE=pov
@@ -107,7 +107,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://dashboardadmin:${POSTGRES_PASSWORD:-devpassword}@db:5432/vmclipov
       - JWT_SECRET_KEY_FILE=/run/secrets/jwt_key_pov
-      # Optional: a separate key for stored secrets (docs/operations/cloud-hosting.md).
+      # Optional: a separate key for stored secrets (docs/platform/cloud-hosting.md).
       # Give app and worker the same one, e.g. CONFIG_ENCRYPTION_KEY_FILE=/run/secrets/config_key
       - INSTALL_PROFILE=pov
       - POV_ENVIRONMENTS_ENABLED=true
@@ -139,6 +139,6 @@ secrets:
   # two instances sharing it is the only way their encrypted config could be swapped —
   # and two instances with DIFFERENT keys is why a pg_dump restore between them yields
   # unreadable ciphertext with no error. Use the config-migration tool if you need to
-  # copy settings across: docs/operations/config-migration.md.
+  # copy settings across: docs/platform/config-migration.md.
   jwt_key_pov:
     file: .jwt_secret_key.pov

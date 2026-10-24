@@ -12,7 +12,7 @@ interesting part shows up. The pattern is per-segment, so a third is a third cop
 same four steps.
 
 The reference documentation for the feature is
-[Agent-executed Config Management](../../../docs/remote-agents/config-runs.md) — read that
+[Agent-executed Config Management](../../../docs/admin/remote-agents/config-runs.md) — read that
 for what the dashboard sends and what a run looks like. This kit is the concrete build of
 it.
 

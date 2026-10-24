@@ -254,7 +254,7 @@ exists. Running a sweep on demand is admin-only, and `?force=true` there bypasse
 
 A resource entering the warn window raises `resource.expiring`; a resource whose teardown
 has been enqueued raises `resource.reaped`. Both go out over
-[notifications.md](notifications.md), which is off by default and dry-run by default even
+[notifications.md](../admin/notifications.md), which is off by default and dry-run by default even
 once on — so **on a fresh install the timer warns nobody**. Turn notifications on if you
 want to hear about this anywhere other than the dashboard.
 
@@ -303,7 +303,7 @@ by hand.
 row is actually *tagged*. A cloud database or Kubernetes cluster carries a workstream only
 once someone assigns one — every row created before the field existed is untagged, and an
 untagged row matches no exemption. Assign it with the **Workstream** button on
-[Databases](../databases.md) or [Kubernetes](../kubernetes.md), or pin that one row instead.
+[Databases](../cloud-services/databases.md) or [Kubernetes](../cloud-services/kubernetes.md), or pin that one row instead.
 
 Note the asymmetry that remains: assigning an exempt workstream stops a *new* resource being
 stamped at all, but it does **not** clear a timer already on an existing row. The sweeper
@@ -313,7 +313,7 @@ visible. Retagging is a visibility action and deliberately does not reschedule a
 Cloud functions and desktop seats still carry no workstream, so pin those individually.
 
 **A resource was deleted and nobody was told.** See *A resource was deleted and never warned*
-in [notifications.md](notifications.md) — the short version is that the warn-once latch is
+in [notifications.md](../admin/notifications.md) — the short version is that the warn-once latch is
 stamped only after the outbox accepts the row, but a warning that was queued and then failed
 to deliver has still burned it.
 

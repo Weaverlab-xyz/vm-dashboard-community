@@ -298,7 +298,7 @@ Caddy is a sidecar *in the app's* Container App rather than its own, because tha
 to share a lifecycle with the request path.
 
 The `dash` half of that table — the environment, the private database, the custom domains and
-the gateway sidecar's own config — is covered in [cloud-hosting.md](cloud-hosting.md), along
+the gateway sidecar's own config — is covered in [cloud-hosting.md](../platform/cloud-hosting.md), along
 with the Cloud Run and ECS equivalents.
 
 ---
@@ -380,7 +380,7 @@ must be at least the release carrying `web_dashboard/worker_health.py`; point a 
 8080 on an older image and nothing answers, the startup probe fails its whole budget, and
 ACA restart-loops a worker that was fine. Check with the `curl` above first. Readiness is
 pointless here — there is no ingress to be removed from — so Startup and Liveness are the
-whole set. See [cloud-hosting.md](cloud-hosting.md#probes) for the app's own probes and for
+whole set. See [cloud-hosting.md](../platform/cloud-hosting.md#probes) for the app's own probes and for
 why the Caddy sidecar needs a TCP probe instead.
 
 ## Shutdown

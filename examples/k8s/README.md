@@ -3,8 +3,8 @@
 Ready-to-adapt manifests for the **EKS / AKS / GKE clusters the dashboard
 manages** — provision or register a cluster, import it into the Rancher
 management plane, and broker access via BeyondTrust PRA
-(see [docs/integrations/rancher.md](../../docs/integrations/rancher.md) and
-[docs/integrations/beyondtrust/privileged-remote-access.md](../../docs/integrations/beyondtrust/privileged-remote-access.md)).
+(see [docs/cloud-services/rancher.md](../../docs/cloud-services/rancher.md) and
+[docs/beyondtrust/privileged-remote-access.md](../../docs/beyondtrust/privileged-remote-access.md)).
 
 They are the Kubernetes counterpart to [`examples/compose/`](../compose/) and
 [`examples/playbooks/`](../playbooks/): the community-edition answer to an
@@ -59,7 +59,7 @@ whole set.
   `app-db-externalsecret.yaml` / `redis-eso-statefulset.yaml` need the External
   Secrets Operator + `beyondtrust-store` ClusterSecretStore installed by the dashboard's
   secret-delivery action (`POST /clusters/{id}/secret-delivery`, kind `eso`; see
-  [docs/kubernetes.md](../../docs/kubernetes.md)). Each file's
+  [docs/cloud-services/kubernetes.md](../../docs/cloud-services/kubernetes.md)). Each file's
   header comment calls out its prerequisite and what happens without it. Managed
   EKS/AKS/GKE clusters vary in what ships by default — check before relying on one.
 
@@ -67,7 +67,7 @@ whole set.
 
 If you registered the cluster as an **Entitle Kubernetes integration**
 ("Register in Entitle" on the cluster page; see
-[docs/integrations/beyondtrust/entitle.md](../../docs/integrations/beyondtrust/entitle.md)), users request
+[docs/beyondtrust/entitle.md](../../docs/beyondtrust/entitle.md)), users request
 just-in-time namespace access in Entitle rather than holding standing kubeconfig
 credentials — orthogonal to these manifests, which define *what* runs.
 

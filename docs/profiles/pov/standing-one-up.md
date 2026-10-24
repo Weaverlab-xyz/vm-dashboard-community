@@ -30,7 +30,7 @@ directory, and both stacks would try to share networks and volume names.
 could be interchanged — and two instances with *different* keys is exactly why a `pg_dump`
 restore from one into the other yields **unreadable ciphertext with no error at all**. If you
 need to copy settings across, use the config-migration tool
-([config-migration.md](../../operations/config-migration.md)); never a database dump.
+([config-migration.md](../../platform/config-migration.md)); never a database dump.
 
 **Bring it up alone the first time.** First boot runs `init_db`, which takes a Postgres
 advisory lock. Two cold instances started together can wedge on it. Start this stack, let it
@@ -44,7 +44,7 @@ The provision refuses the control node install outright when this instance does 
 public URL, or when that URL is plaintext: the agent will not sign over `http://`, so a
 control node installed against one would never enrol.
 When you host it beyond your LAN, use the gateway-sidecar split in
-[cloud-hosting.md](../../operations/cloud-hosting.md) so the agent endpoint is separate from the UI, and keep
+[cloud-hosting.md](../../platform/cloud-hosting.md) so the agent endpoint is separate from the UI, and keep
 the UI behind its own allowlist. A UI 404 that returns in microseconds is the allowlist
 doing its job, not a broken deploy.
 

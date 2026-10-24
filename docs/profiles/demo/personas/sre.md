@@ -35,13 +35,13 @@ so tightening it does not cost anyone an outage.
 An engineer requests cluster access for the length of an incident and gets an RBAC binding named
 after them, which removes itself afterwards. No permanent cluster-admin group.
 
-**Guide:** [Kubernetes federation: Entra ID](../../../oidc/k8s-federation/entra.md)
+**Guide:** [Kubernetes federation: Entra ID](../../../platform/oidc/k8s-federation/entra.md)
 
 ### Reach a private cluster API server
 
 Run kubectl against a cluster with no public endpoint, through a brokered tunnel.
 
-**Guide:** [Kubernetes](../../../kubernetes.md)
+**Guide:** [Kubernetes](../../../cloud-services/kubernetes.md)
 
 ### Rotate a ServiceAccount token
 
@@ -55,14 +55,14 @@ picking up the new value.
 Federate cluster access to the corporate directory, so joining a team grants the right access
 everywhere and leaving revokes it — instead of per-cluster identity nobody deprovisions.
 
-**Guide:** [Kubernetes federation: Entra ID](../../../oidc/k8s-federation/entra.md)
+**Guide:** [Kubernetes federation: Entra ID](../../../platform/oidc/k8s-federation/entra.md)
 
 ### A container platform with a vaulted admin
 
 Stand up a Portainer or Rancher node and reach its UI by Web Jump with the admin credential
 injected — the platform console that usually has a shared login.
 
-**Guide:** [Rancher](../../../integrations/rancher.md) · [Portainer](../../../integrations/portainer.md)
+**Guide:** [Rancher](../../../cloud-services/rancher.md) · [Portainer](../../../cloud-services/portainer.md)
 
 ## What to enable
 

@@ -10,7 +10,7 @@
 #
 # Credentials are AUTO-INJECTED by the dashboard into every runner when Password Safe is
 # enabled (PASSWORD_SAFE_API_URL / _CLIENT_ID / _CLIENT_SECRET) — see
-# docs/integrations/ansible.md. You supply nothing here.
+# docs/platform/ansible.md. You supply nothing here.
 #
 # extra_vars:
 #   cert_system:  ca-adcs-clientauth        the managed SYSTEM's asset name

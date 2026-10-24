@@ -41,7 +41,7 @@ spreadsheet.
 Scan the estate for secrets sitting in configuration. It always turns something up, which is
 the point — a control that finds nothing is indistinguishable from one that is not running.
 
-**Guide:** [Secrets Management](../../../access/secrets-management.md)
+**Guide:** [Secrets Management](../../../admin/secrets-management.md)
 
 ### Refuse the deploy that would have been a finding
 
@@ -55,7 +55,7 @@ can act on. Prevention rather than a quarterly report.
 Stream privileged-access events to Slack, Teams or a signed webhook, so the record lives in the
 tool the team already watches rather than one somebody has to remember to open.
 
-**Guide:** [Notifications](../../../operations/notifications.md)
+**Guide:** [Notifications](../../../admin/notifications.md)
 
 ### Nothing privileged outlives its purpose
 

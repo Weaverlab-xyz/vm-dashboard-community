@@ -241,10 +241,16 @@ def test_the_docs_index_is_not_reordered_by_anything():
 
 
 def test_the_readme_documents_the_personas_pages():
-    """README.md's table is the entry point for someone who has not opened the app yet."""
+    """README.md's table is the entry point for someone who has not opened the app yet.
+
+    It links one level into the docs (tests/test_docs_index_depth.py), so it names the
+    personas and links the profiles index, and that index links the personas pages."""
     text = _read(_README)
-    assert "docs/profiles/demo/personas" in text, "README does not link the personas docs"
-    assert "Personas" in text
+    assert "Personas" in text, "README does not name the personas"
+    assert "](docs/profiles/README.md)" in text, "README does not link the profiles index"
+    profiles = _read(os.path.join(os.path.dirname(_README), "docs", "profiles", "README.md"))
+    assert "](demo/personas/README.md)" in profiles, (
+        "docs/profiles/README.md does not link the personas pages")
 
 
 if __name__ == "__main__":
