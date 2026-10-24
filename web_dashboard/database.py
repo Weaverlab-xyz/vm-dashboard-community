@@ -5025,6 +5025,16 @@ def init_db():
         else:
             Base.metadata.create_all(bind=conn)
 
+        # Which schema changes this database has already recorded (schema_migrations).
+        # create_all has just made `schema_markers` if this is a new install.
+        from . import schema_migrations as _schema
+        _done = _schema.applied(conn)
+
+        # FROZEN. Every statement below has shipped, and once a database records
+        # _schema.LEGACY_KEY it never reads this list again -- so a statement added here
+        # would run on new installs and never on upgraded ones. A new schema change is a
+        # Migration in schema_migrations.MIGRATIONS; tests/test_schema_migrations.py
+        # holds this list to its count.
         _migrations = [
             # `false`, not `0`. PostgreSQL will not coerce an integer literal to a
             # boolean default and rejects the whole statement; SQLite accepts `0`
@@ -5560,7 +5570,11 @@ def init_db():
         # (sqlstate, statement) so the warning can say which of the two it was.
         _not_applied: list[tuple[str, str]] = []
 
-        for stmt in _migrations:
+        # Run only until this database has recorded that the list fully applied: on
+        # PostgreSQL even a no-op statement takes ACCESS EXCLUSIVE on its table until the
+        # commit below, which is the lock pile-up described above.
+        _pending = [] if _schema.LEGACY_KEY in _done else _migrations
+        for stmt in _pending:
             if _is_sqlite:
                 try:
                     conn.execute(text(stmt))
@@ -5624,8 +5638,15 @@ def init_db():
                 len(_not_applied), _DDL_LOCK_TIMEOUT_MS,
                 "; ".join(f"[{code}] {stmt}" for code, stmt in _not_applied))
 
-        if not _is_sqlite:
-            conn.commit()  # ends the txn → releases pg_advisory_xact_lock(20260101)
+        # Record the list once everything it adds is present (or say what is not), then
+        # apply the numbered migrations made since it was frozen.
+        if _pending:
+            _schema.finish_legacy(conn, Base.metadata, _migrations, _not_applied)
+        _schema.apply_numbered(conn)
+
+        # On PostgreSQL this ends the txn → releases pg_advisory_xact_lock(20260101); on
+        # SQLite it commits the ledger rows written just above.
+        conn.commit()
 
 # Seed workgroups table on first boot. Imported here (not at module top)
     # to avoid a circular import: workgroup_service imports from database.

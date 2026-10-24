@@ -285,23 +285,59 @@ Almost every file in `tests/` runs on SQLite. That is deliberate — it needs no
 and the application code is dialect-neutral by design — but it leaves one gap you need
 to know about if you touch the schema.
 
-`database.init_db()` applies its `_migrations` list one statement at a time, each in its
-own savepoint, and swallows the failure. That is correct: on every boot after the first,
-"column already exists" is the expected outcome. The edge is that a statement which is
-**malformed for PostgreSQL** is swallowed identically — nothing raises, nothing logs, the
-column never appears, and SQLite (more permissive about literals and types) keeps the
-suite green. The symptom surfaces much later as `column ... does not exist` on one page.
+#### Making a schema change
 
-`ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT 0` was a live instance of this:
-PostgreSQL will not coerce `0` to a boolean default and rejected the whole statement, so
-the column was never added on any install that predated it.
+A new table needs nothing: `init_db()` runs `create_all` first, which builds it from the
+model. A change to an **existing** table (a new column, an index, a retype) is a numbered
+migration in `web_dashboard/schema_migrations.py`:
 
-Two things catch this now, and a schema change should keep both green:
+```python
+MIGRATIONS = (
+    Migration("0001_jobs_owner_note", (
+        add_column("jobs", "owner_note", "TEXT"),
+        create_index("ix_jobs_owner_note", "jobs", "owner_note"),
+    )),
+)
+```
 
-- `tests/test_rbac_migration.py` — static, runs everywhere, no database needed.
-- `tests/test_postgres_migrations.py` — runs the real statements against a real
-  PostgreSQL. It **skips unless `DATABASE_URL` points at one**, so it costs nothing
-  locally; CI runs it in a separate `postgres` job with a service container.
+Add the column to the model as well. Each migration runs once per database, in name order,
+inside `init_db`'s locked boot transaction, and is recorded in `schema_markers` under
+`ddl:<name>`. Its steps must be safe on a database `create_all` has just built, because on
+a new install the column is already there: `add_column` and `create_index` look before
+they act, and a raw `sql(...)` step has to be written that way. A failing step rolls its
+migration back, stops the ones after it, and is retried next boot with a warning naming
+it. Never edit, rename or reorder a migration that has shipped.
+
+**Do not add to `init_db`'s `_migrations` list.** It is frozen
+(`tests/test_schema_migrations.py` holds its length). Each database runs it until one boot
+leaves everything it adds in place, with no statement skipped for lock contention, then
+records `ddl:legacy_statements_v1` and never reads it again. So a statement added there
+would run on new installs and never on upgraded ones. Until a database has recorded it,
+every boot logs what is still missing: *the legacy migration list has not fully applied
+... Missing: ...*. That names a real gap to fix, not noise.
+
+This exists because the old way, every statement on every boot, was not free on
+PostgreSQL. Even a no-op `ALTER TABLE` takes ACCESS EXCLUSIVE on its table until the boot
+transaction commits, which is how `init_db` came to deadlock with the jobs worker.
+
+#### SQLite in tests, PostgreSQL in production
+
+The trap the legacy list taught: a statement that is **malformed for PostgreSQL** fails
+like one that was redundant, so on the old swallow-everything path it never applied, and
+SQLite (more permissive about literals and types) kept the suite green.
+`ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT 0` was a live instance: PostgreSQL
+will not coerce `0` to a boolean default, so the column was never added on any install
+that predated it. Write a boolean default as `false`.
+
+Three things catch schema mistakes, and a schema change should keep them green:
+
+- `tests/test_schema_migrations.py`: the ledger on SQLite. A migration applies once,
+  skips what is already there, and a failing one stops the rest.
+- `tests/test_rbac_migration.py`: static, runs everywhere, no database needed.
+- `tests/test_postgres_migrations.py`: the real statements against a real PostgreSQL,
+  including an upgrade from before the ledger and a boot under lock contention. It
+  **skips unless `DATABASE_URL` points at one**, so it costs nothing locally; CI runs it
+  in a separate `postgres` job with a service container.
 
 To run it yourself:
 
@@ -312,11 +348,9 @@ DATABASE_URL=postgresql://test:test@localhost:5432/testdb \
   python tests/test_postgres_migrations.py
 ```
 
-Note that a **fresh** database proves nothing here: `create_all` builds every table from
-the models with all columns present, so the `ALTER` statements are no-ops. The test
-therefore simulates an *upgrade* — it drops every migration-added column and requires
-`init_db()` to put them all back. If you add a migration, that is the path it must
-survive.
+A **fresh** database proves nothing about an `ALTER`: `create_all` has already built every
+column, so the statement has nothing to do. Test a migration the way it meets an existing
+install: drop its column, run `init_db()`, and require it back.
 
 ### Local Filesystem / UNC storage backend
 
