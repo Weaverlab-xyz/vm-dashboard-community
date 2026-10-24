@@ -209,10 +209,10 @@ ok('inventory filtered() ANDs state and workgroup with the older three',
 ok('inventory filtered() excludes a null workgroup from a named pick',
    invFilter({filterWorkgroup:'shield'}).every(r => r.workgroup === 'shield'));
 
-// --- admission allow-list picker (settings.html) ---
+// --- admission allow-list picker (Settings: settings/script/regions.js) ---
 // The gate reads a comma-separated string, so the chips UI must round-trip it
 // without dropping hand-typed entries the catalog doesn't know about.
-const S = 'settings.html';
+const S = 'settings/script/regions.js';
 const mkPanel = (csv, catalog) => {
   const o = {};
   for (const m of ['allowedRegionList','addAllowedRegion','removeAllowedRegion','regionCatalogGroups'])
@@ -1540,7 +1540,7 @@ async function portainerFirewallChecks() {
   // stale-box case is the one that matters: the payload IS the new breakdown, so an
   // operator who does not get it re-rendered reads the allow-list that was just
   // replaced and concludes the click did nothing.
-  const SFW = 'settings.html';
+  const SFW = 'settings/script/operations.js';
   const toasts = [];
   global.toast = (msg, kind) => toasts.push([msg, kind || '']);
   const mkSfw = (payload) => {

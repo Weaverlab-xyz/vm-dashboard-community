@@ -6,6 +6,7 @@
 module.exports = {
   content: [
     './web_dashboard/templates/**/*.html',
+    './web_dashboard/templates/**/*.js',
     './web_dashboard/static/js/**/*.js',
     '!./web_dashboard/static/js/vendor/**',
     './web_dashboard/**/*.py',
