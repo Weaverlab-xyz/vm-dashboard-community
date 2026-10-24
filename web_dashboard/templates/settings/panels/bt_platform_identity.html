@@ -1,0 +1,169 @@
+{# Settings slide-over panel "bt_platform_identity". Included by settings.html inside settingsPage(); the state it binds (panelCfg, panelOpen, …) lives in that page's script. #}
+      <template x-if="panel?.key === 'bt_platform_identity' && !panelLoading">
+        <div class="space-y-5">
+          <p class="text-sm text-gray-500">
+            One identity for every BeyondTrust product this dashboard calls. Instead of a
+            stored token or client secret, the dashboard presents its own short-lived identity
+            token — from the cloud it runs on, or its own SPIFFE identity — and Pathfinder
+            trusts it because you registered a <strong>Workload Identity</strong> under
+            <strong>Administration → Workload Identities</strong>. Register it <strong>once</strong>
+            and tick a <strong>Product Scope</strong> for each product you switch to workload
+            identity: Workload Credentials (Secrets), PRA, Password Safe, EPM for Linux,
+            Entitle. Each product then opts in with its own <strong>Authentication</strong>
+            setting.
+            <a href="/docs/integrations/beyondtrust/platform-identity" target="_blank"
+               class="text-blue-600 hover:text-blue-800 underline">Guide</a>.
+          </p>
+          <div class="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
+            <p class="text-xs text-amber-900">
+              Terraform, <code>ps-cli</code> and the Ansible runner cannot present a workload
+              identity — the sra, passwordsafe and entitle providers take client credentials or
+              an API key only. Those features keep using the stored credentials on each
+              product's panel.
+            </p>
+          </div>
+          <div class="space-y-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Pathfinder site ID</label>
+              <input type="text" x-model="panelCfg.bt_platform_site_id"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="(blank = the Workload Credentials or EPM-L site ID)">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Fills <code>{site}</code> in each product's workload API URL. Open
+                <code>https://app.beyondtrust.io/api/platform/currentSite</code> while signed in
+                and copy <code>site_id</code>. The registration must be on this same site, or
+                every call answers <code>401 Access denied for this site</code>.
+              </p>
+            </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Identity platform</label>
+                <select x-model="panelCfg.wlc_identity_platform"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="azure">Azure — Container Apps, App Service, VM</option>
+                  <option value="gcp">GCP — Cloud Run, GCE, GKE</option>
+                  <option value="aws">AWS — EKS only (IRSA / Pod Identity)</option>
+                  <option value="file">Other — a projected token on disk</option>
+                  <option value="spire">The dashboard's own SPIFFE identity (its SPIRE server)</option>
+                </select>
+                <p class="text-[11px] text-gray-400 mt-1">
+                  Which platform vouches for this container. Azure and GCP each answer on their
+                  own metadata endpoint; AWS and <strong>Other</strong> read a token the platform
+                  has written to a file.
+                  <strong class="text-amber-700">On AWS this works on EKS only.</strong> ECS and
+                  plain EC2 hand out SigV4 credentials and an instance identity document — neither
+                  is an OIDC token — so a dashboard on ECS stays on a stored token above.
+                  In Pathfinder, Azure registers as <strong>Azure Entra ID</strong>; GCP and AWS
+                  register as a <strong>Custom IDP</strong> with a claim condition on
+                  <code>sub</code>.
+                  <strong>SPIFFE identity</strong> needs no cloud at all, so it also works on
+                  ECS and on-prem: the dashboard's own SPIRE server mints the token, and
+                  Pathfinder trusts it as a <strong>Custom IDP</strong> whose issuer is the
+                  dashboard's public <code>/spiffe</code> URL.
+                  <a href="/docs/oidc/dashboard-identity#beyondtrust-workload-credentials"
+                     target="_blank" class="text-blue-600 hover:underline">How to register it</a>.
+                </p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Service name</label>
+                <input type="text" x-model="panelCfg.wlc_service_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="e.g. vm-dashboard">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  The <strong>Service Name</strong> from the Workload Identity registration,
+                  sent as the <code>X-BT-Service-Name</code> header. It tells Pathfinder which
+                  registration to evaluate this container's token against.
+                </p>
+              </div>
+              <div x-show="['aws', 'file'].includes(panelCfg.wlc_identity_platform)" x-cloak>
+                <label class="block text-sm font-medium text-gray-700 mb-1">
+                  Projected token file <span class="text-gray-400 font-normal">(optional)</span>
+                </label>
+                <input type="text" x-model="panelCfg.wlc_identity_token_file"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="(blank = the platform's own path)">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  Where the platform mounts this container's identity token. Leave blank for the
+                  defaults — <code>AWS_WEB_IDENTITY_TOKEN_FILE</code> or
+                  <code>AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE</code> on AWS, the Kubernetes
+                  ServiceAccount token path otherwise. <strong>The file is not a secret you
+                  manage</strong>: the platform writes it, rotates it in place, and this app only
+                  reads it.
+                </p>
+              </div>
+              <div x-show="!['aws', 'file'].includes(panelCfg.wlc_identity_platform)" x-cloak>
+                <label class="block text-sm font-medium text-gray-700 mb-1">
+                  Token audience
+                  <span class="text-gray-400 font-normal"
+                        x-text="panelCfg.wlc_identity_platform === 'azure' ? '(App ID URI)' : '(audience string)'"></span>
+                </label>
+                <input type="text" x-model="panelCfg.wlc_identity_audience"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       :placeholder="panelCfg.wlc_identity_platform === 'azure'
+                                     ? 'api://vm-dashboard-wlc'
+                                     : 'e.g. beyondtrust-wlc'">
+                <p class="text-[11px] text-gray-400 mt-1"
+                   x-show="panelCfg.wlc_identity_platform === 'azure'">
+                  What the managed identity requests a token <em>for</em>; it becomes the
+                  token's <code>aud</code>. Use an app registration in your own tenant with
+                  <code>accessTokenAcceptedVersion: 2</code> — that is what makes the issuer
+                  <code>…/v2.0</code>, which is the issuer the Azure Entra ID registration type
+                  expects.
+                </p>
+                <p class="text-[11px] text-gray-400 mt-1"
+                   x-show="panelCfg.wlc_identity_platform === 'gcp'">
+                  Any string, as long as it matches the audience your Custom IDP registration in
+                  Pathfinder expects. The metadata server signs a token with this as its
+                  <code>aud</code>; the issuer is <code>https://accounts.google.com</code>.
+                </p>
+                <p class="text-[11px] text-gray-400 mt-1"
+                   x-show="panelCfg.wlc_identity_platform === 'spire'">
+                  Any string, as long as it matches the <code>aud</code> condition of your Custom
+                  IDP registration in Pathfinder. The dashboard mints <code>wlc.jwt</code> for it
+                  once <strong>Give the dashboard its own SPIFFE identity</strong> and its
+                  <strong>Workload Credentials</strong> audience are ticked under
+                  Settings → Integrations → Remote Agents.
+                </p>
+              </div>
+              <div x-show="panelCfg.wlc_identity_platform === 'azure'" x-cloak>
+                <label class="block text-sm font-medium text-gray-700 mb-1">
+                  User-assigned identity client ID <span class="text-gray-400 font-normal">(optional)</span>
+                </label>
+                <input type="text" x-model="panelCfg.wlc_entra_client_id"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="(blank = system-assigned identity)">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  Leave blank to use the container's system-assigned identity. A
+                  <strong>user-assigned</strong> identity is usually the better choice here: the
+                  app and the worker are separate container apps, and sharing one identity means
+                  <strong>one</strong> registration in Pathfinder instead of two — and the worker
+                  is where credentials are actually minted. Azure only — GCP attaches a
+                  service account to the revision and AWS projects a token for the pod, so
+                  neither has an equivalent.
+                </p>
+              </div>
+          </div>
+          <div>
+            <div class="flex items-center gap-2">
+              <button type="button" @click="testBtIdentity()" :disabled="btIdTest.running"
+                      class="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50">
+                <span x-text="btIdTest.running ? 'Testing…' : 'Test identity'"></span>
+              </button>
+              <span x-show="btIdTest.ok === true" x-cloak
+                    class="text-xs text-green-700" x-text="btIdTest.message"></span>
+            </div>
+            <p x-show="btIdTest.ok === false" x-cloak
+               class="text-xs text-red-600 mt-2" x-text="btIdTest.error"></p>
+            <pre x-show="btIdTest.ok === true && btIdTest.claims" x-cloak
+                 class="text-[11px] bg-gray-50 border border-gray-200 rounded p-2 mt-2 overflow-x-auto"
+                 x-text="btIdTest.claims"></pre>
+            <p class="text-[11px] text-gray-400 mt-1">
+              Fetches a token and shows its <code>iss</code>, <code>aud</code>,
+              <code>sub</code> and <code>exp</code> — the values your registration's issuer and
+              claim conditions must match. <strong>Free</strong>, and it calls no BeyondTrust
+              endpoint, so a pass proves this container has an identity, not that Pathfinder
+              accepts it; each product's own test does that. Tests the <strong>saved</strong>
+              values — save first.
+            </p>
+          </div>
+        </div>
+      </template>

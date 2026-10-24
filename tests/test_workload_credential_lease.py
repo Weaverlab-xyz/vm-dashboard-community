@@ -17,6 +17,7 @@ import importlib.util
 import os
 import sys
 from datetime import datetime, timedelta
+from _settings_src import settings_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PATH = os.path.join(_ROOT, "web_dashboard", "services",
@@ -1132,7 +1133,7 @@ def test_credential_sources_reports_every_configured_purpose():
 
 
 def test_the_credential_panel_renders_each_lease():
-    src = _read("web_dashboard", "templates", "settings.html")
+    src = settings_source()
     assert "c.leases" in src, "the panel does not iterate the per-purpose collection"
     assert "c.lease.last_error" not in src, "the panel still reads the single-lease shape"
 

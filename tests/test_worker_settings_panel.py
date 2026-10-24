@@ -25,12 +25,12 @@ import ast
 import os
 import re
 import sys
+from _settings_src import settings_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-_SETTINGS_HTML = os.path.join(_ROOT, "web_dashboard", "templates", "settings.html")
 _SETUP_PY = os.path.join(_ROOT, "web_dashboard", "api", "setup.py")
 _POLICY_PY = os.path.join(_ROOT, "web_dashboard", "services", "worker_policy.py")
 _WORKER_API = os.path.join(_ROOT, "web_dashboard", "api", "worker.py")
@@ -57,7 +57,7 @@ def _model_fields(class_name):
 
 def _bound_in_template(prefix):
     """Every `panelCfg.<prefix>*` binding in settings.html."""
-    return set(re.findall(rf"panelCfg\.({prefix}[a-z_0-9]+)", _read(_SETTINGS_HTML)))
+    return set(re.findall(rf"panelCfg\.({prefix}[a-z_0-9]+)", settings_source()))
 
 
 def _registry(name):
@@ -158,7 +158,7 @@ def test_the_panel_is_registered_in_the_ui():
     """Mirrors test_notify_wiring.test_the_settings_panel_is_registered_in_the_ui: a model
     with no integrations[] entry is unreachable, and an entry with no panel block opens an
     empty slide-over."""
-    html = _read(_SETTINGS_HTML)
+    html = settings_source()
     assert "key: 'worker'" in html, "no entry in the integrations list"
     assert "panel?.key === 'worker'" in html, "no slide-over panel block"
     assert "configOnly: true" in html.split("key: 'worker'")[1].split("},")[0], (
@@ -178,7 +178,7 @@ def test_the_status_readout_is_wired_end_to_end():
     assert "worker as worker_api" in main, "api/worker.py is never imported"
     assert "include_router(worker_api.router)" in main, "the worker router is not mounted"
 
-    html = _read(_SETTINGS_HTML)
+    html = settings_source()
     assert "loadWorkerStatus()" in html and "workerStatusSummary()" in html
     assert "/api/worker/status" in html, "the panel never calls the status endpoint"
 
@@ -188,7 +188,7 @@ def test_the_panel_links_to_a_doc_that_exists():
     run the worker as its own Container App, the connection budget, the sizing — lives in the
     doc. A renamed file turns that into a 404 with nothing to catch it, since /docs/<page> is
     resolved from the filesystem at request time."""
-    html = _read(_SETTINGS_HTML)
+    html = settings_source()
     panel = html.split("panel?.key === 'worker'")[1].split("</template>")[0]
     links = re.findall(r'href="/docs/([a-z0-9/-]+)"', panel)
     assert links, "the Job Worker panel links to no documentation"

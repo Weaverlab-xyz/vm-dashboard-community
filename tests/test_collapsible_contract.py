@@ -21,7 +21,10 @@ import sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TEMPLATES = os.path.join(_ROOT, "web_dashboard", "templates")
-_MIGRATED = ("storage/index.html", "config-mgmt/index.html", "settings.html")
+# Settings' collapsibles live in the slide-over panels that use them.
+_MIGRATED = ("storage/index.html", "config-mgmt/index.html",
+             "settings/panels/password_safe.html", "settings/panels/ansible.html",
+             "settings/panels/entitle.html")
 
 try:
     from jinja2 import Environment, FileSystemLoader

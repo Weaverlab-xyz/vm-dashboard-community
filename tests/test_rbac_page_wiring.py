@@ -21,6 +21,7 @@ Runs under pytest, or standalone:
 import os
 import re
 import sys
+from _settings_src import settings_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -413,7 +414,7 @@ def test_the_security_persona_pins_the_merged_link():
 
 
 def test_the_in_app_link_from_settings_points_at_the_page():
-    settings = _read("web_dashboard", "templates", "settings.html")
+    settings = settings_source()
     assert 'href="/groups"' not in settings, (
         "settings.html still links the old /groups path; it works, but /rbac#groups is the "
         "canonical URL now")

@@ -32,6 +32,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- bare interpreter
 
 from web_dashboard.services import k8s_service  # noqa: E402
 from web_dashboard.services.k8s_service import K8sCredentialRefused  # noqa: E402
+from _settings_src import settings_source
 
 _SECRET = "LS0tLS1CRUdJTiBFQyBQUklWQVRFIEtFWS0tLS0tU0VDUkVULUtFWS1NQVRFUklBTA=="
 _ISSUER = "https://dex.lab.test:5554"
@@ -202,7 +203,7 @@ def test_the_trust_flag_is_on_prem_only():
 
 def test_the_settings_fields_exist_and_are_bound_in_the_panel():
     from web_dashboard.api.setup import K8sManagementFeatureConfig
-    panel = _src("web_dashboard", "templates", "settings.html")
+    panel = settings_source()
     for key in ("dex_issuer_url", "dex_k8s_client_id", "dex_ca_pem"):
         assert key in K8sManagementFeatureConfig.model_fields, f"{key} missing from the panel model"
         assert f"panelCfg.{key}" in panel, f"{key} is unbound, so a save discards it"

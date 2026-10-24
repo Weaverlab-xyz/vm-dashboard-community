@@ -35,6 +35,8 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 
 TEMPLATES = pathlib.Path(_ROOT) / "web_dashboard" / "templates"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _settings_src import page_for  # noqa: E402
 
 
 class _ScriptExtractor(HTMLParser):
@@ -443,7 +445,8 @@ def test_every_x_data_component_is_defined_somewhere():
     missing = []
     for path in sorted(TEMPLATES.rglob("*.html")):
         text = path.read_text(encoding="utf-8")
-        haystack = text + "\n" + static_js
+        # A Settings panel's component is defined in the page script that includes it.
+        haystack = page_for(str(path.relative_to(TEMPLATES)), text) + "\n" + static_js
         for fn in set(re.findall(r'x-data="(\w+)\(\)"', text)):
             if not re.search(rf"function\s+{fn}\s*\(|{fn}\s*[:=]\s*(?:function|\()",
                              haystack):

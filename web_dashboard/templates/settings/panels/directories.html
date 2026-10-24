@@ -1,0 +1,75 @@
+{# Settings slide-over panel "directories". Included by settings.html inside settingsPage(); the state it binds (panelCfg, panelOpen, …) lives in that page's script. #}
+      <template x-if="panel?.key === 'directories' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Defaults for building directories and for joining Windows servers to them. Enable
+            or disable the feature with the Preview toggle.
+            <a href="/docs/directories" target="_blank"
+               class="text-blue-600 hover:text-blue-800 underline">Guide</a>.
+          </p>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">AWS default edition</label>
+              <select x-model="panelCfg.directory_aws_default_edition"
+                      x-init="panelCfg.directory_aws_default_edition = panelCfg.directory_aws_default_edition || 'Standard'"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="Standard">Standard</option>
+                <option value="Enterprise">Enterprise</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">GCP reserved range for domain controllers</label>
+              <input type="text" x-model="panelCfg.directory_gcp_reserved_ip_range"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="10.250.0.0/24">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Default OU for joined servers</label>
+              <input type="text" x-model="panelCfg.directory_join_default_ou"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="OU=Servers,DC=corp,DC=example,DC=com (blank = Computers)">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Identity provider page size</label>
+              <input type="number" min="1" max="200" x-model.number="panelCfg.directory_idp_page_size"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="50">
+              <p class="text-[11px] text-gray-400 mt-1">Users or groups per page when browsing an
+                Entra ID, Okta or PingOne directory.</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Health check interval (minutes)</label>
+              <input type="number" min="0" max="1440" x-model.number="panelCfg.directory_health_interval_minutes"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="15">
+              <p class="text-[11px] text-gray-400 mt-1">How often the Directory health page re-checks
+                each directory. On-prem directories are probed through their agent at most hourly.
+                0 turns scheduled checks off.</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Domain controller check interval (hours)</label>
+              <input type="number" min="0" max="168" x-model.number="panelCfg.directory_health_deep_interval_hours"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="6">
+              <p class="text-[11px] text-gray-400 mt-1">How often an on-prem AD domain is checked for
+                replication, FSMO roles, clock skew, DC services, SYSVOL and LDAPS certificates. Each
+                check is a Config Management run that checks out the directory's Password Safe
+                account. 0 turns scheduled checks off; Check now still runs one.</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">GCP domain-join service account</label>
+              <input type="text" x-model="panelCfg.gcp_domain_join_service_account"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="ad-join@project.iam.gserviceaccount.com">
+              <p class="text-[11px] text-gray-400 mt-1">Attached to GCE Windows servers that join a
+                domain; it needs <code>roles/managedidentities.domainJoin</code>.</p>
+            </div>
+          </div>
+          <div class="border border-gray-200 rounded-lg p-3 space-y-2">
+            <p class="text-sm font-medium text-gray-700">Directory administrator in Password Safe</p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Functional account (Active Directory platform)</label>
+              <input type="text" x-model="panelCfg.passwordsafe_directory_functional_account"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="name or id">
+            </div>
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" x-model="panelCfg.passwordsafe_directory_change_password_on_register" class="rounded text-blue-600">
+              Rotate the administrator password on onboard, so only Password Safe knows it
+            </label>
+          </div>
+        </div>
+      </template>

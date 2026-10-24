@@ -43,6 +43,7 @@ import os
 import re
 import sys
 import glob
+from _settings_src import settings_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -141,7 +142,7 @@ def test_the_toolbars_that_widened_the_page_still_wrap():
         "pov/index.html": "flex flex-wrap items-start justify-between gap-4",
     }
     for rel, cls in expected.items():
-        src = _read(os.path.join(_TPL, rel))
+        src = settings_source() if rel == "settings.html" else _read(os.path.join(_TPL, rel))
         assert f'class="{cls}"' in src, f"{rel} no longer carries {cls!r}"
 
 

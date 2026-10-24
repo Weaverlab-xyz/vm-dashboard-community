@@ -36,6 +36,7 @@ sys.path.insert(0, _ROOT)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-brand-colors")
 
 from web_dashboard.services import branding, config_service, ui_theme  # noqa: E402
+from _settings_src import settings_source
 
 _TPL = os.path.join(_ROOT, "web_dashboard", "templates")
 _CSS = os.path.join(_TPL, "_brand_css.html")
@@ -378,7 +379,7 @@ def test_the_docs_shell_takes_its_header_colour_from_the_theme():
 def test_the_panel_declares_and_binds_the_three_new_fields():
     """A field bound with x-model but missing from the state object is dropped from the
     PATCH silently -- the setting saves, reports success, and changes nothing."""
-    markup = _read(os.path.join(_TPL, "settings.html"))
+    markup = settings_source()
     bound = set(re.findall(r'x-model="branding\.(\w+)"', markup))
     declared = set(re.findall(r"(brand_\w+):\s*''", markup))
     for key in ("brand_primary", "brand_secondary", "brand_accent_hex"):
@@ -395,7 +396,7 @@ def test_the_three_colour_wells_are_not_two_way_bound():
     bound and should stay that way: it has no companion text input, so there is no
     half-typed state for the coercion to destroy.
     """
-    markup = _read(os.path.join(_TPL, "settings.html"))
+    markup = settings_source()
     wells = re.findall(r'<input type="color"[^>]*>', markup, re.S)
     checked = 0
     for block in wells:
@@ -412,7 +413,7 @@ def test_the_preview_mirrors_the_server_maths():
     """The chrome is rendered server-side, so the only way to preview a colour before the
     reload is to recompute it in the browser. The numeric agreement is exercised by the
     node harness; this pins that the helpers and their constants exist at all."""
-    markup = _read(os.path.join(_TPL, "settings.html"))
+    markup = settings_source()
     for helper in ("mixHex", "stepHex", "inkOn", "contrastRatio", "lumin"):
         assert helper + "(" in markup, f"{helper} is missing from the preview"
     assert "0.179" in markup, "the luminance split does not match ui_theme._text_on"
@@ -422,7 +423,7 @@ def test_the_preview_mirrors_the_server_maths():
 
 def test_the_panel_offers_the_beyondtrust_palette():
     """The instance this was built for. One click beats three pasted hexes."""
-    markup = _read(os.path.join(_TPL, "settings.html"))
+    markup = settings_source()
     assert "brandPresets" in markup
     for colour in (P, S, A):
         assert colour in markup, f"{colour} is not offered as a preset"

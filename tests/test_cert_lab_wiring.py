@@ -11,6 +11,7 @@ Runs under pytest or standalone:  python tests/test_cert_lab_wiring.py
 import os
 import re
 import sys
+from _settings_src import settings_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -238,7 +239,7 @@ def test_a_subordinate_is_refused_against_a_root_that_cannot_sign_one():
 def test_the_second_platform_is_named_declared_bound_and_token_matched():
     conf = _read("web_dashboard", "config.py")
     setup = _read("web_dashboard", "api", "setup.py")
-    panel = _read("web_dashboard", "templates", "settings.html")
+    panel = settings_source()
     svc = _read("web_dashboard", "services", "cert_ps_service.py")
     model = setup.split("class CertLabFeatureConfig(")[1].split("\nclass ")[0]
     for key in ("cert_ps_subca_platform", "cert_ps_subca_functional_account",

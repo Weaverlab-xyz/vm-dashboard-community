@@ -26,6 +26,7 @@ import importlib
 import os
 import sys
 import types
+from _settings_src import settings_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -434,7 +435,7 @@ def _model_body(setup, name):
 
 def test_every_new_binding_is_declared_on_its_model_and_in_config():
     """A field bound in the template but absent from its model is DISCARDED on save."""
-    html = _read("web_dashboard", "templates", "settings.html")
+    html = settings_source()
     setup = _read("web_dashboard", "api", "setup.py")
     config = _read("web_dashboard", "config.py")
     for model, fields in _NEW_FIELDS.items():
@@ -455,7 +456,7 @@ def test_the_identity_fields_moved_off_the_wlc_model():
 
 def test_the_shared_panel_is_registered_config_only_with_a_unique_test_method():
     setup = _read("web_dashboard", "api", "setup.py")
-    html = _read("web_dashboard", "templates", "settings.html")
+    html = settings_source()
     assert '"bt_platform_identity": BtPlatformIdentityFeatureConfig' in setup
     only = setup[setup.index("_CONFIG_ONLY_FEATURES = {"):]
     assert '"bt_platform_identity"' in only[:only.index("}")]

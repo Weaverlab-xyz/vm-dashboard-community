@@ -1,0 +1,335 @@
+{# Settings slide-over panel "cert_lab". Included by settings.html inside settingsPage(); the state it binds (panelCfg, panelOpen, …) lives in that page's script. #}
+      <template x-if="panel?.key === 'cert_lab' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Password Safe as a certificate <strong>registrar and broker</strong> — the managed
+            account holds the PKCS#12 passphrase, Secrets Safe holds the bundle it opens.
+            Nothing here is a secret: both of the plugin's credentials ride one Password Safe
+            <strong>functional account</strong>, which is the protected field built for them, and
+            this panel only names it. Enable/disable the feature with the Preview toggle.
+            <a href="/docs/workload-lab/certificates" target="_blank"
+               class="text-blue-600 hover:text-blue-800 underline">Feature guide</a>.
+          </p>
+
+          <div>
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Password Safe objects</p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Platform name</label>
+              <input type="text" x-model="panelCfg.cert_ps_platform"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="Certificate">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Resolved live through <code>GET /Platforms</code>, so a renamed platform just
+                needs its new name here.
+              </p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Subordinate CA platform name</label>
+              <input type="text" x-model="panelCfg.cert_ps_subca_platform"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="Subordinate CA">
+              <p class="text-[11px] text-gray-400 mt-1">
+                The plugin ships as <strong>two</strong> <code>.psplugin</code> packages over a
+                shared core, with different plugin ids, so both install side by side and
+                neither overwrites the other. <strong>Certificate</strong> issues an end-entity
+                certificate on any of its nine backends; <strong>Subordinate CA</strong> issues
+                an issuing authority on the four that can sign one. The split is what lets the
+                team that may request a leaf not automatically be the team that may request an
+                issuer. Leave it blank unless you renamed the platform in BeyondInsight.
+              </p>
+            </div>
+            <!-- The x-init is load-bearing: an unset string key reads back "" from
+                 /api/setup/feature, not the model default, so without it the select
+                 renders blank and a save would write "". -->
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Functional account source</label>
+              <select x-model="panelCfg.cert_ps_functional_account_mode"
+                      x-init="panelCfg.cert_ps_functional_account_mode = panelCfg.cert_ps_functional_account_mode || 'create'"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="create">Create one per CA</option>
+                <option value="reference">Reference an existing account</option>
+              </select>
+              <p class="text-[11px] text-gray-400 mt-1">
+                <strong>One account, two credentials</strong> — the certificate authority's,
+                and the BeyondInsight identity that writes the bundle to Secrets Safe. On
+                the OAuth path the name and password are the CA credential
+                <em>whole</em> and the BeyondInsight client id and secret ride the account's
+                own API key and secret fields. On the packed one both are split on the
+                <strong>last</strong> colon: username
+                <code>&lt;ca-account&gt;:&lt;bi-run-as-user&gt;</code>, password
+                <code>&lt;ca-secret&gt;:&lt;bi-api-key&gt;</code> — splitting from the right is
+                what lets a CA password contain colons there.
+              </p>
+              <p class="text-[11px] text-gray-400 mt-1"
+                 x-show="(panelCfg.cert_ps_functional_account_mode || 'create') !== 'reference'">
+                The dashboard mints one per CA from the build's own enrollment credential
+                and deletes it on teardown. That credential is returned <em>once</em>, by
+                the apply — this is the only moment it can be captured — and the REST API
+                used here accepts a 1.7&nbsp;KB private key where <code>ps-cli</code> caps
+                a functional account password at 1,000 characters.
+              </p>
+              <p class="text-[11px] text-gray-400 mt-1"
+                 x-show="(panelCfg.cert_ps_functional_account_mode || 'create') === 'reference'">
+                You maintain the account by hand. Right for a CA this dashboard did not
+                build — an ADCS enterprise CA has no enrollment identity to mint from.
+              </p>
+            </div>
+            <div class="mt-3" x-show="(panelCfg.cert_ps_functional_account_mode || 'create') === 'reference'">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Functional account</label>
+              <input type="text" x-model="panelCfg.cert_ps_functional_account"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="certauth-plugin@project.iam.gserviceaccount.com:certauth-svc">
+              <p class="text-[11px] text-gray-400 mt-1">On the Certificate platform.</p>
+            </div>
+            <div class="mt-3" x-show="(panelCfg.cert_ps_functional_account_mode || 'create') === 'reference'">
+              <label class="block text-sm font-medium text-gray-700 mb-1">
+                Subordinate CA functional account
+                <span class="font-normal text-gray-400">(optional)</span>
+              </label>
+              <input type="text" x-model="panelCfg.cert_ps_subca_functional_account"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="(blank reuses the account above)">
+              <p class="text-[11px] text-gray-400 mt-1">
+                A functional account is <strong>platform-bound</strong> and a managed system
+                inherits its platform, so the account above cannot carry a Subordinate CA
+                managed system — it would onboard green and then fail every credential action.
+                Blank reuses it anyway, which is right if you run only one of the two
+                platforms and wrong if you run both.
+              </p>
+            </div>
+            <!-- x-init for the same reason the mode select has one: an unset string key
+                 reads back "" from /api/setup/feature, not the model default. -->
+            <div class="mt-3" x-show="(panelCfg.cert_ps_functional_account_mode || 'create') !== 'reference'">
+              <label class="block text-sm font-medium text-gray-700 mb-1">BeyondInsight credential</label>
+              <select x-model="panelCfg.cert_ps_bi_auth"
+                      x-init="panelCfg.cert_ps_bi_auth = panelCfg.cert_ps_bi_auth || 'auto'"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="auto">Automatic — prefer OAuth</option>
+                <option value="oauth">OAuth client credentials</option>
+                <option value="apikey">Packed API registration key</option>
+              </select>
+              <p class="text-[11px] text-gray-400 mt-1">
+                The plugin reads both and prefers OAuth. What it cannot tell you from here
+                is whether <em>your</em> Password Safe console offers an <strong>API key</strong>
+                credential type on a plugin-supplied platform — open the functional account
+                form on the Certificate platform and look. If it does not, pin
+                <strong>Packed API registration key</strong>; the plugin works either way.
+                <span x-show="(panelCfg.cert_ps_bi_auth || 'auto') === 'auto'">
+                  Automatic keeps an install that already has an API key set on that path,
+                  so nothing changes underneath a CA that works.
+                </span>
+              </p>
+            </div>
+            <div class="mt-3" x-show="(panelCfg.cert_ps_functional_account_mode || 'create') !== 'reference'
+                                      && (panelCfg.cert_ps_bi_auth || 'auto') !== 'apikey'">
+              <label class="block text-sm font-medium text-gray-700 mb-1">
+                BeyondInsight OAuth client id
+                <span class="font-normal text-gray-400">(optional)</span>
+              </label>
+              <input type="text" x-model="panelCfg.cert_ps_bi_client_id"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="(blank uses the dashboard's own pscli_client_id)">
+              <p class="text-[11px] text-gray-400 mt-1">
+                An API registration permitting the <strong>client credentials</strong> grant,
+                with write access to the Secrets Safe folder below. The account carries it in
+                its API key and secret fields, so nothing is packed and the plugin presents a
+                short-lived bearer token instead of a static key. Blank falls back to the
+                dashboard's own registration — same tenant, but that one administers the whole
+                of it, and this one is handed to a plugin on a Resource Broker.
+              </p>
+            </div>
+            <div class="mt-3" x-show="(panelCfg.cert_ps_functional_account_mode || 'create') !== 'reference'
+                                      && (panelCfg.cert_ps_bi_auth || 'auto') !== 'apikey'">
+              <label class="block text-sm font-medium text-gray-700 mb-1">BeyondInsight OAuth client secret</label>
+              <input type="password" x-model="panelCfg.cert_ps_bi_client_secret" autocomplete="new-password"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     :placeholder="(panelCfg._secrets_set || []).includes('cert_ps_bi_client_secret')
+                                   ? '•••••••• stored — leave blank to keep'
+                                   : '(blank uses pscli_client_secret)'">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Both or neither — half a pair is refused rather than quietly falling back to
+                a different registration than the one named above.
+              </p>
+            </div>
+            <div class="mt-3" x-show="(panelCfg.cert_ps_functional_account_mode || 'create') !== 'reference'
+                                      && (panelCfg.cert_ps_bi_auth || 'auto') !== 'oauth'">
+              <label class="block text-sm font-medium text-gray-700 mb-1">BeyondInsight API key</label>
+              <input type="password" x-model="panelCfg.cert_ps_bi_api_key" autocomplete="new-password"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     :placeholder="(panelCfg._secrets_set || []).includes('cert_ps_bi_api_key')
+                                   ? '•••••••• stored — leave blank to keep'
+                                   : 'Paste the API registration key'">
+              <p class="text-[11px] text-gray-400 mt-1">
+                The packed path's second half of the password, with the run-as user below as
+                the second half of the username. Needed only where the console will not take
+                an API key credential type on a plugin platform.
+              </p>
+            </div>
+            <div class="mt-3" x-show="(panelCfg.cert_ps_functional_account_mode || 'create') !== 'reference'
+                                      && (panelCfg.cert_ps_bi_auth || 'auto') !== 'oauth'">
+              <label class="block text-sm font-medium text-gray-700 mb-1">BeyondInsight run-as user</label>
+              <input type="text" x-model="panelCfg.cert_ps_bi_run_as_user"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="(blank uses pscli_api_account_name)">
+              <p class="text-[11px] text-gray-400 mt-1">
+                The username's second half. Same tenant and almost always the same
+                identity as the Password Safe run-as account, so leaving it blank is
+                what stops the two drifting apart.
+              </p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup</label>
+              <input type="text" x-model="panelCfg.cert_ps_workgroup"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                     placeholder="(blank uses the global Password Safe workgroup)">
+            </div>
+          </div>
+
+          <div>
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Where the bundle goes</p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">BeyondInsight base URL</label>
+              <input type="text" x-model="panelCfg.cert_ps_biurl"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="(blank derives it from the ps-cli API URL)">
+              <p class="text-[11px] text-gray-400 mt-1">
+                The <em>origin</em> only — the plugin appends its own API path, so a full API URL
+                here yields a doubled path and a 404 on the first credential change. On a
+                Password&nbsp;Safe&nbsp;Cloud tenant this is the only possible source: the
+                <code>appsettings.json</code> inside the <code>.psplugin</code> cannot be edited.
+              </p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Secrets Safe folder</label>
+              <input type="text" x-model="panelCfg.cert_ps_folder"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="Certs/Pipelines">
+              <p class="text-[11px] text-gray-400 mt-1">
+                <code>&lt;safe&gt;/&lt;folder&gt;/…</code>. The first segment must be an
+                <strong>existing safe</strong>; the folder tree beneath it is created for you. The
+                plugin itself creates nothing and fails when the folder is absent — scattering
+                bundles into an unexpected folder with unexpected permissions is worse than a
+                clear error.
+              </p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Owner group id</label>
+              <input type="text" x-model="panelCfg.cert_ps_owner_group_id"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="1">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Secrets Safe requires an owner for created secrets. This is a <strong>group</strong>
+                id — not the numeric <em>user</em> id the Secrets page uses.
+              </p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Secret title template</label>
+              <input type="text" x-model="panelCfg.cert_ps_secret_template"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="(blank uses cert/{system}/{account})">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Keep <code>{account}</code> in it. A template resolving to the same title for two
+                accounts would have them overwrite each other, and a consumer finds its own bundle
+                by this name with no out-of-band configuration.
+              </p>
+            </div>
+          </div>
+
+          <div>
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Certificate defaults</p>
+            <p class="text-[11px] text-gray-400 mb-2">
+              Applied to a new managed system unless the form overrides them. <strong>Blank means
+              the option is not emitted at all</strong>, which is what keeps the address inside
+              Password&nbsp;Safe's 255-character column — a fully spelled-out ADCS profile is 269
+              characters before anyone types a real CA name.
+            </p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Lifetime</label>
+                <input type="text" x-model="panelCfg.cert_default_lifetime"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="24h">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Key</label>
+                <input type="text" x-model="panelCfg.cert_default_key"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="ecdsa-p256">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Extended key usage</label>
+                <input type="text" x-model="panelCfg.cert_default_eku"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="ClientAuth">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  Named explicitly on purpose: under <code>Auto</code> a DNS SAN drags
+                  <code>serverAuth</code> into the set.
+                </p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Renewal warning (%)</label>
+                <input type="text" x-model="panelCfg.cert_default_warn"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="(blank uses the plugin default, 25)">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  A share of the certificate's <em>own</em> lifetime, capped at 90. One absolute
+                  threshold cannot serve both regimes — 21 days would fire permanently on a
+                  24-hour certificate.
+                </p>
+              </div>
+              <div class="col-span-2">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Subject template</label>
+                <input type="text" x-model="panelCfg.cert_default_subject"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="(blank uses CN={AccountName})">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  Tokens <code>{AccountName}</code>, <code>{DomainName}</code>,
+                  <code>{SamAccountName}</code>, <code>{Upn}</code>. Values are hex-escaped, so an
+                  account name containing a comma cannot inject an extra RDN.
+                </p>
+              </div>
+              <div class="col-span-2">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Subordinate CA lifetime</label>
+                <input type="text" x-model="panelCfg.cert_subca_default_lifetime"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="(blank lets the plugin default it) — e.g. 8d">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  A different quantity from a leaf's lifetime, which is why it has its own field.
+                  <strong>Rotation does not revoke</strong> — a relying party walks the chain to
+                  the root and neither knows nor cares which subordinate was current when a leaf
+                  was minted — so <em>this</em>, not the rotation interval, is the exposure window
+                  if the signing key leaks. Issue it just longer than the interval Password Safe
+                  rotates it on, sizing the overlap to the longest expected session:
+                  <code>8d</code> against a 7-day schedule. A one-year subordinate rotated weekly
+                  leaves ~52 concurrently valid authorities and makes the control illusory.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">GCP CAS lab</p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Location</label>
+                <input type="text" x-model="panelCfg.cert_gcp_cas_location"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="us-central1">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Pool tier</label>
+                <select x-model="panelCfg.cert_gcp_cas_tier"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="DEVOPS">DEVOPS</option>
+                  <option value="ENTERPRISE">ENTERPRISE</option>
+                </select>
+                <p class="text-[11px] text-gray-400 mt-1">
+                  DevOps is about <strong>$20/month per pool</strong> plus ~$0.30 per certificate
+                  and keeps no certificate records. A pool bills whether or not it ever issues
+                  anything, which is why every CA built here carries an auto-delete timer.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>

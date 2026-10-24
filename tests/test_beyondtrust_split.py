@@ -29,12 +29,12 @@ import os
 import re
 import sys
 import types
+from _settings_src import settings_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-_SETTINGS = os.path.join(_ROOT, "web_dashboard", "templates", "settings.html")
 _SETUP = os.path.join(_ROOT, "web_dashboard", "api", "setup.py")
 _CONFIG = os.path.join(_ROOT, "web_dashboard", "config.py")
 _MAIN = os.path.join(_ROOT, "web_dashboard", "main.py")
@@ -285,7 +285,7 @@ def _class_fields(src, name):
 
 def _panel_blocks():
     """Slice settings.html into {panel key: its x-if block}, for the three BT panels."""
-    html = _read(_SETTINGS)
+    html = settings_source()
     opens = [(m.start(), m.group(1)) for m in
              re.finditer(r"<template x-if=\"panel\?\.key === '([a-z_0-9]+)'", html)]
     blocks = {}
@@ -383,7 +383,7 @@ def test_the_three_panel_keys_derive_the_three_flags():
         "to password_safe_enabled/pra_enabled/epml_enabled")
     models = re.search(r"_FEATURE_MODELS\s*=\s*\{(.*?)\n\}", setup, re.S).group(1)
     config_only = re.search(r"_CONFIG_ONLY_FEATURES\s*=\s*\{([^}]*)\}", setup).group(1)
-    html = _read(_SETTINGS)
+    html = settings_source()
     array = html[html.index("integrations: ["):html.index("],", html.index("integrations: ["))]
     # Match real entries, not any mention: both files carry comments naming the retired
     # "beyondtrust" panel, and a bare substring check would trip over its own explanation.
@@ -402,7 +402,7 @@ def test_the_three_panel_keys_derive_the_three_flags():
 def test_the_flag_map_reads_all_three():
     """Miss one and that toggle renders permanently OFF however the flag is really set —
     silent, because nothing errors. Same failure Notifications once had."""
-    html = _read(_SETTINGS)
+    html = settings_source()
     block = html[html.index("const map = {"):html.index("};", html.index("const map = {"))]
     for key in PANELS:
         assert re.search(rf"\b{key}:\s*features\.", block), \
@@ -536,7 +536,7 @@ def test_string_selects_keep_their_x_init_default():
     ``passwordsafe_azure_db_registration_method`` needs it from the other end: the control
     was added long after the key shipped, so its config row is unset on every install that
     never set the env var."""
-    html = _read(_SETTINGS)
+    html = settings_source()
     for key in ("passwordsafe_aws_registration_method",
                 "passwordsafe_azure_registration_method",
                 "passwordsafe_gcp_registration_method",

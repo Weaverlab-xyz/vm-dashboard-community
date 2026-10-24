@@ -27,6 +27,7 @@ import ast
 import os
 import re
 import sys
+from _settings_src import settings_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -453,14 +454,14 @@ def test_the_ui_no_longer_claims_there_is_no_notification():
     """Two places asserted, in operator-visible copy and in a load-bearing comment,
     that this feature did not exist. Both become false the moment this ships."""
     for path in (_SETTINGS_HTML, _DASH_HTML):
-        src = _src(path)
+        src = settings_source() if path == _SETTINGS_HTML else _src(path)
         assert "There is no email or chat notification" not in src, (
             f"{os.path.basename(path)} still tells the operator notifications do not exist")
         assert "there is no email or chat notification" not in src
 
 
 def test_the_settings_panel_is_registered_in_the_ui():
-    src = _src(_SETTINGS_HTML)
+    src = settings_source()
     assert "key: 'notifications'" in src, "no entry in the integrations list"
     assert "panel?.key === 'notifications'" in src, "no slide-over panel block"
 

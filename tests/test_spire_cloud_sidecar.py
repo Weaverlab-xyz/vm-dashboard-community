@@ -57,6 +57,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover — app deps missing
 from web_dashboard.database import (Base, SessionLocal, SpireAdminCall,  # noqa: E402
                                     SpireAdminRelay, engine)
 from web_dashboard.services import dashboard_spire, spire_relay  # noqa: E402
+from _settings_src import settings_source
 
 Base.metadata.create_all(bind=engine)
 
@@ -468,8 +469,7 @@ def test_the_address_setting_is_declared_where_the_panel_saves_it():
     """Bound but undeclared is silently discarded on save."""
     assert "spire_server_address: str" in _text("web_dashboard", "config.py")
     assert "spire_server_address: str" in _text("web_dashboard", "api", "setup.py")
-    assert 'x-model="panelCfg.spire_server_address"' in _text("web_dashboard", "templates",
-                                                              "settings.html")
+    assert 'x-model="panelCfg.spire_server_address"' in settings_source()
 
 
 # ── the sidecar image ────────────────────────────────────────────────────────

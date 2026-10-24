@@ -1,0 +1,588 @@
+{# Settings slide-over panel "k8s_management". Included by settings.html inside settingsPage(); the state it binds (panelCfg, panelOpen, …) lives in that page's script. #}
+      <template x-if="panel?.key === 'k8s_management' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Defaults for <strong>provisioning</strong> AWS EKS (and OCI OKE) clusters. Normally
+            populated by <code>setup-aws.sh</code> + the sandbox <code>--push-only</code> import; set
+            or override the values by hand here. Registering an existing cluster from its kubeconfig
+            needs none of this. Enable or disable the feature with its toggle in the integrations list
+            above.
+          </p>
+
+          <!-- AWS EKS — cluster networking -->
+          <div>
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">AWS EKS — cluster networking</p>
+            <div class="space-y-3">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">k8s subnet A <span class="text-gray-400">(AZ-a)</span></label>
+                  <input type="text" x-model="panelCfg.aws_k8s_subnet_a_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="subnet-…">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">k8s subnet B <span class="text-gray-400">(AZ-b)</span></label>
+                  <input type="text" x-model="panelCfg.aws_k8s_subnet_b_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="subnet-…">
+                </div>
+              </div>
+              <p class="text-[11px] text-gray-400">EKS requires two subnets in distinct AZs. The provision form can override these per-cluster.</p>
+            </div>
+          </div>
+
+          <!-- AWS EKS — defaults (optional) -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">AWS EKS — defaults <span class="normal-case text-gray-400">(optional)</span></p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Kubernetes version</label>
+                <input type="text" x-model="panelCfg.aws_eks_k8s_version"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="(module default — 1.32)">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Node instance type</label>
+                <input type="text" x-model="panelCfg.aws_eks_node_instance_type"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="(module default — t3.small)">
+              </div>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Cluster VPC CIDR</label>
+              <input type="text" x-model="panelCfg.aws_eks_vpc_cidr"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="(module default — 10.97.0.0/16)">
+              <p class="text-[11px] text-gray-400 mt-1">The EKS build creates + peers its <strong>own</strong> VPC. Must not overlap the sandbox VPC (<code>10.99.0.0/16</code>); the provision form can override it per-cluster.</p>
+            </div>
+          </div>
+
+          <!-- OCI OKE — defaults (optional) -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">OCI OKE — defaults <span class="normal-case text-gray-400">(optional, experimental)</span></p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Cluster VCN CIDR</label>
+              <input type="text" x-model="panelCfg.oci_oke_vcn_cidr"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="(module default — 10.96.0.0/16)">
+              <p class="text-[11px] text-gray-400 mt-1">The OKE build creates its <strong>own</strong> VCN (api / nodes / lb subnets carved from this block). Must not overlap the sandbox VCN (<code>10.98.0.0/16</code>); the provision form can override it per-cluster.</p>
+            </div>
+          </div>
+
+          <!-- Entra/IdP group → cluster RBAC (real-identity JIT) -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">IdP group → cluster RBAC <span class="normal-case text-gray-400">(real-identity JIT)</span></p>
+            <p class="text-[11px] text-gray-400 mb-2">
+              Default group the k8s <strong>IdP group</strong> cluster action binds — members get the role below, and Entitle's directory integration JIT-grants membership so a user signs in as <em>themselves</em> (no impersonation). Each cluster's action can override the group. Which IdP is chosen under <strong>Cluster federation IdP</strong> below; AKS always uses the Entra group.
+            </p>
+            <div class="mb-3" x-show="(panelCfg.k8s_oidc_provider || 'entra') !== 'entra'" x-cloak>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Group <span class="text-gray-400">(as the token's groups claim carries it)</span></label>
+              <input type="text" x-model="panelCfg.k8s_oidc_rbac_group_id"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="k8s-admins">
+              <p class="text-[11px] text-gray-400 mt-1">Usually the group's <strong>name</strong> for Okta and PingOne. On EKS the binding names it <code>&lt;provider&gt;:&lt;group&gt;</code> (e.g. <code>okta:k8s-admins</code>), so an IdP group can never be a built-in <code>system:</code> group.</p>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Entra group Object ID <span class="text-gray-400" x-show="(panelCfg.k8s_oidc_provider || 'entra') !== 'entra'" x-cloak>(AKS)</span></label>
+                <input type="text" x-model="panelCfg.entra_rbac_group_id"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="00000000-0000-0000-0000-000000000000">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Group name <span class="text-gray-400">(optional)</span></label>
+                <input type="text" x-model="panelCfg.entra_rbac_group_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                       placeholder="aks-entitle-admins">
+              </div>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Bound ClusterRole</label>
+              <input type="text" x-model="panelCfg.entra_rbac_group_role"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="cluster-admin">
+              <p class="text-[11px] text-gray-400 mt-1">e.g. <code>cluster-admin</code>, <code>admin</code>, <code>view</code>, or a custom ClusterRole — the action lets you pick per-bind.</p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Entitle k8s user prefix</label>
+              <input type="text" x-model="panelCfg.entitle_k8s_user_prefix"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="entitle">
+              <p class="text-[11px] text-gray-400 mt-1">Subject Entitle's <strong>Kubernetes</strong> integration binds for a JIT grant (<code>&lt;prefix&gt;:&lt;email&gt;</code>) — and what a user passes to <code>kubectl --as=</code> with the <strong>Impersonation access</strong> action.</p>
+            </div>
+          </div>
+
+          <!-- Cluster federation IdP (EKS / GKE) -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Cluster federation IdP <span class="normal-case text-gray-400">(EKS, GKE)</span></p>
+            <p class="text-[11px] text-gray-400 mb-2">
+              The identity provider the <strong>IdP federation</strong> action makes a managed cluster trust, so people sign in to it as themselves and their groups match the binding above. EKS associates this IdP's app as the cluster's OIDC identity provider; GKE reaches it through the workforce pool below. <strong>AKS only ever trusts Entra ID</strong> (its managed AAD), whatever is chosen here. On-prem clusters use <strong>Dex</strong>, which can federate any of these. See the <a href="/docs/oidc/k8s-federation" class="underline" target="_blank">federation guide</a>.
+            </p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Provider</label>
+              <select x-model="panelCfg.k8s_oidc_provider"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="entra">Microsoft Entra ID</option>
+                <option value="okta">Okta</option>
+                <option value="pingone">PingOne</option>
+                <option value="oidc">Other OIDC provider</option>
+              </select>
+              <p class="text-[11px] text-gray-400 mt-1">Changing it does not touch clusters already federated: each keeps the IdP it was federated with until you disable federation on it.</p>
+            </div>
+            <div class="mt-3" x-show="(panelCfg.k8s_oidc_provider || 'entra') !== 'entra'" x-cloak>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Issuer URL</label>
+                <input type="text" x-model="panelCfg.k8s_oidc_issuer_url"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       :placeholder="panelCfg.k8s_oidc_provider === 'pingone' ? 'https://auth.pingone.com/<environment-id>/as' : (panelCfg.k8s_oidc_provider === 'okta' ? 'https://<org>.okta.com/oauth2/default' : 'https://idp.example.com')">
+                <p class="text-[11px] text-gray-400 mt-1">Exactly as the IdP's discovery document advertises it, https only: EKS compares the string with each token's <code>iss</code>, and fetches the discovery document and keys from the internet.</p>
+              </div>
+              <div class="mt-3">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
+                <input type="text" x-model="panelCfg.k8s_oidc_client_id"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="public (native) app client id">
+                <p class="text-[11px] text-gray-400 mt-1">A <strong>public</strong> client (no secret) that <code>kubectl oidc-login</code> signs in with; it is also the token audience EKS requires. Emit a <code>groups</code> claim on its <strong>ID token</strong>.</p>
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Username claim</label>
+                  <input type="text" x-model="panelCfg.k8s_oidc_username_claim"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="sub">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Groups claim</label>
+                  <input type="text" x-model="panelCfg.k8s_oidc_groups_claim"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="groups">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Sign-in</label>
+                  <select x-model="panelCfg.k8s_oidc_grant_type"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                    <option value="device-code">Device code</option>
+                    <option value="authcode">Browser (localhost)</option>
+                  </select>
+                </div>
+              </div>
+              <p class="text-[11px] text-gray-400 mt-1"><strong>Device code</strong> needs the app's device-authorization grant turned on. <strong>Browser</strong> needs <code>http://localhost:8000</code> and <code>http://localhost:18000</code> registered as redirect URIs.</p>
+            </div>
+          </div>
+
+          <!-- Entra OIDC federation (EKS) -->
+          <div class="border-t border-gray-100 pt-4" x-show="(panelCfg.k8s_oidc_provider || 'entra') === 'entra'">
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Entra OIDC federation <span class="normal-case text-gray-400">(EKS)</span></p>
+            <p class="text-[11px] text-gray-400 mb-2">
+              Shared Entra app registration the <strong>IdP federation</strong> action associates as an EKS cluster's OIDC identity provider, so a user's Entra token authenticates and its group Object IDs match the binding above. AKS is natively Entra-integrated (no federation needed); GKE uses Workforce Identity Federation (separate). See the <a href="/docs/oidc/k8s-federation/entra" class="underline" target="_blank">Entra federation guide</a>.
+            </p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">App (client) ID</label>
+              <input type="text" x-model="panelCfg.entra_oidc_client_id"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="00000000-0000-0000-0000-000000000000">
+              <p class="text-[11px] text-gray-400 mt-1">The shared Entra app registration's Application (client) ID — the OIDC audience. Required to federate EKS.</p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Issuer URL <span class="text-gray-400">(optional)</span></label>
+              <input type="text" x-model="panelCfg.entra_oidc_issuer_url"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="blank → https://login.microsoftonline.com/<tenant>/v2.0">
+              <p class="text-[11px] text-gray-400 mt-1">Blank derives from the tenant id. The Entra app needs the <strong>groups</strong> claim on the ID token + public-client flows for <code>kubectl oidc-login</code>.</p>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Username claim</label>
+                <input type="text" x-model="panelCfg.entra_oidc_username_claim"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="oid">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Groups claim</label>
+                <input type="text" x-model="panelCfg.entra_oidc_groups_claim"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="groups">
+              </div>
+            </div>
+          </div>
+
+          <!-- Dex: how people reach on-prem clusters -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Dex <span class="normal-case text-gray-400">(on-prem clusters)</span></p>
+            <p class="text-[11px] text-gray-400 mb-2">
+              People reach on-prem (k3s) clusters <strong>only</strong> through Dex: the API-tunnel download for such a cluster is a <code>kubectl oidc-login</code> kubeconfig against this issuer, never the cluster's stored admin kubeconfig. Stand Dex up with <code>examples/playbooks/dex/dex-helm.yml</code>, run <code>k3s/k3s-dex-auth.yml</code> on each cluster, then turn on <strong>Trusts Dex</strong> on its row. Managed clusters are unaffected.
+            </p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Issuer URL</label>
+              <input type="text" x-model="panelCfg.dex_issuer_url"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="https://dex.example.com:5554">
+              <p class="text-[11px] text-gray-400 mt-1">Exactly as Dex's discovery document advertises it — the API server compares the string.</p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
+              <input type="text" x-model="panelCfg.dex_k8s_client_id"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="kubernetes">
+              <p class="text-[11px] text-gray-400 mt-1">The public client <code>dex-helm.yml</code> registers, and the audience <code>k3s-dex-auth.yml</code> requires.</p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Issuer CA <span class="text-gray-400">(optional)</span></label>
+              <textarea x-model="panelCfg.dex_ca_pem" rows="3"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono"
+                        placeholder="-----BEGIN CERTIFICATE----- (lab Dex only; blank for a public CA)"></textarea>
+              <p class="text-[11px] text-gray-400 mt-1">Only for a lab Dex with its own CA (the one <code>dex-helm.yml</code> prints). It is embedded in the downloaded kubeconfig so <code>oidc-login</code> trusts it.</p>
+            </div>
+          </div>
+
+          <!-- GKE Workforce Identity Federation -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">GKE Workforce Identity Federation <span class="normal-case text-gray-400">(GKE)</span></p>
+            <p class="text-[11px] text-gray-400 mb-2">
+              GKE can't use an OIDC identity provider (GKE Identity Service is off for new orgs), so the <strong>IdP federation</strong> action wires the cluster to a <strong>Workforce Identity pool</strong> + Connect Gateway. The RBAC subject becomes <code>principalSet://…/workforcePools/&lt;pool&gt;/group/&lt;group&gt;</code> — the same group as above. Create the pool + an OIDC provider for your IdP (Entra, Okta, PingOne…) once at the org level (<code>gcloud iam workforce-pools</code>); see the <a href="/docs/oidc/k8s-federation" class="underline" target="_blank">federation guide</a>.
+            </p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Workforce pool ID</label>
+                <input type="text" x-model="panelCfg.gcp_workforce_pool_id"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="bt-entra-pool">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Provider ID</label>
+                <input type="text" x-model="panelCfg.gcp_workforce_provider_id"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="bt-entra-oidc">
+              </div>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Location</label>
+              <input type="text" x-model="panelCfg.gcp_workforce_location"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="global">
+              <p class="text-[11px] text-gray-400 mt-1">The pool's OIDC provider needs the attribute mapping <code>google.groups=assertion.groups</code> so the IdP's groups reach the token.</p>
+            </div>
+          </div>
+
+          <!-- Rancher management node (GCE COS) -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Rancher management node <span class="normal-case text-gray-400">(GCE COS)</span></p>
+            <p class="text-[11px] text-gray-400 mb-2">
+              The central Rancher server runs as a single privileged container on a <strong>public</strong> Container-Optimized-OS GCE VM (deployed from the <a href="/containers" class="underline">Containers</a> page). Every k8s cluster is <em>imported</em> into it — the cattle-cluster-agent dials <strong>out</strong> to the node, so private clusters on any cloud / on-prem work as long as they have egress. The node is <strong>ephemeral</strong>: a stop/recreate changes its IP and wipes state. See the <a href="/docs/integrations/rancher" class="underline" target="_blank">integration guide</a> for full setup.
+            </p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Bootstrap password</label>
+              <input type="password" x-model="panelCfg.rancher_bootstrap_password" autocomplete="new-password"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="first-run admin password (stored encrypted)">
+              <p class="text-[11px] text-gray-400 mt-1">Used once to bootstrap the Rancher admin on first boot; the API token is minted from it and stored encrypted.</p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Allowed source CIDRs <span class="text-gray-400 normal-case">(optional / additive)</span></label>
+              <input type="text" x-model="panelCfg.rancher_allowed_source_cidrs"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="203.0.113.4/32, 198.51.100.0/24">
+              <p class="text-[11px] text-gray-400 mt-1">GCE firewall source ranges for the node's public IP (tcp 80/443). Dashboard-provisioned clusters' egress IPs — and, when the Web Jump is enabled, the dashboard-managed Gateway's egress IP — are <strong>added automatically</strong>. Use this only for extra operator/human IPs and pre-existing (operator-owned) Gateways. <span class="text-amber-600">If nothing is set here <em>and</em> nothing is auto-discovered, the firewall stays closed unless you tick "Allow open".</span></p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Dashboard egress IP <span class="text-gray-400 normal-case">(override — usually auto-detected)</span></label>
+              <input type="text" x-model="panelCfg.rancher_dashboard_egress_cidr"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="auto-detected on deploy (e.g. 198.51.100.7/32)">
+              <p class="text-[11px] text-gray-400 mt-1">The dashboard reaches the node over its <strong>public IP</strong> to bootstrap it, so its own egress must be allowed. Auto-detected + saved on deploy. Corp proxies (Cloudflare WARP) egress from a <strong>pool</strong> of IPs — set the pool's CIDR (e.g. <code>104.28.182.0/24</code>) and it is kept as long as the detected IP falls inside it. Bare IP → <code>/32</code>.</p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Public certificate domain <span class="text-gray-400 normal-case">(optional — Let's Encrypt)</span></label>
+              <input type="text" x-model="panelCfg.rancher_acme_domain"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="rancher.example.com — blank = self-signed">
+              <p class="text-[11px] text-gray-400 mt-1">Set this when a <strong>TLS-inspecting proxy</strong> (Cloudflare Gateway, Zscaler) sits between you and the node: it verifies the <em>origin</em> certificate and kills the handshake on a self-signed one, so the UI is unreachable from a browser no matter what the firewall allows — and <code>-k</code> / "ignore certificate" cannot help, because the rejection happens upstream of you. Rancher's built-in ACME client then serves a real, <strong>auto-renewing</strong> certificate. Unlike the runner transport, this fixes your <strong>browser</strong> too.</p>
+              <p class="text-[11px] text-amber-600 mt-1">Two conditions: an <strong>A record for this name must already point at the node's external IP</strong> (checked at deploy — the job fails fast naming the record if not), and <strong>port 80 is opened to <code>0.0.0.0/0</code></strong> for the HTTP-01 challenge, permanently, since renewal re-validates. That is a separate rule — <strong>443 stays source-restricted</strong>. The node is then reached <em>by name</em>, not by IP. Let's Encrypt allows 5 certificates per name per week and the node does not persist ACME state, so avoid repeated redeploys.</p>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">API transport</label>
+                <select x-model="panelCfg.rancher_api_transport"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="direct">direct — HTTPS from the dashboard</option>
+                  <option value="runner">runner — curl via a GCP Cloud Run job</option>
+                </select>
+                <p class="text-[11px] text-gray-400 mt-1">Pick <strong>runner</strong> when this network TLS-inspects and blocks the node's self-signed cert (deploy fails with "HTTPS handshake terminated in transit"). Reuses the k8s runner's GCP region + VPC connector; calls target the node's internal IP.</p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Runner source CIDR <span class="text-gray-400">(runner only)</span></label>
+                <input type="text" x-model="panelCfg.rancher_runner_source_cidr"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="10.8.0.0/28 (the VPC connector range)">
+                <p class="text-[11px] text-gray-400 mt-1">The Cloud Run VPC connector's /28 — auto-added to the node firewall so the runner's internal traffic is admitted.</p>
+              </div>
+            </div>
+            <!-- Auto-discovered allow-list (read-only) -->
+            <template x-if="rancherFirewall">
+              <div class="mt-3 rounded-lg border border-gray-200 bg-gray-50 p-3 text-[11px]">
+                <p class="font-semibold text-gray-500 uppercase tracking-wide mb-2">Effective firewall allow-list
+                  <span class="normal-case font-normal" x-text="rancherFirewall.opened ? '(open to the sources below)' : '(closed — no sources)'"></span>
+                </p>
+                <template x-if="rancherFirewall.cluster_egress_ips && rancherFirewall.cluster_egress_ips.length">
+                  <div class="mb-1">
+                    <span class="text-gray-500">Provisioned clusters:</span>
+                    <template x-for="c in rancherFirewall.cluster_egress_ips" :key="c.ip">
+                      <span class="inline-block ml-1 font-mono text-gray-700" x-text="c.name + ' → ' + c.ip + '/32'"></span>
+                    </template>
+                  </div>
+                </template>
+                <div class="mb-1" x-show="rancherFirewall.dashboard_egress_ip">
+                  <span class="text-gray-500">Dashboard egress:</span>
+                  <span class="ml-1 font-mono text-gray-700" x-text="rancherFirewall.dashboard_egress_ip"></span>
+                </div>
+                <!-- The hosting platform's published outbound pool, counted rather than
+                     listed; the error is nearly always a missing Reader grant. -->
+                <div class="mb-1" x-show="(rancherFirewall.dashboard_egress_pool || {}).count">
+                  <span class="text-gray-500">Hosting platform outbound pool:</span>
+                  <span class="ml-1 text-gray-700" x-text="(rancherFirewall.dashboard_egress_pool || {}).count + ' addresses, read from the platform'"></span>
+                </div>
+                <div class="mb-1 text-amber-700" x-show="(rancherFirewall.dashboard_egress_pool || {}).error">
+                  <span class="text-gray-500">Outbound pool:</span>
+                  <span class="ml-1" x-text="(rancherFirewall.dashboard_egress_pool || {}).error"></span>
+                </div>
+                <!-- Entitle's own egress, added while a directly-registered integration
+                     exists. Named so the ranges do not read as unexplained entries. -->
+                <div class="mb-1" x-show="rancherFirewall.entitle_cidrs && rancherFirewall.entitle_cidrs.length">
+                  <span class="text-gray-500">Entitle egress:</span>
+                  <span class="ml-1 font-mono text-gray-700" x-text="(rancherFirewall.entitle_cidrs || []).join(', ')"></span>
+                </div>
+                <div class="mb-1" x-show="rancherFirewall.gateway_cidrs && rancherFirewall.gateway_cidrs.length">
+                  <span class="text-gray-500">Web-Jump Gateways:</span>
+                  <span class="ml-1 font-mono text-gray-700" x-text="(rancherFirewall.gateway_cidrs || []).join(', ')"></span>
+                </div>
+                <div class="mb-1" x-show="rancherFirewall.runner_source_cidr">
+                  <span class="text-gray-500">API runner (VPC connector):</span>
+                  <span class="ml-1 font-mono text-gray-700" x-text="rancherFirewall.runner_source_cidr"></span>
+                </div>
+                <div class="mb-1" x-show="rancherFirewall.manual_cidrs && rancherFirewall.manual_cidrs.length">
+                  <span class="text-gray-500">Manual:</span>
+                  <span class="ml-1 font-mono text-gray-700" x-text="rancherFirewall.manual_cidrs.join(', ')"></span>
+                </div>
+                <p class="text-gray-400 mt-1" x-show="!(rancherFirewall.cluster_egress_ips && rancherFirewall.cluster_egress_ips.length) && !rancherFirewall.dashboard_egress_ip && !(rancherFirewall.dashboard_egress_pool || {}).count && !(rancherFirewall.gateway_cidrs && rancherFirewall.gateway_cidrs.length) && !(rancherFirewall.manual_cidrs && rancherFirewall.manual_cidrs.length)">
+                  No sources yet — provision a cluster, enable the Web Jump, or add a CIDR above.
+                </p>
+                <!-- The list above governs 443 only once ACME is on. Saying so here is
+                     the difference between an accurate readout and one that implies the
+                     node is source-restricted on every port. -->
+                <p class="text-amber-600 mt-1" x-show="rancherFirewall.acme_http01_open">
+                  Plus <span class="font-mono">tcp 80</span> from <span class="font-mono">0.0.0.0/0</span> — the Let's Encrypt HTTP-01 challenge for
+                  <span class="font-mono" x-text="rancherFirewall.acme_domain"></span>. The sources above still govern <span class="font-mono">443</span>.
+                </p>
+              </div>
+            </template>
+            <!-- Per-cloud node settings. The selector is a VIEW control, not a setting:
+                 which cloud the node runs on is chosen on the Containers page at deploy
+                 time (and recorded there), so binding it here would create a second
+                 source of truth the next deploy silently overwrites. Each cloud keeps
+                 its own image / size / name so switching does not mean re-entering all
+                 of them. -->
+            <div class="mt-4 pt-3 border-t border-gray-100 space-y-3"
+                 x-data="{ nodeCloud: 'gcp' }">
+              <div class="flex items-center gap-3">
+                <label class="text-sm font-medium text-gray-700">Settings for cloud</label>
+                <select x-model="nodeCloud"
+                        class="border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                  <option value="aws">AWS</option>
+                  <option value="azure">Azure</option>
+                  <option value="gcp">GCP</option>
+                </select>
+                <span class="text-xs text-gray-400">
+                  Where the node runs is picked on <a href="/containers#rancher" class="underline">Containers &rarr; Kubernetes (Rancher)</a> when you deploy.
+                </span>
+              </div>
+
+              <!-- GCP -->
+              <div x-show="nodeCloud === 'gcp'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Machine type</label>
+                  <input type="text" x-model="panelCfg.gcp_rancher_machine_type"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="e2-medium">
+                  <p class="text-[11px] text-gray-400 mt-1">Rancher needs ≥4 GB RAM.</p>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Zone <span class="text-gray-400">(optional)</span></label>
+                  <input type="text" x-model="panelCfg.gcp_rancher_zone"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="(blank → GCP default zone)">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Container image</label>
+                  <input type="text" x-model="panelCfg.gcp_rancher_image"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="rancher/rancher:latest">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Boot disk (GB)</label>
+                  <input type="number" min="20" x-model.number="panelCfg.gcp_rancher_boot_disk_gb"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="30">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">VM name</label>
+                  <input type="text" x-model="panelCfg.gcp_rancher_name"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="rancher-server">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Network tag</label>
+                  <input type="text" x-model="panelCfg.gcp_rancher_network_tag"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="rancher">
+                </div>
+              </div>
+
+              <!-- AWS. No zone: an EC2 subnet already pins the availability zone. No
+                   network tag: a dedicated security group replaces the target-tag model. -->
+              <div x-show="nodeCloud === 'aws'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Instance type</label>
+                  <input type="text" x-model="panelCfg.aws_rancher_instance_type"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="t3.medium">
+                  <p class="text-[11px] text-gray-400 mt-1">Rancher needs ≥4 GB RAM — t3.small (2 GB) OOMs.</p>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Container image</label>
+                  <input type="text" x-model="panelCfg.aws_rancher_image"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="rancher/rancher:latest">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Instance name</label>
+                  <input type="text" x-model="panelCfg.aws_rancher_name"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="rancher-server">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Root volume (GB)</label>
+                  <input type="number" min="20" x-model.number="panelCfg.aws_rancher_boot_disk_gb"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="30">
+                </div>
+              </div>
+
+              <!-- Azure. Same omissions, plus: the Standard public IP is Static, so this
+                   node keeps its address (and its imported clusters' agent URL) across a
+                   recreate. -->
+              <div x-show="nodeCloud === 'azure'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">VM size</label>
+                  <input type="text" x-model="panelCfg.azure_rancher_vm_size"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="Standard_B2s">
+                  <p class="text-[11px] text-gray-400 mt-1">Rancher needs ≥4 GB RAM — Standard_B1s (1 GB) OOMs.</p>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Container image</label>
+                  <input type="text" x-model="panelCfg.azure_rancher_image"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="rancher/rancher:latest">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">VM name</label>
+                  <input type="text" x-model="panelCfg.azure_rancher_name"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="rancher-server">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">OS disk (GB)</label>
+                  <input type="number" min="20" x-model.number="panelCfg.azure_rancher_boot_disk_gb"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="30">
+                </div>
+              </div>
+
+              <!-- Fail-open is per cloud: GCP deletes its firewall rule, AWS revokes
+                   every ingress permission, Azure deletes its NSG rule. Three explicit
+                   checkboxes rather than one computed key, which the panel model cannot
+                   check and which would be discarded on save. -->
+              <div x-show="nodeCloud === 'gcp'" class="flex items-center gap-2">
+                <input type="checkbox" id="gcp_rancher_allow_open" x-model="panelCfg.gcp_rancher_allow_open"
+                       class="rounded border-gray-300">
+                <label for="gcp_rancher_allow_open" class="text-sm text-gray-700">Allow open <span class="text-gray-400">(open 0.0.0.0/0 when no CIDRs are set — not recommended) — GCP</span></label>
+              </div>
+              <div x-show="nodeCloud === 'aws'" class="flex items-center gap-2">
+                <input type="checkbox" id="aws_rancher_allow_open" x-model="panelCfg.aws_rancher_allow_open"
+                       class="rounded border-gray-300">
+                <label for="aws_rancher_allow_open" class="text-sm text-gray-700">Allow open <span class="text-gray-400">(open 0.0.0.0/0 when no CIDRs are set — not recommended) — AWS</span></label>
+              </div>
+              <div x-show="nodeCloud === 'azure'" class="flex items-center gap-2">
+                <input type="checkbox" id="azure_rancher_allow_open" x-model="panelCfg.azure_rancher_allow_open"
+                       class="rounded border-gray-300">
+                <label for="azure_rancher_allow_open" class="text-sm text-gray-700">Allow open <span class="text-gray-400">(open 0.0.0.0/0 when no CIDRs are set — not recommended) — Azure</span></label>
+              </div>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Readiness timeout (s)</label>
+                <input type="number" min="60" step="30" x-model.number="panelCfg.rancher_ready_timeout_s"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="360">
+                <p class="text-[11px] text-gray-400 mt-1">How long the deploy waits for Rancher to serve after boot. Raise it for a cold image pull / slow disk.</p>
+              </div>
+            </div>
+            <div class="mt-2 flex items-center gap-2">
+              <input type="checkbox" id="rancher_verify_tls" x-model="panelCfg.rancher_verify_tls"
+                     class="rounded border-gray-300">
+              <label for="rancher_verify_tls" class="text-sm text-gray-700">Verify TLS certificate on dashboard → Rancher API calls <span class="text-gray-400">(leave off for the node's self-signed cert)</span></label>
+            </div>
+
+            <!-- PRA Web Jump (optional broker for the node's UI) — mirrors the Portainer panel -->
+            <div class="pt-3 mt-3 border-t border-gray-100">
+              <div class="flex items-center gap-2">
+                <input type="checkbox" id="rancher_ui_web_jump_enabled" x-model="panelCfg.rancher_ui_web_jump_enabled"
+                       class="rounded border-gray-300">
+                <label for="rancher_ui_web_jump_enabled" class="text-sm text-gray-700">PRA Web Jump to the Rancher UI <span class="text-gray-400">(opt-in zero-trust access without opening your IP)</span></label>
+              </div>
+              <p class="text-xs text-gray-400 mt-1">
+                Opt-in. Reach the node from the PRA representative console — brokered and recorded —
+                without adding your IP to the CIDR list. The Gateway's egress IP is auto-allowed, and
+                with a Vault account group the admin password is injected instead of shown. Asset Group,
+                Gateway and Vault account group can also be chosen per-deploy on the Containers page —
+                these are the defaults it starts from.
+              </p>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Asset Group</label>
+                  <input type="text" x-model="panelCfg.rancher_ui_jump_group"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                         placeholder="(bt_jump_group_name)">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Gateway</label>
+                  <input type="text" x-model="panelCfg.rancher_ui_jumpoint_name"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                         placeholder="(bt_jumpoint_name)">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Vault account group id</label>
+                  <input type="text" x-model="panelCfg.rancher_ui_vault_account_group_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="(bt_vault_account_group_id)">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Gateway cloud</label>
+                  <select x-model="panelCfg.rancher_ui_jumpoint_cloud"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                    <option value="gcp">gcp</option>
+                    <option value="aws">aws</option>
+                    <option value="azure">azure</option>
+                  </select>
+                  <p class="text-[11px] text-gray-400 mt-1">Which dashboard-managed Gateway brokers the UI. Azure's host has no public IP — add that one to the CIDRs by hand.</p>
+                </div>
+              </div>
+              <div class="mt-3 flex items-center gap-2">
+                <input type="checkbox" id="rancher_ui_verify_certificate" x-model="panelCfg.rancher_ui_verify_certificate"
+                       class="rounded border-gray-300">
+                <label for="rancher_ui_verify_certificate" class="text-sm text-gray-700">Web Jump verifies the node's certificate <span class="text-gray-400">(separate from the API check above — leave off for the self-signed cert)</span></label>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>

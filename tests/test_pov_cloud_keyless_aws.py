@@ -49,10 +49,10 @@ from web_dashboard.api.setup import PovCloudFeatureConfig  # noqa: E402
 from web_dashboard.database import Base, engine  # noqa: E402
 from web_dashboard.services import (aws_service, cloud_federation,  # noqa: E402
                                     config_service, dashboard_identity, pov_cloud_aws)
+from _settings_src import settings_source
 
 Base.metadata.create_all(bind=engine)
 
-_SETTINGS = os.path.join(_ROOT, "web_dashboard", "templates", "settings.html")
 
 
 class _Patch:
@@ -217,7 +217,7 @@ def _method(src, name):
 
 
 def test_choosing_spiffe_ticks_the_identity_and_never_clears_a_key():
-    src = open(_SETTINGS, encoding="utf-8").read()
+    src = settings_source()
     body = _method(src, "choosePovAwsSource")
     assert "dashboard_spiffe_identity_enabled = true" in body
     assert "dashboard_spiffe_aud_aws = true" in body
@@ -228,7 +228,7 @@ def test_choosing_spiffe_ticks_the_identity_and_never_clears_a_key():
 def test_removing_the_stored_key_marks_the_secret_touched():
     """savePanelConfig leaves an UNTOUCHED blank secret out of the payload, so a removal
     that forgot the touch list would save 200 and keep the key — and the key wins."""
-    src = open(_SETTINGS, encoding="utf-8").read()
+    src = settings_source()
     body = _method(src, "removePovAwsStoredKey")
     assert "panelSecretsTouched.push('aws_secret_access_key')" in body, body
     assert "aws_access_key_id = ''" in body, body

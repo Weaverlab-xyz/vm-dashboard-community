@@ -51,10 +51,10 @@ from web_dashboard.services import (aws_service, cloud_federation,  # noqa: E402
                                     job_service, pov_aws_service, pov_cloud_aws)
 from web_dashboard.services import workload_credential_lease as leases  # noqa: E402
 from web_dashboard.services import workload_credentials_service as wlc  # noqa: E402
+from _settings_src import settings_source
 
 Base.metadata.create_all(bind=engine)
 
-_SETTINGS = os.path.join(_ROOT, "web_dashboard", "templates", "settings.html")
 _RECONCILE = os.path.join(_ROOT, "web_dashboard", "services", "pov_reconcile.py")
 
 
@@ -210,7 +210,7 @@ def test_the_panel_model_declares_the_everyday_source():
 
 
 def test_the_third_choice_writes_the_everyday_source_and_nothing_of_wlcs_own():
-    src = open(_SETTINGS, encoding="utf-8").read()
+    src = settings_source()
     start = src.index("    choosePovAwsSource(")
     body = src[start:src.index("\n    },", start)]
     assert "wlc_aws_everyday_source = src === 'spiffe_wlc' ? 'federation' : 'lease'" in body

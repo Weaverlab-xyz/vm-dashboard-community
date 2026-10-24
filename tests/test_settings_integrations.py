@@ -23,9 +23,9 @@ import ast
 import os
 import re
 import sys
+from _settings_src import settings_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_SETTINGS = os.path.join(_ROOT, "web_dashboard", "templates", "settings.html")
 _SETUP = os.path.join(_ROOT, "web_dashboard", "api", "setup.py")
 _MAIN = os.path.join(_ROOT, "web_dashboard", "main.py")
 # The feature map moved out of main.py so dash-worker could read it without importing
@@ -41,7 +41,7 @@ def _read(path):
 
 def _integration_keys() -> set:
     """The `key:` of every entry in the integrations[] array."""
-    html = _read(_SETTINGS)
+    html = settings_source()
     start = html.index("integrations: [")
     end = html.index("\n    ],", start)
     return set(re.findall(r"\{\s*key:\s*'([a-z_0-9]+)'", html[start:end]))
@@ -50,7 +50,7 @@ def _integration_keys() -> set:
 def _config_only_keys() -> set:
     """Entries flagged `configOnly: true` — their on/off lives elsewhere, so they are
     exempt from the enabled-state map."""
-    html = _read(_SETTINGS)
+    html = settings_source()
     start = html.index("integrations: [")
     end = html.index("\n    ],", start)
     block = html[start:end]
@@ -65,7 +65,7 @@ def _load_map_keys() -> set:
     entries share a line — a line-anchored pattern silently sees only the first of them
     and reports the rest as missing.
     """
-    html = _read(_SETTINGS)
+    html = settings_source()
     start = html.index("const map = {")
     end = html.index("};", start)
     return set(re.findall(r"([a-z_0-9]+):\s*features\.", html[start:end]))
@@ -107,7 +107,7 @@ def test_the_map_has_no_entries_for_toggles_that_do_not_exist():
 def test_the_api_supplies_every_field_the_map_reads():
     """The map reads `features.<x>` off GET /api/features. A name that is not in the
     response is `undefined` → falsy → the toggle renders off, silently."""
-    html = _read(_SETTINGS)
+    html = settings_source()
     start = html.index("const map = {")
     end = html.index("};", start)
     read_fields = set(re.findall(r":\s*features\.([a-z_0-9]+)", html[start:end]))
@@ -156,7 +156,7 @@ def test_the_wizard_and_the_settings_page_agree_on_labels():
     Labels only. The `desc` strings for vmware and remote_agents already diverge between
     the two files, so asserting those would fail on arrival for reasons unrelated to this.
     """
-    settings_html = _read(_SETTINGS)
+    settings_html = settings_source()
     start = settings_html.index("integrations: [")
     end = settings_html.index("\n    ],", start)
     settings_labels = dict(re.findall(r"key:\s*'([a-z_0-9]+)',\s*label:\s*'([^']*)'",
@@ -182,7 +182,7 @@ def test_the_wizard_and_the_settings_page_agree_on_labels():
 
 def _integration_groups() -> dict:
     """key -> `group:` of every integrations[] entry (None when an entry has none)."""
-    html = _read(_SETTINGS)
+    html = settings_source()
     start = html.index("integrations: [")
     end = html.index("\n    ],", start)
     out = {}
@@ -193,7 +193,7 @@ def _integration_groups() -> dict:
 
 
 def _tab_ids() -> set:
-    html = _read(_SETTINGS)
+    html = settings_source()
     start = html.index("integrationGroups: [")
     end = html.index("\n    ],", start)
     return set(re.findall(r"\{\s*id:\s*'([a-z_0-9]+)'", html[start:end]))
@@ -212,7 +212,7 @@ def test_every_integration_renders_on_a_tab():
 def test_every_page_tab_shows_a_card():
     """The page-level tab strip is built from settingsTabs; each card is gated on
     `settingsTab === '<id>'`. A tab with no gated card is a click that empties the page."""
-    html = _read(_SETTINGS)
+    html = settings_source()
     start = html.index("settingsTabs: [")
     end = html.index("\n    ],", start)
     ids = re.findall(r"\{\s*id:\s*'([a-z_0-9]+)'", html[start:end])

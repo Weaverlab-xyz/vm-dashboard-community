@@ -18,6 +18,7 @@ import importlib.util
 import os
 import sys
 from datetime import datetime
+from _settings_src import settings_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PATH = os.path.join(_ROOT, "web_dashboard", "services",
@@ -433,7 +434,7 @@ def _model_fields():
 
 def _panel_html():
     """Just this feature's <template> block from settings.html."""
-    html = _read("web_dashboard", "templates", "settings.html")
+    html = settings_source()
     marker = f"panel?.key === '{_PANEL_KEY}'"
     start = html.index(marker)
     end = html.index("</template>", start)
@@ -485,7 +486,7 @@ def test_every_shortcut_opens_the_integrations_entry():
     has no `enabled`, so saving from it would switch the integration OFF -- harmless
     while the panel was config-only, a silent kill switch now."""
     import re
-    html = _read("web_dashboard", "templates", "settings.html")
+    html = settings_source()
     adhoc = re.findall(r"openPanel\(\{\s*key:\s*'workload_credentials'", html)
     assert not adhoc, "an ad hoc openPanel object would turn the integration off on save"
 
@@ -719,7 +720,7 @@ def test_the_panel_route_is_exposed_and_off_the_hot_path():
 
 
 def test_the_panel_has_a_test_connection_button():
-    html = _read("web_dashboard", "templates", "settings.html")
+    html = settings_source()
     assert "testWlcConnection()" in html, "no button calls the probe"
     assert "/api/secrets/wlc/test" in html, "the button posts to the wrong path"
 
@@ -728,7 +729,7 @@ def test_the_pat_field_is_never_prefilled_with_a_mask():
     """A masked value in a type=password box is indistinguishable from an empty one, so
     pasting into it appends to the mask and the save silently drops the field. This is
     the bug that made a wrong PAT look unfixable — the box must render genuinely empty."""
-    html = _read("web_dashboard", "templates", "settings.html")
+    html = settings_source()
     pat = next(line for line in html.splitlines() if "panelCfg.wlc_pat" in line)
     assert "x-model" in pat and "type=\"password\"" in pat
     # A :placeholder (bound) is fine — it renders only while the field is empty. A plain
@@ -781,7 +782,7 @@ def test_a_stored_entra_still_means_workload_identity():
         assert wlc.auth_mode() == wlc.AUTH_MODE_WORKLOAD
     assert wlc.normalise_auth_mode(" ENTRA ") == wlc.AUTH_MODE_WORKLOAD
     # And it is never written back out under the old name.
-    html = _read("web_dashboard", "templates", "settings.html")
+    html = settings_source()
     panel = html[html.index("panelCfg.wlc_auth_mode"):]
     panel = panel[:panel.index("panelCfg.wlc_api_version")]
     assert 'value="workload"' in panel and 'value="entra"' not in panel
@@ -1100,7 +1101,7 @@ def test_a_panel_save_clears_the_identity_token_too():
 def test_every_bound_entra_field_is_declared_on_the_panel_model():
     """A field bound in the template but absent from the model is DISCARDED on
     save, silently — the save returns 200 and the value never lands."""
-    html = _read("web_dashboard", "templates", "settings.html")
+    html = settings_source()
     setup = _read("web_dashboard", "api", "setup.py")
     config = _read("web_dashboard", "config.py")
     for field in ("wlc_auth_mode", "wlc_identity_platform", "wlc_service_name",
@@ -1112,7 +1113,7 @@ def test_every_bound_entra_field_is_declared_on_the_panel_model():
 
 
 def test_the_pat_box_hides_in_entra_mode_and_the_identity_fields_hide_in_pat_mode():
-    html = _read("web_dashboard", "templates", "settings.html")
+    html = settings_source()
     panel = html[html.index("panelCfg.wlc_auth_mode"):]
     panel = panel[:panel.index("panelCfg.wlc_api_version")]
     assert "x-show" in panel and "panelCfg.wlc_pat" in panel

@@ -30,6 +30,7 @@ Run: python tests/test_database_terminology.py   (or under pytest)
 """
 import os
 import sys
+from _settings_src import settings_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -82,7 +83,8 @@ def test_no_user_facing_label_still_says_cloud_databases():
     offenders = []
     for rel in (("_nav_links.html",), ("databases", "index.html"), ("dashboard.html",),
                 ("settings.html",), ("setup.html",), ("config-mgmt", "index.html")):
-        if "Cloud Databases" in _read(_tpl(*rel)):
+        src = settings_source() if rel == ("settings.html",) else _read(_tpl(*rel))
+        if "Cloud Databases" in src:
             offenders.append(os.path.join(*rel))
     assert not offenders, f"these still label the feature 'Cloud Databases': {offenders}"
 

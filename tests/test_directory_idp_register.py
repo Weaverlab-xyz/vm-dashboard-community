@@ -40,6 +40,7 @@ from web_dashboard.database import AuditLog, Base, ManagedDirectory, SessionLoca
 from web_dashboard.services import config_service, directory_idp  # noqa: E402
 from web_dashboard.services import directory_service as ds  # noqa: E402
 from web_dashboard.services.directory_idp import base  # noqa: E402
+from _settings_src import settings_source
 
 Base.metadata.create_all(bind=engine)
 
@@ -409,8 +410,7 @@ def test_directories_is_a_preview_flag_with_a_config_only_panel():
     assert setup._PREVIEW_FLAG_CONFIG["directories_enabled"] == "directories"
     assert "directories" in setup._CONFIG_ONLY_FEATURES
     assert "directories_enabled" not in setup.FeaturesSetup.model_fields
-    html = open(os.path.join(_ROOT, "web_dashboard", "templates", "settings.html"),
-                encoding="utf-8").read()
+    html = settings_source()
     assert "key: 'directories'" not in html, "a preview feature has no integrations-list toggle"
 
 

@@ -57,12 +57,12 @@ from web_dashboard.database import Base, EntitleActivation, SessionLocal, engine
 from web_dashboard.services import (cloud_federation, cloud_identity_service,  # noqa: E402
                                     config_service, entitle_public_api, entitle_service,
                                     gcp_service, pov_cloud_gcp)
+from _settings_src import settings_source
 
 Base.metadata.create_all(bind=engine)
 
 _DRIVER = os.path.join(_ROOT, "web_dashboard", "services", "pov_cloud_gcp.py")
 _TF = os.path.join(_ROOT, "terraform", "pov_cloud_gcp_role", "main.tf")
-_SETTINGS = os.path.join(_ROOT, "web_dashboard", "templates", "settings.html")
 
 
 class _Patch:
@@ -418,13 +418,13 @@ def _method(src, name):
 
 
 def test_choosing_a_gcp_source_never_touches_the_key():
-    body = _method(open(_SETTINGS, encoding="utf-8").read(), "choosePovGcpSource")
+    body = _method(settings_source(), "choosePovGcpSource")
     assert "pov_gcp_provision_source = src === 'spiffe_entitle' ? 'entitle' : ''" in body
     assert "gcp_service_account_json" not in body
 
 
 def test_removing_the_stored_key_marks_it_touched():
-    body = _method(open(_SETTINGS, encoding="utf-8").read(), "removePovGcpStoredKey")
+    body = _method(settings_source(), "removePovGcpStoredKey")
     assert "panelSecretsTouched.push('gcp_service_account_json')" in body, body
 
 

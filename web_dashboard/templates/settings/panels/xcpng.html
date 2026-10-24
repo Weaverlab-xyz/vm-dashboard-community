@@ -1,0 +1,57 @@
+{# Settings slide-over panel "xcpng". Included by settings.html inside settingsPage(); the state it binds (panelCfg, panelOpen, …) lives in that page's script. #}
+      <template x-if="panel?.key === 'xcpng' && !panelLoading">
+        <div class="space-y-4">
+        <div class="mb-4 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          <span class="font-medium">These fields are the initial values only.</span>
+          Hypervisor credentials now live on the <a href="/connections" class="underline font-medium">Connections</a>
+          tab of the Remote Agents page, which supports more than one of each kind. The values here were copied
+          across on first start; editing them afterwards has no effect on what the
+          dashboard connects to. They are kept so rolling back to an older build still
+          works.
+        </div>
+
+          <p class="text-sm text-gray-500">
+            Connects to an <strong>XCP-ng</strong> or <strong>XenServer</strong> host or pool master
+            via the XAPI XML-RPC API (Python stdlib — no external SDK required). Supports start,
+            graceful shutdown/reboot (requires xe-guest-utilities), force stop, hard reboot, suspend,
+            resume, pause, and unpause.
+          </p>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Host / Pool Master</label>
+            <input type="text" x-model="panelCfg.xcpng_host"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="xcpng.corp.local or 192.168.1.60">
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
+              <input type="text" x-model="panelCfg.xcpng_username"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="root">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Password</label>
+              <input type="password" x-model="panelCfg.xcpng_password"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="••••••••">
+            </div>
+          </div>
+
+          <div class="flex items-center gap-2 pt-1">
+            <button @click="panelCfg.xcpng_verify_ssl = !panelCfg.xcpng_verify_ssl"
+                    class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors"
+                    :class="panelCfg.xcpng_verify_ssl ? 'bg-blue-600' : 'bg-gray-300'">
+              <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
+                    :class="panelCfg.xcpng_verify_ssl ? 'translate-x-6' : 'translate-x-1'"></span>
+            </button>
+            <span class="text-sm text-gray-700">Verify SSL certificate <span class="text-gray-400">(disable for self-signed / lab)</span></span>
+          </div>
+
+          <p class="text-xs text-gray-400 pt-1">
+            Connect using the pool master address. Root or equivalent admin access is required.
+            See <a href="/docs/integrations/xcpng" class="underline" target="_blank">integration guide</a> for full setup.
+          </p>
+        </div>
+      </template>

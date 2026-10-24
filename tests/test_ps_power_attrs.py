@@ -46,6 +46,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover — bare interpreter
 
 from web_dashboard.services import ps_attribute_catalog as pac
 from web_dashboard.services import ps_power_attrs as ppa
+from _settings_src import settings_source
 
 _WEB = os.path.join(_ROOT, "web_dashboard")
 
@@ -352,8 +353,8 @@ def test_the_settings_keys_exist_in_both_places():
                 "passwordsafe_power_attr_offline"):
         assert key in PasswordSafeFeatureConfig.model_fields, key
         assert key in Settings.model_fields, key
-        assert f"panelCfg.{key}" in _src("templates/settings.html") or \
-            f"'{key}'" in _src("templates/settings.html"), key
+        assert f"panelCfg.{key}" in settings_source() or \
+            f"'{key}'" in settings_source(), key
 
 
 def test_a_typed_label_is_refused_and_an_id_is_kept():

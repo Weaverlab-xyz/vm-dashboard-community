@@ -1,0 +1,145 @@
+{# Settings slide-over panel "notifications". Included by settings.html inside settingsPage(); the state it binds (panelCfg, panelOpen, …) lives in that page's script. #}
+      <template x-if="panel?.key === 'notifications' && !panelLoading">
+        {# Endpoints and the delivery log are shared with the /notifications page, which is
+           where anyone holding the `notifications` scope manages endpoints -- this drawer is
+           admin-only. See notificationEndpoints() in static/js/app.js. #}
+        <div class="space-y-4" x-data="notificationEndpoints()" x-init="loadNotifications()">
+          <p class="text-sm text-gray-500">
+            Push dashboard events to Slack, Microsoft Teams, or any HTTP endpoint. Delivery
+            is <strong>outbound only</strong> — nothing here opens an inbound webhook.
+            See <a href="/docs/operations/notifications" class="text-blue-600 underline">the notifications doc</a>.
+          </p>
+
+          <div class="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[11px] text-amber-800">
+            There is no built-in email sender. To send mail, add a <span class="font-mono">custom</span>
+            endpoint pointed at a Power Automate Flow (or similar) and let that send the message —
+            the same endpoint can fan out to a mailbox, a channel and a ticket queue.
+          </div>
+
+          <label class="flex items-start gap-2">
+            <input type="checkbox" x-model="panelCfg.notify_dry_run"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            <span class="text-sm text-gray-700">
+              <span class="font-medium">Dry run — record, don't send</span>
+              <span class="block text-[11px] text-gray-400 mt-0.5">
+                On by default. Every message is written to the delivery log below with status
+                <span class="font-mono">dry-run</span> and nothing leaves the dashboard. Watch a
+                full day, then turn this off. The per-endpoint <strong>Test</strong> button
+                ignores this and always sends.
+              </span>
+            </span>
+          </label>
+
+          <label class="flex items-start gap-2">
+            <input type="checkbox" x-model="panelCfg.notifications_allow_private_targets"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            <span class="text-sm text-gray-700">
+              <span class="font-medium">Allow internal webhook targets</span>
+              <span class="block text-[11px] text-gray-400 mt-0.5">
+                Off by default: an endpoint whose host resolves to a private address
+                (10.x, 172.16–31.x, 192.168.x, 100.64.x, fd00::/8) is refused. Turn on to send
+                to an internal receiver. Loopback, link-local and cloud metadata addresses
+                are always refused.
+              </span>
+            </span>
+          </label>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Dashboard URL</label>
+            <input type="text" x-model="panelCfg.notify_base_url"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="https://dashboard.example.com">
+            <p class="text-[11px] mt-1"
+               :class="panelCfg.notify_base_url ? 'text-gray-400' : 'text-amber-600'">
+              The worker has no idea what address you reach the dashboard on. Leave this blank
+              and every message ships with <strong>no link</strong> — which looks like a bug but
+              is this setting. No trailing path.
+            </p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Events to send</label>
+            <input type="text" x-model="panelCfg.notify_event_types"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Comma-separated. Known:
+              <span class="font-mono" x-text="notif.knownEvents.join(', ')"></span>.
+              An individual endpoint can narrow this further, but not widen it.
+            </p>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Minimum severity</label>
+              <select x-model="panelCfg.notify_min_severity"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="info">info</option>
+                <option value="warning">warning</option>
+                <option value="critical">critical</option>
+              </select>
+              <p class="text-[11px] text-gray-400 mt-1">Below this, nothing is queued.</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Send every</label>
+              <input type="number" min="5" x-model.number="panelCfg.notify_flush_interval_s"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">Seconds (floor 5).</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Condition scan every</label>
+              <input type="number" min="300" x-model.number="panelCfg.notify_scan_interval_s"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Seconds (floor 300). Budget, stale-secret and drift checks.
+              </p>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Attempts</label>
+              <input type="number" min="1" max="5" x-model.number="panelCfg.notify_max_attempts"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Timeout</label>
+              <input type="number" min="1" x-model.number="panelCfg.notify_http_timeout_s"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Max per pass</label>
+              <input type="number" min="1" x-model.number="panelCfg.notify_max_per_flush"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Queue ceiling</label>
+              <input type="number" min="1" x-model.number="panelCfg.notify_max_queue"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+          </div>
+          <p class="text-[11px] text-gray-400 -mt-2">
+            Retries back off 30s → 2m → 10m → 30m and survive a worker restart. Past the queue
+            ceiling, new messages are recorded as <span class="font-mono">suppressed</span>
+            rather than queued — the brake that keeps a first enable against a large estate from
+            becoming an incident.
+          </p>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Keep delivery history</label>
+            <input type="number" min="0" x-model.number="panelCfg.notify_retention_days"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Days. 0 = keep forever. Failed deliveries are never pruned — they're the evidence.
+            </p>
+          </div>
+
+          {% include "partials/notification_endpoints.html" %}
+
+          <p class="text-[11px] text-amber-600">
+            Delivery is at-least-once: a worker killed mid-send retries when the row is
+            reclaimed, so a duplicate message is possible. A failing endpoint can never
+            slow down or fail the job it is reporting on — sending happens in a separate
+            process, after the fact.
+          </p>
+        </div>
+      </template>

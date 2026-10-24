@@ -51,10 +51,10 @@ from web_dashboard.services import (azure_service, cloud_federation,  # noqa: E4
                                     config_service, dashboard_identity, pov_cloud_azure)
 from web_dashboard.services import workload_credential_lease as leases  # noqa: E402
 from web_dashboard.services import workload_credentials_service as wlc  # noqa: E402
+from _settings_src import settings_source
 
 Base.metadata.create_all(bind=engine)
 
-_SETTINGS = os.path.join(_ROOT, "web_dashboard", "templates", "settings.html")
 _APP = "11111111-2222-3333-4444-555555555555"
 _SUB = "99999999-8888-7777-6666-555555555555"
 
@@ -233,7 +233,7 @@ def _method(src, name):
 
 
 def test_choosing_an_azure_source_never_touches_the_app_or_its_secret():
-    body = _method(open(_SETTINGS, encoding="utf-8").read(), "choosePovAzureSource")
+    body = _method(settings_source(), "choosePovAzureSource")
     assert "dashboard_spiffe_aud_azure = true" in body
     assert "wlc_azure_everyday_source = src === 'spiffe_wlc' ? 'federation' : 'lease'" in body
     for key in ("azure_client_secret", "azure_client_id", "wlc_azure_enabled",
@@ -242,7 +242,7 @@ def test_choosing_an_azure_source_never_touches_the_app_or_its_secret():
 
 
 def test_removing_the_stored_secret_keeps_the_app_and_marks_it_touched():
-    body = _method(open(_SETTINGS, encoding="utf-8").read(), "removePovAzureStoredSecret")
+    body = _method(settings_source(), "removePovAzureStoredSecret")
     assert "panelSecretsTouched.push('azure_client_secret')" in body, body
     assert "azure_client_secret = ''" in body, body
     assert "azure_client_id" not in body, (

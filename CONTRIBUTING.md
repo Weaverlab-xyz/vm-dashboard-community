@@ -184,6 +184,14 @@ tests/test_x.py` runs a file at the times that break such tests (midnight, the h
 before it, month and year ends, a leap day, daylight-saving changes, dates years ahead)
 and names any time whose result differs from a real run.
 
+A test that reads the Settings page as text reads it through
+`tests/_settings_src.py`'s `settings_source()`, not `settings.html` itself. Each
+integration's slide-over form is its own file, `templates/settings/panels/<key>.html`,
+included by `settings.html`, and `settings_source()` puts them back in place. The page's
+tabs, the `integrations[]` list and the `settingsPage()` script stay in `settings.html`.
+A new panel is a new file there plus one `{%- include %}` line, and its state goes in the
+script.
+
 ### Other checks CI runs
 
 Each has a script, or a single command, that runs the same way locally:

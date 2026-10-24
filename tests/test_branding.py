@@ -32,6 +32,7 @@ sys.path.insert(0, _ROOT)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-branding")
 
 from web_dashboard.services import branding, config_service, ui_theme  # noqa: E402
+from _settings_src import settings_source
 
 _TPL = os.path.join(_ROOT, "web_dashboard", "templates")
 _SETUP_API = os.path.join(_ROOT, "web_dashboard", "api", "setup.py")
@@ -299,7 +300,7 @@ def test_the_context_processor_supplies_branding_to_every_page():
 
 def test_the_settings_panel_declares_every_field_it_binds():
     """A bound-but-undeclared field is dropped from the PATCH body without a word."""
-    markup = _read(os.path.join(_TPL, "settings.html"))
+    markup = settings_source()
     bound = set(re.findall(r"x-model=\"branding\.(\w+)\"", markup))
     assert bound, "the Appearance card binds nothing"
     declared = set(re.findall(r"(brand_\w+):\s*''", markup))
@@ -308,7 +309,7 @@ def test_the_settings_panel_declares_every_field_it_binds():
 
 def test_the_panel_and_the_api_agree_on_the_field_list():
     """The card writing a key the endpoint does not persist would save into nothing."""
-    markup = _read(os.path.join(_TPL, "settings.html"))
+    markup = settings_source()
     api = _read(_SETUP_API)
     bound = set(re.findall(r"x-model=\"branding\.(\w+)\"", markup))
     persisted = set(re.findall(r"\"(brand_\w+)\",", api))

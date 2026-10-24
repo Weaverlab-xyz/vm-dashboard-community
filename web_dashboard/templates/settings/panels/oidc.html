@@ -1,0 +1,186 @@
+{# Settings slide-over panel "oidc". Included by settings.html inside settingsPage(); the state it binds (panelCfg, panelOpen, …) lives in that page's script. #}
+      <template x-if="panel?.key === 'oidc' && !panelLoading">
+        <div class="space-y-5">
+          <p class="text-xs text-gray-500 leading-snug">
+            Point this at any OpenID Connect provider — the authorize, token and JWKS endpoints are
+            read from the issuer's discovery document, so there is nothing else to fill in. SSO goes
+            live as soon as an issuer and client id are saved; clear the issuer to turn it off.
+            Sign-in with Microsoft is configured separately under Azure and is unaffected.
+            See <a href="/docs/oidc" class="underline" target="_blank">integration guide</a> for full setup.
+          </p>
+
+          <!-- Redirect URI is the thing operators most often get wrong, and the
+               provider rejects the login before we ever see it — so show the exact
+               value the SERVER will send (GET /api/auth/oauth/redirect-uris), not the
+               current browser origin, which can differ on a split-host install. -->
+          <div class="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2.5">
+            <p class="text-[11px] font-medium text-blue-900 mb-1">Register this redirect URI with your provider</p>
+            <code class="text-[11px] text-blue-800 break-all" x-text="oidcCallbackUri()"></code>
+            <p x-show="oidcCallbackUri() && !oidcCallbackUri().startsWith(window.location.origin + '/')" x-cloak
+               class="text-[11px] text-amber-700 mt-1">
+              This is not the origin you are browsing from. SSO sends the browser back here, so it
+              must be the host users sign in on — set <strong>UI base URL</strong> below if it is wrong.
+            </p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">UI base URL</label>
+            <input type="text" x-model="panelCfg.ui_base_url"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="https://dash.example.com">
+            <p class="text-[11px] text-gray-400 mt-1">
+              The origin a browser reaches this dashboard at; both SSO callbacks (OIDC and Sign-in
+              with Microsoft) are built from it. Blank uses <code>WEBAUTHN_ORIGIN</code> when that is
+              not localhost, then <code>PUBLIC_BASE_URL</code>, then the request. Set it when
+              <code>PUBLIC_BASE_URL</code> is a separate agent hostname. Agents never use it.
+            </p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Issuer URL</label>
+            <input type="text" x-model="panelCfg.oidc_issuer"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="https://keycloak.example.com/realms/main">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Base URL only — <code>/.well-known/openid-configuration</code> is appended automatically.
+            </p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
+            <input type="text" x-model="panelCfg.oidc_client_id"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Client secret</label>
+            <input type="password" x-model="panelCfg.oidc_client_secret"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="leave blank for a public client">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Optional — PKCE is always sent, so a public client works. Leave the dots untouched to keep the stored value.
+            </p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Button label</label>
+            <input type="text" x-model="panelCfg.oidc_provider_name"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                   placeholder="defaults to the issuer host">
+            <p class="text-[11px] text-gray-400 mt-1">Shown on the login page as “Sign in with …”.</p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Scopes</label>
+            <input type="text" x-model="panelCfg.oidc_scopes"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="openid profile email groups">
+            <p class="text-[11px] text-gray-400 mt-1"><code>openid</code> is always included.</p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Groups claim</label>
+            <input type="text" x-model="panelCfg.oidc_groups_claim"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="groups">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Claim carrying the user's groups, matched against the mappings on
+              <a href="/rbac#groups" class="underline text-blue-600">Groups</a> to assign workstreams.
+              Usually <code>groups</code>; some Okta setups use <code>roles</code>.
+            </p>
+          </div>
+
+          <!-- Discovery probe: a typo'd issuer otherwise only shows up as a
+               failed login redirect that explains nothing. -->
+          <div class="border-t border-gray-100 pt-4">
+            <button type="button" @click="testOidc()" :disabled="oidcTest.running"
+                    class="text-sm border border-gray-300 hover:bg-gray-50 disabled:opacity-50 px-3 py-2 rounded-lg font-medium transition-colors">
+              <span x-show="!oidcTest.running">Test connection</span>
+              <span x-show="oidcTest.running" x-cloak>Contacting provider…</span>
+            </button>
+            <p class="text-[11px] text-gray-400 mt-1">Save first — the probe reads the stored issuer.</p>
+
+            <div x-show="oidcTest.ok === false" x-cloak
+                 class="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] text-red-700"
+                 x-text="oidcTest.error"></div>
+
+            <div x-show="oidcTest.ok === true" x-cloak
+                 class="mt-3 rounded-lg border border-green-200 bg-green-50 px-3 py-2.5 text-[11px] text-green-900 space-y-1">
+              <p class="font-medium">Discovery succeeded</p>
+              <p>Issuer: <code class="break-all" x-text="oidcTest.doc?.issuer"></code></p>
+              <p>Authorize: <code class="break-all" x-text="oidcTest.doc?.authorization_endpoint"></code></p>
+              <p>Token: <code class="break-all" x-text="oidcTest.doc?.token_endpoint"></code></p>
+              <p x-show="oidcTest.doc?.groups_claim_advertised === false" class="text-amber-800">
+                The provider does not advertise a
+                <code x-text="oidcTest.doc?.groups_claim"></code> claim. Group→workstream mapping may
+                not work until it is configured to emit one — some providers emit claims they do not
+                advertise, so this is worth checking rather than assuming broken.
+              </p>
+            </div>
+          </div>
+
+          <!-- Workload tokens: an IdP's access tokens accepted for service accounts.
+               Independent of SSO -- needs no client id, and lets nobody sign in. -->
+          <div class="border-t border-gray-100 pt-4 space-y-4">
+            <div>
+              <p class="text-sm font-medium text-gray-800">Workload tokens</p>
+              <p class="text-[11px] text-gray-500 leading-snug mt-1">
+                Accept access tokens this IdP issues to <em>workloads</em> (client credentials,
+                managed identities) and map them to
+                <a href="/docs/access/service-accounts" class="underline" target="_blank">service accounts</a>
+                under Users → OAuth clients → External identities. Off until an audience is set.
+                Works without SSO: no client id is needed here.
+              </p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Workload issuer</label>
+              <input type="text" x-model="panelCfg.workload_idp_issuer"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="blank = the issuer above">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Audience</label>
+              <input type="text" x-model="panelCfg.workload_idp_audience"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="api://vm-dashboard">
+              <p class="text-[11px] text-gray-400 mt-1">
+                What the token's <code>aud</code> must be, so a token minted for another API at the
+                same IdP is refused. Space-separate to accept several (Entra: <code>api://&lt;app-id&gt;</code>
+                and the bare app id).
+              </p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Extra accepted issuers</label>
+              <input type="text" x-model="panelCfg.workload_idp_extra_issuers"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="https://sts.windows.net/<tenant-id>/">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Optional. Other <code>iss</code> values signed by the same keys — Entra v1 tokens carry
+                <code>https://sts.windows.net/&lt;tenant&gt;/</code> (with the slash) unless the app's
+                <code>accessTokenAcceptedVersion</code> is 2.
+              </p>
+            </div>
+            <div>
+              <button type="button" @click="testWorkloadIdp()" :disabled="wkTest.running"
+                      class="text-sm border border-gray-300 hover:bg-gray-50 disabled:opacity-50 px-3 py-2 rounded-lg font-medium transition-colors">
+                <span x-show="!wkTest.running">Test workload trust</span>
+                <span x-show="wkTest.running" x-cloak>Contacting provider…</span>
+              </button>
+              <div x-show="wkTest.ok === false" x-cloak
+                   class="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] text-red-700"
+                   x-text="wkTest.error"></div>
+              <div x-show="wkTest.ok === true" x-cloak
+                   class="mt-3 rounded-lg border border-green-200 bg-green-50 px-3 py-2.5 text-[11px] text-green-900 space-y-1">
+                <p class="font-medium">Signing keys fetched (<span x-text="wkTest.doc?.signing_keys"></span>)</p>
+                <p>Accepted issuers: <code class="break-all" x-text="(wkTest.doc?.accepted_issuers || []).join(', ')"></code></p>
+                <p>Audience: <code class="break-all" x-text="(wkTest.doc?.audiences || []).join(', ')"></code></p>
+                <p x-show="wkTest.doc && !wkTest.doc.discovered_issuer_accepted" class="text-amber-800">
+                  The provider reports its issuer as <code x-text="wkTest.doc?.discovered_issuer"></code>,
+                  which is not in the accepted list. Tokens carrying it will be refused — add it above
+                  if that is what your tokens say.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>

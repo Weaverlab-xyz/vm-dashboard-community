@@ -20,6 +20,7 @@ Runs under pytest, or standalone:
 import os
 import re
 import sys
+from _settings_src import settings_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -92,7 +93,7 @@ def test_the_clouds_group_holds_the_four_consoles():
 def test_cloud_services_is_the_settings_cloud_tab():
     """The Settings integrations on the `cloud` tab that own a page. Discovery and
     multi-region are settings of the cloud consoles, not pages, so they have no link."""
-    settings = _read(os.path.join(_TPL, "settings.html"))
+    settings = settings_source()
     cloud_keys = set(re.findall(r"\{ key: '([a-z0-9_]+)',[^}]*?group: 'cloud'", settings))
     page_of = {"portainer": "containers", "cloud_database": "databases",
                "k8s_management": "k8s", "cloud_functions": "functions"}
