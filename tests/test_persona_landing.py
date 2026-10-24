@@ -32,6 +32,10 @@ import sys
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-persona-landing")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _schema import build_schema  # noqa: E402
+
+build_schema("persona-landing")
 
 _TPL = os.path.join(_ROOT, "web_dashboard", "templates")
 _DASHBOARD = os.path.join(_TPL, "dashboard.html")

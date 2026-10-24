@@ -44,6 +44,10 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-dashboard-pov-home")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _schema import build_schema  # noqa: E402
+
+build_schema("dashboard-pov-home")
 
 
 def _read(*parts):

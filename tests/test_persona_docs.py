@@ -26,6 +26,10 @@ import sys
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-persona-docs")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _schema import build_schema  # noqa: E402
+
+build_schema("persona-docs")
 
 _DOCS = os.path.join(_ROOT, "docs")
 _PERSONA_DOCS = os.path.join(_DOCS, "profiles", "demo", "personas")

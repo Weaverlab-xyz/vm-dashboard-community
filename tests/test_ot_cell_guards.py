@@ -30,6 +30,10 @@ import re
 import sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _schema import build_schema  # noqa: E402
+
+build_schema("ot-cell-guards")
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 _OT = os.path.join(_ROOT, "web_dashboard", "services", "ot_service.py")

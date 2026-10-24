@@ -25,17 +25,14 @@ Runs under pytest, or standalone:
 import os
 import re
 import sys
-import tempfile
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-persona-identity")
-os.environ.setdefault("DATABASE_URL", "sqlite:///" + os.path.join(
-    tempfile.mkdtemp(prefix="persona-identity-"), "test.db"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _schema import build_schema  # noqa: E402
 
-from web_dashboard.database import Base, engine  # noqa: E402
-
-Base.metadata.create_all(bind=engine)
+build_schema("persona-identity")
 
 _DB = os.path.join(_ROOT, "web_dashboard", "database.py")
 _AUTH = os.path.join(_ROOT, "web_dashboard", "api", "auth.py")
