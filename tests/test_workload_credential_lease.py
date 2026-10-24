@@ -184,19 +184,19 @@ def test_the_readonly_secret_falls_back_to_the_provisioning_secret():
     # The read-only split is an optional refinement; an operator who has not created the
     # second dynamic secret should still get a working dashboard.
     _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision"})
-    assert lease.secret_name_for("aws", lease.PURPOSE_READONLY) == "dashboard-provision"
+    assert lease.dynamic_name_for("aws", lease.PURPOSE_READONLY) == "dashboard-provision"
 
 
 def test_the_readonly_secret_is_used_when_it_is_set():
     _stub_cfg(values={"wlc_aws_secret_name": "dashboard-provision",
                       "wlc_aws_readonly_secret_name": "dashboard-readonly"})
-    assert lease.secret_name_for("aws", lease.PURPOSE_READONLY) == "dashboard-readonly"
+    assert lease.dynamic_name_for("aws", lease.PURPOSE_READONLY) == "dashboard-readonly"
 
 
 def test_the_provisioning_secret_never_falls_back_to_readonly():
     # Silently provisioning with a read-only session would fail deep inside a job.
     _stub_cfg(values={"wlc_aws_readonly_secret_name": "dashboard-readonly"})
-    assert lease.secret_name_for("aws", lease.PURPOSE_PROVISION) == ""
+    assert lease.dynamic_name_for("aws", lease.PURPOSE_PROVISION) == ""
 
 
 def test_source_reports_dynamic_when_enabled():
