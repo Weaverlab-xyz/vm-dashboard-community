@@ -136,19 +136,32 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Galaxy answers the occasional 500 on a collection download, and ansible-galaxy
-      # does not retry one: a single blip failed this job on two PRs that touch no
-      # playbook. Four tries over about two minutes, then the error stands.
+      # Galaxy answers the occasional 500 on a collection download, and on 2026-10-24 it
+      # kept doing so for over forty minutes, through four retries. The collections are
+      # still upgraded from Galaxy on every run, so the check matches what the runner
+      # images install; the cache is only the fallback when Galaxy is down. It is the
+      # last set main downloaded (saved below, on main only), and a pull request reads
+      # main's caches. See scripts/ci/galaxy_collections.sh.
+      - name: Restore the last Galaxy collections main downloaded
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.ansible/collections
+          key: ansible-galaxy-${{ github.run_id }}
+          restore-keys: ansible-galaxy-
+
       - name: Install Ansible and the BeyondTrust collections
+        id: galaxy
         run: |
           pip install ansible
-          for attempt in 1 2 3 4; do
-            ansible-galaxy collection install beyondtrust.secrets_safe beyondtrust.password_safe && break
-            if [ "$attempt" = 4 ]; then exit 1; fi
-            echo "::warning::Galaxy collection install failed (attempt $attempt of 4); retrying"
-            sleep $((attempt * 20))
-          done
+          scripts/ci/galaxy_collections.sh beyondtrust.secrets_safe beyondtrust.password_safe
           ansible --version
+
+      - name: Save the collections for the next Galaxy outage
+        if: github.ref == 'refs/heads/main' && steps.galaxy.outputs.fresh == 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.ansible/collections
+          key: ansible-galaxy-${{ github.run_id }}
 
       - name: Syntax-check every playbook
         run: scripts/ci/ansible_syntax.sh
