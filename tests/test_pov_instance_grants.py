@@ -47,6 +47,7 @@ from fastapi import HTTPException  # noqa: E402
 
 from web_dashboard.api import auth as auth_mod  # noqa: E402
 from web_dashboard.database import User  # noqa: E402
+from _pov_api_src import pov_api_source
 
 
 class _FakeRequest:
@@ -180,8 +181,7 @@ def test_use_is_the_stakeholder_level_and_does_not_imply_write():
 
 
 def test_the_use_case_routes_are_gated_on_use_and_destroy_on_delete():
-    with open(os.path.join(_ROOT, "web_dashboard", "api", "pov.py"), encoding="utf-8") as fh:
-        src = fh.read()
+    src = pov_api_source()
     for line in src.split("\n"):
         if "/use-cases/{card_id}" in line and line.strip().startswith("@router."):
             assert "_POV_USE" in line, f"use-case route not on the use level: {line.strip()}"
@@ -282,8 +282,7 @@ def test_the_general_levels_are_unchanged():
 
 def test_platform_wide_operations_stay_on_general_write():
     """A presenter's own POVs are not a licence to list or reconcile the whole platform."""
-    with open(os.path.join(_ROOT, "web_dashboard", "api", "pov.py"), encoding="utf-8") as fh:
-        src = fh.read()
+    src = pov_api_source()
     for route in ('@router.post("/managed/reconcile", dependencies=_POV_WRITE)',
                   '@router.get("/environments", dependencies=_POV_WRITE)',
                   '@router.get("/environments/{platform_env_id}", dependencies=_POV_WRITE)'):
@@ -512,8 +511,7 @@ def test_platforms_reports_whether_this_caller_may_provision():
 def test_the_registry_is_read_and_the_pickers_are_write():
     """Pins which of the four platform reads sits at which level, since the difference is
     one `dependencies=` argument and the symptom of getting it wrong is a blank page."""
-    with open(os.path.join(_ROOT, "web_dashboard", "api", "pov.py"), encoding="utf-8") as fh:
-        lines = fh.read().split("\n")
+    lines = pov_api_source().split("\n")
 
     def _decorator(path):
         hits = [l for l in lines if l.strip().startswith(f'@router.get("{path}"')]
@@ -539,8 +537,7 @@ def test_the_platform_environment_id_is_not_called_env_id():
     platform's own environment id lives in a different namespace from PovEnvironment
     uuids, so naming it `env_id` made the gate compare the two and 404 every platform
     environment for any narrowed user -- at any level, write included."""
-    with open(os.path.join(_ROOT, "web_dashboard", "api", "pov.py"), encoding="utf-8") as fh:
-        src = fh.read()
+    src = pov_api_source()
     assert '@router.get("/environments/{platform_env_id}"' in src, (
         "the platform environment route is not on {platform_env_id}")
     assert '@router.get("/environments/{env_id}"' not in src, (

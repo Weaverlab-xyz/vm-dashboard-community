@@ -435,7 +435,7 @@ def test_the_endpoint_sets_clears_and_refuses():
         print("SKIP: fastapi not installed (endpoint half only)")
         return
     from fastapi import HTTPException
-    from web_dashboard.api import pov as pov_api
+    from web_dashboard.api import pov_schedule as pov_api
 
     class _User:
         username = "se"

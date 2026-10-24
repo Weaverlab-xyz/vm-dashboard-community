@@ -848,7 +848,7 @@ def test_the_spend_sweep_runs_after_the_schedule():
 def test_raising_the_cap_clears_both_latches():
     """Otherwise "give it another fifty dollars" leaves the row permanently flagged and
     the cap unable to fire again."""
-    body = _code(os.path.join("web_dashboard", "api", "pov.py"), "set_spend_cap")
+    body = _code(os.path.join("web_dashboard", "api", "pov_schedule.py"), "set_spend_cap")
     assert "spend_warned_at = None" in body and "spend_capped_at = None" in body
     assert "cap > previous" in body, "the latches clear on any edit, not only on a raise"
     assert "spend_estimate_usd" not in body, (

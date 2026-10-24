@@ -58,6 +58,7 @@ d.Base.metadata.create_all(bind=d.engine)
 from web_dashboard.services import (bt_tenant_service, job_service,  # noqa: E402
                                     pov_env_service, pov_functional_account,
                                     pov_wireup as w, terraform_pra_service)
+from _pov_api_src import pov_api_source
 
 
 def _name(prefix):
@@ -285,7 +286,7 @@ def test_preflight_makes_no_network_call():
 
 def test_the_wireup_endpoint_preflights_without_demanding_a_group():
     """Static: the endpoint must call `preflight`, not `tenant_override`."""
-    src = open(os.path.join(_ROOT, "web_dashboard", "api", "pov.py"), encoding="utf-8").read()
+    src = pov_api_source()
     handler = src.split('job_type="pov_env_wireup"', 1)[0].rsplit("@router.post", 1)[1]
     assert "pov_wireup.preflight(" in handler
     assert "pov_wireup.tenant_override(" not in handler
