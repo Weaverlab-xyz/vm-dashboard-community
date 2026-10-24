@@ -302,10 +302,9 @@ def test_indexes_declared_in_the_migrations_exist():
     query just gets slower as `jobs` grows."""
     _reset_schema()
     init_db()
-    src = open(os.path.join(_ROOT, "web_dashboard/database.py"), encoding="utf-8").read()
-    block = src.split("_migrations = [", 1)[1].split("\n        ]", 1)[0]
-    declared = re.findall(
-        r'"CREATE (?:UNIQUE )?INDEX (?:IF NOT EXISTS )?(\w+) ON (\w+)', block)
+    found = (re.match(r"CREATE (?:UNIQUE )?INDEX (?:IF NOT EXISTS )?(\w+) ON (\w+)", stmt)
+             for stmt in schema_legacy.STATEMENTS)
+    declared = [m.groups() for m in found if m]
     insp = inspect(engine)
     missing = []
     for name, table in declared:
