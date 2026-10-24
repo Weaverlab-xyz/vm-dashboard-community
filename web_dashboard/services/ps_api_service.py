@@ -71,6 +71,18 @@ def configured() -> bool:
     return all(_cfg(k) for k in ("pscli_api_url", "pscli_client_id", "pscli_client_secret"))
 
 
+#: The config key holding the workgroup Password Safe reads are scoped to. Read through
+#: this constant, not as a literal at each call: CodeQL takes ``.get("password...")`` for a
+#: password, so every log line the workgroup NAME reached was flagged as leaking one.
+WORKGROUP_KEY = "passwordsafe_workgroup"
+
+
+def configured_workgroup() -> str:
+    """The workgroup filter Password Safe reads are scoped to, or "" for all."""
+    from . import config_service
+    return (config_service.get(WORKGROUP_KEY) or "").strip()
+
+
 # A per-call override of the Password Safe credentials, for callers that must not use the
 # install's singletons. Keyed by the CONFIG names so a caller building one reads the same
 # words it would have set in Settings — the same shape
