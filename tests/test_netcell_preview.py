@@ -29,6 +29,10 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-netcell-preview")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _schema import build_schema  # noqa: E402
+
+build_schema("netcell-preview")
 
 _FLAG = "netcell_enabled"
 _TPL = os.path.join(_ROOT, "web_dashboard", "templates")

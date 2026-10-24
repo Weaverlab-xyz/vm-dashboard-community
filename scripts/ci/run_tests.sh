@@ -17,6 +17,12 @@
 #   scripts/ci/run_tests.sh                    # every tests/test_*.py
 #   scripts/ci/run_tests.sh tests/test_x.py    # just these
 #
+# ONE DATABASE PER FILE. Unless the caller sets DATABASE_URL (the postgres job does),
+# each file gets its own empty SQLite file. Without this, every file that sets no URL of
+# its own shared config.py's default ./vm_cli.db in the repo root -- so a file could pass
+# only because an earlier file, alphabetically, had created the tables it reads, and
+# fail on a fresh checkout or when run alone. A file that sets its own URL keeps it.
+#
 # Run it with the interpreter CI uses (Python 3.12, web_dashboard/requirements.txt, and
 # NOT pytest: a skip calls pytest.skip() when pytest is importable, which a standalone
 # runner reports as an error).
@@ -55,11 +61,16 @@ fail=0
 failed=()
 skipped=()
 out=$(mktemp)
-trap 'rm -f "$out"' EXIT
+dbdir=$(mktemp -d)
+trap 'rm -f "$out"; rm -rf "$dbdir"' EXIT
 
 for f in "${files[@]}"; do
   echo "::group::$f"
-  "$PY" "$f" 2>&1 | tee "$out"
+  if [ -n "${DATABASE_URL:-}" ]; then
+    "$PY" "$f" 2>&1 | tee "$out"
+  else
+    DATABASE_URL="sqlite:///$dbdir/$(basename "$f" .py).db" "$PY" "$f" 2>&1 | tee "$out"
+  fi
   rc=${PIPESTATUS[0]}
   echo "::endgroup::"
   if [ "$rc" -ne 0 ]; then

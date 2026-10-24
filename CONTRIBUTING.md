@@ -176,6 +176,13 @@ It installs no pytest, because CI has none: a test file whose imports fail print
 and exits 0 without pytest, but exits 1 with it, so an extra package would make a session
 disagree with CI.
 
+Each test file gets a database of its own: `run_tests.sh` points it at an empty
+SQLite file unless `DATABASE_URL` is already set. A file whose code under test reads the
+database (most often `config_service` reading `app_config`) builds the schema itself,
+by calling `build_schema("<name>")` from `tests/_schema.py` at import. Without that a
+file can pass only after another one, which is how ten files once leaned on a
+`./vm_cli.db` an earlier file had happened to fill.
+
 A test that reads the clock should pass at any time of day and on any date. Steer by a
 fixed `now=` where the code takes one; where it reads the real clock, build every
 timestamp the assertion depends on from `utcnow()`, never a literal date, and don't step

@@ -30,6 +30,10 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _schema import build_schema  # noqa: E402
+
+build_schema("cert-lab-clouds")
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 

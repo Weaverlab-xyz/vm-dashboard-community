@@ -158,6 +158,18 @@ def test_an_install_from_before_the_ledger_runs_the_list_and_records_it():
     assert M.LEGACY_KEY in _ledger()
 
 
+def test_a_second_worker_recording_the_list_does_not_fail():
+    # gunicorn -w 2 on a fresh SQLite file: both workers find the ledger empty, the
+    # faster records the list, and the slower must not die on the UNIQUE key.
+    _fresh()
+    with D.engine.begin() as conn:
+        M._record(conn, M.LEGACY_KEY, "the second worker")
+    with D.engine.connect() as conn:
+        rows = conn.execute(text("SELECT detail FROM schema_markers WHERE key = :k"),
+                            {"k": M.LEGACY_KEY}).all()
+    assert len(rows) == 1 and rows[0][0] != "the second worker", rows
+
+
 def test_a_gap_the_list_cannot_fill_is_named_and_not_recorded():
     _fresh()
     table, column = _column_the_list_does_not_add()
