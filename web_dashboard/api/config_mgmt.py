@@ -210,7 +210,9 @@ def get_cloud_targets(
         meta = job.metadata_dict
         if meta.get("destroyed"):
             continue
-        if routes.match_for(str(meta.get("private_ip") or ""), cloud_vm=True) is not None:
+        scope, region = cmr.scope_of_deploy(job.job_type, meta)
+        if routes.match_for(str(meta.get("private_ip") or ""), scope=scope,
+                            region=region) is not None:
             continue
         ip = meta.get("public_ip") or meta.get("private_ip")
         if not ip:
@@ -322,7 +324,9 @@ def get_agent_targets(
                         "target_id": item["id"].split(":", 1)[1]})
             out["directories"].append(row)
         elif item.get("source") == "provisioned":
-            route = routes.match_for(item.get("private_ip") or "", cloud_vm=True)
+            route = routes.match_for(item.get("private_ip") or "",
+                                     scope=item.get("route_scope") or "",
+                                     region=item.get("route_region") or "")
             via = (route.label or route.cidr) if route else ""
             row.update({"cloud": item.get("cloud") or "",
                         "target_id": item.get("job_id") or "",
@@ -340,7 +344,8 @@ def get_agent_targets(
             out["cloud_vms"].append(row)
         else:
             broker = item.get("broker_agent_id") or ""
-            route = routes.match_for(item.get("ip") or "")
+            route = routes.match_for(item.get("ip") or "", scope="onprem",
+                                     connection_id=item.get("connection_id") or "")
             row.update({"cloud": item.get("cloud") or "",
                         "connection_id": item.get("connection_id") or "",
                         "target_id": item["id"].split(":")[-1],
@@ -711,7 +716,7 @@ def _wrong_executor(db, conn, host: str, agent, expected: str) -> str:
 
     runner = db.query(RemoteAgent).filter(RemoteAgent.id == expected).first()
     runner_name = runner.name if runner else (expected or "no agent")
-    route = cmr.match_for(db, host)
+    route = cmr.match_for(db, host, scope="onprem", connection_id=conn.id)
     if route is not None:
         return (f"This VM's address {host} is routed to agent '{runner_name}' by the "
                 f"Config-Management route {route.cidr}, so agent '{agent.name}' cannot run "
@@ -760,17 +765,18 @@ def _resolve_cloud_vm_target(payload: "RunRequest", db, agent, current_user) -> 
 
     # ONLY NOW, from the pinned address — the same ordering as the synced-guest branch.
     # No fallback: with no cloud route the remote worker runs it, never some agent.
-    expected = cmr.executor_for(db, host, fallback="", cloud_vm=True)
+    scope, region = cmr.scope_of_deploy(deploy.job_type, meta)
+    expected = cmr.executor_for(db, host, fallback="", scope=scope, region=region)
     if not expected:
         raise HTTPException(
             status_code=400,
             detail=(f"No Config-Management route sends cloud VMs at {host} to an agent, so "
                     f"this VM runs on the remote worker. Leave the agent unset, or add a "
-                    f"route with \"Also route cloud VMs\" under Remote Agents → Config "
-                    f"Routes."))
+                    f"route scoped to {cmr.scope_text(scope, region)} under Remote Agents → "
+                    f"Config Routes."))
     if agent.id != expected:
         runner = db.query(type(agent)).filter(type(agent).id == expected).first()
-        route = cmr.match_for(db, host, cloud_vm=True)
+        route = cmr.match_for(db, host, scope=scope, region=region)
         raise HTTPException(
             status_code=400,
             detail=(f"This VM's address {host} is routed to agent "
@@ -975,7 +981,8 @@ def _resolve_agent_target(payload: "RunRequest", db, current_user=None) -> dict:
     # that leases, runs and times out — which is the bug this feature exists to fix,
     # surviving as an accepted input. With no routes `executor_for` returns the fallback,
     # so this is byte-equivalent to the `conn.agent_id` check it replaces.
-    expected = cmr.executor_for(db, host, fallback=conn.agent_id or "")
+    expected = cmr.executor_for(db, host, fallback=conn.agent_id or "", scope="onprem",
+                                connection_id=conn.id)
     if agent.id != expected:
         raise HTTPException(status_code=400,
                             detail=_wrong_executor(db, conn, host, agent, expected))

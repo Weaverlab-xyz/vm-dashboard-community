@@ -23,18 +23,30 @@ The address stays pinned to one the discovering agent itself reported, and
 route is an input to the agent decision and can never become an input to the address
 decision. That ordering is the anti-substitution control; do not reverse it.
 
-**Cloud VMs, opt-in per route.** A route with ``include_cloud_vms`` also decides which
-agent executes a run against a dashboard-deployed cloud VM whose private address it
-covers — an agent in that VPC or VNet, instead of the remote worker. Off by default and
-off for every route that predates the flag, so an upgrade never moves a cloud VM off the
-remote worker. A cloud lookup (``cloud_vm=True``) considers only flagged routes; a
-hypervisor-guest lookup considers every route, exactly as before. The address rule is the
-same one restated: for a cloud VM it is the private address its deploy job recorded,
-never one from the request.
+**Every route has a scope**, because an address alone does not name a machine. Every AWS
+region's default VPC is 172.31.0.0/16, and half the labs in the world are 192.168.1.0/24:
+one address can be an on-premises guest, an EC2 VM and an Azure VM at once. So a route is
 
-Matching is longest-prefix-first, like a routing table. The unique constraint on
-``cidr`` is what makes that order total: two agents claiming one range is the single
-ambiguity prefix length cannot settle, so it is refused at write time instead.
+  * ``onprem`` — hypervisor guests, optionally only those discovered through one
+    connection (``connection_id``); or
+  * ``aws`` / ``azure`` / ``gcp`` — that cloud's dashboard-deployed VMs, optionally in one
+    region (``region``), executed by an agent in that VPC or VNet instead of the remote
+    worker.
+
+A lookup only ever considers routes in the TARGET's own scope. Before scopes, a
+hypervisor-guest lookup considered every route, so a cloud route for 10.40.1.0/24 also
+captured on-premises guests at 10.40.1.x — sending their runs, and the credentials sealed
+for them, to an agent that reached a different machine at the same address.
+
+The connection qualifier narrows WHICH GUESTS a route covers; it never changes WHO
+EXECUTES. ``agent_id`` is the executing agent, independent of the agent brokering the
+connection — that separation (vmrest, Hyper-V) is what this module exists for.
+
+Matching is longest-prefix-first, like a routing table, and at an equal prefix a
+qualified route (region or connection set) beats an unqualified one. The unique
+constraint on ``(cidr, scope, scope_region, scope_connection_id)`` is what makes that
+order total: two agents claiming one range in one scope is the single ambiguity it
+cannot settle, so it is refused at write time instead.
 """
 import ipaddress
 import json
@@ -59,6 +71,40 @@ logger = logging.getLogger(__name__)
 # which is the difference between that logic being covered and being covered only on CI.
 # `tests/test_config_mgmt_routes.py` imports this module directly on that basis.
 # Please do not hoist them.
+
+
+SCOPES = ("onprem", "aws", "azure", "gcp")
+CLOUD_SCOPES = ("aws", "azure", "gcp")
+SCOPE_LABELS = {"onprem": "On-premises", "aws": "AWS", "azure": "Azure",
+                "gcp": "Google Cloud"}
+
+# The deploy job types whose VMs a cloud-scoped route can govern, and their scope.
+DEPLOY_SCOPES = {"ec2_deploy": "aws", "azure_deploy": "azure", "gce_deploy": "gcp"}
+
+
+def scope_of_deploy(job_type: str, meta: dict) -> tuple:
+    """``(scope, region)`` of a dashboard-deployed VM, from its deploy job — the one place
+    that decides it. ``("", "")`` for a job type no route can govern.
+
+    The region is whichever key the cloud's deploy wrote: ``region`` (AWS, GCP),
+    ``location`` (Azure), else derived from a GCP ``zone`` (``us-central1-a`` →
+    ``us-central1``)."""
+    scope = DEPLOY_SCOPES.get(job_type or "", "")
+    if not scope:
+        return "", ""
+    meta = meta or {}
+    region = str(meta.get("region") or meta.get("location") or "").strip().lower()
+    if not region and scope == "gcp":
+        zone = str(meta.get("zone") or "").strip().lower()
+        region = zone.rsplit("-", 1)[0] if zone.count("-") >= 2 else ""
+    return scope, region
+
+
+def scope_text(scope: str, region: str = "", connection_name: str = "") -> str:
+    """"AWS · us-east-2", "On-premises · vmrest-lab" — for lists and refusals."""
+    base = SCOPE_LABELS.get(scope, scope)
+    detail = region or connection_name
+    return f"{base} · {detail}" if detail else base
 
 
 class ConfigRouteError(Exception):
@@ -146,7 +192,19 @@ class Route:
     network: object          # IPv4Network | IPv6Network
     label: str
     cidr: str
-    cloud_vms: bool = False  # also governs dashboard-deployed cloud VMs in this range
+    scope: str = "onprem"    # onprem | aws | azure | gcp
+    region: str = ""         # cloud scopes: one region, or "" for every region
+    connection_id: str = ""  # onprem: one connection's guests, or "" for every one
+
+    @property
+    def qualified(self) -> bool:
+        return bool(self.region or self.connection_id)
+
+    def covers(self, *, scope: str, region: str = "", connection_id: str = "") -> bool:
+        """Whether a target in this scope is one this route may govern at all."""
+        return (self.scope == scope
+                and self.region in ("", (region or "").lower())
+                and self.connection_id in ("", connection_id or ""))
 
 
 @dataclass(frozen=True)
@@ -162,13 +220,15 @@ class RouteTable:
     def __bool__(self) -> bool:
         return bool(self.routes)
 
-    def match_for(self, address: str, *, cloud_vm: bool = False) -> Optional[Route]:
-        """The most specific route covering ``address``, or None.
+    def match_for(self, address: str, *, scope: str = "onprem", region: str = "",
+                  connection_id: str = "") -> Optional[Route]:
+        """The most specific route covering ``address`` in the target's scope, or None.
 
-        ``cloud_vm`` restricts the search to routes that opted in to cloud VMs. It is a
-        filter on the candidate set, not a second rule: the order (longest prefix first)
-        is the same one, so a flagged /24 inside an unflagged /16 still governs the cloud
-        VMs in that /24, and the /16's hypervisor guests are untouched.
+        ``scope`` is the TARGET's: ``onprem`` with the ``connection_id`` that discovered a
+        hypervisor guest, or a cloud with the ``region`` a VM was deployed to
+        (:func:`scope_of_deploy`). It is a filter on the candidate set, not a second
+        rule: the order is the same one, longest prefix first and a qualified route
+        before an unqualified one at an equal prefix.
 
         A non-IP (a hostname, or an empty string from a VM with no synced address) is
         *not* an error here — it simply matches nothing, so the caller falls back to the
@@ -180,7 +240,7 @@ class RouteTable:
         except ValueError:
             return None
         for route in self.routes:
-            if cloud_vm and not route.cloud_vms:
+            if not route.covers(scope=scope, region=region, connection_id=connection_id):
                 continue
             # `in` returns False across address families rather than raising, so v4 and
             # v6 rows can share one flat list.
@@ -188,15 +248,17 @@ class RouteTable:
                 return route
         return None
 
-    def executor_for(self, address: str, *, fallback: str = "",
-                     cloud_vm: bool = False) -> str:
+    def executor_for(self, address: str, *, fallback: str = "", scope: str = "onprem",
+                     region: str = "", connection_id: str = "") -> str:
         """Which agent id executes a run against ``address``.
 
-        ``fallback`` is the brokering agent. With an empty table this returns it
-        unchanged, which is the backwards-compatibility contract: an install with no
-        routes behaves exactly as it did before this module existed.
+        ``fallback`` is the brokering agent for a guest, and "" (the remote worker) for a
+        cloud VM. With an empty table this returns it unchanged, which is the
+        backwards-compatibility contract: an install with no routes behaves exactly as it
+        did before this module existed.
         """
-        match = self.match_for(address, cloud_vm=cloud_vm)
+        match = self.match_for(address, scope=scope, region=region,
+                               connection_id=connection_id)
         return match.agent_id if match else fallback
 
 
@@ -229,24 +291,36 @@ def load_table(db) -> RouteTable:
             continue
         parsed.append(Route(id=row.id, agent_id=row.agent_id, network=network,
                             label=row.label or "", cidr=row.cidr,
-                            cloud_vms=bool(row.include_cloud_vms)))
-    parsed.sort(key=lambda r: (-r.network.prefixlen, r.network.version,
-                               r.network.network_address))
+                            scope=row.scope or "onprem",
+                            region=(row.scope_region or "").lower(),
+                            connection_id=row.scope_connection_id or ""))
+    parsed.sort(key=_order)
     return RouteTable(tuple(parsed))
 
 
-def executor_for(db, address: str, *, fallback: str = "", cloud_vm: bool = False) -> str:
+def _order(route: Route) -> tuple:
+    """Longest prefix first; at an equal prefix a qualified route first; then a stable
+    order by version and address."""
+    return (-route.network.prefixlen, 0 if route.qualified else 1, route.network.version,
+            route.network.network_address)
+
+
+def executor_for(db, address: str, *, fallback: str = "", scope: str = "onprem",
+                 region: str = "", connection_id: str = "") -> str:
     """One-shot convenience for a single run. Same answer as :meth:`RouteTable.executor_for`.
 
     ``tests/test_config_mgmt_routes.py`` pins that those two agree — two entry points
     into one rule is exactly the drift this module is shaped to avoid.
     """
-    return load_table(db).executor_for(address, fallback=fallback, cloud_vm=cloud_vm)
+    return load_table(db).executor_for(address, fallback=fallback, scope=scope,
+                                       region=region, connection_id=connection_id)
 
 
-def match_for(db, address: str, *, cloud_vm: bool = False) -> Optional[Route]:
+def match_for(db, address: str, *, scope: str = "onprem", region: str = "",
+              connection_id: str = "") -> Optional[Route]:
     """The route covering ``address``, for a refusal that needs to name it."""
-    return load_table(db).match_for(address, cloud_vm=cloud_vm)
+    return load_table(db).match_for(address, scope=scope, region=region,
+                                    connection_id=connection_id)
 
 
 # ── CRUD ──────────────────────────────────────────────────────────────────────
@@ -260,7 +334,12 @@ def serialize(row) -> dict:
         "cidr": row.cidr,
         "label": row.label or "",
         "is_active": bool(row.is_active),
-        "include_cloud_vms": bool(row.include_cloud_vms),
+        "scope": row.scope or "onprem",
+        "region": row.scope_region or "",
+        "connection_id": row.scope_connection_id or "",
+        # Derived, for readers written before scopes: a cloud-scoped route is the one that
+        # sends cloud VMs to an agent. Never read back on a write.
+        "include_cloud_vms": (row.scope or "onprem") != "onprem",
         "created_by": row.created_by or "",
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
@@ -296,12 +375,12 @@ def match_counts(db) -> dict:
     counts = {r.id: 0 for r in table.routes}
     if not table:
         return counts
-    rows = (db.query(HypervisorVMCache.ip_addresses)
+    rows = (db.query(HypervisorVMCache.ip_addresses, HypervisorVMCache.connection_id)
             .join(HypervisorConnection,
                   HypervisorConnection.id == HypervisorVMCache.connection_id)
             .filter(HypervisorConnection.is_active.is_(True))
             .all())
-    for (raw,) in rows:
+    for raw, connection_id in rows:
         try:
             ips = json.loads(raw or "[]")
         except (TypeError, ValueError):
@@ -309,7 +388,7 @@ def match_counts(db) -> dict:
         # The FIRST address only: that is the one `_hv_item` publishes as the target, so
         # counting every interface would overstate what a route actually governs.
         first = next((str(i) for i in ips if str(i).strip()), "")
-        route = table.match_for(first)
+        route = table.match_for(first, scope="onprem", connection_id=connection_id or "")
         if route is not None:
             counts[route.id] = counts.get(route.id, 0) + 1
     return counts
@@ -318,14 +397,14 @@ def match_counts(db) -> dict:
 def cloud_match_counts(db, addresses) -> dict:
     """``{route_id: how many cloud VMs' private addresses it governs}``.
 
-    The cloud half of :func:`match_counts`, for routes with ``include_cloud_vms``. The
-    caller supplies the addresses (``inventory_service.cloud_vm_private_ips``) so this
-    module keeps no knowledge of deploy-job metadata.
+    The cloud half of :func:`match_counts`, for cloud-scoped routes. The caller supplies
+    ``(scope, region, address)`` triples (``inventory_service.cloud_vm_private_ips``), so
+    this module keeps no knowledge of deploy-job metadata.
     """
     table = load_table(db)
-    counts = {r.id: 0 for r in table.routes if r.cloud_vms}
-    for address in addresses:
-        route = table.match_for(address, cloud_vm=True)
+    counts = {r.id: 0 for r in table.routes if r.scope != "onprem"}
+    for scope, region, address in addresses:
+        route = table.match_for(address, scope=scope, region=region)
         if route is not None:
             counts[route.id] = counts.get(route.id, 0) + 1
     return counts
@@ -365,10 +444,47 @@ def _check_agent(db, agent_id: str):
     return agent
 
 
-def _refuse_duplicate(db, cidr: str, *, excluding: str = "") -> None:
-    from ..database import ConfigMgmtRoute, RemoteAgent
+def _check_scope(db, scope: str, region: str, connection_id: str) -> tuple:
+    """The normalised ``(scope, region, connection_id)``, or raise."""
+    scope = (scope or "onprem").strip().lower()
+    if scope not in SCOPES:
+        raise ConfigRouteError(
+            f"Scope must be one of {', '.join(SCOPES)}: on-premises guests, or one cloud's "
+            f"dashboard-deployed VMs.")
+    region = (region or "").strip().lower()
+    connection_id = (connection_id or "").strip()
+    if scope == "onprem":
+        if region:
+            raise ConfigRouteError(
+                "A region narrows a cloud route. For on-premises guests, narrow by "
+                "connection instead, or leave both blank.")
+        if connection_id:
+            from ..database import HypervisorConnection
+            if db.query(HypervisorConnection).filter(
+                    HypervisorConnection.id == connection_id).first() is None:
+                raise ConfigRouteError("That hypervisor connection does not exist.")
+    else:
+        if connection_id:
+            raise ConfigRouteError(
+                "A connection narrows an on-premises route. For a cloud, narrow by "
+                "region instead, or leave both blank.")
+        if region:
+            from . import region_catalog
+            if not region_catalog.validate(scope, region):
+                raise ConfigRouteError(
+                    f"{region!r} is not a {SCOPE_LABELS[scope]} region.")
+            region = region_catalog.normalize(scope, region).lower()
+    return scope, region, connection_id
 
-    query = db.query(ConfigMgmtRoute).filter(ConfigMgmtRoute.cidr == cidr)
+
+def _refuse_duplicate(db, cidr: str, scope: str = "onprem", region: str = "",
+                      connection_id: str = "", *, excluding: str = "") -> None:
+    from ..database import ConfigMgmtRoute, HypervisorConnection, RemoteAgent
+
+    query = db.query(ConfigMgmtRoute).filter(
+        ConfigMgmtRoute.cidr == cidr, ConfigMgmtRoute.scope == scope,
+        ConfigMgmtRoute.scope_region == region,
+        ConfigMgmtRoute.scope_connection_id == connection_id)
     if excluding:
         query = query.filter(ConfigMgmtRoute.id != excluding)
     clash = query.first()
@@ -377,25 +493,33 @@ def _refuse_duplicate(db, cidr: str, *, excluding: str = "") -> None:
     owner = db.query(RemoteAgent).filter(RemoteAgent.id == clash.agent_id).first()
     name = owner.name if owner else clash.agent_id
     label = f" ('{clash.label}')" if clash.label else ""
+    conn_name = ""
+    if connection_id:
+        conn = db.query(HypervisorConnection).filter(
+            HypervisorConnection.id == connection_id).first()
+        conn_name = conn.name if conn else connection_id
     raise ConfigRouteError(
-        f"{cidr} is already routed to agent '{name}'{label}. One address range can name "
-        f"only one executing agent, or the dashboard would have to guess which. Edit that "
-        f"route, or add a narrower range — the most specific range wins.")
+        f"{cidr} is already routed to agent '{name}'{label} for "
+        f"{scope_text(scope, region, conn_name)}. One range can name only one executing "
+        f"agent in one scope, or the dashboard would have to guess which. Edit that route, "
+        f"add a narrower range — the most specific range wins — or narrow this one to a "
+        f"region or connection.")
 
 
-def create(db, *, agent_id: str, cidr: str, label: str = "",
-           created_by: str = "", include_cloud_vms: bool = False) -> dict:
+def create(db, *, agent_id: str, cidr: str, label: str = "", created_by: str = "",
+           scope: str = "onprem", region: str = "", connection_id: str = "") -> dict:
     from sqlalchemy.exc import IntegrityError
 
     from ..database import ConfigMgmtRoute
 
     _check_agent(db, agent_id)
     normalized = normalize_cidr(cidr)
-    _refuse_duplicate(db, normalized)
+    scope, region, connection_id = _check_scope(db, scope, region, connection_id)
+    _refuse_duplicate(db, normalized, scope, region, connection_id)
     row = ConfigMgmtRoute(
         id=str(uuid.uuid4()), agent_id=agent_id, cidr=normalized,
         label=(label or "").strip() or None, is_active=True,
-        include_cloud_vms=bool(include_cloud_vms),
+        scope=scope, scope_region=region, scope_connection_id=connection_id,
         created_by=created_by or None)
     db.add(row)
     try:
@@ -404,7 +528,7 @@ def create(db, *, agent_id: str, cidr: str, label: str = "",
         # The unique constraint, reached by two operators saving at once. Rolled back and
         # re-raised as the operator message so a race reads the same as a clash.
         db.rollback()
-        _refuse_duplicate(db, normalized)
+        _refuse_duplicate(db, normalized, scope, region, connection_id)
         raise
     db.refresh(row)
     return serialize(row)
@@ -415,16 +539,25 @@ def update(db, route_id: str, **fields) -> dict:
     if fields.get("agent_id") is not None:
         _check_agent(db, str(fields["agent_id"]))
         row.agent_id = str(fields["agent_id"])
-    if fields.get("cidr") is not None:
-        normalized = normalize_cidr(str(fields["cidr"]))
-        _refuse_duplicate(db, normalized, excluding=row.id)
-        row.cidr = normalized
+    cidr = (normalize_cidr(str(fields["cidr"])) if fields.get("cidr") is not None
+            else row.cidr)
+    new_scope = fields["scope"] if fields.get("scope") is not None else row.scope
+    # A qualifier belongs to its scope: moving a route to another scope drops the old one
+    # unless the request names a new one.
+    moved = (new_scope or "onprem") != (row.scope or "onprem")
+    scope, region, connection_id = _check_scope(
+        db, new_scope,
+        (fields["region"] if fields.get("region") is not None
+         else ("" if moved else row.scope_region)),
+        (fields["connection_id"] if fields.get("connection_id") is not None
+         else ("" if moved else row.scope_connection_id)))
+    _refuse_duplicate(db, cidr, scope, region, connection_id, excluding=row.id)
+    row.cidr = cidr
+    row.scope, row.scope_region, row.scope_connection_id = scope, region, connection_id
     if fields.get("label") is not None:
         row.label = str(fields["label"]).strip() or None
     if fields.get("is_active") is not None:
         row.is_active = bool(fields["is_active"])
-    if fields.get("include_cloud_vms") is not None:
-        row.include_cloud_vms = bool(fields["include_cloud_vms"])
     row.updated_at = _utcnow()
     db.commit()
     db.refresh(row)

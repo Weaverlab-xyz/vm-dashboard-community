@@ -56,14 +56,15 @@ def _vm_item(job, routes: "cmr.RouteTable" = cmr.EMPTY) -> dict:
     Name/region are pulled from whichever metadata key the provider used, so this
     stays robust across the per-cloud deploy shapes.
 
-    ``routes`` decides whether a Config-Management route (one with ``include_cloud_vms``)
-    sends this VM's runs to an agent. It defaults to the empty table, which is the remote
+    ``routes`` decides whether a Config-Management route scoped to this VM's cloud (and
+    region) sends its runs to an agent. It defaults to the empty table, which is the remote
     worker for every VM — the answer for callers that do not route, post-deploy runs among
     them."""
     meta = job.metadata_dict
     cloud, href = _VM_JOBS[job.job_type]
     private_ip = str(meta.get("private_ip") or "").strip()
-    route_agent = (routes.executor_for(private_ip, cloud_vm=True)
+    scope, region = cmr.scope_of_deploy(job.job_type, meta)
+    route_agent = (routes.executor_for(private_ip, scope=scope, region=region)
                    if cloud in _AGENT_ROUTABLE_CLOUDS and private_ip else "")
     name = (meta.get("instance_name") or meta.get("vm_name") or meta.get("name")
             or job.cloud_resource_id or "(unnamed)")
@@ -95,6 +96,10 @@ def _vm_item(job, routes: "cmr.RouteTable" = cmr.EMPTY) -> dict:
         # matches. Separate from `ip`, which prefers the public address for the remote
         # worker and must keep meaning exactly that.
         "private_ip": private_ip,
+        # The route scope this VM is matched in (cmr.scope_of_deploy), so every reader of
+        # this row asks the route table the same question the gate does.
+        "route_scope": scope,
+        "route_region": region,
         # Who executes a Config-Management run against it: an agent a cloud-VM route names,
         # or None for the remote worker. Resolved here so the picker, the bulk fan-out and
         # the enqueue gate read one answer (config_mgmt_route_service).
@@ -617,7 +622,9 @@ def _hv_item(conn, row, workgroup: Optional[str], ips: list,
         # host and Docker Desktop's WSL2 VM reaches no vmnet. Resolved HERE so
         # /agent-targets, `_target_spec` and the bulk fan-out cannot disagree about it.
         "agent_id": routes.executor_for(ips[0] if ips else "",
-                                        fallback=getattr(conn, "agent_id", None) or "")
+                                        fallback=getattr(conn, "agent_id", None) or "",
+                                        scope="onprem",
+                                        connection_id=getattr(conn, "id", "") or "")
                     or None,
         # WHO DISCOVERED it. Provenance, and the field a diagnostic must name: the
         # `sync_guest_details` remedy for a VM with no address belongs in the BROKER's
@@ -710,8 +717,8 @@ def _hypervisor_items(db: Session, claimed: set, routes: "cmr.RouteTable") -> li
 
 
 def cloud_vm_private_ips(db: Session) -> list:
-    """The private address of every live, dashboard-deployed cloud VM a route could govern.
-    Feeds the Config Routes page's "how many cloud VMs does this range cover" count."""
+    """``(scope, region, private address)`` of every live, dashboard-deployed cloud VM a
+    route could govern. Feeds the Config Routes page's "how many cloud VMs" count."""
     out = []
     for job in (db.query(Job)
                 .filter(Job.job_type.in_(tuple(_VM_JOBS)), Job.status == "completed")
@@ -721,7 +728,8 @@ def cloud_vm_private_ips(db: Session) -> list:
             continue
         ip = str(meta.get("private_ip") or "").strip()
         if ip:
-            out.append(ip)
+            scope, region = cmr.scope_of_deploy(job.job_type, meta)
+            out.append((scope, region, ip))
     return out
 
 
