@@ -165,7 +165,15 @@ def has_work(db: Session) -> bool:
     scheduled_hosts = (db.query(AgentHost.id)
                        .filter(AgentHost.mode.in_(("until", "window")))
                        .first())
-    return bool(scheduled_hosts)
+    if scheduled_hosts:
+        return True
+    # A rollout waiting on its canary ring: the canary's upgrades may run with nothing
+    # else scheduled, and this pass is what queues the rest.
+    from ..database import AgentRollout
+    rolling = (db.query(AgentRollout.id)
+               .filter(AgentRollout.status.in_(("canary", "default")))
+               .first())
+    return bool(rolling)
 
 
 def enqueue_sweep_if_due(db: Session, *, min_gap_seconds: "int | None" = None) -> "str | None":
@@ -366,6 +374,19 @@ def _sweep_agent_hosts(db: Session, now: datetime) -> list:
         return []
 
 
+def _sweep_rollouts(db: Session) -> int:
+    """Move each agent rollout on: the default ring after the canary, or stop it.
+
+    Isolated like the agent-host pass, for the same reason."""
+    from . import agent_lifecycle_service
+    try:
+        return agent_lifecycle_service.advance_rollouts(db)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("schedule sweep: agent rollout pass failed: %s", exc)
+        db.rollback()
+        return 0
+
+
 async def run(db: Session, *, job_id: str, meta: dict) -> None:
     """One pass: reap missed windows, materialise due schedules, record outcomes."""
     job_service.set_running(db, job_id)
@@ -376,6 +397,7 @@ async def run(db: Session, *, job_id: str, meta: dict) -> None:
         _note_finished(db, now)
         db.commit()
         hosts = _sweep_agent_hosts(db, now)
+        rollouts = _sweep_rollouts(db)
         # This sweep writes a row per pass whether or not it found anything, so it prunes
         # its own history the way the auto-delete sweep does — otherwise it would push
         # real deploys off the first page of /jobs within days. Shares that feature's
@@ -389,6 +411,7 @@ async def run(db: Session, *, job_id: str, meta: dict) -> None:
             "scheduled_count": len(created),
             "pruned": pruned,
             "agent_hosts": hosts,
+            "agent_rollouts": rollouts,
         })
     except Exception as exc:
         logger.error("schedule sweep failed: %s", exc)

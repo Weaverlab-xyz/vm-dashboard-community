@@ -521,7 +521,16 @@ def lease_one(db: Session, agent: RemoteAgent, *,
     transiently was re-leased instantly instead of waiting out its backoff; routing
     through the shared predicate fixes that too.
     """
+    # Paused from the Agents page: still heartbeats (authenticate bumped last_seen_at),
+    # and jobs it already holds finish, but it is handed nothing new.
+    if getattr(agent, "paused", None):
+        return None
     allowed = allowed_job_types(agent)
+    # Upgrade and restart: gated when they are queued (agent_lifecycle_service.host_gate),
+    # and claimable only by a SPIRE-attested agent, whose successor can finish the job.
+    if (getattr(agent, "auth_mode", None) or "ed25519") == "spiffe":
+        from .agent_lifecycle_service import CONTROL_JOB_TYPES
+        allowed = allowed + CONTROL_JOB_TYPES
     # An agent running several jobs at once asks only for what it has a free slot for.
     # Intersected with the grant, so the request can narrow the claim and never widen it.
     if want_job_types is not None:
@@ -816,7 +825,7 @@ def set_allowed_job_types(db: Session, agent: RemoteAgent, types) -> RemoteAgent
 
 def record_self_report(db: Session, agent: RemoteAgent, *,
                        agent_version: str = "", job_types=None,
-                       ansible_slots: int = 0) -> None:
+                       ansible_slots: int = 0, control=None) -> None:
     """Store what the agent reported about itself on this lease.
 
     ``agent_version`` was previously written only at enrolment, so an operator who
@@ -850,6 +859,16 @@ def record_self_report(db: Session, agent: RemoteAgent, *,
         if slots != (agent.reported_ansible_slots or 0):
             agent.reported_ansible_slots = slots
             changed = True
+
+    # Agent 2.10+: whether its policy.yaml opts into upgrades and an updater is beside it.
+    # Absent (older agents) leaves both alone, which is NULL: "not reported".
+    if isinstance(control, dict):
+        for column, key in (("control_upgrades", "upgrades_enabled"),
+                            ("control_updater", "updater_present")):
+            value = bool(control.get(key))
+            if getattr(agent, column) is not value:
+                setattr(agent, column, value)
+                changed = True
 
     if changed:
         db.commit()
