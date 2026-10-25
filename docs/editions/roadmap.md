@@ -259,7 +259,7 @@ the next things queued for QA.
   remote runners** (ECS / ACI / Cloud Run) for Ansible, Kubernetes, and
   image-promote runs — those run **cloud-side** and are torn down after
   each job. Community now *also* owns the hub-and-spoke primitive itself:
-  [remote agents](../admin/remote-agents.md) are containerised, customer-hosted spokes
+  [remote agents](../platform/spiffe/remote-agents.md) are containerised, customer-hosted spokes
   that poll out to the dashboard, enrol with a short-lived code, and
   authenticate with an Ed25519 key they generate themselves. Community
   scopes them to **discovery** of on-prem Kubernetes clusters and databases,

@@ -13,15 +13,15 @@ reading and writing.
 It exists because the dashboard's own "Local Filesystem / UNC" backend opens the SMB
 socket from inside its own container, which means it only works when the dashboard is
 already on the same network as the share. Most are not: a dashboard on Azure Container
-Apps has no route to a file server, and a [POV instance](../../profiles/pov/README.md) has no cloud
+Apps has no route to a file server, and a [POV instance](../../../profiles/pov/README.md) has no cloud
 provider to fall back on, so it has nowhere to put a playbook at all. The agent is
 already inside; this makes it the path.
 
-Full setup, fields and limits: [Storage Management → Remote Filesystem / UNC](../../operations/storage-management/configuring.md#remote-filesystem--unc-via-agent).
+Full setup, fields and limits: [Storage Management → Remote Filesystem / UNC](../../../operations/storage-management/configuring.md#remote-filesystem--unc-via-agent).
 
 ### The dashboard holds a name, not a path
 
-`shares.yaml` — [example](../../../examples/remote-agent/shares.example.yaml) — maps a name to
+`shares.yaml` — [example](../../../../examples/remote-agent/shares.example.yaml) — maps a name to
 a path and, for UNC, a credential. Mount it `:ro,Z` beside `policy.yaml`:
 
 ```yaml

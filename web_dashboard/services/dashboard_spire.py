@@ -183,7 +183,7 @@ def _cli(*args: str, timeout: int = 30, input: Optional[str] = None) -> str:
             raise DashboardSpireError(
                 f"the SPIRE server container {container()!r} is not running. Start it with "
                 f"docker compose -f docker-compose.yml -f docker-compose.spire.yml up -d, "
-                f"or set its name under Settings → Remote agents.")
+                f"or set its name under Settings → SPIFFE and SPIRE.")
         if any(s in stderr for s in _SOCKET_DOWN):
             raise DashboardSpireError(
                 f"the SPIRE server sidecar is not running (nothing is listening on its "
@@ -430,7 +430,7 @@ def check_agent_address(host: str, port: int, bundle_pem: str, td: str,
     except ssl.SSLCertVerificationError:
         return False, (f"{host}:{port} answers with a SPIRE server this dashboard does not "
                        f"trust: another dashboard's, or another trust domain's. Set SPIRE "
-                       f"server address for agents (Settings → Remote Agents) to the "
+                       f"server address for agents (Settings → SPIFFE and SPIRE) to the "
                        f"host:port that reaches THIS dashboard's server")
     except (ssl.SSLError, OSError) as exc:
         # It connected, so something is there; it just is not a SPIRE server's TLS.

@@ -18,11 +18,23 @@ The dashboard uses SPIFFE in two quite different ways:
   SPIRE trust domains for demos, and the Password Safe **SPIFFE SVID** plugin governs
   them. Those servers are covered on [their own page](../preview/workload-lab/spiffe.md).
 
+## Remote agents
+
+The dashboard does not trust a remote agent. An agent runs on a network the dashboard does
+not control, so it has to prove what it is: it attests to the dashboard's SPIRE server at
+every start, and signs every request it makes after that with a key that exists only in
+its memory. That is why the agents' pages live here.
+
+| Page | Read it when |
+|---|---|
+| [Remote Agents](spiffe/remote-agents.md) | your hypervisors, databases or clusters live somewhere the dashboard cannot reach, and you want the trust model, the architecture and the agent's pages |
+| [Attesting an agent through SPIRE](spiffe/remote-agents/spire-attestation.md) | you are setting an agent up to attest, or moving an enrolled agent from a key on disk to SPIRE |
+
 ## Where SPIFFE shows up
 
 | Feature | What SPIFFE does there | Trust domain | Read |
 |---|---|---|---|
-| Remote agent attestation | an agent proves itself at every start with a JWT-SVID, and keeps its signing key only in memory | the dashboard's | [Attesting an agent through SPIRE](../admin/remote-agents/spire-attestation.md) |
+| Remote agents | an agent proves itself at every start with a JWT-SVID, and keeps its signing key only in memory | the dashboard's | [Remote Agents](spiffe/remote-agents.md), [Attesting an agent through SPIRE](spiffe/remote-agents/spire-attestation.md) |
 | The dashboard's own identity | the dashboard reaches AWS, Azure, GCP, k3s and Workload Credentials with tokens its own server signs, instead of a stored key | the dashboard's | [The dashboard's own identity](oidc/dashboard-identity.md) |
 | Service accounts | a workload calls the dashboard's API with its SVID and holds no dashboard secret | any registered one, including the dashboard's | [SPIFFE workloads](../admin/service-accounts.md#spiffe-workloads-authenticate-with-the-svid-hold-nothing) |
 | POV control node agents | a POV's control node attests at every start, falling back to its enrolment code where the guest cannot reach the server | the POV instance's | [SPIRE on the control node](../profiles/pov/skytap/control-node.md#spire-on-the-control-node) |
@@ -296,12 +308,12 @@ can be copied and used offline for ever. It is not "the app holds nothing".
 ## Settings and environment
 
 The switches that **use** the server are on the feature pages:
-- [Let agents attest through SPIRE](../admin/remote-agents/spire-attestation.md#settings) (`spire_attest_enabled`);
+- [Let agents attest through SPIRE](spiffe/remote-agents/spire-attestation.md#settings) (`spire_attest_enabled`);
 - [Give the dashboard its own SPIFFE identity](oidc/dashboard-identity.md#settings) (`dashboard_spiffe_identity_enabled`).
 - On a POV instance, [AWS for the POV cloud provider with no stored key](../profiles/pov/public-cloud/keyless-aws.md), which uses that identity.
 
-These two are about the server itself, both on **Settings → Integrations → Remote
-Agents**:
+These are about the server itself, on **Settings → Integrations → Platform → SPIFFE and SPIRE**, the same
+panel as the dashboard's own identity:
 
 | Setting | Key | Default | What it does |
 |---|---|---|---|

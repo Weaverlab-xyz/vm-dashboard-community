@@ -110,7 +110,7 @@ Things to know:
 * **Cloud pages** (AWS, Azure, GCP, OCI) can book any selection.
 * **On-premises pages** (Proxmox, vSphere, Hyper-V, XCP-ng, VMware Workstation) can book
   only VMs on an **agent-bound** connection. There the job waits in the queue and the
-  [remote agent](../../admin/remote-agents/hypervisors.md) is simply not offered it until its time.
+  [remote agent](../../platform/spiffe/remote-agents/hypervisors.md) is simply not offered it until its time.
   A connection the dashboard dials **directly** runs a power operation in the dashboard
   process, right now — a booking there would create a scheduled-looking job and power the
   machine off immediately. So each direct-connection VM in the selection is refused on its

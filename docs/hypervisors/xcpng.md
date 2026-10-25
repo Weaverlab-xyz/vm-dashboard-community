@@ -48,7 +48,7 @@ the **XCP-ng** page appears under **Hypervisors** in the navigation, at `/xcpng`
 or **Reboot** to the whole selection — one job per VM, sharing a batch you watch on one
 page. VMs already in the target state are skipped and the confirmation says how many;
 fifty per operation is the cap. See
-[Powering a selection](../admin/remote-agents/hypervisors/power.md).
+[Powering a selection](../platform/spiffe/remote-agents/hypervisors/power.md).
 
 Those four only. The rest of the table above stays per-VM: each of them depends on the
 state the VM is in right now — Resume needs a suspended VM, Unpause a paused one — which
@@ -59,7 +59,7 @@ under [Inventory](../operations/inventory.md)'s **Tag** filter. Proxmox is the o
 reports tags today; see [Cloud VMs — Tags and labels](../clouds/vms/tags.md).
 
 **Scheduling power.** On a connection bound to a
-[remote agent](../admin/remote-agents/hypervisors.md), the bulk power toolbar's **Schedule**
+[remote agent](../platform/spiffe/remote-agents/hypervisors.md), the bulk power toolbar's **Schedule**
 tick books the operation for a time or a change window. A directly dialled connection
 cannot be booked, and each of its VMs is refused by name. See [Scheduling](../operations/scheduling.md).
 
@@ -167,7 +167,7 @@ image still works.
 ## Over a remote agent
 
 A XCP-ng pool the dashboard has no network route to can be reached through a
-[remote agent](../admin/remote-agents/hypervisors.md#hypervisor-connections) instead. Tick *Reached
+[remote agent](../platform/spiffe/remote-agents/hypervisors.md#hypervisor-connections) instead. Tick *Reached
 through a remote agent* when adding the connection and give it the name that connection
 has in the agent's own `connections.yaml`.
 
@@ -190,7 +190,7 @@ Power actions still work: they are dispatched to the agent as jobs and appear on
 with Live Output, exactly like a discovery scan. Start, Force Off, Shutdown, Reboot and
 Hard Reboot all map to a verb; **Suspend, Resume, Pause and Unpause** do not, and are
 refused with a 501 naming what is available rather than approximated onto a neighbouring
-operation — see [the verbs](../admin/remote-agents/hypervisors.md#the-verbs).
+operation — see [the verbs](../platform/spiffe/remote-agents/hypervisors.md#the-verbs).
 
 Shutdown and Reboot are the two that need the guest utilities. The synced inventory
 carries no `tools_installed`, so those buttons are offered rather than hidden — and no

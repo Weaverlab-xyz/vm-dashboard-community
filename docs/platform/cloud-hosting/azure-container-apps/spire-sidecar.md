@@ -96,10 +96,11 @@ az containerapp logs show -n dash -g RG-DASH --container spire --tail 50
 ```
 
 **4. The dashboard.** Under **Settings → Integrations → Remote Agents**, tick
-**Let agents attest through SPIRE**. Leave **SPIRE server address for agents** blank: the
+**Let agents attest through SPIRE**. Under **Settings → Integrations → Platform → SPIFFE and SPIRE**, leave
+**SPIRE server address for agents** blank: the
 agent hostname's custom domain resolves to the environment's address, and that address
 carries the TCP ports too. From an agent host, `nc -vz agents.example.com 8081` should
-connect. Then migrate agents as on [the guide](../../../admin/remote-agents/spire-attestation.md#setting-it-up).
+connect. Then migrate agents as on [the guide](../../spiffe/remote-agents/spire-attestation.md#setting-it-up).
 
 `UI_ALLOWED_CIDR` does not cover these ports: it is the gateway's, and only for the UI
 hostname. Restrict 8081 and 8082 at the network level if agents come from known addresses.

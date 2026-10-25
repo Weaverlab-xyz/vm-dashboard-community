@@ -2687,7 +2687,8 @@ def federation_problem(db: Session, row: SpireLab) -> str:
                 f"relationship with. Press Refresh keys on the lab first")
     if not dashboard_spire.server_in_use():
         return ("the dashboard's own SPIRE server is not in use. Turn on agent attestation "
-                "or the dashboard's SPIFFE identity under Settings → Remote Agents first")
+                "under Settings → Remote Agents, or the dashboard's SPIFFE identity under "
+                "Settings → SPIFFE and SPIRE, first")
     if not dashboard_spire.server_address():
         return ("the dashboard has no address the lab can reach its SPIRE server at — pin "
                 "the agent audience under Settings → Remote Agents")

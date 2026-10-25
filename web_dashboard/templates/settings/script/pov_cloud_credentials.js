@@ -17,7 +17,7 @@ function settingsPovCloudCredentials() {
     // Read back the stored lease state for each cloud. Note this does NOT authenticate:
     // it reports what the last mint recorded, which is why testWlcConnection() exists.
     // POV cloud panel → SPIFFE. Federation needs the identity AND the AWS audience on,
-    // so choosing it ticks both (they are the same keys the Remote Agents panel shows).
+    // so choosing it ticks both (they are the same keys the SPIFFE and SPIRE panel shows).
     // It deliberately does NOT clear a stored key: that is removePovAwsStoredKey(), an
     // explicit click, because a key that silently vanished on a radio change is a
     // credential the operator can no longer see they had.

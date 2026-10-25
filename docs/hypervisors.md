@@ -16,5 +16,5 @@ pages the app's **Hypervisors** menu leads to. Each is off until you enable it i
 | [XCP-ng / XenServer](hypervisors/xcpng.md) | your VMs live on XCP-ng or XenServer |
 
 Related:
-- [Remote Agents](admin/remote-agents.md): when the hypervisor sits in a network the dashboard cannot reach;
+- [Remote Agents](platform/spiffe/remote-agents.md): when the hypervisor sits in a network the dashboard cannot reach;
 - [Inventory](operations/inventory.md): every hypervisor VM in one list, beside the clouds'.

@@ -85,7 +85,7 @@ remote agents, secret vault registrations.
 - **Personal access tokens.** Stored as hashes; re-issue them.
 - **Remote agents.** The private half of an agent's Ed25519 identity never
   leaves the agent host. Re-enrol against the new audience — see
-  [remote-agents.md](../admin/remote-agents.md).
+  [remote-agents.md](spiffe/remote-agents.md).
 
 **Deliberately never migrated:** deployed databases, clusters, gateways and
 desktops. Two dashboards holding deploy records for one set of real resources

@@ -1133,7 +1133,7 @@ function k8sPage() {
     //
     // Agent discovery no longer produces Kubernetes findings — it scans for hypervisor
     // management endpoints now, and Password Safe is the source for databases. See
-    // docs/admin/remote-agents.md. This handler stays because the link still works if someone
+    // docs/platform/spiffe/remote-agents.md. This handler stays because the link still works if someone
     // has one bookmarked or builds it by hand, and it costs ten lines.
     openFromQuery() {
       const q = new URLSearchParams(window.location.search);

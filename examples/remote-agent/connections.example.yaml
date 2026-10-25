@@ -41,7 +41,7 @@
 # lives only in memory, so nothing on this host — not even a key file — can ask for a
 # credential later. Point the connection at a Password Safe managed account on the
 # Connections page and the dashboard holds no standing password either: it checks one out
-# per job, checks it back in and rotates it. See docs/admin/remote-agents/credentials.md,
+# per job, checks it back in and rotates it. See docs/platform/spiffe/remote-agents/credentials.md,
 # "Central storage with SPIRE".
 #
 # The other sources stay supported for sites that will not let a credential leave them.
@@ -54,7 +54,7 @@
 #
 # The `,Z` is not optional on Fedora, RHEL, CentOS, Rocky or Alma — without it the
 # agent cannot read this file whatever its mode bits say. Same reasoning as policy.yaml.
-# On a Windows host it is inert and harmless; see docs/admin/remote-agents.md, "Running on
+# On a Windows host it is inert and harmless; see docs/platform/spiffe/remote-agents.md, "Running on
 # Windows".
 #
 # Nothing here grants anything on its own. Three separate parties must agree before a

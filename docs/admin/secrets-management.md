@@ -198,7 +198,7 @@ Unlike the four backend prefixes, `ps_account://` is deliberately **not** resolv
 `config_service.get()`. The others are stateless reads; this one opens a request that
 something has to close, so it is handled only on the agent-credential path where the release
 lifecycle exists. See
-[Remote Agents → credentials](remote-agents/credentials.md#the-credential-the-dashboard-holds).
+[Remote Agents → credentials](../platform/spiffe/remote-agents/credentials.md#the-credential-the-dashboard-holds).
 
 ---
 

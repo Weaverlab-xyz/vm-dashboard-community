@@ -41,7 +41,7 @@ with [`examples/remote-agent/docker-compose.sibling.yml`](../../examples/remote-
 and name the image in the `sibling:` block of your `policy.yaml`.
 
 Full setup, the four required grants, and troubleshooting live in
-[`docs/admin/remote-agents/hypervisors.md#the-sibling-runner`](../../docs/admin/remote-agents/hypervisors.md#the-sibling-runner) —
+[`docs/platform/spiffe/remote-agents/hypervisors.md#the-sibling-runner`](../../docs/platform/spiffe/remote-agents/hypervisors.md#the-sibling-runner) —
 this file does not restate them.
 
 ## The contract

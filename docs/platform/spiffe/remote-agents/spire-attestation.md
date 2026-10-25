@@ -2,31 +2,32 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you want a remote agent to hold no signing key on disk, are moving an enrolled agent from Ed25519 to SPIRE, or an attested agent stopped authenticating.
 
-Part of [Remote Agents](../remote-agents.md). By default an agent enrols with a one-time
-code and keeps an Ed25519 key in its state volume (`identity.json`), and whoever can read
-that volume *is* the agent. With SPIRE, the agent proves who it is at every start with a
-short-lived JWT-SVID from the dashboard's own SPIRE server, and keeps its signing key only
-in memory. **SPIRE is the recommended way to run an agent.** Ed25519 stays the enrolment
-default, for compatibility, and stays supported for sites that cannot reach a SPIRE server
+Part of [Remote Agents](../remote-agents.md). **SPIRE is the recommended way to run an
+agent**, because the dashboard does not trust an agent until it proves what it is. With
+SPIRE, the agent proves it at every start with a short-lived JWT-SVID from the dashboard's
+own SPIRE server, and keeps its signing key only in memory. Without it, an agent enrols
+with a one-time code and keeps an Ed25519 key in its state volume (`identity.json`), and
+whoever can read that volume *is* the agent. Ed25519 stays the enrolment default, for
+compatibility, and stays supported for sites that cannot reach a SPIRE server
 (a TLS-inspecting proxy, a dashboard on Cloud Run); nothing changes for an agent you do not
 migrate. Why this is the recommendation, and what comes after it, is on
-[Workload identity](../../platform/workload-identity.md#remote-agents).
+[Workload identity](../../workload-identity.md#remote-agents).
 
 Proven live on 2026-10-13: a Docker Desktop agent attested to a dashboard on Azure
 Container Apps, and POV control nodes have attested the same way since 2026-10-14. The
-design is [SPIRE for agents, Dex for people](../../design/agent-and-human-identity.md#part-1-the-agent-attests-through-spire).
+design is [SPIRE for agents, Dex for people](../../../design/agent-and-human-identity.md#part-1-the-agent-attests-through-spire).
 The server itself, and every other feature that uses it, is on
-[SPIFFE and SPIRE](../../platform/spiffe.md).
+[SPIFFE and SPIRE](../../spiffe.md).
 
 ## What runs where
 
 | Where | What | From |
 |---|---|---|
-| The dashboard host | a SPIRE server for the dashboard's trust domain | [`docker-compose.spire.yml`](../../../docker-compose.spire.yml), layered over `docker-compose.yml`; on a managed runtime, [a sidecar of the app](../../platform/spiffe.md#on-a-managed-container-runtime) |
-| The agent host | `spire-agent`, which attests the host; `spiffe-helper`, which keeps a JWT-SVID in a memory-only volume as the agent's uid (10001); the agent, which reads it | [`examples/remote-agent/docker-compose.spire.yml`](../../../examples/remote-agent/docker-compose.spire.yml), layered over the agent's `docker-compose.yml` |
+| The dashboard host | a SPIRE server for the dashboard's trust domain | [`docker-compose.spire.yml`](../../../../docker-compose.spire.yml), layered over `docker-compose.yml`; on a managed runtime, [a sidecar of the app](../../spiffe.md#on-a-managed-container-runtime) |
+| The agent host | `spire-agent`, which attests the host; `spiffe-helper`, which keeps a JWT-SVID in a memory-only volume as the agent's uid (10001); the agent, which reads it | [`examples/remote-agent/docker-compose.spire.yml`](../../../../examples/remote-agent/docker-compose.spire.yml), layered over the agent's `docker-compose.yml` |
 
 The agent needs **2.6.0 or later** (`AGENT_SPIFFE_JWT_FILE`; see the
-[agent README](../../../runners/agent/README.md)). The Agents page banner says "update the
+[agent README](../../../../runners/agent/README.md)). The Agents page banner says "update the
 image first" for an older one.
 
 ## Ports
@@ -39,14 +40,14 @@ image first" for an older one.
 The server's admin API is a unix socket on a volume mounted only into the dashboard's own
 containers. Nothing administrative listens on the network. tcp/8082
 (`SPIRE_FEDERATION_PORT`) is the bundle endpoint for
-[federation with a Workload Lab](../../preview/workload-lab/spiffe/federation.md);
+[federation with a Workload Lab](../../../preview/workload-lab/spiffe/federation.md);
 attestation does not use it.
 
 ## Setting it up
 
 1. **Start the dashboard's SPIRE server.** On Docker Compose, layer the overlay as below.
    On Azure Container Apps, Cloud Run, ECS or Kubernetes, it is a sidecar of the app
-   instead: see [Running it on a managed container runtime](../../platform/spiffe.md#on-a-managed-container-runtime).
+   instead: see [Running it on a managed container runtime](../../spiffe.md#on-a-managed-container-runtime).
 
    ```bash
    SPIRE_TRUST_DOMAIN=dashboard.example.com \
@@ -61,8 +62,9 @@ attestation does not use it.
 2. **Pin the agent audience** under **Settings → Integrations → Remote Agents**, if it is
    not already. The agent host reaches the SPIRE server at that URL's host name.
 3. **Tick "Let agents attest through SPIRE"** (`spire_attest_enabled`) on the same panel.
-   Leave **SPIRE server container** (`spire_server_container`) at `vmdash-spire-server`
-   unless you renamed the container.
+   On **Settings → Integrations → Platform → SPIFFE and SPIRE**, leave **SPIRE server
+   container** (`spire_server_container`) at `vmdash-spire-server` unless you renamed the
+   container.
 4. **Migrate the agent.** On the **Agents** page, open the agent and press **Migrate to
    SPIRE**. In one step the dashboard:
    - creates a one-use **join token** for `spiffe://<td>/node/<agent-id>`, valid for 15
@@ -112,17 +114,22 @@ also clears its SPIFFE binding and puts it back on Ed25519.
 
 ## Settings
 
-All on **Settings → Integrations → Remote Agents**.
+The agent settings are on **Settings → Integrations → Remote Agents**:
 
 | Setting | Key | Default | What it does |
 |---|---|---|---|
 | Let agents attest through SPIRE | `spire_attest_enabled` | off | Turns on `POST /api/agent/attest`, the **Migrate to SPIRE** button and the banner |
-| SPIRE server container, SPIRE server address for agents | `spire_server_container`, `spire_server_address` | | About the server itself: see [SPIFFE and SPIRE → Settings](../../platform/spiffe.md#settings-and-environment) |
 | Release dashboard-held credentials only to SPIRE-attested agents | `dashboard_secrets_require_spire` | off | Hypervisor credentials, Gateway deploy keys, Config-Management bundles and file-share passwords go only to agents whose key came from a SPIRE attestation |
-| Give the dashboard its own SPIFFE identity | `dashboard_spiffe_identity_enabled` | off | Not needed for attestation; see [The dashboard's own SPIFFE identity](../../platform/oidc/dashboard-identity.md) |
+
+The server's own settings, **SPIRE server container** (`spire_server_container`) and
+**SPIRE server address for agents** (`spire_server_address`), are on **Settings →
+Integrations → Platform → SPIFFE and SPIRE**: see
+[SPIFFE and SPIRE → Settings](../../spiffe.md#settings-and-environment). The dashboard's own
+SPIFFE identity is on the same panel and is not needed for attestation; see
+[The dashboard's own SPIFFE identity](../../oidc/dashboard-identity.md).
 
 The server's environment variables, on the overlay, the sidecar and the dashboard's own
-containers, are on [SPIFFE and SPIRE](../../platform/spiffe.md#settings-and-environment).
+containers, are on [SPIFFE and SPIRE](../../spiffe.md#settings-and-environment).
 
 ## Troubleshooting
 
@@ -132,5 +139,5 @@ containers, are on [SPIFFE and SPIRE](../../platform/spiffe.md#settings-and-envi
 | The join token is refused | spent, or older than 15 minutes | press **Migrate to SPIRE** again for a new one |
 | After the host was off, the SPIRE agent logs `SVID is expired` then `join token does not exist or has already been used`, and restarts in a loop. The dashboard agent warns `still no JWT-SVID` after a minute, then exits after six | the agent's own SPIRE identity (7 days at most, about 3.5 at least) ran out while the host was offline, and a join-token agent cannot attest again with its spent token | press **New SPIRE token** on the agent's row, put the new `SPIRE_JOIN_TOKEN` in its `.env` and `up -d` again. Never `down -v` |
 | The agent waits at start instead of authenticating | its last token was already presented, and a replay is refused | nothing: it waits for spiffe-helper's next rotation, half the token's lifetime |
-| **Migrate to SPIRE** says the server is not running | the server, not the agent | [SPIFFE and SPIRE → Troubleshooting](../../platform/spiffe.md#troubleshooting) |
+| **Migrate to SPIRE** says the server is not running | the server, not the agent | [SPIFFE and SPIRE → Troubleshooting](../../spiffe.md#troubleshooting) |
 | `403 … only to agents attested through SPIRE` | the release setting is on and this agent is still Ed25519 | migrate it, or keep its credential on its host for now |

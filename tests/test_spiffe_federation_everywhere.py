@@ -237,10 +237,10 @@ def test_someone_elses_keys_fail():
                for c in result["checks"])
 
 
-def test_the_check_needs_write_and_is_not_public():
+def test_the_check_is_admin_only_and_not_public():
     src = _src("web_dashboard", "api", "spiffe_oidc.py")
     route = src.split('@admin_router.post("/check-issuer")', 1)[1]
-    assert 'require_explicit_permission("agents", "write")' in route.split("\n\n", 1)[0] + route
+    assert "Depends(require_admin)" in route.split("\n\n", 1)[0] + route
 
 
 # ── The trust modules ────────────────────────────────────────────────────────

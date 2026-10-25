@@ -15,9 +15,10 @@
                         the guests -- vmrest binds 127.0.0.1, so that agent lives on the
                         Windows host, whose Docker Desktop WSL2 VM reaches no vmnet.
 
-   plus Identity -- the agents' pinned signing audience and the dashboard's own SPIFFE
-   identity (remote_agents_enabled, /api/agents/audience and /api/spiffe-identity), the
-   read-and-repair view of two values configured in Settings.
+   plus Identity -- the agents' pinned signing audience (remote_agents_enabled,
+   /api/agents/audience), the read-and-repair view of a value configured in Settings.
+   The dashboard's own SPIFFE identity is not about agents and is not here: it is on
+   Settings → Integrations → Platform → SPIFFE and SPIRE.
 
    CONNECTIONS WAS ITS OWN PAGE AND IS NOT ANY MORE, because a connection is almost always
    a connection THROUGH an agent: the via_agent form holds no host and no username at all,
@@ -121,7 +122,7 @@
     for work, and the hypervisor connections they carry it out against. They share a page
     because a connection reached <strong>through</strong> an agent is named in that agent's
     own file &mdash; so the two are usually filled in together.
-    <a href="/docs/admin/remote-agents" target="_blank" class="text-blue-600 hover:underline">Feature guide</a>.
+    <a href="/docs/platform/spiffe/remote-agents" target="_blank" class="text-blue-600 hover:underline">Feature guide</a>.
   </p>
   {% endif %}
 

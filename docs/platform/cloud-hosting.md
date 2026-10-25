@@ -35,7 +35,7 @@ depend on those, and the rest do not.
 | Kubernetes management — kubectl, helm, External Secrets, Rancher | **Works.** Both binaries are baked into the image and run in-process, specifically so no socket is needed. |
 | Image builds and cross-cloud promotion | **Works.** |
 | Config Management against **cloud** targets | **Works**, but you must set the runner to `ecs` / `aci` / `gcp` in Settings → Ansible. The `local` runner shells out to `docker run`. |
-| Config Management against **on-prem** targets — VMware, Proxmox, Hyper-V, locally-registered clusters | **Broken**, and not only because of the socket: the dashboard has no route to your lab. The run is refused with a message saying so. Use [remote agents](../admin/remote-agents.md). |
+| Config Management against **on-prem** targets — VMware, Proxmox, Hyper-V, locally-registered clusters | **Broken**, and not only because of the socket: the dashboard has no route to your lab. The run is refused with a message saying so. Use [remote agents](spiffe/remote-agents.md). |
 | Local Filesystem / UNC storage backend | **Unavailable.** Pick a cloud bucket on `/storage`. |
 | The dashboard's SPIRE server: agent attestation, the dashboard's own SPIFFE identity | **Works, as a sidecar of the app**, not the compose overlay: PostgreSQL for its datastore, an upstream CA as a secret, and the worker reaching it through the database. Agents cannot attest on **Cloud Run**, which has no TCP ingress. See [On a managed container runtime](spiffe.md#on-a-managed-container-runtime). |
 
@@ -95,7 +95,7 @@ minted on an install permanently pins the signing audience, and every agent
 signature is checked against it afterwards. A platform-assigned name — an
 `*.azurecontainerapps.io` default FQDN, a Cloud Run auto-URL — will change, and
 changing it strands the fleet. Bind a custom domain first. See
-[Remote Agents → enrolment](../admin/remote-agents/enrolment.md#the-signing-audience-is-pinned-by-that-first-code).
+[Remote Agents → enrolment](spiffe/remote-agents/enrolment.md#the-signing-audience-is-pinned-by-that-first-code).
 
 ---
 

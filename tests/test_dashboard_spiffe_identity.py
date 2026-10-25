@@ -160,6 +160,7 @@ class _Admin:
     username = "tester"
     is_admin = True
     is_effective_admin = True
+    accessor_env_id = None      # require_admin refuses a POV accessor before anything else
 
 
 def _client() -> TestClient:

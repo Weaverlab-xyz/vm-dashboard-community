@@ -1,15 +1,16 @@
 {# The Identity tab of the Remote Agents page (agents/index.html): the agents' pinned
-   signing audience, and the dashboard's own SPIFFE identity.
+   signing audience.
 
-   Both answer to the `agents` scope -- GET /api/agents/audience and GET /api/spiffe-identity
-   are agents:read, DELETE /api/agents/audience and POST /api/spiffe-identity/check-issuer
-   are agents:write -- but until this tab they were shown only inside Settings →
-   Integrations, which is admin-only because it is instance configuration. A role granting
-   `agents` reached the Agents page (PR #1144) and still could not see why enrolment codes
-   were refused. The Settings drawers keep their copies beside the fields that configure
-   these values (Public base URL, the SPIFFE audiences); this tab is the read-and-repair
-   view. Write buttons show on $store.auth.can('agents', 'write'); the routes are the
-   control.
+   It answers to the `agents` scope -- GET /api/agents/audience is agents:read, DELETE is
+   agents:write -- but until this tab it was shown only inside Settings → Integrations,
+   which is admin-only because it is instance configuration. A role granting `agents`
+   reached the Agents page (PR #1144) and still could not see why enrolment codes were
+   refused. The Settings drawer keeps its copy beside the field that configures it (Public
+   base URL); this tab is the read-and-repair view. Reset shows on
+   $store.auth.can('agents', 'write'); the route is the control.
+
+   The dashboard's own SPIFFE identity used to be on this tab too. It is about the clouds,
+   not agents, so it lives on Settings → Integrations → Platform → SPIFFE and SPIRE.
 
    Self-contained like the other tab partials -- markup and factory in this one file (see
    the hub's note on why). #}
@@ -97,109 +98,37 @@
       </template>
     </div>
 
-    <!-- ── The dashboard's own SPIFFE identity ──────────────────────────── -->
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-      <h2 class="text-base font-semibold text-gray-700 mb-2">The dashboard's SPIFFE identity</h2>
-      <p class="text-sm text-gray-500 mb-4">
-        Short-lived tokens the dashboard presents to a cloud instead of a stored key, and the
-        issuer the cloud fetches its keys from.
-        <a href="/docs/design/dashboard-workload-identity" class="text-blue-600 hover:underline">How it works</a>.
-      </p>
-
-      <p x-show="spiffeError" x-cloak class="text-sm text-red-700" x-text="spiffeError"></p>
-
-      <template x-if="spiffe && !spiffe.enabled">
-        <p class="text-sm text-gray-500">
-          Off on this instance. An administrator turns it on in Settings → Integrations →
-          Remote Agents.
-        </p>
-      </template>
-
-      <template x-if="spiffe && spiffe.enabled">
-        <div class="text-sm space-y-1">
-          <div>
-            <span class="text-gray-500">Issuer:</span>
-            <span class="ml-1 font-mono text-gray-800" x-text="spiffe.issuer || '—'"></span>
-          </div>
-          <p x-show="spiffe.error" class="text-red-700" x-text="spiffe.error"></p>
-          <template x-for="entry in Object.entries(spiffe.sources || {})" :key="'src-' + entry[0]">
-            <div>
-              <span class="font-medium text-gray-700" x-text="entry[0].toUpperCase()"></span>
-              <span class="text-gray-500">uses</span>
-              <span :class="entry[1] === 'SPIFFE federation' ? 'text-green-700' : 'text-gray-700'"
-                    x-text="entry[1]"></span>
-            </div>
-          </template>
-          <template x-for="cloud in (spiffe.shadowed || [])" :key="'shadow-' + cloud">
-            <p class="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-900">
-              <span class="font-medium" x-text="'SPIFFE federation is ready for ' + cloud.toUpperCase() + ', but the stored key still wins.'"></span>
-              An administrator removes the stored key to go keyless; until then every call uses it.
-              <a href="/docs/platform/workload-identity#moving-a-surface-over" class="underline">How</a>
-            </p>
-          </template>
-          <template x-for="entry in Object.entries(spiffe.tokens || {})" :key="entry[0]">
-            <div class="text-xs">
-              <span class="font-mono text-gray-800" x-text="entry[1].path"></span>
-              <span x-show="entry[1].present && !entry[1].error" class="text-green-700"
-                    x-text="'valid until ' + new Date(entry[1].expires_at * 1000).toLocaleTimeString()"></span>
-              <span x-show="entry[1].error" class="text-red-700" x-text="entry[1].error"></span>
-            </div>
-          </template>
-
-          <!-- Fetches discovery and keys from the issuer's public URL the way a cloud does,
-               so a private name or an untrusted certificate shows up here rather than as a
-               403 from every cloud. agents:write: it makes outbound requests on demand. -->
-          <div x-show="$store.auth.can('agents', 'write')" class="pt-2 text-xs">
-            <button type="button" @click="checkIssuer()" :disabled="issuerCheck.running"
-                    class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-2.5 py-1 rounded-lg disabled:opacity-50"
-                    x-text="issuerCheck.running ? 'Checking…' : 'Check the issuer is reachable'"></button>
-            <template x-for="c in (issuerCheck.result ? issuerCheck.result.checks : [])" :key="c.name">
-              <div class="mt-1">
-                <span :class="c.ok ? 'text-green-700' : 'text-red-700'" x-text="c.ok ? '✓' : '✗'"></span>
-                <span class="font-medium text-gray-700" x-text="c.name"></span>
-                <span class="text-gray-500" x-text="c.detail"></span>
-              </div>
-            </template>
-            <p x-show="issuerCheck.error" class="mt-1 text-red-700" x-text="issuerCheck.error"></p>
-          </div>
-        </div>
-      </template>
-    </div>
   </div>
 </div>
 
 <script>
 function agentIdentityPanel() {
   return {
-    audience: null, spiffe: null,
+    audience: null,
     loading: false, resetting: false, noAccess: false,
-    audienceUnavailable: '', spiffeError: '',
-    issuerCheck: { running: false, result: null, error: '' },
+    audienceUnavailable: '',
 
     init() { this.load(); },
 
-    // Two reads, each failing on its own: the audience router is behind the remote-agents
-    // flag (off = 404 "not enabled") while the SPIFFE status is not, and a 403 on either
-    // means the viewer lacks `agents` -- which both share, so one 403 is the whole answer.
-    // Matched on the message, as the Agents tab does (isDenied/isFeatureOff there): the
-    // API helper throws an Error carrying the detail string and no status.
+    // The audience router is behind the remote-agents flag (off = 404 "not enabled"), and
+    // a 403 means the viewer lacks `agents`. Matched on the message, as the Agents tab does
+    // (isDenied/isFeatureOff there): the API helper throws an Error carrying the detail
+    // string and no status.
     async load() {
       this.loading = true;
-      const [aud, sp] = await Promise.allSettled([
-        API.get('/api/agents/audience'),
-        API.get('/api/spiffe-identity'),
-      ]);
-      const msg = r => (r.status === 'rejected' && r.reason && r.reason.message) || '';
-      const forbidden = r => /^Requires '[\w.:]+' permission/.test(msg(r));
-      this.noAccess = forbidden(aud) || forbidden(sp);
-      this.audience = aud.status === 'fulfilled' ? aud.value : null;
-      this.audienceUnavailable = aud.status === 'fulfilled' ? ''
-        : (/not enabled/i.test(msg(aud))
-            ? 'Remote agents are off, so there is no signing audience.'
-            : 'Could not load the signing audience: ' + msg(aud));
-      this.spiffe = sp.status === 'fulfilled' ? sp.value : null;
-      this.spiffeError = sp.status === 'fulfilled' ? ''
-        : 'Could not load the SPIFFE identity status: ' + msg(sp);
+      let msg = '';
+      try {
+        this.audience = await API.get('/api/agents/audience');
+        this.audienceUnavailable = '';
+        this.noAccess = false;
+      } catch (e) {
+        msg = (e && e.message) || '';
+        this.audience = null;
+        this.noAccess = /^Requires '[\w.:]+' permission/.test(msg);
+        this.audienceUnavailable = /not enabled/i.test(msg)
+          ? 'Remote agents are off, so there is no signing audience.'
+          : 'Could not load the signing audience: ' + msg;
+      }
       this.loading = false;
     },
 
@@ -221,16 +150,6 @@ function agentIdentityPanel() {
         toast('Could not reset the signing audience: ' + e.message, 'error');
       } finally {
         this.resetting = false;
-      }
-    },
-
-    async checkIssuer() {
-      this.issuerCheck = { running: true, result: null, error: '' };
-      try {
-        const result = await API.post('/api/spiffe-identity/check-issuer', {});
-        this.issuerCheck = { running: false, result, error: '' };
-      } catch (e) {
-        this.issuerCheck = { running: false, result: null, error: e.message };
       }
     },
   };

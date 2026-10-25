@@ -184,7 +184,7 @@ A divergence is not *always* a mistake, though, which is why the refusal is not 
 `PUBLIC_BASE_URL` used to do two jobs — the OAuth callback origin as well as the agent
 audience — and a split vhost is exactly the case where those want different hostnames. The
 callbacks now come from `UI_BASE_URL`, else a non-localhost `WEBAUTHN_ORIGIN`, so on a split
-vhost set `PUBLIC_BASE_URL` to the agent host without breaking SSO ([OIDC](../../platform/oidc.md#step-1--register-an-application-with-your-idp)).
+vhost set `PUBLIC_BASE_URL` to the agent host without breaking SSO ([OIDC](../../oidc.md#step-1--register-an-application-with-your-idp)).
 Confirming the prompt re-issues with `?acknowledge_audience=true`, which mints against the
 **pinned** audience, labels the command with which URL it used, and logs and audits the
 exception. It does not move the pin: the override is permission to use the pinned audience,
@@ -248,8 +248,8 @@ overlay as the other runners.
 
 The dashboard-side driver for this today is the POV feature, which generates the whole
 policy for a control node VM it created; see
-[POV Gateway and Broker](../../profiles/pov/gateway-and-broker.md#the-pov-gateway). The same feature uses `agent_ansible`
-to install a [Password Safe Resource Broker](../../profiles/pov/gateway-and-broker.md#the-resource-broker) on a
+[POV Gateway and Broker](../../../profiles/pov/gateway-and-broker.md#the-pov-gateway). The same feature uses `agent_ansible`
+to install a [Password Safe Resource Broker](../../../profiles/pov/gateway-and-broker.md#the-resource-broker) on a
 Windows VM beside it — a `.exe` asset, which the Config-Management runner now installs with
 `win_package`.
 
@@ -308,7 +308,7 @@ domain and base DN, the DC's host name and, for AD, the functional level. You ca
 the scan by a **domain name**: the domain's A records are its domain controllers, so
 `corp.example.com` finds every DC. **All** stays hypervisor-only. A finding has a
 **Register directory** link, covered in
-[On-premises directories](../../preview/directories/on-premises.md#discover-register-and-change-them).
+[On-premises directories](../../../preview/directories/on-premises.md#discover-register-and-change-them).
 
 **WinRM is the honest limit of the set.** It identifies WinRM on Windows — and nearly
 every domain-joined Windows Server has WinRM enabled, the overwhelming majority of them
@@ -329,7 +329,7 @@ network — a probe for it would be code that never returns anything.
 Databases and Kubernetes clusters are **no longer discovered by an agent**. Password
 Safe already finds databases with managed credentials — it knows the platform, port and
 accounts, which a socket probe never could — so
-[Import from Password Safe](../../cloud-services/databases/import.md) replaced that
+[Import from Password Safe](../../../cloud-services/databases/import.md) replaced that
 path. Kubernetes clusters are registered from a kubeconfig, which no credential-less
 probe could ever supply.
 

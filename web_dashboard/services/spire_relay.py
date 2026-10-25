@@ -87,7 +87,8 @@ def call(args: list, timeout: int, input: Optional[str] = None) -> subprocess.Co
                 "the dashboard's SPIRE server (no SPIRE_SERVER_SOCKET, no Docker socket), "
                 "and no app process with SPIRE_SERVER_SOCKET has checked in. Start the "
                 "SPIRE sidecar beside the app (docs/platform/spiffe.md), "
-                "or turn off the SPIRE features under Settings → Remote agents")
+                "or turn off the SPIRE features (agent attestation under Settings → Remote "
+                "Agents, the dashboard's identity under Settings → SPIFFE and SPIRE)")
         row = SpireAdminCall(
             args_json=json.dumps([str(a) for a in args]),
             stdin_enc=config_service.encrypt_value(input) if input is not None else None,

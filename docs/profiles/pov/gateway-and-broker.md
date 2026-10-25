@@ -82,7 +82,7 @@ reads as a firewall problem for a long time.
 
 On a customer-owned agent host the agent **will not pull an image for you** — a pull is a
 network fetch of executable content, so `policy.yaml` grants and the operator provisions.
-That rule is unchanged, and [the remote-agent guide](../../admin/remote-agents.md) still
+That rule is unchanged, and [the remote-agent guide](../../platform/spiffe/remote-agents.md) still
 describes it.
 
 **A POV control node is the exception, because every clause of that argument inverts.** The

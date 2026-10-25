@@ -18,7 +18,7 @@ nearest one.
 A dashboard connection row bound to an agent stores the agent's **name for it** and never a
 host or a username. The job says *"run `inventory_sync` on `dc1-vcenter`"* and the agent
 resolves the endpoint from its own
-[`connections.yaml`](../../../examples/remote-agent/connections.example.yaml).
+[`connections.yaml`](../../../../examples/remote-agent/connections.example.yaml).
 
 This binding decides which agent **discovers and powers** the estate. Which agent
 **configures** the guests it finds is a separate question, because the two are not always
@@ -199,7 +199,7 @@ security argument, those two run in a one-shot container the agent creates, read
 of JSON from, and deletes.
 
 **This needs the Docker socket, and the socket is root on the host.** It is not mounted by
-the default deployment — [`docker-compose.yml`](../../../examples/remote-agent/docker-compose.yml)
+the default deployment — [`docker-compose.yml`](../../../../examples/remote-agent/docker-compose.yml)
 still promises the agent launches nothing, and that stays true. Turning it on is a
 separate, deliberate act:
 
@@ -207,7 +207,7 @@ separate, deliberate act:
 |---|---|---|
 | the `agent_hypervisor` job type | dashboard operator | Agents page |
 | `sibling: {enabled, image}` | **you** | `policy.yaml` |
-| the socket itself | **you** | [`docker-compose.sibling.yml`](../../../examples/remote-agent/docker-compose.sibling.yml) |
+| the socket itself | **you** | [`docker-compose.sibling.yml`](../../../../examples/remote-agent/docker-compose.sibling.yml) |
 
 Withhold any one and nothing runs. Prefer the rootless Docker or Podman user socket; the
 example overlay uses the rootless path deliberately, so reaching for the root socket has to

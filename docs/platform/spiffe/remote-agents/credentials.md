@@ -9,10 +9,10 @@ Part of [Remote Agents](../remote-agents.md). What the dashboard holds, what the
 Keep each credential in the dashboard, attest the agent through SPIRE, and let the agent
 fetch the credential per job. This is the agent's half of the dashboard-wide
 recommendation: an identity instead of a stored secret, and privilege only for the job that
-needs it ([Workload identity](../../platform/workload-identity.md)). In practice:
+needs it ([Workload identity](../../workload-identity.md)). In practice:
 
 1. **Migrate the agent to SPIRE.** Use **Migrate to SPIRE** on the Agents page and the
-   [`docker-compose.spire.yml`](../../../examples/remote-agent/docker-compose.spire.yml) overlay;
+   [`docker-compose.spire.yml`](../../../../examples/remote-agent/docker-compose.spire.yml) overlay;
    [Attesting an agent through SPIRE](spire-attestation.md) walks through it.
    After that the agent's signing key lives only in memory, and every restart attests again.
 2. **Set `dashboard_secret: true`** on the connection in `connections.yaml`, and delete
@@ -31,7 +31,7 @@ needs it ([Workload identity](../../platform/workload-identity.md)). In practice
 
 File shares work the same way: put `dashboard_secret: true` on the share's entry in
 `shares.yaml` and set the SMB password on `/storage`
-([Storage Management](../../operations/storage-management/configuring.md#the-smb-password-can-live-in-the-dashboard)).
+([Storage Management](../../../operations/storage-management/configuring.md#the-smb-password-can-live-in-the-dashboard)).
 Its releases are audited as `agent.share_secret`.
 
 Earlier versions of these docs treated a host-side credential as the default and central
@@ -250,7 +250,7 @@ asking to the dashboard, which already holds such a client for other features. P
 declaring both is a refusal, not a precedence.
 
 Mount the client alongside the other two files — see
-[`passwordsafe.example.yaml`](../../../examples/remote-agent/passwordsafe.example.yaml). The
+[`passwordsafe.example.yaml`](../../../../examples/remote-agent/passwordsafe.example.yaml). The
 dashboard never issues it and never sees it.
 
 A check-in failure is swallowed deliberately: the credential has already been used and the

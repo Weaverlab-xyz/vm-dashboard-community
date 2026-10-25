@@ -273,4 +273,4 @@ that is maintained.
 | Sign in with Microsoft (legacy Entra) | [oidc/entra-oauth.md](platform/oidc/entra-oauth.md) |
 
 Anything the dashboard cannot route to — a hypervisor on another network, a database
-behind NAT — is reached through an agent instead: see [Remote Agents](admin/remote-agents.md).
+behind NAT — is reached through an agent instead: see [Remote Agents](platform/spiffe/remote-agents.md).

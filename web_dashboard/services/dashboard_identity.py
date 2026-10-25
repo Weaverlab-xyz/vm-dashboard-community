@@ -196,7 +196,7 @@ def _check_minted(token: str, audience: str, want_sub: str, want_iss: str) -> No
             f"dashboard publishes discovery as {want_iss!r}. Set SPIRE_JWT_ISSUER to the "
             f"same value (docker-compose.spire.yml, or the SPIRE sidecar's environment) and "
             f"restart the SPIRE server, or change "
-            f"the issuer under Settings → Remote agents.")
+            f"the issuer under Settings → SPIFFE and SPIRE.")
 
 
 def refresh(now: Optional[float] = None) -> dict:
@@ -251,7 +251,7 @@ def _refresh_locked(directory: str, now: float) -> dict:
         wanted = audiences()
         if not status["issuer"]:
             raise IdentityError(
-                "No issuer: set one under Settings → Remote agents, or pin the agent "
+                "No issuer: set one under Settings → SPIFFE and SPIRE, or pin the agent "
                 "audience (the agent gateway's public URL) first.")
         if not status["issuer"].startswith("https://"):
             raise IdentityError(

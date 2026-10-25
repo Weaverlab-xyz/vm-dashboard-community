@@ -265,7 +265,7 @@ def test_every_doc_page_named_outside_a_link_exists():
     """A runner prints one of these AT AN OPERATOR, at the moment it refuses their job.
 
     ``runners/agent/agent.py`` refused a Config Management run with "see
-    docs/admin/remote-agents.md#agent-executed-ansible" long after that heading had been renamed
+    docs/platform/spiffe/remote-agents.md#agent-executed-ansible" long after that heading had been renamed
     to "Agent-executed Config Management" — so the operator being told why their job
     failed was sent to a page that scrolled nowhere.
 

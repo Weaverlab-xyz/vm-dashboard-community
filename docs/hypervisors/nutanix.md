@@ -52,7 +52,7 @@ The default `admin` account has full access. Suitable for lab environments.
 or **Reboot** to the whole selection — one job per VM, sharing a batch you watch on one
 page. VMs already in the target state are skipped and the confirmation says how many;
 fifty per operation is the cap. See
-[Powering a selection](../admin/remote-agents/hypervisors/power.md).
+[Powering a selection](../platform/spiffe/remote-agents/hypervisors/power.md).
 
 Those four only. The rest of the table above stays per-VM: each of them depends on the
 state the VM is in right now — a Resume needs a paused VM, and a Reset is a power cut you
@@ -143,7 +143,7 @@ image still works.
 ## Over a remote agent
 
 A Prism Central the dashboard has no network route to can be reached through a
-[remote agent](../admin/remote-agents/hypervisors.md#hypervisor-connections) instead. Tick *Reached
+[remote agent](../platform/spiffe/remote-agents/hypervisors.md#hypervisor-connections) instead. Tick *Reached
 through a remote agent* when adding the connection and give it the name that connection
 has in the agent's own `connections.yaml`.
 

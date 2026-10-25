@@ -202,7 +202,7 @@ mismatch is rejected by the identity provider with no useful diagnostic.
 Everything above assumes one trust domain: you run the dashboard, it holds your
 credentials, and an administrator abusing it is abusing resources they already own.
 
-[Remote agents](docs/admin/remote-agents.md) break that assumption, so they get their own
+[Remote agents](docs/platform/spiffe/remote-agents.md) break that assumption, so they get their own
 rule. An agent is a container running inside a private network — possibly one whose
 owner is not the dashboard's operator — and it is, structurally, a
 dashboard-controlled execution endpoint on that network. **Across this boundary the

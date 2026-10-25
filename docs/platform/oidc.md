@@ -7,7 +7,7 @@ several other places too, each with its own page:
 
 | Page | Read it when |
 |---|---|
-| [The dashboard's own identity](oidc/dashboard-identity.md) | you want the dashboard to reach AWS, Azure, GCP or a k3s cluster with a short-lived token instead of a stored key. Here the dashboard is the **issuer**. Its tokens come from the SPIRE server that [Remote Agents](../admin/remote-agents/spire-attestation.md) also uses |
+| [The dashboard's own identity](oidc/dashboard-identity.md) | you want the dashboard to reach AWS, Azure, GCP or a k3s cluster with a short-lived token instead of a stored key. Here the dashboard is the **issuer**. Its tokens come from the SPIRE server that [Remote Agents](spiffe/remote-agents/spire-attestation.md) also uses |
 | [Dex](oidc/dex.md) | you want one issuer that both the dashboard and your on-prem clusters trust |
 | [Kubernetes federation with your IdP](oidc/k8s-federation.md) | you want people signing in to managed clusters as themselves, with their IdP groups as RBAC subjects. One page per provider: [Entra ID](oidc/k8s-federation/entra.md), [Okta](oidc/k8s-federation/okta.md), [PingOne](oidc/k8s-federation/pingone.md), [other OIDC](oidc/k8s-federation/oidc.md) |
 | [Identity providers](../preview/directories/identity-providers.md) | you want to browse or change users and groups in Entra ID, Okta or PingOne, rather than sign in through one. That lives in the [Directories](../preview/directories.md) section |

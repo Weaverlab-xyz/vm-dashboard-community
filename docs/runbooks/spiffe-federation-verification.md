@@ -22,7 +22,7 @@ outcome in [§10](#10-record-the-result).
   By default it is the agent gateway's public URL plus `/spiffe`.
 - One sandbox account, subscription or project per cloud you will test, and permission to
   create IAM roles, app credentials or workload identity pools in it.
-- Note three values from **Settings → Integrations → Remote Agents → Give the dashboard its
+- Note three values from **Settings → Integrations → Platform → SPIFFE and SPIRE → Give the dashboard its
   own SPIFFE identity**. Every trust below uses them exactly:
   - the **issuer**, for example `https://agents.example.com/spiffe`, with no trailing slash;
   - the **trust domain**, for example `dashboard.example.com`;

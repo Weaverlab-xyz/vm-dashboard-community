@@ -37,9 +37,9 @@ so this index links the hubs and each hub links its own pages.
 | [Cloud services](cloud-services.md) | menu → Cloud services | you are running containers, databases, Kubernetes or functions |
 | [Preview](preview.md) | menu → Preview | you are trying virtual desktops, directories or the Workload Lab |
 | [Operations](operations.md) | menu → Operations | you are running it day to day: Config Management, scheduling, images, storage, inventory, jobs, costs and clean-up |
-| [Admin](admin.md) | menu → Admin | you are deciding who may use it, where its secrets live and how you would prove what happened, or running its agents, health checks and notifications |
+| [Admin](admin.md) | menu → Admin | you are deciding who may use it, where its secrets live and how you would prove what happened, or running its health checks and notifications |
 | [BeyondTrust](beyondtrust.md) | Settings → BeyondTrust | you are wiring it into Privileged Remote Access, Password Safe, EPM for Linux or Entitle |
-| [Platform](platform.md) | Settings → Platform | you are deciding how people sign in, how the dashboard proves its own identity, where it is hosted, or how its runners and AI clients connect |
+| [Platform](platform.md) | Settings → Platform | you are deciding how people sign in, how the dashboard proves its own identity and its remote agents prove theirs, where it is hosted, or how its runners and AI clients connect |
 | [Editions](editions.md) | — | you are choosing between running the dashboard yourself and a hosted edition |
 
 ## Collections

@@ -20,7 +20,7 @@ case. Moving that container onto the agent's host is the whole change.
 ### What the dashboard sends, and what it does not
 
 This is the part worth reading closely, because a playbook is executable content and the
-[philosophy](../remote-agents.md#philosophy) above says the dashboard is not trusted.
+[philosophy](../remote-agents.md#philosophy) says an agent must not have to trust the dashboard.
 
 The signed job envelope carries **four scalars**: the kind of run, the transport, and the
 target address and port. That is all. No playbook, no filename, no variable name, no
@@ -117,7 +117,7 @@ To undo it, clear **Active** on the route — runs go straight back to the disco
 with no re-sync. Delete it if you do not want the record of the decision kept.
 
 **A worked build of exactly this shape**, for two lab segments behind separate firewalls,
-is in [`examples/remote-agent/config-mgmt-lab/`](../../../examples/remote-agent/config-mgmt-lab/README.md):
+is in [`examples/remote-agent/config-mgmt-lab/`](../../../../examples/remote-agent/config-mgmt-lab/README.md):
 two Config-Management-only `policy.yaml` files, a compose file with the Docker socket the
 runner needs, and the dashboard-side steps in order.
 
@@ -154,7 +154,7 @@ the agent.
 ### On-premises directories
 
 An Active Directory or LDAP directory registered on the Directories page with an agent
-(see [On-premises directories](../../preview/directories/on-premises.md#discover-register-and-change-them))
+(see [On-premises directories](../../../preview/directories/on-premises.md#discover-register-and-change-them))
 is a third kind of run, `directory`, with two transports:
 
 - **LDAP** (`local`): the same `hosts: localhost` shape as a database run, using
@@ -177,7 +177,7 @@ serves both transports. Add the directory's LDAP port, and 5986 for WinRM, to
 `ansible.targets`. Directory runs need agent 2.8.0 or later.
 
 The same run kind joins a new GCE Windows server to an on-prem domain through a
-[GCP DNS link](../../preview/directories/on-premises.md#extending-to-gcp-a-dns-link). The dashboard queues
+[GCP DNS link](../../../preview/directories/on-premises.md#extending-to-gcp-a-dns-link). The dashboard queues
 it after the deploy, against the server's private address on 5986, so that address must be
 in `ansible.targets` too.
 

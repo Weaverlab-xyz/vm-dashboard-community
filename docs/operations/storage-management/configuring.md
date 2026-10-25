@@ -92,7 +92,7 @@ agent-brokered backend below instead, which has no runner constraint at all.
 ## Remote Filesystem / UNC (via agent)
 
 The same kind of target as the Local backend, with the constraint removed.
-The dashboard does not open the SMB socket; a [remote agent](../../admin/remote-agents.md)
+The dashboard does not open the SMB socket; a [remote agent](../../platform/spiffe/remote-agents.md)
 already inside your network does, and reports back over the same
 outbound-polling channel it uses for hypervisor and Config-Management work.
 
@@ -130,7 +130,7 @@ The one exception, and the one this doc recommends for an agent attested
 through SPIRE: set **SMB password** above, put `dashboard_secret: true` on the
 share's entry in `shares.yaml`, and delete its `password:`. The agent then
 fetches the password for each job through the same sealed per-job fetch a
-[hypervisor connection](../../admin/remote-agents/credentials.md#central-storage-with-spire-the-recommended-model)
+[hypervisor connection](../../platform/spiffe/remote-agents/credentials.md#central-storage-with-spire-the-recommended-model)
 uses, and nothing durable sits on the host.
 
 - **Only for the configured share and agent.** A storage job for any other share
@@ -145,8 +145,8 @@ uses, and nothing durable sits on the host.
   for one. Clear the field to go back to the host-side password.
 
 The agent side of this, `shares.yaml` and the policy, is in
-[Agent-brokered file shares](../../admin/remote-agents/file-shares.md); moving the agent to SPIRE is
-[Attesting an agent through SPIRE](../../admin/remote-agents/spire-attestation.md).
+[Agent-brokered file shares](../../platform/spiffe/remote-agents/file-shares.md); moving the agent to SPIRE is
+[Attesting an agent through SPIRE](../../platform/spiffe/remote-agents/spire-attestation.md).
 
 ### Three grants, all required
 
