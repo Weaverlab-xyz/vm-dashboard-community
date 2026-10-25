@@ -17,13 +17,27 @@ inbound firewall rule, no VPN, no port forward, no exposed management interface.
 
 ## Philosophy
 
-**1. The dashboard is not trusted by the agent.**
+**1. Neither side trusts the other.**
 This is the unusual part and everything else follows from it. Elsewhere in this
 codebase there is one trust domain — you run the dashboard, it holds your credentials,
-and `SECURITY.md` puts a malicious administrator out of scope. An agent breaks that,
-because it puts a dashboard-controlled process inside a network whose owner may not be
-the dashboard's operator. So the design assumes the dashboard may be compromised and
-makes that insufficient to execute anything meaningful on the LAN.
+and `SECURITY.md` puts a malicious administrator out of scope. An agent breaks that in
+both directions:
+
+- **The dashboard does not trust an agent.** An agent is a machine on a network the
+  dashboard does not control, so being registered earns it nothing. It has to prove
+  its identity on every request: each poll (every 5 seconds by default) is signed by
+  the agent's key, and the dashboard checks that the signature is fresh and unused and
+  that the agent is still active before it hands out any work. Revoke or unbind an
+  agent and its next request is refused. With SPIRE, the recommended model, the key
+  itself comes from attestation: at every start the agent presents a single-use
+  JWT-SVID from the dashboard's SPIRE server, and the key it then signs with lives
+  only in memory. Nothing on the host's disk can stand in for the agent. The dashboard
+  can also release the credentials it holds only to attested agents. See
+  [Attesting an agent through SPIRE](remote-agents/spire-attestation.md).
+- **The agent does not trust the dashboard.** An agent puts a dashboard-controlled
+  process inside a network whose owner may not be the dashboard's operator. So the
+  design assumes the dashboard may be compromised and makes that insufficient to
+  execute anything meaningful on the LAN.
 
 **2. The security boundary is a file you own.**
 `policy.yaml` is mounted read-only into the agent and no dashboard API can read, write
@@ -48,6 +62,9 @@ the clear on every poll.
 
 | Principle | Where it shows up |
 |---|---|
+| Agent is untrusted | Every request is verified before it is served: `agent_service.authenticate` checks the agent is active, the signature, and a single-use nonce inside a 60-second window |
+| Agent is untrusted | With SPIRE, `agent_service.attest` binds a key only to an agent whose single-use JWT-SVID verifies and who proves possession of that key; it runs again at every agent start, and the key is never written to disk |
+| Agent is untrusted | `dashboard_secrets_require_spire` releases dashboard-held credentials only to agents attested through SPIRE |
 | Dashboard is untrusted | Job envelopes signed by a key the agent pins at enrolment (`services/agent_signing.py`); the agent verifies before parsing the payload |
 | Dashboard is untrusted | No protocol field can carry executable content — `services/agent_job_meta.py` is a closed allowlist of scalars, enums and network addresses |
 | Dashboard is untrusted | `HANDLERS` in `runners/agent/agent.py` is a closed dict, not a dispatch on a wire string |
