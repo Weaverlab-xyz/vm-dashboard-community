@@ -1699,10 +1699,21 @@ def revoke(agent_id: str, request: Request,
     """Revoke an agent and clear any work it was holding."""
     agent = _load(db, agent_id)
     affected = agent_service.revoke_agent(db, agent)
+    # A deployed agent's host would otherwise sit in the cloud, unable to do anything, until
+    # someone noticed. Take it down; the record stays for the Deployed agents list.
+    from ..services import agent_host_service
+    host = agent_host_service.for_agent(db, agent.id)
+    stop_job = ""
+    if host is not None and (host.host_id or host.status in agent_host_service.LIVE_STATUSES) \
+            and not agent_host_service.busy(db, host):
+        stop_job = agent_host_service.enqueue(db, host, "stop",
+                                              created_by=current_user.username)
     job_service.log_audit(db, current_user.username, "agent.revoke",
                           ip_address=_client_ip(request),
-                          details={"agent": agent.name, "jobs_cleared": affected})
-    return {"detail": f"Agent '{agent.name}' revoked.", "jobs_cleared": affected}
+                          details={"agent": agent.name, "jobs_cleared": affected,
+                                   **({"host_stop_job": stop_job} if stop_job else {})})
+    return {"detail": f"Agent '{agent.name}' revoked.", "jobs_cleared": affected,
+            "host_stop_job": stop_job}
 
 
 @admin_router.delete("/{agent_id}/record")
@@ -1731,6 +1742,12 @@ def remove_record(agent_id: str, request: Request,
         raise HTTPException(
             status_code=409,
             detail=f"Revoke '{agent.name}' before removing its record.")
+    from ..services import agent_host_service
+    if agent_host_service.for_agent(db, agent.id) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"'{agent.name}' was deployed by the dashboard. Delete it under "
+                    f"Deployed agents, which also removes its host."))
 
     name = agent.name
     orphaned = agent_service.delete_agent(db, agent)

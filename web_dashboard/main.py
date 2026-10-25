@@ -1120,6 +1120,7 @@ from .api import workgroup_overrides as workgroup_overrides_api  # noqa: E402
 from .api import cloud_identity as cloud_identity_api  # noqa: E402
 from .api import entitle_bundles as entitle_bundles_api  # noqa: E402
 from .api import gateways as gateways_api  # noqa: E402
+from .api import agent_hosts as agent_hosts_api  # noqa: E402
 from .api import expiry as expiry_api  # noqa: E402
 from .api import notifications as notifications_api  # noqa: E402
 from .api import agent as agent_api  # noqa: E402
@@ -1251,6 +1252,10 @@ app.include_router(docs_pages.router)
 app.include_router(agent_api.router,
                    dependencies=[_feature_gate("remote_agents_enabled")])
 app.include_router(agent_api.admin_router,
+                   dependencies=[_feature_gate("remote_agents_enabled")])
+# Agents the dashboard deploys into a cloud (api/agent_hosts.py). Operator routes, on
+# their own prefix so the agent vhost's `/api/agent/` matcher can never publish them.
+app.include_router(agent_hosts_api.router,
                    dependencies=[_feature_gate("remote_agents_enabled")])
 
 # ── API explorer (/swagger) + authenticated schema ────────────────────────────

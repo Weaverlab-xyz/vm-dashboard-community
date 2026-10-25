@@ -144,7 +144,9 @@ async def reclaim_nat_instance(db, region: str) -> None:
     try:
         if not config_service.get_bool("aws_nat_instance_enabled"):
             return
-        active = _active_ec2_count(db)
+        from . import agent_host_service
+        # Deployed agents sit in the same private subnet and dial out through this NAT.
+        active = _active_ec2_count(db) + agent_host_service.live_count(db, "aws")
         if active > 0:
             logger.info("nat-instance: keeping NAT (%d active EC2 instance(s))", active)
             return

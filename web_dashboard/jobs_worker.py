@@ -91,6 +91,9 @@ HANDLED_TYPES = (
     "gce_deploy", "gce_bulk_deploy", "gce_capture_image", "gce_destroy",
     "ot_cell_deploy",
     "gateway_deploy", "gateway_teardown",
+    # A remote agent's host the dashboard deployed (services/agent_host_service): started,
+    # stopped and deleted by hand or by the schedule sweep's agent-host pass.
+    "agent_host_start", "agent_host_stop", "agent_host_delete",
     # Auto-delete timer sweep. The app's loop only ENQUEUES one of these; _claim_one's
     # rowcount lock below is what makes a pass single-flight across two gunicorn workers
     # and three worker replicas. Running it here also gives each pass a job row, Live
@@ -224,6 +227,9 @@ LIGHT_TYPES = (
     "image_promote_aws", "image_promote_azure",
     "image_promote_gcp", "image_promote_oci",
     "gateway_deploy", "gateway_teardown",              # pure cloud SDK (jumpoint_host_service)
+    # Pure cloud SDK too, then a sleep-and-check wait for the agent to come online (start)
+    # or for its running jobs to finish (stop). Mostly asleep, so LIGHT.
+    "agent_host_start", "agent_host_stop", "agent_host_delete",
     "epml_sync",                                       # HTTP download + storage upload
     "windows_hybrid_check",                            # Graph polls, up to 90 minutes asleep
     "expiry_sweep",                                    # pure DB, sub-second
@@ -810,6 +816,9 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             # The service owns the parent's terminal status.
             from .services import ot_service
             await ot_service.run_cell_deploy(job_id, meta)
+        elif job_type in ("agent_host_start", "agent_host_stop", "agent_host_delete"):
+            from .services import agent_host_service
+            await agent_host_service.run(db, job_id=job_id, meta=meta)
         elif job_type in ("gateway_deploy", "gateway_teardown"):
             # An operator-requested BeyondTrust Gateway host. Unlike the auto-ensured
             # one, nothing reference-counts it — it lives until someone removes it.

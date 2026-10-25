@@ -3468,7 +3468,7 @@ def _run_vm_container_node_sync(
     cred, sub_id: str, rg: str, location: str, subnet_id: str, name: str,
     vm_size: str, admin_username: str, admin_password: str, cloud_init_b64: str,
     nsg_id: str, os_disk_gb: int, data_disk_id: str, purpose: str,
-    container_image: str,
+    container_image: str, public_ip: bool = True,
 ) -> dict:
     """Find-or-create the node VM. Idempotent on name: an existing VM is returned with
     ``reused=True`` rather than recreated, matching the GCE launcher -- a redeploy onto
@@ -3496,15 +3496,18 @@ def _run_vm_container_node_sync(
 
     # Standard + Static: secure-by-default (no inbound without an NSG rule) AND stable
     # across a recreate, which is what lets Edge keys and a pinned server-url survive.
-    pip = network.public_ip_addresses.begin_create_or_update(
-        rg, pip_name,
-        PublicIPAddress(location=location, sku=PublicIPAddressSku(name="Standard"),
-                        public_ip_allocation_method="Static", tags=tags),
-    ).result()
+    # None at all for a node that only dials OUT (a deployed remote agent).
+    pip = None
+    if public_ip:
+        pip = network.public_ip_addresses.begin_create_or_update(
+            rg, pip_name,
+            PublicIPAddress(location=location, sku=PublicIPAddressSku(name="Standard"),
+                            public_ip_allocation_method="Static", tags=tags),
+        ).result()
     ip_config = NetworkInterfaceIPConfiguration(
         name="ipconfig1", subnet={"id": subnet_id},
         private_ip_allocation_method="Dynamic",
-        public_ip_address={"id": pip.id},
+        **({"public_ip_address": {"id": pip.id}} if pip is not None else {}),
     )
     nic_params = NetworkInterface(location=location, ip_configurations=[ip_config],
                                   tags=tags)
@@ -3562,22 +3565,24 @@ def _run_vm_container_node_sync(
             "status": "RUNNING", "machine_type": vm_size, "image": container_image,
             "internal_ip": (nic.ip_configurations[0].private_ip_address
                             if nic.ip_configurations else ""),
-            "external_ip": pip.ip_address or "", "created_at": None}
+            "external_ip": (pip.ip_address or "") if pip is not None else "",
+            "created_at": None}
 
 
 async def run_vm_container_node(
     rg: str, location: str, *, subnet_id: str, name: str, vm_size: str,
     admin_password: str, cloud_init_b64: str, nsg_id: str = "", os_disk_gb: int = 0,
     data_disk_id: str = "", purpose: str = "", container_image: str = "",
-    admin_username: str = "nodeadmin",
+    admin_username: str = "nodeadmin", public_ip: bool = True,
 ) -> dict:
-    """Ensure the managed node VM (idempotent on name)."""
+    """Ensure the managed node VM (idempotent on name). ``public_ip=False`` gives it none:
+    a node that only dials out, like a deployed remote agent."""
     try:
         cred, sub_id = await _ensure_creds()
         return await _to_thread(
             _run_vm_container_node_sync, cred, sub_id, rg, location, subnet_id, name,
             vm_size, admin_username, admin_password, cloud_init_b64, nsg_id,
-            os_disk_gb, data_disk_id, purpose, container_image,
+            os_disk_gb, data_disk_id, purpose, container_image, public_ip,
         )
     except AzureError:
         raise

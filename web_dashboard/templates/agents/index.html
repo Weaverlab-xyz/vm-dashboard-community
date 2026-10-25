@@ -134,6 +134,7 @@
   {% if 'agents' in tab_slugs %}
   <div x-show="activeTab === 'agents'" x-cloak role="tabpanel">
     {% include "agents/_agents.html" %}
+    {% include "agents/_deployed.html" %}
   </div>
   {% endif %}
 

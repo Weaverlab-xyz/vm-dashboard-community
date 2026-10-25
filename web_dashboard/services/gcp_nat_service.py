@@ -171,7 +171,10 @@ async def reclaim_vm_nat(db, region: str) -> None:
     try:
         if not config_service.get_bool("gcp_vm_nat_enabled"):
             return
-        active = _active_gce_count(db, region)
+        from . import agent_host_service
+        # Deployed agents in this region dial out through the same Cloud NAT.
+        active = (_active_gce_count(db, region)
+                  + agent_host_service.live_count(db, "gcp", region))
         if active > 0:
             logger.info("gcp-vm-nat: keeping egress in %s (%d active VM(s))", region, active)
             return

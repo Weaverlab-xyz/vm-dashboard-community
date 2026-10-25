@@ -189,6 +189,9 @@ range. When a large estate outgrows the remote worker, it adds capacity outside 
 dashboard's job worker; [Where work runs](../../where-work-runs.md#scaling-configuration-in-the-cloud)
 says when that trade is worth making.
 
+The dashboard can do all three steps for you, and keep the agent up only around a change
+window: see [Deploying an agent into a cloud](deploying.md). By hand:
+
 1. Run an agent inside the VPC or VNet, and grant it `agent_ansible`.
 2. In its `policy.yaml`, give `ansible:` a `vm_image` and an `ansible.targets` entry for
    the subnet, port 22.
