@@ -6077,6 +6077,10 @@ class JobSlots:
             free_ansible = self._running["ansible"] < self.ansible
             free_other = self._running["other"] < 1
         types = set(HANDLERS) & POLICY.job_types
+        if getattr(POLICY, "upgrades", None):
+            # Control jobs take the serial slot (and quiesce the rest themselves). Left
+            # out, an agent running several jobs at once could never be upgraded.
+            types |= set(CONTROL_JOB_TYPES)
         return {t for t in types
                 if (free_ansible if self._kind(t) == "ansible" else free_other)}
 

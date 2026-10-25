@@ -293,6 +293,24 @@ def test_quiesce_waits_for_other_jobs_and_holds_new_leases():
     assert slots.quiesce(1) is True
 
 
+def test_a_concurrent_agent_asks_for_control_jobs_only_when_opted_in():
+    ansible = ("ansible:\n  enabled: true\n  vm_image: x\n  max_concurrent: 2\n"
+               "  targets:\n    - cidr: 10.0.0.0/8\n      ports: [22]\n")
+    slots = agent.JobSlots(2)
+    agent.POLICY = _policy(ansible)
+    assert not set(agent.CONTROL_JOB_TYPES) & slots.wanted()
+    agent.POLICY = _policy(ansible + UPGRADES)
+    assert set(agent.CONTROL_JOB_TYPES) <= slots.wanted()
+    # The serial slot busy: no control job either, it would have to wait for it.
+    release = threading.Event()
+    slots.run(lambda: release.wait(5), "agent_discover")
+    try:
+        assert not set(agent.CONTROL_JOB_TYPES) & slots.wanted()
+    finally:
+        release.set()
+        slots.drain(5)
+
+
 def test_sigterm_drains_a_serial_agent_too():
     slots = agent.JobSlots(1)
     before = signal.getsignal(signal.SIGTERM)
