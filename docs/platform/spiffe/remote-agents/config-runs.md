@@ -96,7 +96,34 @@ an address range and the agent that executes runs against it:
 
 Runs for an address in that range go to `lab-runner`. Everything else still goes to the
 discovering agent. Matching is longest-prefix-first, so a `/32` overrides a `/24`, and one
-range may name only one agent — a duplicate is refused rather than resolved by guesswork.
+range may name only one agent in one scope — a duplicate is refused rather than resolved
+by guesswork.
+
+#### Scopes: on-premises, or one cloud
+
+An address alone does not name a machine. Every AWS region's default VPC is
+`172.31.0.0/16`, and many sites use `192.168.1.0/24`, so one address can be an on-premises
+guest, an EC2 VM and an Azure VM at once. Every route therefore says what it **applies
+to**, and a run only ever consults routes for its own target:
+
+| Applies to | Governs | Optional narrower |
+|---|---|---|
+| On-premises guests | VMs synced from a hypervisor connection | One connection: only guests it discovered |
+| AWS, Azure or Google Cloud VMs | That cloud's dashboard-deployed VMs, by private address | One region |
+
+So the same range can be routed once per scope — an on-premises route and an AWS route for
+`10.40.0.0/16` live side by side and never capture each other's targets — and two regions,
+or two connections, with the same range can each name their own agent. At an equal prefix
+a narrowed route wins over an unnarrowed one.
+
+**A connection narrows which guests are covered, never who runs them.** The route's agent
+still executes. A route narrowed to your Workstation connection means "guests that
+connection discovered run on this agent" — the `vmrest` agent on the Windows host stays
+the discoverer only.
+
+**Routes from before scopes** keep every answer. A route without the old *Also route cloud
+VMs* tick became an on-premises route. A route with it became four: on-premises, AWS, Azure
+and Google Cloud, with the same range and agent. Delete the ones you never meant.
 
 **What moves is who runs it, never what it runs against.** The target address is still
 whichever address the *discovering* agent reported for that VM
@@ -195,15 +222,15 @@ window: see [Deploying an agent into a cloud](deploying.md). By hand:
 1. Run an agent inside the VPC or VNet, and grant it `agent_ansible`.
 2. In its `policy.yaml`, give `ansible:` a `vm_image` and an `ansible.targets` entry for
    the subnet, port 22.
-3. On **Remote Agents → Config Routes**, add a route for that range naming the agent, and
-   tick **Also route cloud VMs in this range**. The list shows how many cloud VMs each
-   route covers.
+3. On **Remote Agents → Config Routes**, add a route for that range naming the agent, with
+   **Applies to** set to the VMs' cloud — and the region, if another region uses the same
+   range. The list shows how many cloud VMs each route covers.
 
-From then on, the VMs whose private address is in the range appear under **Cloud VMs (via
-agent)** in the target picker instead of under their cloud, and bulk runs from the
-Inventory page send them to the agent as well. A route without the tick governs only
-hypervisor guests, exactly as before, which includes every route that existed before the
-option did.
+From then on, that cloud's VMs whose private address is in the range appear under **Cloud
+VMs (via agent)** in the target picker instead of under their cloud, and bulk runs from
+the Inventory page send them to the agent as well. Another cloud's VMs, and on-premises
+guests, at the same addresses are untouched: see
+[Scopes](#scopes-on-premises-or-one-cloud).
 
 **The address is the deploy's, never the request's.** The dashboard reads the VM's
 **private** address off its deploy job, and only then works out which agent covers it. The
