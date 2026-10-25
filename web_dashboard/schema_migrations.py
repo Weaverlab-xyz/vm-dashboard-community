@@ -228,7 +228,7 @@ def _route_scope_unique(conn) -> None:
     if "uq_config_mgmt_route_scope" not in _route_constraint_names(conn):
         conn.execute(text(
             f"CREATE UNIQUE INDEX uq_config_mgmt_route_scope ON {_ROUTES} "
-            f"(cidr, scope, scope_region, scope_connection_id)"))
+            f"(cidr, scope, scope_region, scope_connection_id, scope_workstream)"))
 
 
 def _split_cloud_routes(conn) -> None:
@@ -243,14 +243,15 @@ def _split_cloud_routes(conn) -> None:
     rows = conn.execute(text(
         f"SELECT id, agent_id, cidr, label, is_active, created_at, created_by "
         f"FROM {_ROUTES} WHERE include_cloud_vms = :t AND scope = 'onprem' "
-        f"AND scope_region = '' AND scope_connection_id = ''"), {"t": True}).fetchall()
+        f"AND scope_region = '' AND scope_connection_id = '' AND scope_workstream = ''"),
+        {"t": True}).fetchall()
     for row in rows:
         for cloud in ("aws", "azure", "gcp"):
             conn.execute(text(
                 f"INSERT INTO {_ROUTES} (id, agent_id, cidr, label, is_active, "
                 f"include_cloud_vms, scope, scope_region, scope_connection_id, "
-                f"created_at, created_by, updated_at) VALUES (:id, :agent, :cidr, :label, "
-                f":active, :f, :scope, '', '', :created, :by, :created)"),
+                f"scope_workstream, created_at, created_by, updated_at) VALUES (:id, :agent, "
+                f":cidr, :label, :active, :f, :scope, '', '', '', :created, :by, :created)"),
                 {"id": str(uuid.uuid4()), "agent": row.agent_id, "cidr": row.cidr,
                  "label": row.label, "active": row.is_active, "f": False, "scope": cloud,
                  "created": row.created_at, "by": row.created_by})
@@ -260,7 +261,8 @@ def _split_cloud_routes(conn) -> None:
 
 _split_cloud_routes.describe = "split cloud-flagged routes into one row per scope"
 _drop_cidr_only_unique.describe = "drop uq_config_mgmt_route_cidr"
-_route_scope_unique.describe = "unique (cidr, scope, scope_region, scope_connection_id)"
+_route_scope_unique.describe = ("unique (cidr, scope, scope_region, scope_connection_id, "
+                               "scope_workstream)")
 
 
 #: Every schema change since the legacy list was frozen, oldest first. Append; never
@@ -274,12 +276,13 @@ MIGRATIONS: tuple = (
     Migration("0002_agent_reported_ansible_slots",
               (add_column("remote_agents", "reported_ansible_slots", "INTEGER"),)),
     # A route has a scope: on-premises guests (optionally one connection's) or one cloud's
-    # VMs (optionally one region's). One CIDR may be routed once per scope, so the
+    # VMs (optionally one region's and/or one workstream's). One CIDR may be routed once per scope, so the
     # CIDR-only unique constraint goes; flagged routes split so no lookup changes answer.
     Migration("0003_config_route_scopes",
               (add_column(_ROUTES, "scope", "VARCHAR(16) NOT NULL DEFAULT 'onprem'"),
                add_column(_ROUTES, "scope_region", "VARCHAR(64) NOT NULL DEFAULT ''"),
                add_column(_ROUTES, "scope_connection_id", "VARCHAR(36) NOT NULL DEFAULT ''"),
+               add_column(_ROUTES, "scope_workstream", "VARCHAR(100) NOT NULL DEFAULT ''"),
                _drop_cidr_only_unique,
                _route_scope_unique,
                _split_cloud_routes)),

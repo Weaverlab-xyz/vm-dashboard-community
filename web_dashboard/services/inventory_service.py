@@ -63,8 +63,9 @@ def _vm_item(job, routes: "cmr.RouteTable" = cmr.EMPTY) -> dict:
     meta = job.metadata_dict
     cloud, href = _VM_JOBS[job.job_type]
     private_ip = str(meta.get("private_ip") or "").strip()
-    scope, region = cmr.scope_of_deploy(job.job_type, meta)
-    route_agent = (routes.executor_for(private_ip, scope=scope, region=region)
+    scope, region, workstream = cmr.scope_of_job(job)
+    route_agent = (routes.executor_for(private_ip, scope=scope, region=region,
+                                       workstream=workstream)
                    if cloud in _AGENT_ROUTABLE_CLOUDS and private_ip else "")
     name = (meta.get("instance_name") or meta.get("vm_name") or meta.get("name")
             or job.cloud_resource_id or "(unnamed)")
@@ -100,6 +101,7 @@ def _vm_item(job, routes: "cmr.RouteTable" = cmr.EMPTY) -> dict:
         # this row asks the route table the same question the gate does.
         "route_scope": scope,
         "route_region": region,
+        "route_workstream": workstream,
         # Who executes a Config-Management run against it: an agent a cloud-VM route names,
         # or None for the remote worker. Resolved here so the picker, the bulk fan-out and
         # the enqueue gate read one answer (config_mgmt_route_service).
@@ -717,8 +719,8 @@ def _hypervisor_items(db: Session, claimed: set, routes: "cmr.RouteTable") -> li
 
 
 def cloud_vm_private_ips(db: Session) -> list:
-    """``(scope, region, private address)`` of every live, dashboard-deployed cloud VM a
-    route could govern. Feeds the Config Routes page's "how many cloud VMs" count."""
+    """``(scope, region, workstream, private address)`` of every live, dashboard-deployed
+    cloud VM a route could govern. Feeds the Config Routes page's "how many cloud VMs" count."""
     out = []
     for job in (db.query(Job)
                 .filter(Job.job_type.in_(tuple(_VM_JOBS)), Job.status == "completed")
@@ -728,8 +730,7 @@ def cloud_vm_private_ips(db: Session) -> list:
             continue
         ip = str(meta.get("private_ip") or "").strip()
         if ip:
-            scope, region = cmr.scope_of_deploy(job.job_type, meta)
-            out.append((scope, region, ip))
+            out.append((*cmr.scope_of_job(job), ip))
     return out
 
 

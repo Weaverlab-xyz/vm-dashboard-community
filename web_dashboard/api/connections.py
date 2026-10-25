@@ -121,11 +121,12 @@ class RouteRequest(BaseModel):
     agent_id: str
     cidr: str
     label: str = ""
-    # onprem | aws | azure | gcp, with an optional narrower: a connection for onprem, a
-    # region for a cloud. See config_mgmt_route_service.
+    # onprem | aws | azure | gcp, with optional narrowers: a connection for onprem; a
+    # region and/or a workstream for a cloud. See config_mgmt_route_service.
     scope: str = "onprem"
     region: str = ""
     connection_id: str = ""
+    workstream: str = ""
     # Superseded by `scope`. Accepted only to refuse it: `true` used to mean "every cloud
     # too", and silently creating an on-premises route instead would route nothing.
     include_cloud_vms: Optional[bool] = None
@@ -139,6 +140,7 @@ class RouteUpdate(BaseModel):
     scope: Optional[str] = None
     region: Optional[str] = None
     connection_id: Optional[str] = None
+    workstream: Optional[str] = None
     include_cloud_vms: Optional[bool] = None
 
 
@@ -168,10 +170,12 @@ def list_config_routes(db: Session = Depends(get_db),
         row["matches"] = counts.get(row["id"], 0)
         row["cloud_matches"] = cloud_counts.get(row["id"], 0)
     from ..database import HypervisorConnection
+    from ..services import workgroup_service
     connections = {c.id: c.name for c in db.query(HypervisorConnection).all()}
     for row in routes:
         row["scope_text"] = cmr.scope_text(row["scope"], row["region"],
-                                           connections.get(row["connection_id"], ""))
+                                           connections.get(row["connection_id"], ""),
+                                           row["workstream"])
     granted = [a.id for a in db.query(RemoteAgent).filter(
         RemoteAgent.is_active.is_(True)).all()
         if "agent_ansible" in agent_service.allowed_job_types(a)]
@@ -180,12 +184,13 @@ def list_config_routes(db: Session = Depends(get_db),
             "connections": [{"id": cid, "name": name}
                             for cid, name in sorted(connections.items(),
                                                     key=lambda kv: kv[1].lower())],
-            "scopes": [{"id": s, "label": cmr.SCOPE_LABELS[s]} for s in cmr.SCOPES]}
+            "scopes": [{"id": s, "label": cmr.SCOPE_LABELS[s]} for s in cmr.SCOPES],
+            "workstreams": sorted(workgroup_service.list_names(db))}
 
 
 @router.get("/config-mgmt-routes/resolve")
 def resolve_config_route(address: str, scope: str = "onprem", region: str = "",
-                         connection_id: str = "",
+                         connection_id: str = "", workstream: str = "",
                                db: Session = Depends(get_db),
                                current_user: User = Depends(require_explicit_permission("connections", "read"))):
     """Which agent would execute a run against ``address``.
@@ -194,11 +199,12 @@ def resolve_config_route(address: str, scope: str = "onprem", region: str = "",
     is ``"route"`` when a range decided it and ``"none"`` when nothing did — in which
     case the executor is whichever agent brokers the target's connection, which this
     endpoint cannot know from an address alone. With a cloud ``scope`` it answers for a
-    cloud VM's private address in that cloud (and ``region``), where "none" means the
+    cloud VM's private address in that cloud (and ``region`` and ``workstream``), where
+    "none" means the
     remote worker; with ``onprem`` and a ``connection_id``, for that connection's guests.
     """
     route = cmr.match_for(db, address, scope=scope, region=region,
-                          connection_id=connection_id)
+                          connection_id=connection_id, workstream=workstream)
     if route is None:
         return {"agent_id": "", "agent_name": "", "cidr": "", "source": "none"}
     agent = db.query(RemoteAgent).filter(RemoteAgent.id == route.agent_id).first()
@@ -216,14 +222,16 @@ def create_config_route(req: RouteRequest,
     try:
         out = cmr.create(db, agent_id=req.agent_id, cidr=req.cidr, label=req.label,
                          created_by=current_user.username, scope=req.scope,
-                         region=req.region, connection_id=req.connection_id)
+                         region=req.region, connection_id=req.connection_id,
+                         workstream=req.workstream)
     except cmr.ConfigRouteError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     job_service.log_audit(db, current_user.username, "config_mgmt_route_create",
                           details={"id": out["id"], "cidr": out["cidr"],
                                    "agent_id": out["agent_id"],
                                    "scope": out["scope"], "region": out["region"],
-                                   "connection_id": out["connection_id"]})
+                                   "connection_id": out["connection_id"],
+                                   "workstream": out["workstream"]})
     return out
 
 

@@ -180,7 +180,8 @@ def deploy(body: DeployRequest, request: Request,
         # text reaching the response. An on-premises route for the same range is no
         # clash: routes are scoped (config_mgmt_route_service).
         taken = {r["cidr"]: r for r in cmr.list_routes(db)
-                 if r["scope"] == host.cloud and r["region"] == host.region.lower()}
+                 if r["scope"] == host.cloud and r["region"] == host.region.lower()
+                 and not r["workstream"]}
         names = {a.id: a.name for a in db.query(RemoteAgent).all()}
         for cidr in ahs.cidrs_of(host):
             clash = taken.get(cidr)

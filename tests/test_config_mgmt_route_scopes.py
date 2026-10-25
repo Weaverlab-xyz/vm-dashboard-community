@@ -12,6 +12,9 @@ ever considers routes in its target's own scope. What has to hold:
   * **Delegated execution is unchanged.** The route's agent EXECUTES, independent of the
     agent brokering the connection — the vmrest / Hyper-V shape routes exist for — with
     or without a connection narrower.
+  * **A workstream narrows a cloud route** to the VMs deployed in it: two teams' VPCs in
+    one region share a range, and one team's agent is never handed the other's VM. The
+    deploy-time workstream decides, so reassigning a VM does not move its executor.
   * **The upgrade keeps every answer.** A flagged route becomes four, an unflagged one
     on-premises, on an old-schema database, idempotently.
 
@@ -38,7 +41,7 @@ except ModuleNotFoundError as exc:
 
 from web_dashboard.database import (Base, ConfigMgmtRoute, HypervisorConnection,  # noqa: E402
                                     HypervisorVMCache, Job, RemoteAgent, SessionLocal,
-                                    engine, get_db)
+                                    Workgroup, engine, get_db)
 from web_dashboard.api.config_mgmt import _resolve_agent_target  # noqa: E402
 from web_dashboard.services import config_mgmt_route_service as cmr  # noqa: E402
 
@@ -53,8 +56,12 @@ def _utcnow():
 
 def _fresh():
     db = SessionLocal()
-    for model in (ConfigMgmtRoute, HypervisorVMCache, HypervisorConnection, Job, RemoteAgent):
+    for model in (ConfigMgmtRoute, HypervisorVMCache, HypervisorConnection, Job, RemoteAgent,
+                  Workgroup):
         db.query(model).delete()
+    db.commit()
+    for name in ("team-a", "team-b"):
+        db.add(Workgroup(name=name, display_name=name))
     db.commit()
     return db
 
@@ -118,10 +125,10 @@ def _gate(db, payload):
     return out["executor_name"], ""
 
 
-def _deploy(db, job_id, job_type, **meta):
+def _deploy(db, job_id, job_type, workgroup="team-a", **meta):
     meta.setdefault("private_ip", GUEST)
     meta.setdefault("instance_name", job_id)
-    db.add(Job(id=job_id, job_type=job_type, status="completed", workgroup="team-a",
+    db.add(Job(id=job_id, job_type=job_type, status="completed", workgroup=workgroup,
                extra_data=json.dumps(meta), created_at=_utcnow()))
     db.commit()
 
@@ -287,6 +294,91 @@ def test_an_azure_vm_in_an_aws_only_range_stays_on_the_remote_worker():
     assert not name and "remote worker" in detail and "Azure" in detail, detail
 
 
+# ── workstreams ───────────────────────────────────────────────────────────────
+
+def test_two_teams_sharing_a_range_in_one_region_each_get_their_own_agent():
+    db = _fresh()
+    _agent(db, "a")
+    _agent(db, "b")
+    for team in ("a", "b"):
+        cmr.create(db, agent_id=f"agent-{team}", cidr="10.0.0.0/16", scope="aws",
+                   region="us-east-2", workstream=f"team-{team}")
+    table = cmr.load_table(db)
+    at = dict(scope="aws", region="us-east-2")
+    assert table.executor_for("10.0.1.5", workstream="team-a", **at) == "agent-a"
+    assert table.executor_for("10.0.1.5", workstream="team-b", **at) == "agent-b"
+    assert table.executor_for("10.0.1.5", workstream="team-c", **at) == "", \
+        "a third team's VM was handed to another team's agent"
+
+
+def test_more_narrowers_win_at_an_equal_prefix():
+    db = _fresh()
+    _agent(db, "none")
+    _agent(db, "ws")
+    _agent(db, "both")
+    cmr.create(db, agent_id="agent-none", cidr="10.0.0.0/16", scope="aws")
+    cmr.create(db, agent_id="agent-ws", cidr="10.0.0.0/16", scope="aws", workstream="team-a")
+    cmr.create(db, agent_id="agent-both", cidr="10.0.0.0/16", scope="aws",
+               region="us-east-2", workstream="team-a")
+    table = cmr.load_table(db)
+    assert table.executor_for("10.0.1.5", scope="aws", region="us-east-2",
+                              workstream="team-a") == "agent-both"
+    assert table.executor_for("10.0.1.5", scope="aws", region="eu-west-1",
+                              workstream="team-a") == "agent-ws"
+    assert table.executor_for("10.0.1.5", scope="aws", region="us-east-2",
+                              workstream="team-b") == "agent-none"
+
+
+def test_the_deploy_time_workstream_decides_after_a_reassignment():
+    job = Job(id="j", job_type="ec2_deploy", workgroup="team-b",
+              extra_data=json.dumps({"region": "us-east-2", "deploy_workgroup": "team-a",
+                                     "workgroup": "team-b"}))
+    assert cmr.scope_of_job(job) == ("aws", "us-east-2", "team-a")
+    never_moved = Job(id="k", job_type="gce_deploy", workgroup="Team-B",
+                      extra_data=json.dumps({"zone": "us-central1-a"}))
+    assert cmr.scope_of_job(never_moved) == ("gcp", "us-central1", "team-b")
+
+
+def test_every_reassign_endpoint_keeps_the_deploy_time_workstream():
+    """Reassigning rewrites the job's workgroup. Each cloud's handler must keep the
+    original first, or a workstream-narrowed route would follow ownership to a network
+    the VM is not on."""
+    for cloud in ("aws", "azure", "gcp"):
+        src = open(os.path.join(_ROOT, "web_dashboard", "api", f"{cloud}.py"),
+                   encoding="utf-8").read()
+        keep = src.index('meta.setdefault("deploy_workgroup", previous or canonical)')
+        assert keep < src.index('meta["workgroup"] = canonical', keep), cloud
+
+
+def test_the_gate_refuses_another_teams_agent():
+    db = _fresh()
+    _agent(db, "a")
+    _agent(db, "b")
+    _deploy(db, "ec2-a", "ec2_deploy", workgroup="team-a", region="us-east-2")
+    # team-b's route is the MORE specific one, so without the workstream filter it would
+    # take team-a's VM: only the narrower keeps it out.
+    cmr.create(db, agent_id="agent-a", cidr="10.40.0.0/16", scope="aws", workstream="team-a")
+    cmr.create(db, agent_id="agent-b", cidr="10.40.1.0/24", scope="aws", workstream="team-b")
+    assert _gate(db, _CloudRun("agent-a", "aws", "ec2-a")) == ("a", "")
+    name, detail = _gate(db, _CloudRun("agent-b", "aws", "ec2-a"))
+    assert not name and "routed to agent 'a'" in detail, detail
+
+
+def test_a_workstream_narrower_must_name_a_workstream_on_a_cloud_route():
+    db = _fresh()
+    _agent(db, "vpc")
+    for kw in ({"scope": "onprem", "workstream": "team-a"},
+               {"scope": "aws", "workstream": "no-such-team"}):
+        try:
+            cmr.create(db, agent_id="agent-vpc", cidr="10.40.0.0/16", **kw)
+        except cmr.ConfigRouteError:
+            continue
+        raise AssertionError(f"{kw} was accepted")
+    out = cmr.create(db, agent_id="agent-vpc", cidr="10.40.0.0/16", scope="aws",
+                     workstream="Team-A")
+    assert out["workstream"] == "team-a"
+
+
 # ── the API ───────────────────────────────────────────────────────────────────
 
 def test_the_api_refuses_the_superseded_flag_and_takes_a_scope():
@@ -316,6 +408,7 @@ def test_the_api_refuses_the_superseded_flag_and_takes_a_scope():
     listed = c.get("/api/connections/config-mgmt-routes").json()
     assert listed["routes"][0]["scope_text"] == "AWS · us-east-2"
     assert [s["id"] for s in listed["scopes"]] == list(cmr.SCOPES)
+    assert {"team-a", "team-b"} <= set(listed["workstreams"])
     res = c.get("/api/connections/config-mgmt-routes/resolve",
                 params={"address": GUEST, "scope": "aws", "region": "us-east-2"}).json()
     assert res["agent_id"] == "agent-vpc"

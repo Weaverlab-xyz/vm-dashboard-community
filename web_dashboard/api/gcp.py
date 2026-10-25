@@ -1011,6 +1011,10 @@ async def reassign_instance_workgroup(
     if job is not None:
         job.workgroup = canonical
         meta = job.metadata_dict
+        # The workstream the VM was DEPLOYED in, kept across reassignment: a
+        # Config-Management route narrowed to a workstream stands for that workstream's
+        # network, which reassigning ownership does not move (config_mgmt_route_service).
+        meta.setdefault("deploy_workgroup", previous or canonical)
         meta["workgroup"] = canonical
         job.metadata_dict = meta
         if not job.cloud_resource_id:

@@ -210,9 +210,9 @@ def get_cloud_targets(
         meta = job.metadata_dict
         if meta.get("destroyed"):
             continue
-        scope, region = cmr.scope_of_deploy(job.job_type, meta)
+        scope, region, workstream = cmr.scope_of_job(job)
         if routes.match_for(str(meta.get("private_ip") or ""), scope=scope,
-                            region=region) is not None:
+                            region=region, workstream=workstream) is not None:
             continue
         ip = meta.get("public_ip") or meta.get("private_ip")
         if not ip:
@@ -326,7 +326,8 @@ def get_agent_targets(
         elif item.get("source") == "provisioned":
             route = routes.match_for(item.get("private_ip") or "",
                                      scope=item.get("route_scope") or "",
-                                     region=item.get("route_region") or "")
+                                     region=item.get("route_region") or "",
+                                     workstream=item.get("route_workstream") or "")
             via = (route.label or route.cidr) if route else ""
             row.update({"cloud": item.get("cloud") or "",
                         "target_id": item.get("job_id") or "",
@@ -765,18 +766,20 @@ def _resolve_cloud_vm_target(payload: "RunRequest", db, agent, current_user) -> 
 
     # ONLY NOW, from the pinned address — the same ordering as the synced-guest branch.
     # No fallback: with no cloud route the remote worker runs it, never some agent.
-    scope, region = cmr.scope_of_deploy(deploy.job_type, meta)
-    expected = cmr.executor_for(db, host, fallback="", scope=scope, region=region)
+    scope, region, workstream = cmr.scope_of_job(deploy)
+    expected = cmr.executor_for(db, host, fallback="", scope=scope, region=region,
+                                workstream=workstream)
     if not expected:
         raise HTTPException(
             status_code=400,
             detail=(f"No Config-Management route sends cloud VMs at {host} to an agent, so "
                     f"this VM runs on the remote worker. Leave the agent unset, or add a "
-                    f"route scoped to {cmr.scope_text(scope, region)} under Remote Agents → "
+                    f"route scoped to {cmr.scope_text(scope, region, '', workstream)} under "
+                    f"Remote Agents → "
                     f"Config Routes."))
     if agent.id != expected:
         runner = db.query(type(agent)).filter(type(agent).id == expected).first()
-        route = cmr.match_for(db, host, scope=scope, region=region)
+        route = cmr.match_for(db, host, scope=scope, region=region, workstream=workstream)
         raise HTTPException(
             status_code=400,
             detail=(f"This VM's address {host} is routed to agent "

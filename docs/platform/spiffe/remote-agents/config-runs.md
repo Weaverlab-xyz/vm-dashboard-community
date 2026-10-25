@@ -109,12 +109,21 @@ to**, and a run only ever consults routes for its own target:
 | Applies to | Governs | Optional narrower |
 |---|---|---|
 | On-premises guests | VMs synced from a hypervisor connection | One connection: only guests it discovered |
-| AWS, Azure or Google Cloud VMs | That cloud's dashboard-deployed VMs, by private address | One region |
+| AWS, Azure or Google Cloud VMs | That cloud's dashboard-deployed VMs, by private address | One region, one workstream, or both |
 
 So the same range can be routed once per scope — an on-premises route and an AWS route for
 `10.40.0.0/16` live side by side and never capture each other's targets — and two regions,
 or two connections, with the same range can each name their own agent. At an equal prefix
-a narrowed route wins over an unnarrowed one.
+the route with more narrowers wins: region and workstream beat either, and either beats
+none.
+
+**A workstream narrower stands for that workstream's network.** Two teams' VPCs in one
+region often share a range like `10.0.0.0/16`, and region cannot tell them apart. Every
+deploy records its workstream, and each workstream has its own network defaults, so a
+route for `10.0.0.0/16` in AWS · us-east-2 · team-a governs only team-a's VMs. It is also a
+tenancy line: one team's agent is never handed another team's VM, or the SSH key sealed
+for it. The match is on the workstream a VM was **deployed** in. Reassigning a VM to
+another workstream does not move its network, so it does not move which agent runs it.
 
 **A connection narrows which guests are covered, never who runs them.** The route's agent
 still executes. A route narrowed to your Workstation connection means "guests that

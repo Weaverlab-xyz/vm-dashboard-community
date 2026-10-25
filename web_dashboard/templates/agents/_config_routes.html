@@ -213,6 +213,22 @@
           </p>
         </div>
 
+        <div x-show="form.scope !== 'onprem'">
+          <label class="block text-xs font-medium text-gray-600 mb-1">Workstream <span class="text-gray-400">(optional)</span></label>
+          <select x-model="form.workstream"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">Every workstream</option>
+            <template x-for="ws in workstreams" :key="ws">
+              <option :value="ws" x-text="ws" :selected="ws === form.workstream"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-400 mt-1">
+            Only VMs deployed in this workstream — for teams whose networks use the same
+            range in one region. It also keeps one team's agent from ever being handed
+            another team's VMs or their keys.
+          </p>
+        </div>
+
         <label class="flex items-center gap-2 text-sm text-gray-700">
           <input type="checkbox" x-model="form.is_active" class="rounded border-gray-300">
           Active
@@ -251,7 +267,7 @@
 // Agents panels, and the container in agents/index.html owns only which tab is showing.
 function configRoutesPage() {
   return {
-    routes: [], agents: [], grantedIds: [], connections: [], regions: [],
+    routes: [], agents: [], grantedIds: [], connections: [], regions: [], workstreams: [],
     scopes: [{id: 'onprem', label: 'On-premises'}],
     loading: true, busy: '',
     noAccess: '',   // the 403 text when this user holds no `connections` permission
@@ -271,6 +287,7 @@ function configRoutesPage() {
         this.agents = data.agents || [];
         this.grantedIds = data.ansible_agent_ids || [];
         this.connections = data.connections || [];
+        this.workstreams = data.workstreams || [];
         if ((data.scopes || []).length) this.scopes = data.scopes;
         this.noAccess = '';
       } catch (e) {
@@ -315,7 +332,7 @@ function configRoutesPage() {
 
     _blank() {
       return {cidr: '', agent_id: '', label: '', is_active: true, scope: 'onprem',
-              region: '', scope_connection_id: ''};
+              region: '', scope_connection_id: '', workstream: ''};
     },
 
     // The region picker follows the scope's cloud: only regions with a per-region config
@@ -335,6 +352,7 @@ function configRoutesPage() {
     scopeChanged() {
       this.form.region = '';
       this.form.scope_connection_id = '';
+      this.form.workstream = '';
       this.loadRegions();
     },
 
@@ -350,7 +368,8 @@ function configRoutesPage() {
       this.editingId = r.id;
       this.form = {cidr: r.cidr, agent_id: r.agent_id, label: r.label || '',
                    is_active: !!r.is_active, scope: r.scope || 'onprem',
-                   region: r.region || '', scope_connection_id: r.connection_id || ''};
+                   region: r.region || '', scope_connection_id: r.connection_id || '',
+                   workstream: r.workstream || ''};
       this.formError = '';
       this.loadRegions();
       this.showForm = true;
@@ -365,6 +384,7 @@ function configRoutesPage() {
         const body = {cidr: this.form.cidr, agent_id: this.form.agent_id,
                       label: this.form.label || '', scope: this.form.scope || 'onprem',
                       region: this.form.scope === 'onprem' ? '' : (this.form.region || ''),
+                      workstream: this.form.scope === 'onprem' ? '' : (this.form.workstream || ''),
                       // The scope narrower, sent as the API's connection_id: which
                       // discovered guests this route covers, never what a run targets.
                       connection_id: this.form.scope === 'onprem' ? (this.form.scope_connection_id || '') : ''};

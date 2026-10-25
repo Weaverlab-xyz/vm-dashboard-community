@@ -1122,6 +1122,10 @@ class ConfigMgmtRoute(Base):
     # independent of the agent brokering that connection.
     scope_region = Column(String(64), nullable=False, default="", server_default="")
     scope_connection_id = Column(String(36), nullable=False, default="", server_default="")
+    # Cloud scopes: one workstream's VMs (the one each was DEPLOYED in). It stands for that
+    # workstream's network — two teams' VPCs in one region often share a range — and is a
+    # tenancy line: one team's agent is never handed another team's VM or its key.
+    scope_workstream = Column(String(100), nullable=False, default="", server_default="")
     created_at = Column(DateTime, default=utcnow, nullable=False)
     created_by = Column(String(100))
     updated_at = Column(DateTime, default=utcnow)
@@ -1132,6 +1136,7 @@ class ConfigMgmtRoute(Base):
     # by an invisible created_at comparison. Overlapping ranges of DIFFERENT prefix
     # length are legal and the longest wins, exactly like a routing table.
     __table_args__ = (UniqueConstraint("cidr", "scope", "scope_region", "scope_connection_id",
+                                       "scope_workstream",
                                        name="uq_config_mgmt_route_scope"),)
 
 
