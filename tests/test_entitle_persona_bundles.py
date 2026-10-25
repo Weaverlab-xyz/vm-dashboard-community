@@ -271,7 +271,7 @@ def test_every_bundle_has_delegation_steps_with_names_filled_in():
 
 
 def test_the_docs_print_exactly_the_catalogs_delegation_steps():
-    path = os.path.join(_ROOT, "docs", "beyondtrust", "entitle-persona-bundles.md")
+    path = os.path.join(_ROOT, "docs", "beyondtrust", "entitle", "persona-bundles.md")
     with open(path, encoding="utf-8") as fh:
         doc = fh.read()
     for p in bundles.CATALOG:

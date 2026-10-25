@@ -13,7 +13,7 @@
 > any OIDC) immediately. Both can run at once.
 >
 > **Start here instead:**
-> [`integrations/beyondtrust/entitle-dashboard-permissions.md`](../beyondtrust/entitle-dashboard-permissions.md)
+> [`integrations/beyondtrust/entitle-dashboard-permissions.md`](../beyondtrust/entitle/dashboard-permissions.md)
 > — it compares the two, and covers migrating from this one.
 
 > **Status:** Design + execution plan, v1.

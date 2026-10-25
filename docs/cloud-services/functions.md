@@ -130,7 +130,7 @@ Each workload, and the work around them, has a page:
 The fourth integration is not a function at all: granting **dashboard permissions**
 happens on a dashboard-hosted endpoint, because there the dashboard *is* the target
 system and there is no function to deploy. See
-[entitle-dashboard-permissions.md](../beyondtrust/entitle-dashboard-permissions.md).
+[Entitle dashboard permissions](../beyondtrust/entitle/dashboard-permissions.md).
 
 ### Credentials
 

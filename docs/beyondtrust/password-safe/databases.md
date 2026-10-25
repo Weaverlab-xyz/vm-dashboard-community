@@ -8,9 +8,9 @@ Handing a **database** credential to Password Safe, so the vault owns the passwo
 
 | Page | Read it when |
 |---|---|
-| [AWS: `dbssm`](databases-aws.md) | your database is on RDS, reached through the ECS gateway host over AWS Systems Manager |
-| [Azure: `dbazure`](databases-azure.md) | your database is Azure Flexible Server or SQL Database, reached through a jump VM over Azure Run Command |
-| [GCP: `dbgcp`](databases-gcp.md) | your database is Cloud SQL, rotated over the Data API with no jump host |
+| [AWS: `dbssm`](databases/aws.md) | your database is on RDS, reached through the ECS gateway host over AWS Systems Manager |
+| [Azure: `dbazure`](databases/azure.md) | your database is Azure Flexible Server or SQL Database, reached through a jump VM over Azure Run Command |
+| [GCP: `dbgcp`](databases/gcp.md) | your database is Cloud SQL, rotated over the Data API with no jump host |
 
 This page holds what the three share: what the dashboard does, the two ways to ask for it, where the functional account comes from, and importing databases Password Safe already manages.
 
@@ -106,7 +106,7 @@ one of them, so a key you have not set can never outrank one you have. Only
 `gcp_sqlserver` exists on the cloud+engine rung: it is the single cell the coarser rungs
 cannot express, because `..._mode_sqlserver` governs AWS and Azure SQL Server too and
 those want the opposite answer — see
-[Password Safe rotation for Cloud SQL](databases-gcp.md).
+[Password Safe rotation for Cloud SQL](databases/gcp.md).
 
 It also needs `clouddb_ps_self_rotation` on: the account it names is unprivileged on the
 database, so only the plugin's self-rotate action can change a credential. Its DB login must

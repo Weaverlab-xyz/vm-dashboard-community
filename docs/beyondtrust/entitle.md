@@ -9,8 +9,8 @@ tenant + API token. You can enable any combination:
 |---|---|---|
 | **Resource registration** (this doc) | As the dashboard builds Linux VMs and cloud databases, it registers each as an Entitle integration so users request **just-in-time access** in Entitle. | Off |
 | **Machine-identity JIT** | Short-TTL, auto-approved cloud-credential elevations for the dashboard's own privileged cloud calls. | Off |
-| **Virtual applications & persona bundles** | Friendly, tiered roles over a registered directory's groups, and one bundle per job function per cloud that combines them with the cloud's own roles. See [virtual applications](entitle-virtual-apps.md) and [persona bundles](entitle-persona-bundles.md). | Off (needs resource registration) |
-| **Dashboard permissions** | Time-boxed permissions **inside the dashboard**, granted by Entitle. Two mechanisms: **REST** (current — any user, takes effect immediately) and **Entra groups** (legacy — Entra only, takes effect at next login). See [entitle-dashboard-permissions.md](entitle-dashboard-permissions.md). | Off |
+| **Virtual applications & persona bundles** | Friendly, tiered roles over a registered directory's groups, and one bundle per job function per cloud that combines them with the cloud's own roles. See [virtual applications](entitle/virtual-apps.md) and [persona bundles](entitle/persona-bundles.md). | Off (needs resource registration) |
+| **Dashboard permissions** | Time-boxed permissions **inside the dashboard**, granted by Entitle. Two mechanisms: **REST** (current — any user, takes effect immediately) and **Entra groups** (legacy — Entra only, takes effect at next login). See [entitle-dashboard-permissions.md](entitle/dashboard-permissions.md). | Off |
 
 > The previous **approval-gate** track (which blocked dashboard actions behind an
 > Entitle approval + webhook) has been **removed**. Secret read/update/delete are
@@ -20,11 +20,14 @@ tenant + API token. You can enable any combination:
 
 ## Pages
 
-The larger parts have a page each:
+Each part has a page:
 
 | Page | Read it when |
 |---|---|
 | [Registering resources with Entitle](entitle/resource-registration.md) | you want what the dashboard builds (VMs, databases, clusters, Rancher, Portainer) requestable in Entitle |
+| [Entitle dashboard permissions](entitle/dashboard-permissions.md) | you want dashboard access without standing admins, or you need to tell the two mechanisms apart |
+| [Entitle virtual applications](entitle/virtual-apps.md) | you registered Active Directory or an identity provider and want people to request its groups in Entitle by a clear name, under an approval tier |
+| [Entitle persona bundles](entitle/persona-bundles.md) | you want people to request everything one job function needs on one cloud, or on-premises through Active Directory, in a single Entitle request |
 | [Troubleshooting Entitle](entitle/troubleshooting.md) | a resource will not register in Entitle, or a request is granted and nothing changes |
 
 ---

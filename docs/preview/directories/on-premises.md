@@ -87,8 +87,8 @@ The dashboard also runs one AD playbook of its own here. **Settings → Integrat
 Entitle → Persona access bundles → Create missing groups** runs the built-in
 `ad-ensure-groups` playbook through the same agent, to create the empty `ent-*` groups
 that Entitle persona bundles grant. It only ever creates groups. See
-[Creating the groups](../../beyondtrust/entitle-persona-bundles.md#creating-the-groups)
-and the [delegation steps](../../beyondtrust/entitle-persona-bundles.md#delegating-rights).
+[Creating the groups](../../beyondtrust/entitle/persona-bundles.md#creating-the-groups)
+and the [delegation steps](../../beyondtrust/entitle/persona-bundles.md#delegating-rights).
 
 **Unregister** only forgets the row. It is refused while an AD Connector or DNS link
 extends the directory.

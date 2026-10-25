@@ -2,7 +2,7 @@
 
 > **Audience:** operator · **Profile:** `demo` · **Read this when:** you are onboarding a Cloud SQL database into Password Safe over the Data API, or SQL Server through the Cloud Run service.
 
-Part of [Password Safe: databases](databases.md), which has the shared model: the two ways to onboard, and where the functional account comes from.
+Part of [Password Safe: databases](../databases.md), which has the shared model: the two ways to onboard, and where the functional account comes from.
 
 > **Every channel is built. None has been exercised against a live instance.**
 >
@@ -122,7 +122,7 @@ validator refuses the global form at the click rather than letting a rotation di
 > authenticates as, and the `statementKind` values beyond the one example. To settle them,
 > set `FN_DBOPS_CAPTURE=1` to log the redacted request, point one managed system at the
 > service and click *Verify Managed Account*: one real request in Cloud Logging answers both.
-> See [docs/design/ps-dbops-cloud-run.md](../../design/ps-dbops-cloud-run.md).
+> See [docs/design/ps-dbops-cloud-run.md](../../../design/ps-dbops-cloud-run.md).
 
 The DB is registered on the **`GCP Cloud SQL {engine}`** platform with the five-field
 address `channel;project:region:instance;dbName;audience;ssl[;key=value]`:

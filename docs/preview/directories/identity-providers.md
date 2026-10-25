@@ -85,5 +85,5 @@ groups. Unregistering a provider only forgets it.
 only a label: nothing is created or changed in Entitle. Once a directory is pinned,
 **Virtual app** creates an Entitle virtual application over its synced groups, giving them
 clear role names and approval tiers. Nothing is created in the directory. See
-[Entitle virtual applications](../../beyondtrust/entitle-virtual-apps.md). The
+[Entitle virtual applications](../../beyondtrust/entitle/virtual-apps.md). The
 same button works on Active Directory and LDAP rows.

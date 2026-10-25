@@ -1027,7 +1027,7 @@ _FINOPS = Persona(
                     "permanent owner.",
             target="/rbac",
             minutes=12,
-            docs="beyondtrust/entitle-dashboard-permissions",
+            docs="beyondtrust/entitle/dashboard-permissions",
             requires_flags=("entitle_user_jit_enabled",),
         ),
         UseCase(
@@ -1232,7 +1232,7 @@ _IAMOPS = Persona(
                     "who change the directory are not standing admins of it either.",
             target="/rbac",
             minutes=10,
-            docs="beyondtrust/entitle-dashboard-permissions",
+            docs="beyondtrust/entitle/dashboard-permissions",
             requires_flags=("entitle_user_jit_enabled",),
         ),
     ),
@@ -1280,7 +1280,7 @@ _IDARCH = Persona(
                     "architect specifies, applied to the console that enforces it.",
             target="/rbac",
             minutes=10,
-            docs="beyondtrust/entitle-dashboard-permissions",
+            docs="beyondtrust/entitle/dashboard-permissions",
             requires_flags=("entitle_user_jit_enabled",),
         ),
         UseCase(

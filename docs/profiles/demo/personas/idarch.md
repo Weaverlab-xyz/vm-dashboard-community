@@ -53,7 +53,7 @@ Every dashboard scope, administrator included, can be requested through Entitle.
 revoked the moment it ends, through the REST mechanism. The access model the architect writes
 down is applied to the console that enforces it.
 
-**Guide:** [Entitle dashboard permissions](../../../beyondtrust/entitle-dashboard-permissions.md)
+**Guide:** [Entitle dashboard permissions](../../../beyondtrust/entitle/dashboard-permissions.md)
 
 ### Machine identities elevated per action, not per year
 

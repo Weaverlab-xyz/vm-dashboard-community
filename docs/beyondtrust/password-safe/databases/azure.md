@@ -2,7 +2,7 @@
 
 > **Audience:** operator · **Profile:** `demo` · **Read this when:** you are handing rotation of an Azure Flexible Server or SQL Database credential to Password Safe, through Azure Run Command on the jump VM.
 
-Part of [Password Safe: databases](databases.md), which has the shared model: the two ways to onboard, and where the functional account comes from.
+Part of [Password Safe: databases](../databases.md), which has the shared model: the two ways to onboard, and where the functional account comes from.
 
 Instead of AWS SSM, the three **`{engine} Azure Run Command Plugin`**s reach the private
 DB by sending an **Azure VM Run Command** to the shared **`clouddb-jumpoint`** VM. The

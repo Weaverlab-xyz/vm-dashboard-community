@@ -157,11 +157,11 @@ _MOVED = {
     "integrations/privileged-remote-access":     "beyondtrust/privileged-remote-access",
     "integrations/gateways":                     "beyondtrust/gateways",
     "integrations/entitle":                      "beyondtrust/entitle",
-    "integrations/entitle-dashboard-permissions": "beyondtrust/entitle-dashboard-permissions",
+    "integrations/entitle-dashboard-permissions": "beyondtrust/entitle/dashboard-permissions",
     "integrations/epml":                         "beyondtrust/epml",
     "integrations/databases":                    "beyondtrust/password-safe/databases",
     "integrations/databases/password-safe":      "beyondtrust/password-safe/databases",
-    "integrations/databases/password-safe-gcp":  "beyondtrust/password-safe/databases-gcp",
+    "integrations/databases/password-safe-gcp":  "beyondtrust/password-safe/databases/gcp",
     "profiles/demo/ot-protocol-clients":         "profiles/demo/ot-demo-cell/ot-protocol-clients",
     # The Workload Lab folder, 2026-09. certificates.md was split three ways; its opening
     # section, the plugin reference, is what kept the name.
@@ -214,7 +214,7 @@ _MOVED = {
     "integrations/beyondtrust/databases/password-safe":
         "beyondtrust/password-safe/databases",
     "integrations/beyondtrust/databases/password-safe-gcp":
-        "beyondtrust/password-safe/databases-gcp",
+        "beyondtrust/password-safe/databases/gcp",
 
     # Sections that mirror the app, 2026-10: one hub per nav group (Hypervisors, Clouds,
     # Cloud services, Preview, Operations, Admin), plus BeyondTrust and Platform from
@@ -266,6 +266,14 @@ _MOVED = {
     "operations/health":                         "admin/health",
     "operations/notifications":                  "admin/notifications",
     "spiffe":                                    "platform/spiffe",
+    # Sub-pages into their hub's folder, 2026-10: beyondtrust/entitle-*.md under entitle/,
+    # password-safe/databases-<cloud>.md under databases/.
+    "beyondtrust/entitle-dashboard-permissions": "beyondtrust/entitle/dashboard-permissions",
+    "beyondtrust/entitle-persona-bundles":       "beyondtrust/entitle/persona-bundles",
+    "beyondtrust/entitle-virtual-apps":          "beyondtrust/entitle/virtual-apps",
+    "beyondtrust/password-safe/databases-aws":   "beyondtrust/password-safe/databases/aws",
+    "beyondtrust/password-safe/databases-azure": "beyondtrust/password-safe/databases/azure",
+    "beyondtrust/password-safe/databases-gcp":   "beyondtrust/password-safe/databases/gcp",
 }
 
 
@@ -334,6 +342,7 @@ _INDEX_SECTIONS = {
     "beyondtrust",
     "beyondtrust/gateways",
     "beyondtrust/password-safe",
+    "beyondtrust/password-safe/databases",
     "beyondtrust/entitle",
     "platform",
     "platform/oidc",
@@ -391,6 +400,7 @@ _SECTION_LABELS = {
     "beyondtrust":                  "BeyondTrust",
     "beyondtrust/gateways":         "BeyondTrust · Gateway hosts",
     "beyondtrust/password-safe":    "BeyondTrust · Password Safe",
+    "beyondtrust/password-safe/databases":"BeyondTrust · Password Safe · databases",
     "beyondtrust/entitle":          "BeyondTrust · Entitle",
     "platform":                     "Platform",
     "platform/oidc":                "Platform · OIDC and single sign-on",
@@ -457,9 +467,9 @@ _TITLE_OVERRIDES = {
     "profiles/pov/lifecycle":            "Keeping a POV true, and reaping it",
     "profiles/pov/ps-runbook":           "Password Safe POC runbook",
     "beyondtrust/password-safe/databases":       "Databases: the shared model",
-    "beyondtrust/password-safe/databases-aws":   "Databases on AWS (dbssm)",
-    "beyondtrust/password-safe/databases-azure": "Databases on Azure (dbazure)",
-    "beyondtrust/password-safe/databases-gcp":   "Databases on GCP Cloud SQL (dbgcp)",
+    "beyondtrust/password-safe/databases/aws":   "Databases on AWS (dbssm)",
+    "beyondtrust/password-safe/databases/azure": "Databases on Azure (dbazure)",
+    "beyondtrust/password-safe/databases/gcp":   "Databases on GCP Cloud SQL (dbgcp)",
     "platform/cloud-hosting/azure-container-apps": "Azure Container Apps",
     "platform/cloud-hosting/gcp-cloud-run":        "GCP Cloud Run",
     "platform/cloud-hosting/aws-ecs":              "AWS ECS Fargate",
@@ -498,7 +508,7 @@ _TITLE_OVERRIDES = {
     # The BeyondTrust folder. "Epml" is not a word, and "Entitle Dashboard Permissions"
     # reads as a settings page rather than the Entitle mechanism it describes.
     "beyondtrust/epml":     "EPM for Linux",
-    "beyondtrust/entitle-dashboard-permissions": "Entitle dashboard permissions",
+    "beyondtrust/entitle/dashboard-permissions": "Entitle dashboard permissions",
     "beyondtrust/gateways": "Gateway hosts",
     "profiles/demo/ot-demo-cell/ot-protocol-clients": "OT protocol clients on Windows",
     # The filename predates the product name; Settings and the page's own H1 say this.

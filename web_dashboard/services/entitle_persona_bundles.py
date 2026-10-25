@@ -266,7 +266,7 @@ _BY_KEY = {p.key: p for p in CATALOG}
 #
 # Creating a group grants nothing. These are the steps that make ent-<target>-<persona>
 # mean something, shown per bundle on the settings card and printed in full in
-# docs/beyondtrust/entitle-persona-bundles.md#delegating-rights. One source
+# docs/beyondtrust/entitle/persona-bundles.md#delegating-rights. One source
 # for both, so they cannot disagree. "{group}" is the bundle's group name.
 
 AD_DELEGATION = {

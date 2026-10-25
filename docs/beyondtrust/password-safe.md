@@ -130,9 +130,9 @@ Making the ServiceAccount token a PRA Kubernetes tunnel injects a rotating Passw
 
 Handing database credentials to Password Safe, and importing databases Password Safe already
 manages. The shared model is on [Password Safe: databases](password-safe/databases.md), and
-each cloud's channel has its own page: [AWS (`dbssm`)](password-safe/databases-aws.md),
-[Azure (`dbazure`)](password-safe/databases-azure.md) and
-[GCP Cloud SQL (`dbgcp`)](password-safe/databases-gcp.md).
+each cloud's channel has its own page: [AWS (`dbssm`)](password-safe/databases/aws.md),
+[Azure (`dbazure`)](password-safe/databases/azure.md) and
+[GCP Cloud SQL (`dbgcp`)](password-safe/databases/gcp.md).
 
 ---
 

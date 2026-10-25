@@ -186,9 +186,9 @@ The mechanism, the functional-account rules and the per-cloud setup are under Pa
 | Channel | Page |
 |---|---|
 | The shared model: the two ways in, the functional account, importing | [Password Safe: databases](../beyondtrust/password-safe/databases.md) |
-| AWS (`dbssm`, Systems Manager on the ECS gateway host) | [Password Safe: AWS databases](../beyondtrust/password-safe/databases-aws.md) |
-| Azure (`dbazure`, Run Command on the jump VM) | [Password Safe: Azure databases](../beyondtrust/password-safe/databases-azure.md) |
-| GCP (`dbgcp`, Cloud SQL Data API) | [Password Safe: GCP Cloud SQL](../beyondtrust/password-safe/databases-gcp.md) |
+| AWS (`dbssm`, Systems Manager on the ECS gateway host) | [Password Safe: AWS databases](../beyondtrust/password-safe/databases/aws.md) |
+| Azure (`dbazure`, Run Command on the jump VM) | [Password Safe: Azure databases](../beyondtrust/password-safe/databases/azure.md) |
+| GCP (`dbgcp`, Cloud SQL Data API) | [Password Safe: GCP Cloud SQL](../beyondtrust/password-safe/databases/gcp.md) |
 
 ### Oracle on RDS: the native platform
 
