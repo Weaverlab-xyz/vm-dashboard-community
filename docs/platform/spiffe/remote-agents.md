@@ -145,6 +145,7 @@ operator-supplied code. The runner stays one-shot; only the thing that launches 
 | [Hypervisor connections through an agent](remote-agents/hypervisors.md) | The verbs, what the agent can reach, the sibling runner and VMware Workstation Pro. |
 | [Credentials an agent uses](remote-agents/credentials.md) | What the dashboard holds, what the host seals, and where a credential comes from at run time. |
 | [Agent-executed Config Management](remote-agents/config-runs.md) | What the dashboard sends, the grants it needs, and what a run looks like, for VMs, on-prem databases and on-prem AD/LDAP directories. |
+| [Deploying an agent into a cloud](remote-agents/deploying.md) | The dashboard builds an agent for Config Management in AWS, Azure or Google Cloud, with no inbound access, and keeps it up always, until a time, or just around a change window. |
 | [Agent-brokered file shares](remote-agents/file-shares.md) | A name rather than a path, the grants, and why it needs no Docker socket. |
 | [Attesting an agent through SPIRE](remote-agents/spire-attestation.md) | Moving an agent from an Ed25519 key on disk to a SPIRE attestation at every start: the two overlays, **Migrate to SPIRE**, ports, rollback and the settings. |
 | [SPIFFE and SPIRE](../spiffe.md) | The dashboard's own SPIRE server that agents attest to: running it on Docker Compose or as a sidecar on a managed container runtime, its trust domain, and troubleshooting it. |

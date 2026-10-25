@@ -150,8 +150,10 @@ Remote agents add capacity outside the dashboard's worker:
 
 The tradeoffs to accept:
 
-- **A standing host.** Each agent is a long-running host with a Docker socket that someone
-  patches and monitors, in place of nothing at all between jobs.
+- **A host.** Each agent is a host with a Docker socket, in place of nothing at all
+  between jobs. The dashboard can build it for you and keep it up only around a change
+  window, so nothing stands between windows: see
+  [Deploying an agent into a cloud](spiffe/remote-agents/deploying.md).
 - **The VM's SSH key leaves the dashboard.** For each run, the dashboard seals the key to
   that one agent, for that one job. Turn on **Release dashboard-held credentials only to
   SPIRE-attested agents**, so an agent with a key on disk never receives one.

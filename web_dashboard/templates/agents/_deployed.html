@@ -1,0 +1,379 @@
+{# Deployed agents: remote agents the dashboard built in a cloud, on the Agents tab below the
+   enrolled-agent list. Backed by /api/agent-hosts (api/agent_hosts.py).
+
+   Each one is also an ordinary row in the list above — it enrols or attests and leases like
+   any agent. What this panel adds is its HOST: where it runs, when it should exist (always,
+   until a time, or around a change window) and Start / Stop / Delete for it.
+
+   Self-contained, like every tab partial on this page: markup and the Alpine factory live
+   in this one file (tests/test_template_scripts.py, tests/test_templates_parse.py). Hidden
+   entirely when the list cannot load for a reason the panel above already explains
+   (feature off, no `agents` permission), so the page never says it twice. #}
+
+<div x-data="deployedAgentsPanel()" x-show="available" x-cloak class="mt-10">
+
+  <div class="flex items-start justify-between gap-4 mb-3">
+    <div>
+      <h2 class="text-lg font-semibold text-gray-800">Deployed agents</h2>
+      <p class="text-sm text-gray-500 max-w-3xl">
+        Agents the dashboard builds for you in AWS, Azure or Google Cloud, to run
+        Config Management on the VMs in that network. A host has no public address and no
+        inbound rule. It can stay up, go away at a set time, or come up just before each
+        occurrence of a change window and go away after it.
+        <a href="/docs/platform/spiffe/remote-agents/deploying" target="_blank"
+           class="text-blue-600 hover:underline">How deployed agents work</a>.
+      </p>
+    </div>
+    <button x-show="$store.auth.can('agents', 'write')" @click="openDeploy()"
+            class="shrink-0 text-sm bg-blue-700 hover:bg-blue-800 text-white px-3 py-1.5 rounded-lg font-medium transition">
+      Deploy an agent
+    </button>
+  </div>
+
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-4 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
+
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto">
+    <p x-show="!hosts.length" class="text-sm text-gray-500 p-6 text-center">
+      No deployed agents yet.
+    </p>
+    <table x-show="hosts.length" class="w-full text-sm">
+      <thead class="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
+        <tr>
+          <th class="text-left px-4 py-2">Agent</th>
+          <th class="text-left px-4 py-2">Where</th>
+          <th class="text-left px-4 py-2">Lifecycle</th>
+          <th class="text-left px-4 py-2">Host</th>
+          <th class="text-left px-4 py-2">Ranges</th>
+          <th class="px-4 py-2"></th>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="h in hosts" :key="h.id">
+          <tr class="border-t border-gray-100 align-top">
+            <td class="px-4 py-3">
+              <div class="font-medium text-gray-800" x-text="h.name"></div>
+              <div class="text-xs text-gray-500">
+                agent <span x-text="h.agent_status"></span> ·
+                <span x-text="h.max_concurrent"></span> at once
+              </div>
+            </td>
+            <td class="px-4 py-3 text-gray-700">
+              <span class="uppercase text-xs font-semibold text-gray-500" x-text="h.cloud"></span>
+              <span x-text="h.region"></span>
+              <div class="text-xs text-gray-500" x-text="h.instance_size"></div>
+            </td>
+            <td class="px-4 py-3 text-gray-700">
+              <div x-text="lifecycleText(h)"></div>
+              <div class="text-xs text-gray-500" x-show="nextText(h)" x-text="nextText(h)"></div>
+            </td>
+            <td class="px-4 py-3">
+              <span class="inline-block text-xs font-medium px-2 py-0.5 rounded-full"
+                    :class="statusClass(h.status)" x-text="h.status"></span>
+              <div x-show="h.error" class="text-xs text-red-600 mt-1 max-w-xs break-words" x-text="h.error"></div>
+            </td>
+            <td class="px-4 py-3 text-xs text-gray-600">
+              <template x-for="c in h.ansible_cidrs" :key="c">
+                <div>
+                  <span class="font-mono" x-text="c"></span>
+                  <span x-show="h.routes.includes(c)" class="text-green-700">· routed</span>
+                </div>
+              </template>
+            </td>
+            <td class="px-4 py-3 text-right whitespace-nowrap">
+              <template x-if="$store.auth.can('agents', 'write')">
+                <span>
+                  <button x-show="canStart(h)" @click="act(h, 'start')" :disabled="h.busy"
+                          class="text-xs px-2 py-1 rounded text-blue-700 hover:bg-blue-50 disabled:opacity-40">Start</button>
+                  <button x-show="canStop(h)" @click="act(h, 'stop')" :disabled="h.busy"
+                          class="text-xs px-2 py-1 rounded text-gray-700 hover:bg-gray-100 disabled:opacity-40">Stop</button>
+                </span>
+              </template>
+              <button x-show="$store.auth.can('agents', 'delete')" @click="remove(h)" :disabled="h.busy"
+                      class="text-xs px-2 py-1 rounded text-red-600 hover:bg-red-50 disabled:opacity-40">Delete</button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Deploy modal -->
+  <div x-show="deployOpen" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl p-6 max-h-[90vh] overflow-y-auto">
+      <h3 class="text-lg font-semibold text-gray-800 mb-1">Deploy an agent</h3>
+      <p class="text-xs text-gray-500 mb-4">
+        The agent runs Config Management only, against the ranges below. Its identity is
+        <span x-text="opts.identity === 'spire' ? 'a single-use SPIRE join token' : 'a single-use enrolment code'"></span>,
+        minted fresh every time its host starts.
+      </p>
+      <div x-show="opts.dashboard_url_error" class="mb-4 border border-amber-200 bg-amber-50 rounded-lg px-3 py-2 text-xs text-amber-800"
+           x-text="opts.dashboard_url_error"></div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Name</label>
+          <input type="text" x-model="form.name" placeholder="vpc-a-agent"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"/>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Cloud</label>
+          <select x-model="form.cloud" @change="loadRegions()"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="aws">AWS</option>
+            <option value="azure">Azure</option>
+            <option value="gcp">Google Cloud</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Region</label>
+          <select x-model="form.region" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <template x-for="r in regions" :key="r">
+              <option :value="r" x-text="r" :selected="r === form.region"></option>
+            </template>
+          </select>
+          <p x-show="!regions.length" class="text-xs text-amber-700 mt-1">
+            No region of this cloud has a VM subnet configured (Settings → Clouds).
+          </p>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Size <span class="text-gray-400">(optional)</span></label>
+          <input type="text" x-model="form.instance_size" :placeholder="opts.default_sizes[form.cloud] || ''"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"/>
+        </div>
+        <div class="sm:col-span-2">
+          <label class="block text-xs font-medium text-gray-600 mb-1">Subnet <span class="text-gray-400">(optional: blank uses the region's VM subnet)</span></label>
+          <input type="text" x-model="form.subnet"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"/>
+        </div>
+        <div class="sm:col-span-2">
+          <label class="block text-xs font-medium text-gray-600 mb-1">Ranges it may configure</label>
+          <input type="text" x-model="form.ranges" placeholder="10.40.0.0/16"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"/>
+          <p class="text-xs text-gray-500 mt-1">Comma- or space-separated. Written into the agent's own policy, which it enforces.</p>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Runs at once</label>
+          <input type="number" min="1" :max="opts.max_concurrent_ceiling" x-model.number="form.max_concurrent"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"/>
+        </div>
+        <div class="flex items-end">
+          <label class="inline-flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" x-model="form.create_routes"/>
+            Route cloud VMs in these ranges to it
+          </label>
+        </div>
+      </div>
+
+      <fieldset class="mt-5 border-t border-gray-100 pt-4">
+        <legend class="text-xs font-medium text-gray-600 mb-2">When it exists</legend>
+        <div class="flex flex-wrap gap-4 text-sm text-gray-700 mb-3">
+          <label class="inline-flex items-center gap-2"><input type="radio" value="always" x-model="form.mode"/> Always</label>
+          <label class="inline-flex items-center gap-2"><input type="radio" value="until" x-model="form.mode"/> Until a time</label>
+          <label class="inline-flex items-center gap-2"><input type="radio" value="window" x-model="form.mode"/> For a change window</label>
+        </div>
+        <div x-show="form.mode === 'until'">
+          <label class="block text-xs font-medium text-gray-600 mb-1">Remove it at (your local time)</label>
+          <input type="datetime-local" x-model="form.until_local"
+                 class="border border-gray-300 rounded-lg px-3 py-2 text-sm"/>
+        </div>
+        <div x-show="form.mode === 'window'" class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div class="sm:col-span-3">
+            <label class="block text-xs font-medium text-gray-600 mb-1">Change window</label>
+            <select x-model="form.change_window_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="">Choose a window…</option>
+              <template x-for="w in opts.windows" :key="w.id">
+                <option :value="w.id" x-text="w.name"></option>
+              </template>
+            </select>
+            <p x-show="!opts.windows.length" class="text-xs text-amber-700 mt-1">
+              No change windows yet — add one under <a href="/schedules" class="underline">Schedules</a>.
+            </p>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Start (minutes before)</label>
+            <input type="number" min="5" max="240" x-model.number="form.lead_minutes"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"/>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Keep (minutes after)</label>
+            <input type="number" min="0" max="240" x-model.number="form.grace_minutes"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"/>
+          </div>
+        </div>
+      </fieldset>
+
+      <div class="flex justify-end gap-2 mt-6">
+        <button @click="deployOpen = false"
+                class="text-sm px-3 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition">Cancel</button>
+        <button @click="deploy()" :disabled="saving"
+                class="text-sm bg-blue-700 hover:bg-blue-800 text-white px-3 py-1.5 rounded-lg font-medium transition disabled:opacity-50">
+          Deploy
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function deployedAgentsPanel() {
+  return {
+    hosts: [],
+    available: false,
+    toast: '',
+    toastType: 'success',
+    deployOpen: false,
+    saving: false,
+    regions: [],
+    opts: {clouds: [], default_sizes: {}, max_concurrent_ceiling: 8, windows: [],
+           dashboard_url_error: '', identity: 'code'},
+    form: {},
+    _timer: null,
+
+    blankForm() {
+      return {name: '', cloud: 'aws', region: '', instance_size: '', subnet: '', ranges: '',
+              max_concurrent: 2, create_routes: true, mode: 'always', until_local: '',
+              change_window_id: '', lead_minutes: 20, grace_minutes: 15};
+    },
+
+    async init() {
+      this.form = this.blankForm();
+      await this.load();
+      if (this.available) this._timer = setInterval(() => this.load(), 15000);
+    },
+
+    async load() {
+      try {
+        const r = await API.get('/api/agent-hosts');
+        this.hosts = (r && r.hosts) || [];
+        this.available = true;
+      } catch (e) {
+        // Feature off or no `agents` permission: the panel above says so; stay hidden.
+        this.available = false;
+        if (this._timer) { clearInterval(this._timer); this._timer = null; }
+      }
+    },
+
+    flash(msg, type = 'success') {
+      this.toast = msg;
+      this.toastType = type;
+      setTimeout(() => { this.toast = ''; }, type === 'error' ? 8000 : 4000);
+    },
+
+    async openDeploy() {
+      this.form = this.blankForm();
+      try {
+        this.opts = await API.get('/api/agent-hosts/options');
+      } catch (e) {
+        this.flash(e.message || String(e), 'error');
+        return;
+      }
+      await this.loadRegions();
+      this.deployOpen = true;
+    },
+
+    async loadRegions() {
+      try {
+        const r = await API.get('/api/regions?cloud=' + encodeURIComponent(this.form.cloud));
+        this.regions = (r && r.configured) || [];
+        this.form.region = this.regions.includes(r.default) ? r.default : (this.regions[0] || '');
+      } catch (e) {
+        this.regions = [];
+        this.form.region = '';
+      }
+    },
+
+    payload() {
+      const f = this.form;
+      return {
+        name: f.name, cloud: f.cloud, region: f.region, instance_size: f.instance_size,
+        subnet: f.subnet, ranges: f.ranges.split(/[\s,]+/).filter(Boolean),
+        max_concurrent: f.max_concurrent, create_routes: f.create_routes, mode: f.mode,
+        // datetime-local is the browser's local time with no offset; send it as UTC.
+        until_at: f.mode === 'until' && f.until_local ? new Date(f.until_local).toISOString() : '',
+        change_window_id: f.mode === 'window' ? f.change_window_id : '',
+        lead_minutes: f.lead_minutes, grace_minutes: f.grace_minutes,
+      };
+    },
+
+    async deploy() {
+      this.saving = true;
+      try {
+        const r = await API.post('/api/agent-hosts', this.payload());
+        this.deployOpen = false;
+        const skipped = (r.route_errors || []).length
+          ? ' Some routes were not added: ' + r.route_errors.join('; ') : '';
+        this.flash((r.job_id ? `Deploying ${r.name}.` : `${r.name} will start before its next window.`) + skipped,
+                   skipped ? 'error' : 'success');
+        await this.load();
+      } catch (e) {
+        this.flash(e.message || String(e), 'error');
+      } finally {
+        this.saving = false;
+      }
+    },
+
+    async act(h, action) {
+      try {
+        await API.post(`/api/agent-hosts/${h.id}/${action}`, {});
+        this.flash(action === 'start' ? `Starting ${h.name}.` : `Stopping ${h.name}.`);
+        await this.load();
+      } catch (e) {
+        this.flash(e.message || String(e), 'error');
+      }
+    },
+
+    async remove(h) {
+      const routes = h.routes.length ? ` and its routes (${h.routes.join(', ')})` : '';
+      if (!confirm(`Delete ${h.name}? Its host is removed, then the agent${routes}.`)) return;
+      try {
+        await API.delete(`/api/agent-hosts/${h.id}`);
+        this.flash(`Deleting ${h.name}.`);
+        await this.load();
+      } catch (e) {
+        this.flash(e.message || String(e), 'error');
+      }
+    },
+
+    canStart(h) {
+      return !h.host_id && ['parked', 'error'].includes(h.status);
+    },
+
+    canStop(h) {
+      return !!h.host_id || ['starting', 'running'].includes(h.status);
+    },
+
+    when(iso) {
+      if (!iso) return '';
+      return new Date(iso + (/[zZ]|[+-]\d\d:\d\d$/.test(iso) ? '' : 'Z'))
+        .toLocaleString([], {weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+    },
+
+    lifecycleText(h) {
+      if (h.mode === 'until') return 'Until ' + this.when(h.until_at);
+      if (h.mode === 'window') return `Window: ${h.change_window_name || '(missing)'}`;
+      return 'Always';
+    },
+
+    nextText(h) {
+      if (h.mode !== 'window') return '';
+      const up = h.status === 'running' ? '' : (h.next_start_at ? 'next up ' + this.when(h.next_start_at) : '');
+      const down = h.next_stop_at ? 'down ' + this.when(h.next_stop_at) : '';
+      return [up, down].filter(Boolean).join(', ');
+    },
+
+    statusClass(s) {
+      return {
+        running: 'bg-green-100 text-green-800',
+        starting: 'bg-blue-100 text-blue-800',
+        provisioning: 'bg-blue-100 text-blue-800',
+        stopping: 'bg-amber-100 text-amber-800',
+        parked: 'bg-gray-100 text-gray-700',
+        error: 'bg-red-100 text-red-800',
+      }[s] || 'bg-gray-100 text-gray-700';
+    },
+  };
+}
+</script>
