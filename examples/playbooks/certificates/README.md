@@ -48,7 +48,7 @@ population, or the weaker of the two is your real access boundary.
 
 Credentials are auto-injected into every runner (`PASSWORD_SAFE_API_URL` / `_CLIENT_ID` /
 `_CLIENT_SECRET`) when Password Safe is enabled, so there is nothing to configure here —
-see [the Ansible integration doc](../../../docs/platform/ansible.md).
+see [the Ansible integration doc](../../../docs/platform/remote-worker.md).
 
 **The `reason` string carries `build_id` into the audit trail**, so the audit record
 answers *which build* used the certificate rather than merely that something did. And with

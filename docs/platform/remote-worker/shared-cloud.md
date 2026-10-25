@@ -2,7 +2,7 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you are giving the runners somewhere to run — a cluster, a registry, a subnet.
 
-Part of [Remote Worker](../ansible.md). The cluster, registry and network each runner backend needs, and the per-cloud prerequisites.
+Part of [Remote Worker](../remote-worker.md). The cluster, registry and network each runner backend needs, and the per-cloud prerequisites.
 
 ## Shared cloud infrastructure
 

@@ -3,7 +3,8 @@
 > **Audience:** operator · **Profile:** `both` · **Read this when:** your hypervisors, databases or clusters live somewhere the dashboard cannot reach.
 
 Part of [SPIFFE and SPIRE](../spiffe.md): an agent is a workload the dashboard does not trust
-until it attests to the dashboard's SPIRE server.
+until it attests to the dashboard's SPIRE server. How an agent compares with a one-shot
+remote worker is on [Where work runs](../where-work-runs.md).
 
 Every other execution path in this dashboard dials **out** to its target. That works
 for a cloud API, and it works for a LAN the dashboard container happens to sit on. It

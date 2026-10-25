@@ -7,7 +7,7 @@ This is the **in-playbook** pattern — Password Safe stays the source of truth 
 pulls exactly what it needs mid-run.
 
 It is **complementary** to the dashboard's out-of-band **Use a secret → managed account**
-checkout (see [docs/platform/ansible/secrets.md](../../../docs/platform/ansible/secrets.md#managed-account-checkout-beyondtrust-password-safe)):
+checkout (see [docs/platform/remote-worker/secrets.md](../../../docs/platform/remote-worker/secrets.md#managed-account-checkout-beyondtrust-password-safe)):
 
 | | Out-of-band checkout (existing) | In-playbook lookup (these samples) |
 |---|---|---|

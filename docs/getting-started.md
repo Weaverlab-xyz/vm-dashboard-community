@@ -266,7 +266,7 @@ that is maintained.
 | BeyondTrust (Password Safe, PRA, EPM-L) | [integrations/beyondtrust.md](beyondtrust.md) |
 | Entitle | [integrations/beyondtrust/entitle.md](beyondtrust/entitle.md) |
 | Portainer CE | [integrations/portainer.md](cloud-services/portainer.md) |
-| Remote Worker (Ansible + k8s runners) | [integrations/ansible.md](platform/ansible.md) |
+| Remote Worker (Ansible + k8s runners) | [integrations/ansible.md](platform/remote-worker.md) |
 | Cloud Functions | [integrations/cloud-functions.md](cloud-services/functions.md) |
 | MCP server (AI clients) | [integrations/mcp-server.md](platform/mcp-server.md) |
 | Single sign-on (any IdP) | [OIDC and single sign-on](platform/oidc.md) |

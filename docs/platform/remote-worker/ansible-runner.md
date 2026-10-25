@@ -2,7 +2,7 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** your target is a VM, on-premises or in a cloud.
 
-Part of [Remote Worker](../ansible.md). VM targets: SSH keys, discovery, provisioning assets, bulk runs and the local Docker runner.
+Part of [Remote Worker](../remote-worker.md). VM targets: SSH keys, discovery, provisioning assets, bulk runs and the local Docker runner.
 
 ## Ansible: local Docker runner (on-premises and cloud targets)
 

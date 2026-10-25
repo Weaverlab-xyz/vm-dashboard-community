@@ -36,7 +36,7 @@ details are worth knowing because they are not obvious:
   RBAC-locked secret and force-deleted after the run.
 
 Full walkthrough in
-[Ansible → Managed-account checkout](../../platform/ansible/secrets.md#managed-account-checkout-beyondtrust-password-safe).
+[Ansible → Managed-account checkout](../../platform/remote-worker/secrets.md#managed-account-checkout-beyondtrust-password-safe).
 
 ## Hypervisor credentials for a remote agent
 

@@ -322,7 +322,7 @@ _PASSWORD_SAFE_CARDS = (
                 "nothing on disk when it finishes.",
         target="#wired",
         minutes=12,
-        docs="platform/ansible",
+        docs="platform/remote-worker",
         requires_products=("password_safe",),
     ),
     UseCase(

@@ -44,7 +44,7 @@ with session cookies and returns 401 for every Bearer request.
 | BeyondTrust EPM for Linux subscription | EPM-L enabled on your Pathfinder site |
 | Personal Access Token (PAT) | Created in Pathfinder (see Step 1). PAT support may require org-level enablement by BeyondTrust. |
 | Your Pathfinder Site ID | A UUID — see Step 2 |
-| **For package sync:** Ansible asset storage | Any one of S3, Azure Blob Storage, or GCS configured — the sync uses whichever backend is active. See [docs/platform/ansible.md](../platform/ansible.md) Step 1 for storage setup. |
+| **For package sync:** Ansible asset storage | Any one of S3, Azure Blob Storage, or GCS configured — the sync uses whichever backend is active. See [docs/platform/remote-worker.md](../platform/remote-worker.md) Step 1 for storage setup. |
 
 ---
 
@@ -277,7 +277,7 @@ left off.
 **"No asset storage configured"** — the sync requires at least one Ansible
 storage backend. Set `ANSIBLE_S3_BUCKET`, `ANSIBLE_AZURE_STORAGE_ACCOUNT`, or
 `ANSIBLE_GCS_BUCKET` in Settings → Integrations → Ansible before running the
-sync. See [docs/platform/ansible.md](../platform/ansible.md) Step 1 for setup instructions.
+sync. See [docs/platform/remote-worker.md](../platform/remote-worker.md) Step 1 for setup instructions.
 
 **Packages appear in the list but are wrong architecture** — EPM-L builds
 `.rpm` (x86_64) and `.deb` (amd64) variants of both the standard and the

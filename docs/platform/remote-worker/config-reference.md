@@ -2,7 +2,7 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you are filling in the Remote Worker panel and want to know what each field does.
 
-Part of [Remote Worker](../ansible.md). Every field on the Settings panel, and the config key behind it.
+Part of [Remote Worker](../remote-worker.md). Every field on the Settings panel, and the config key behind it.
 
 ## Config panel field reference
 
@@ -17,7 +17,7 @@ meanings are taken from `web_dashboard/config.py`.
 The panel shows a **runner × cloud grid**: for each runner (Ansible,
 Kubernetes) pick **Local** or the matching cloud service per target cloud. Each
 selector writes a per-cloud key; the global keys remain as a fallback (see
-[Per-target-cloud backend](../ansible.md#per-target-cloud-backend)).
+[Per-target-cloud backend](../remote-worker.md#per-target-cloud-backend)).
 
 | Panel label | Config key | Env var | Default | Meaning |
 |---|---|---|---|---|

@@ -2,7 +2,7 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** a playbook needs a credential and you do not want it in the playbook.
 
-Part of [Remote Worker](../ansible.md). Hardened per-provider lookups, Password Safe managed-account checkout, and in-playbook lookups.
+Part of [Remote Worker](../remote-worker.md). Hardened per-provider lookups, Password Safe managed-account checkout, and in-playbook lookups.
 
 ## Using a Secrets-Management secret in a run
 
