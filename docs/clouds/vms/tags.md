@@ -94,7 +94,7 @@ that failed or that was already in the requested state.
 Editing needs the cloud's existing **write** permission (`aws:write` and friends); there is
 no separate tag permission.
 
-**Proxmox can be edited too** — see [Agent-brokered hypervisors](../../admin/remote-agents/hypervisors.md#the-verbs)
+**Proxmox can be edited too** — see [Agent-brokered hypervisors](../../platform/spiffe/remote-agents/hypervisors.md#the-verbs)
 for the one difference that matters: a connection the dashboard dials directly is written
 immediately, while an agent-bound one is *queued* as a job. The other hypervisors report
 no tags to edit.

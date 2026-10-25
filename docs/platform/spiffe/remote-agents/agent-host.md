@@ -159,7 +159,7 @@ Six things to know before you start:
   start it — it can dial the host but not launch a process there. `vmrest` is the case that
   bites, because the agent then reports itself healthy and fails every Workstation job on a
   closed port: see
-  [Keep it running](../../hypervisors/vmware.md#1a-keep-it-running-reboots-logouts-closed-windows).
+  [Keep it running](../../../hypervisors/vmware.md#1a-keep-it-running-reboots-logouts-closed-windows).
 - **The source IP the dashboard records is Docker's NAT gateway,** not the Windows host's LAN
   address. The **Source IP** column and the audit rows will show that. It is not a fault, and
   it does mean the column cannot identify *which* Windows host an agent is on.
@@ -181,7 +181,7 @@ than `127.0.0.1`.
 
 Hyper-V, bare ESXi and Config Management run in a one-shot container the agent launches
 through the Docker socket — see [The sibling runner](hypervisors.md#the-sibling-runner).
-[`docker-compose.sibling.yml`](../../../examples/remote-agent/docker-compose.sibling.yml) is
+[`docker-compose.sibling.yml`](../../../../examples/remote-agent/docker-compose.sibling.yml) is
 written for a Linux host, and **two of its defaults are wrong on Docker Desktop**:
 
 - **The socket path.** The overlay mounts the *rootless* socket,
@@ -222,7 +222,7 @@ docker compose -f docker-compose.yml -f docker-compose.sibling.yml up -d
 
 **Every overlay, on every `up`.** Compose recreates the agent from exactly the files named
 on that command line, so running with the sibling overlay and later with
-[`docker-compose.spire.yml`](../../../examples/remote-agent/docker-compose.spire.yml) alone
+[`docker-compose.spire.yml`](../../../../examples/remote-agent/docker-compose.spire.yml) alone
 silently drops the socket — the next Hyper-V job fails with `No such file or directory`
 again. The two overlays touch different mounts and variables and merge cleanly; name them
 together. To stop having to remember, list them once in the same `.env` (the separator is
@@ -265,7 +265,7 @@ was the objection to holding credentials centrally at all, and it is why this is
 the application layer rather than trusted to TLS.
 
 Mount the inspection CA and point `AGENT_CA_BUNDLE` at it —
-[`docker-compose.corp-ca.yml`](../../../docker-compose.corp-ca.yml) is the same pattern for
+[`docker-compose.corp-ca.yml`](../../../../docker-compose.corp-ca.yml) is the same pattern for
 the dashboard. `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` are honoured automatically.
 
 They apply to the **dashboard connection only**. The discovery probes are raw sockets
@@ -287,7 +287,7 @@ an objection into a demonstration.
 
 ## 2. Write the policy
 
-Copy [`examples/remote-agent/policy.example.yaml`](../../../examples/remote-agent/policy.example.yaml)
+Copy [`examples/remote-agent/policy.example.yaml`](../../../../examples/remote-agent/policy.example.yaml)
 and edit the ranges:
 
 ```yaml

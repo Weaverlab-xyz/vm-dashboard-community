@@ -107,7 +107,7 @@ air gap is the OT cell's.
   agents authenticate and the honest reply is a long-lived key in an environment
   variable.
 - The machinery mostly exists. **`remote_agents` is already a container that runs inside
-  a private network and dials out** ([Remote Agents](../admin/remote-agents.md)) — that is an
+  a private network and dials out** ([Remote Agents](../platform/spiffe/remote-agents.md)) — that is an
   agent in a box with the network story solved. `workload_credentials`, the SPIRE lab and
   `cloud_functions` give it an identity.
 - It fits the cheap shape: a Shell Jump plus a workload identity. No Web Jump, no tunnel,

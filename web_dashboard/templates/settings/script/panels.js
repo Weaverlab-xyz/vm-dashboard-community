@@ -21,7 +21,7 @@ function settingsPanels() {
     entitleAgentToken: '',   // read-only display of the auto-minted Entitle agent token name
     agentAudience: null,     // read-only view of the pinned agent signing audience (Remote Agents panel)
     oauthRedirectUris: null, // read-only: the SSO callbacks the server will send (OIDC panel)
-    spiffeIdentity: null,    // read-only status of the dashboard's own SPIFFE token files (Remote Agents panel)
+    spiffeIdentity: null,    // read-only status of the dashboard's own SPIFFE token files (SPIFFE and SPIRE panel)
     spiffeIssuerCheck: { running: false, result: null, error: '' },
     agentAudienceResetting: false,
     rancherFirewall: null,   // read-only breakdown of the Rancher node firewall allow-list (k8s panel)
@@ -161,6 +161,9 @@ function settingsPanels() {
           try {
             this.agentAudience = await API.get('/api/agents/audience');
           } catch (e) { /* the router is feature-gated; off means 404, and this panel is where you turn it on */ }
+        }
+        if (intg.key === 'spiffe') {
+          this.spiffeIssuerCheck = { running: false, result: null, error: '' };
           this.spiffeIdentity = null;
           try {
             this.spiffeIdentity = await API.get('/api/spiffe-identity');

@@ -115,7 +115,7 @@ host tabs and a table of VMs within a few seconds.
 | **Suspend** | Suspend VM to memory |
 | **VM detail** | Hardware config, guest OS, Tools status, all IP addresses, annotation, managed object reference |
 | **Host summary cards** | CPU, memory, VM count, maintenance mode status per host |
-| **Bulk power** | Tick several rows and send Power On, Shutdown, Force Off or Reset to the whole selection from the toolbar — one job per VM, sharing a batch you watch on one page. VMs already in the target state are skipped and the dialog says how many; fifty per operation is the cap. See [Powering a selection](../admin/remote-agents/hypervisors/power.md) |
+| **Bulk power** | Tick several rows and send Power On, Shutdown, Force Off or Reset to the whole selection from the toolbar — one job per VM, sharing a batch you watch on one page. VMs already in the target state are skipped and the dialog says how many; fifty per operation is the cap. See [Powering a selection](../platform/spiffe/remote-agents/hypervisors/power.md) |
 
 Templates are automatically excluded from the VM list.
 
@@ -124,7 +124,7 @@ under [Inventory](../operations/inventory.md)'s **Tag** filter. Proxmox is the o
 reports tags today; see [Cloud VMs — Tags and labels](../clouds/vms/tags.md).
 
 **Scheduling power.** On a connection bound to a
-[remote agent](../admin/remote-agents/hypervisors.md), the bulk power toolbar's **Schedule**
+[remote agent](../platform/spiffe/remote-agents/hypervisors.md), the bulk power toolbar's **Schedule**
 tick books the operation for a time or a change window. A directly dialled connection
 cannot be booked, and each of its VMs is refused by name. See [Scheduling](../operations/scheduling.md).
 
@@ -234,7 +234,7 @@ image still works.
 ## Over a remote agent
 
 A vCenter the dashboard has no network route to can be reached through a
-[remote agent](../admin/remote-agents/hypervisors.md#hypervisor-connections) instead. Tick *Reached
+[remote agent](../platform/spiffe/remote-agents/hypervisors.md#hypervisor-connections) instead. Tick *Reached
 through a remote agent* when adding the connection and give it the name that connection
 has in the agent's own `connections.yaml`.
 
@@ -260,7 +260,7 @@ Power actions still work: they are dispatched to the agent as jobs and appear on
 with Live Output, exactly like a discovery scan. Power On, Force Off, Reset and Shutdown
 all map to a verb; **Suspend** does not, and is refused with a 501 naming what is
 available rather than approximated onto a neighbouring operation — see
-[the verbs](../admin/remote-agents/hypervisors.md#the-verbs).
+[the verbs](../platform/spiffe/remote-agents/hypervisors.md#the-verbs).
 
 Shutdown is the one that needs the guest: it is not a power action but a call to
 vCenter's separate `guest/power` endpoint, through VMware Tools. The synced inventory

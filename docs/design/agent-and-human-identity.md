@@ -16,7 +16,7 @@ There are two problems, and they are different enough that one tool should not s
 
 1. **The remote agent keeps a long-lived private key on disk.**
    - `runners/agent/agent.py` generates an Ed25519 key at enrolment and writes it, unencrypted, to `/var/lib/dashboard-agent/identity.json`.
-   - [`docs/admin/remote-agents/agent-host.md`](../admin/remote-agents/agent-host.md) is honest about this: whoever can read the volume *is* the agent until someone re-issues it.
+   - [`docs/platform/spiffe/remote-agents/agent-host.md`](../platform/spiffe/remote-agents/agent-host.md) is honest about this: whoever can read the volume *is* the agent until someone re-issues it.
 2. **People reach Kubernetes six different ways.**
    - EKS, AKS, GKE and OKE each have their own token exec plugin and their own user model.
    - k3s and other on-prem clusters have whatever the operator set up.
@@ -118,7 +118,7 @@ node attestation ──── mTLS gRPC :8081 ───────────�
 - **Signing in the other direction is unchanged too.** Job envelopes are still signed with the dashboard's own key, and the agent learns that public key from the attest response, as it does at enrolment today.
 - **On restart the agent attests again.** It writes nothing to `identity.json`.
 - **Workload attestor: `unix`, selector `uid:10001`.** The two containers share a PID namespace (`pid: "service:spire-agent"`), so the SPIRE agent can see the caller's uid.
-  - The alternative, the `docker` workload attestor, needs `/var/run/docker.sock` mounted into the sidecar. That is root on the host, and the agent's whole hardening story (`docs/admin/remote-agents/agent-host.md`) is that nothing on this host has it.
+  - The alternative, the `docker` workload attestor, needs `/var/run/docker.sock` mounted into the sidecar. That is root on the host, and the agent's whole hardening story (`docs/platform/spiffe/remote-agents/agent-host.md`) is that nothing on this host has it.
 
 ### How each side picks a mode
 

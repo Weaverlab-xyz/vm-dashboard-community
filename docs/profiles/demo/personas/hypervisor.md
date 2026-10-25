@@ -65,7 +65,7 @@ deploy".
 An agent inside the datacentre polls outward and reports what is there — no inbound access to
 the management network, and no credentials stored anywhere the dashboard can reach.
 
-**Guide:** [Remote Agents](../../../admin/remote-agents.md)
+**Guide:** [Remote Agents](../../../platform/spiffe/remote-agents.md)
 
 ## What to enable
 

@@ -1405,7 +1405,7 @@ def reset_audience(request: Request, current_user: User = Depends(require_explic
                          db: Session = Depends(get_db)):
     """Clear the pin so the next minted code pins the audience again.
 
-    The recovery ``docs/admin/remote-agents.md`` has always told operators to perform — "clear
+    The recovery ``docs/platform/spiffe/remote-agents.md`` has always told operators to perform — "clear
     the stale ``agent_base_url`` config key and re-enrol" — and never gave them a way to.
 
     **Deliberately not a way to set the audience.** It takes no value: it deletes the key

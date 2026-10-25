@@ -5,7 +5,7 @@
 Part of [Skytap](../skytap.md).
 
 Everything the dashboard does *inside* a POV after it is running goes through one VM in
-the environment: the **control node**. It runs the [remote agent](../../../admin/remote-agents.md), and the
+the environment: the **control node**. It runs the [remote agent](../../../platform/spiffe/remote-agents.md), and the
 agent dials out — because a POV lives on a lab platform's private network and this
 dashboard has no route into it. The Gateway install, the Resource Broker install and the
 per-VM wire-up all wait on this one thing, so it is worth setting up properly once.
@@ -95,7 +95,7 @@ control node install (**Install control node** or **Rebuild control node**) does
 - it writes the token and the trust bundle into the bootstrap beside the code.
 
 On the guest, the script starts `spire-agent` and `spiffe-helper`, the same two sidecars
-as the [agent overlay](../../../admin/remote-agents/spire-attestation.md), with the same images and
+as the [agent overlay](../../../platform/spiffe/remote-agents/spire-attestation.md), with the same images and
 the same locked-down settings. It then **waits up to two minutes for an SVID**:
 
 | The guest | The agent starts with |

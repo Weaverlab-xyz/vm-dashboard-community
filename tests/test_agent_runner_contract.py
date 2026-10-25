@@ -315,7 +315,7 @@ def test_the_selinux_advice_is_withheld_inside_a_docker_desktop_vm():
     no SELinux to relabel anything in. An unreadable bind mount there is file sharing: an
     unshared drive, a UNC path, or the Hyper-V backend materialising an unreachable bind
     source as an empty *directory* inside the container. Emitting the label message anyway
-    sends the operator after `chcon` for an afternoon, and `docs/admin/remote-agents.md` marks the
+    sends the operator after `chcon` for an afternoon, and `docs/platform/spiffe/remote-agents.md` marks the
     same troubleshooting rows Linux-only for exactly this reason.
     """
     import errno as _errno

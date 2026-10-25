@@ -515,7 +515,7 @@ _HYPERVISOR = Persona(
                     "the dashboard.",
             target="/agents",
             minutes=10,
-            docs="admin/remote-agents",
+            docs="platform/spiffe/remote-agents",
             requires_flags=("remote_agents_enabled",),
         ),
     ),
@@ -570,7 +570,7 @@ _ITOPS = Persona(
                     "who can manage the endpoint without any standing access to it.",
             target="/vms",
             minutes=6,
-            docs="admin/remote-agents",
+            docs="platform/spiffe/remote-agents",
             requires_flags=("remote_agents_enabled", "vmware_enabled"),
         ),
         UseCase(

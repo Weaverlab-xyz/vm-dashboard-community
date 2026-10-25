@@ -2,7 +2,7 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you want the dashboard to authenticate to a cloud with a short-lived token from its own SPIRE server instead of a stored key, or you are checking why a token file is missing or refused.
 
-Part of [OIDC and single sign-on](../oidc.md). The dashboard publishes an OIDC issuer of its own, and AWS, Azure, GCP, k3s and BeyondTrust Workload Credentials can trust the short-lived tokens it signs instead of a stored key. The tokens come from the same SPIRE server that [attests remote agents](../../admin/remote-agents/spire-attestation.md); the server itself is on [SPIFFE and SPIRE](../spiffe.md).
+Part of [OIDC and single sign-on](../oidc.md). The dashboard publishes an OIDC issuer of its own, and AWS, Azure, GCP, k3s and BeyondTrust Workload Credentials can trust the short-lived tokens it signs instead of a stored key. The tokens come from the same SPIRE server that [attests remote agents](../spiffe/remote-agents/spire-attestation.md); the server itself is on [SPIFFE and SPIRE](../spiffe.md).
 
 **This is the recommended way for the dashboard to reach a cloud**, in place of a stored
 access key, client secret or service-account key; why, and what to pair it with so the
@@ -23,7 +23,7 @@ The design, including what is not built, is
 
 ## What it does
 
-With **Settings → Integrations → Remote Agents → Give the dashboard its own SPIFFE
+With **Settings → Integrations → Platform → SPIFFE and SPIRE → Give the dashboard its own SPIFFE
 identity** ticked, the app keeps one token file per audience you tick:
 
 | Audience | File | Token `aud` |
@@ -198,7 +198,7 @@ installs the other identity platforms cannot serve: on-prem, Docker on a VM, and
    **Settings → Integrations → Workload Credentials**, set **Authentication** to *Workload
    identity (nothing stored)*, **Identity platform** to *The dashboard's own SPIFFE identity*, and
    **Token audience** to that string.
-2. **Tick the audience** under **Settings → Integrations → Remote Agents → Give the
+2. **Tick the audience** under **Settings → Integrations → Platform → SPIFFE and SPIRE → Give the
    dashboard its own SPIFFE identity → Workload Credentials**. The app keeps
    `/run/spiffe-tokens/wlc.jwt` with that `aud`. The worker reads the same file, so jobs
    authenticate the same way.
@@ -292,9 +292,9 @@ or a cloud KMS; on a managed runtime it is an upstream CA held as a secret. See
 
 ## Settings
 
-All on **Settings → Integrations → Remote Agents**, under **Give the dashboard its own SPIFFE
-identity**. The SPIRE server itself is set up in
-[Attesting an agent through SPIRE](../../admin/remote-agents/spire-attestation.md#settings).
+All on **Settings → Integrations → Platform → SPIFFE and SPIRE**, under **Give the dashboard its own SPIFFE
+identity**, beside the SPIRE server's own settings: see
+[SPIFFE and SPIRE → Settings](../spiffe.md#settings-and-environment).
 
 | Setting | Key | Default | What it does |
 |---|---|---|---|

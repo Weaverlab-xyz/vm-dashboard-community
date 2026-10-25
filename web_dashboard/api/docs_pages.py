@@ -178,6 +178,9 @@ _MOVED = {
     # Kubernetes federation, 2026-10: one hub plus a page per IdP, Entra's among them.
     "oidc/entra-k8s-federation":                 "platform/oidc/k8s-federation/entra",
     "remote-agents/dashboard-identity":          "platform/oidc/dashboard-identity",
+    # Remote agents under SPIFFE, 2026-10: an agent is a workload the dashboard does not
+    # trust until it attests, so its pages live with the SPIRE server it attests to.
+    "admin/remote-agents":                       "platform/spiffe/remote-agents",
     # Sections, 2026-10: the flat top level grouped into hub + folder sections the way
     # oidc/ is -- cloud/, access/, operations/, editions/, and kubesolo under kubernetes/.
     "cloud-vms":                                 "clouds/vms",
@@ -229,7 +232,7 @@ _MOVED = {
     "oidc":                                      "platform/oidc",
     "onboarding":                                "getting-started",
     "operations/cloud-hosting":                  "platform/cloud-hosting",
-    "remote-agents":                             "admin/remote-agents",
+    "remote-agents":                             "platform/spiffe/remote-agents",
     "workload-lab":                              "preview/workload-lab",
     # Workload Credentials is generally available and configured under Settings ->
     # BeyondTrust, so its guide went to that section rather than into preview/ with the lab.
@@ -337,8 +340,6 @@ _INDEX_SECTIONS = {
     "admin",
     "admin/secrets-management",
     "admin/permissions",
-    "admin/remote-agents",
-    "admin/remote-agents/hypervisors",
     "beyondtrust",
     "beyondtrust/gateways",
     "beyondtrust/password-safe",
@@ -348,6 +349,9 @@ _INDEX_SECTIONS = {
     "platform/oidc",
     "platform/oidc/k8s-federation",
     "platform/oidc/k8s-federation/entra",
+    "platform/spiffe",
+    "platform/spiffe/remote-agents",
+    "platform/spiffe/remote-agents/hypervisors",
     "platform/cloud-hosting",
     "platform/cloud-hosting/azure-container-apps",
     "platform/ansible",
@@ -395,8 +399,6 @@ _SECTION_LABELS = {
     "admin":                        "Admin",
     "admin/secrets-management":     "Admin · Secrets Management",
     "admin/permissions":            "Admin · Permissions",
-    "admin/remote-agents":          "Admin · remote agents",
-    "admin/remote-agents/hypervisors":"Admin · remote agents · hypervisors",
     "beyondtrust":                  "BeyondTrust",
     "beyondtrust/gateways":         "BeyondTrust · Gateway hosts",
     "beyondtrust/password-safe":    "BeyondTrust · Password Safe",
@@ -406,6 +408,9 @@ _SECTION_LABELS = {
     "platform/oidc":                "Platform · OIDC and single sign-on",
     "platform/oidc/k8s-federation": "Platform · OIDC · Kubernetes federation",
     "platform/oidc/k8s-federation/entra":"Platform · OIDC · Kubernetes federation · Entra",
+    "platform/spiffe":              "Platform · SPIFFE and SPIRE",
+    "platform/spiffe/remote-agents":"Platform · SPIFFE · remote agents",
+    "platform/spiffe/remote-agents/hypervisors":"Platform · SPIFFE · remote agents · hypervisors",
     "platform/cloud-hosting":       "Platform · cloud hosting",
     "platform/cloud-hosting/azure-container-apps":"Platform · cloud hosting · Azure Container Apps",
     "platform/ansible":             "Platform · Remote Worker runners",
@@ -531,12 +536,12 @@ _TITLE_OVERRIDES = {
     "platform/ansible/kubernetes-runner": "The Kubernetes runner",
     "platform/ansible/secrets":           "Secrets in a run",
     "platform/ansible/playbooks":         "Playbook structure",
-    "admin/remote-agents/enrolment":               "Enrolling an agent",
-    "admin/remote-agents/agent-host":              "Running the agent on your host",
-    "admin/remote-agents/hypervisors":             "Hypervisor connections",
-    "admin/remote-agents/credentials":             "Credentials an agent uses",
-    "admin/remote-agents/config-runs":             "Agent-executed Config Management",
-    "admin/remote-agents/file-shares":             "Agent-brokered file shares",
+    "platform/spiffe/remote-agents/enrolment":               "Enrolling an agent",
+    "platform/spiffe/remote-agents/agent-host":              "Running the agent on your host",
+    "platform/spiffe/remote-agents/hypervisors":             "Hypervisor connections",
+    "platform/spiffe/remote-agents/credentials":             "Credentials an agent uses",
+    "platform/spiffe/remote-agents/config-runs":             "Agent-executed Config Management",
+    "platform/spiffe/remote-agents/file-shares":             "Agent-brokered file shares",
 }
 
 _SHELL = """<!doctype html>

@@ -9,7 +9,6 @@ scope, so a role granting the scope granted an API and no way to use it:
   * notification endpoints   notifications:read / write      -> /notifications (new page)
   * change windows           change_windows:write            -> the Schedules page
   * agent signing audience   agents:read / write             -> /agents, Identity tab
-  * SPIFFE identity + check  agents:read / write             -> /agents, Identity tab
   * DB-Ops services          cloud_database (+cloud_function) -> /databases
   * Rancher/Portainer firewall readouts   containers:read    -> /containers
 
@@ -109,8 +108,10 @@ def test_the_routes_still_take_the_scopes_the_homes_gate_on():
         ("change_windows.py", "delete", "/{window_id}"): 'require_explicit_permission("change_windows","write")',
         ("agent.py", "get", "/audience"): 'require_explicit_permission("agents","read")',
         ("agent.py", "delete", "/audience"): 'require_explicit_permission("agents","write")',
-        ("spiffe_oidc.py", "get", ""): 'require_explicit_permission("agents","read")',
-        ("spiffe_oidc.py", "post", "/check-issuer"): 'require_explicit_permission("agents","write")',
+        # The dashboard's own SPIFFE identity is admin-only now: it moved off the Agents page
+        # to Settings → SPIFFE and SPIRE, because it is about the clouds, not agents.
+        ("spiffe_oidc.py", "get", ""): "require_admin",
+        ("spiffe_oidc.py", "post", "/check-issuer"): "require_admin",
         ("cloud_databases.py", "get", "/dbops/status"): 'require_permission("cloud_database","read")',
         ("cloud_databases.py", "post", "/dbops/deploy"): 'require_permission("cloud_database","write")',
         ("cloud_databases.py", "post", "/dbops/invokers"): 'require_permission("cloud_database","write")',
@@ -186,7 +187,7 @@ def test_change_windows_render_on_schedules_and_settings_from_one_copy():
     assert "function changeWindowsEditor()" in _app_js()
 
 
-# ── agents: signing audience + SPIFFE identity ───────────────────────────────
+# ── agents: signing audience ─────────────────────────────────────────────────
 
 def test_agents_page_has_a_scoped_identity_tab():
     hub = _tpl("agents", "index.html")
@@ -199,15 +200,15 @@ def test_agents_page_has_a_scoped_identity_tab():
 
     panel = _tpl("agents", "_identity.html")
     assert 'x-data="agentIdentityPanel()"' in panel and "function agentIdentityPanel()" in panel
-    for route in ("API.get('/api/agents/audience')", "API.get('/api/spiffe-identity')",
-                  "API.delete('/api/agents/audience')",
-                  "API.post('/api/spiffe-identity/check-issuer'"):
+    for route in ("API.get('/api/agents/audience')", "API.delete('/api/agents/audience')"):
         assert route in panel, f"the Identity tab no longer calls {route}"
+    # The dashboard's own SPIFFE identity is about the clouds, not agents: it is on
+    # Settings → SPIFFE and SPIRE, and must not drift back onto the Agents page.
+    assert "/api/spiffe-identity" not in panel, \
+        "the Identity tab shows the dashboard's own SPIFFE identity again"
     write = "$store.auth.can('agents', 'write')"
     reset = panel[:panel.index('@click="resetAudience()"')]
     assert reset.rfind(write) > reset.rfind("<div"), "Reset is not write-gated"
-    check = panel[:panel.index('@click="checkIssuer()"')]
-    assert check.rfind(write) > check.rfind("<div"), "the issuer check is not write-gated"
 
     agents = _tpl("agents", "_agents.html")
     assert "select('identity')" in agents, (
@@ -324,9 +325,8 @@ const stubApi = (fail) => ({{
   out.saved = calls;
   out.closed_after_save = c.draft === null;
 
-  // The Identity tab: one 403 is the whole answer; the feature-off 404 is not an error.
-  global.API = stubApi({{'/api/agents/audience': "Requires 'agents:read' permission.",
-                        '/api/spiffe-identity': "Requires 'agents:read' permission."}});
+  // The Identity tab: a 403 is the whole answer; the feature-off 404 is not an error.
+  global.API = stubApi({{'/api/agents/audience': "Requires 'agents:read' permission."}});
   let p = agentIdentityPanel();
   await p.load();
   out.denied = p.noAccess;
@@ -335,7 +335,6 @@ const stubApi = (fail) => ({{
   await p.load();
   out.off_denied = p.noAccess;
   out.off_message = p.audienceUnavailable;
-  out.off_spiffe_loaded = !!p.spiffe;
   console.log(JSON.stringify(out));
 }})().catch(e => {{ console.error(e); process.exit(1); }});
 """
@@ -348,7 +347,6 @@ const stubApi = (fail) => ({{
     assert got["saved"][0] == "PUT /api/change-windows/w1" and got["closed_after_save"], got
     assert got["denied"] is True, got
     assert got["off_denied"] is False and "Remote agents are off" in got["off_message"], got
-    assert got["off_spiffe_loaded"] is True, got
 
 
 def test_page_gates_behave():

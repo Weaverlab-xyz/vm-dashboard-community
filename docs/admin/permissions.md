@@ -254,7 +254,7 @@ drawer keeps only the instance settings:
 |---|---|---|
 | Notification endpoints | **Notifications** page (`/notifications`) | `notifications` read to list them, write to add, test, edit or delete one. The delivery log and the delivery settings stay in Settings. |
 | Change windows | **Schedules** page, *Change windows* | anyone can see them, because every run form offers them; `change_windows` write adds, edits or deletes one. The approval settings and the grace period stay in Settings. |
-| The agents' signing audience, and the dashboard's SPIFFE identity | **Agents** page, *Identity* tab | `agents` read to see them; write to reset the audience or check the issuer. Public base URL and the SPIFFE audiences stay in Settings. |
+| The agents' signing audience | **Agents** page, *Identity* tab | `agents` read to see it; write to reset it. Public base URL stays in Settings. The dashboard's own SPIFFE identity is about the clouds, not agents, and is admin-only, in Settings → Integrations → Platform → SPIFFE and SPIRE. |
 | Password Safe DB-Ops services | **Databases** page, *Password Safe DB-Ops services* | `cloud_database` read to see them; Deploy and Sync invokers need `cloud_database` write **and** `cloud_function` write, because they deploy a function. The invoker list stays in Settings. |
 | Rancher and Portainer node firewalls | **Containers** page, *Show firewall sources* | `containers` read |
 

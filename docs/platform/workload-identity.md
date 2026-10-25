@@ -32,7 +32,7 @@ cost, status). A write gets its privilege one of three ways:
 - **an Entitle just-in-time grant** to the identity (GCP, and any resource Entitle governs):
   see [Entitle machine identity](../beyondtrust/entitle.md#machine-identity--jit-cloud-credentials-via-entitle);
 - **a per-job Password Safe checkout**, released only to an attested agent: see
-  [Central storage with SPIRE](../admin/remote-agents/credentials.md#central-storage-with-spire-the-recommended-model).
+  [Central storage with SPIRE](spiffe/remote-agents/credentials.md#central-storage-with-spire-the-recommended-model).
 
 You can stop at stage 2. It already removes every secret at rest, and it is one setting
 away from stage 3 on AWS and Azure.
@@ -47,7 +47,7 @@ install of a "built" path as the test.
 
 | Today | Recommended | Target | Status |
 |---|---|---|---|
-| Ed25519 key in the agent's state volume | [attest through SPIRE](../admin/remote-agents/spire-attestation.md): the key lives only in memory | SPIRE, plus credentials kept by the dashboard and released per job (`dashboard_secret: true`), with **Release dashboard-held credentials only to SPIRE-attested agents** ticked | proven live (2026-10-13) |
+| Ed25519 key in the agent's state volume | [attest through SPIRE](spiffe/remote-agents/spire-attestation.md): the key lives only in memory | SPIRE, plus credentials kept by the dashboard and released per job (`dashboard_secret: true`), with **Release dashboard-held credentials only to SPIRE-attested agents** ticked | proven live (2026-10-13) |
 
 The Agents page already shows a **Migrate to SPIRE** banner for every agent still on a key
 on disk. POV control-node agents attest the same way, falling back to their enrolment

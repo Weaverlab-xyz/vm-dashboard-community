@@ -338,7 +338,7 @@ minutes. The Secrets Manager copy stays as the fallback setting.
 have no `dashboard_secret` option, unlike `connections.yaml`. For a SPIRE-attested agent
 the same per-job sealed fetch, under the same **Release dashboard-held credentials only to
 SPIRE-attested agents** setting, completes
-[central storage with SPIRE](../admin/remote-agents/credentials.md#central-storage-with-spire-the-recommended-model).
+[central storage with SPIRE](../platform/spiffe/remote-agents/credentials.md#central-storage-with-spire-the-recommended-model).
 
 **Built** (agent 2.7.0). `dashboard_secret: true` on a `shares.yaml` entry, and one
 dashboard-held password, `storage_agent_password`, for the one share the storage backend is

@@ -35,7 +35,7 @@ UI so you can copy assets between them without downtime.
 | **Azure Blob Storage** | Storage account + container + blob prefix | Teams on Azure; integrates with Azure SP creds |
 | **Google Cloud Storage** | GCS bucket + object prefix | Teams on GCP; same SA creds as Compute Engine |
 | **Local Filesystem / UNC** | Filesystem path inside the dashboard container, or a corporate `\\server\share` UNC accessed via SMB | On-prem hypervisor targets when a corporate file share is the source of truth — see [the constraint below](storage-management/configuring.md#constraint-local-backend-only-works-with-the-local-ansible-runner) |
-| **Remote Filesystem / UNC (via agent)** | The same kind of target, reached by a [remote agent](../admin/remote-agents.md) instead of by the dashboard container | A **cloud-hosted** dashboard — or a [POV instance](../profiles/pov/README.md) — that needs an on-prem share it has no network route to. See [below](storage-management/configuring.md#remote-filesystem--unc-via-agent) |
+| **Remote Filesystem / UNC (via agent)** | The same kind of target, reached by a [remote agent](../platform/spiffe/remote-agents.md) instead of by the dashboard container | A **cloud-hosted** dashboard — or a [POV instance](../profiles/pov/README.md) — that needs an on-prem share it has no network route to. See [below](storage-management/configuring.md#remote-filesystem--unc-via-agent) |
 
 They are interchangeable from the dashboard's perspective. Switching
 backends does **not** move data; the Migrate panel does that explicitly,

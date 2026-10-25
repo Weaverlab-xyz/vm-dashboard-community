@@ -14,7 +14,7 @@ in the *agent's own* ``connections.yaml``; the agent resolves it locally. So a d
 with a fully compromised database can ask an agent to run a verb against a name the
 customer already wrote down, and nothing else. No standing vCenter credential is in the
 dashboard, in a job payload, in the agent's memory, or in a TLS-inspecting proxy's log —
-envelopes are signed, not encrypted, and ``docs/admin/remote-agents.md`` sells the whole
+envelopes are signed, not encrypted, and ``docs/platform/spiffe/remote-agents.md`` sells the whole
 feature on that property.
 
 Pure and stdlib-only, so the boundary is testable without FastAPI or a database.

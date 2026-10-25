@@ -5,7 +5,7 @@
 Part of [Directories](../directories.md).
 
 An on-premises AD domain or LDAP directory is reached through a
-[remote agent](../../admin/remote-agents/enrolment.md). From the **Directories** page you can:
+[remote agent](../../platform/spiffe/remote-agents/enrolment.md). From the **Directories** page you can:
 
 - **discover** domain controllers and LDAP servers;
 - **register** them, or **import** them from Password Safe;
@@ -19,7 +19,7 @@ An on-premises AD domain or LDAP directory is reached through a
 This needs remote agent **2.8.0** or later, on the network the directory is on.
 
 **Discover.** Run a **Directories** scan from the agent's **Discover** dialog
-([scan details](../../admin/remote-agents/enrolment.md#5-discover)). The scan reads the anonymous
+([scan details](../../platform/spiffe/remote-agents/enrolment.md#5-discover)). The scan reads the anonymous
 rootDSE on 389 and 636 and never binds. Scope it by domain name to find every DC. Each
 finding has a **Register directory** link that opens the form below, pre-filled.
 
@@ -72,7 +72,7 @@ Importing changes nothing in Password Safe. It needs `secrets:use` as well as
 
 **Change it.** In Config Management, choose the directory under **On-Prem Directories (via
 agent)**, and pick **LDAP** or **WinRM**
-([how the run works](../../admin/remote-agents/config-runs.md#on-premises-directories)).
+([how the run works](../../platform/spiffe/remote-agents/config-runs.md#on-premises-directories)).
 [`examples/playbooks/directory/`](../../../examples/playbooks/directory/) has playbooks for
 these tasks:
 

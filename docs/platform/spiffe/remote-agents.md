@@ -2,6 +2,9 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** your hypervisors, databases or clusters live somewhere the dashboard cannot reach.
 
+Part of [SPIFFE and SPIRE](../spiffe.md): an agent is a workload the dashboard does not trust
+until it attests to the dashboard's SPIRE server.
+
 Every other execution path in this dashboard dials **out** to its target. That works
 for a cloud API, and it works for a LAN the dashboard container happens to sit on. It
 cannot work for a private network the dashboard is not in — which is why the local
@@ -11,39 +14,48 @@ Ansible runner says so outright when its Docker socket is missing:
 > route to the cluster — a dashboard deployed in a cloud (ECS / ACI / Cloud Run) cannot
 > run them.
 
-A remote agent inverts the direction. It is a container you run *inside* the private
+A remote agent reverses the direction of the connection. It is a container you run *inside* the private
 network; it dials out to the dashboard, asks for work, does it, and reports back. No
 inbound firewall rule, no VPN, no port forward, no exposed management interface.
 
 ## Philosophy
 
-**1. Neither side trusts the other.**
-This is the unusual part and everything else follows from it. Elsewhere in this
-codebase there is one trust domain — you run the dashboard, it holds your credentials,
-and `SECURITY.md` puts a malicious administrator out of scope. An agent breaks that in
-both directions:
+**1. The dashboard does not trust an agent.**
+This is the starting point and everything else follows from it. An agent is a machine
+on a network the dashboard does not control, so being registered earns it nothing: it
+has to prove what it is, and keep proving it.
 
-- **The dashboard does not trust an agent.** An agent is a machine on a network the
-  dashboard does not control, so being registered earns it nothing. It has to prove
-  its identity on every request: each poll (every 5 seconds by default) is signed by
-  the agent's key, and the dashboard checks that the signature is fresh and unused and
-  that the agent is still active before it hands out any work. Revoke or unbind an
-  agent and its next request is refused. With SPIRE, the recommended model, the key
-  itself comes from attestation: at every start the agent presents a single-use
-  JWT-SVID from the dashboard's SPIRE server, and the key it then signs with lives
-  only in memory. Nothing on the host's disk can stand in for the agent. The dashboard
-  can also release the credentials it holds only to attested agents. See
+- **It attests through SPIFFE.** This is the recommended way to run an agent. At every
+  start the agent presents a single-use JWT-SVID from the
+  [dashboard's SPIRE server](../spiffe.md), proves it holds the key it is about to use,
+  and keeps that key only in memory. Nothing on the host's disk can stand in for the
+  agent, and a restart attests again. See
   [Attesting an agent through SPIRE](remote-agents/spire-attestation.md).
-- **The agent does not trust the dashboard.** An agent puts a dashboard-controlled
-  process inside a network whose owner may not be the dashboard's operator. So the
-  design assumes the dashboard may be compromised and makes that insufficient to
-  execute anything meaningful on the LAN.
+- **Every request is verified.** Each poll (every 5 seconds by default) is signed by
+  the agent's key, and the dashboard checks that the agent is still active and that the
+  signature is fresh and unused before it hands out any work. Revoke or unbind an agent
+  and its very next request is refused.
+- **Credentials go only to attested agents.** With
+  **Release dashboard-held credentials only to SPIRE-attested agents** on, an agent whose
+  key did not come from an attestation is refused every credential the dashboard holds.
 
-**2. The security boundary is a file you own.**
+An agent enrolled with a one-time code and an Ed25519 key on disk still works, for
+compatibility and for sites that cannot reach a SPIRE server (a TLS-inspecting proxy,
+for example). There, whoever can read the agent's state volume *is* the agent, which
+is exactly what attestation removes.
+
+**2. The agent does not have to trust the dashboard either.**
+Elsewhere in this codebase there is one trust domain — you run the dashboard, it holds
+your credentials, and `SECURITY.md` puts a malicious administrator out of scope. An agent
+puts a dashboard-controlled process inside a network whose owner may not be the
+dashboard's operator, so the design also assumes the dashboard may be compromised and
+makes that insufficient to execute anything meaningful on the LAN.
+
+**3. The security boundary is a file you own.**
 `policy.yaml` is mounted read-only into the agent and no dashboard API can read, write
 or override it. It names what may be touched. It fails closed.
 
-**Holding a credential is not aiming it.** Principle 1 is about *execution*: a
+**Holding a credential is not aiming it.** Principle 2 is about *execution*: a
 compromised dashboard must not be able to run anything meaningful on your LAN. Holding a
 credential for an agent to fetch does not break that. `host`, `username` and the verbs
 allowed stay in your `connections.yaml` and `policy.yaml`, so the dashboard cannot point a
@@ -52,7 +64,7 @@ the dashboard, ideally as Password Safe references, and releases them per job to
 attested through SPIRE. See
 [Central storage with SPIRE](remote-agents/credentials.md#central-storage-with-spire-the-recommended-model).
 
-**3. Nothing reusable crosses the wire.**
+**4. Nothing reusable crosses the wire.**
 The agent authenticates with an Ed25519 signature over one method, one path, one body,
 valid for sixty seconds — not a bearer token. This is what makes it safe through a
 TLS-inspecting corporate proxy, where an `Authorization` header would be captured in
@@ -110,7 +122,7 @@ Three independent guards, all pinned by `tests/test_agent_lease_invariants.py`:
 
 ### Reconciling with "why one-shot runners"
 
-[`config-management.md`](../operations/config-management.md) argues against long-lived runners. Read
+[`config-management.md`](../../operations/config-management.md) argues against long-lived runners. Read
 its wording precisely: *no escape hatch for "give me a long-lived worker **for
 performance reasons**"*. An agent is not asking for persistence for performance. It
 asks for it for **reachability** — you cannot launch a one-shot container inside a
@@ -134,11 +146,11 @@ operator-supplied code. The runner stays one-shot; only the thing that launches 
 | [Agent-executed Config Management](remote-agents/config-runs.md) | What the dashboard sends, the grants it needs, and what a run looks like, for VMs, on-prem databases and on-prem AD/LDAP directories. |
 | [Agent-brokered file shares](remote-agents/file-shares.md) | A name rather than a path, the grants, and why it needs no Docker socket. |
 | [Attesting an agent through SPIRE](remote-agents/spire-attestation.md) | Moving an agent from an Ed25519 key on disk to a SPIRE attestation at every start: the two overlays, **Migrate to SPIRE**, ports, rollback and the settings. |
-| [SPIFFE and SPIRE](../platform/spiffe.md) | The dashboard's own SPIRE server that agents attest to: running it on Docker Compose or as a sidecar on a managed container runtime, its trust domain, and troubleshooting it. |
+| [SPIFFE and SPIRE](../spiffe.md) | The dashboard's own SPIRE server that agents attest to: running it on Docker Compose or as a sidecar on a managed container runtime, its trust domain, and troubleshooting it. |
 
 The same SPIRE server also gives the **dashboard** an identity of its own, which AWS, Azure,
 GCP and k3s can trust instead of a stored key. That is not about agents, so it lives with the
-other OIDC pages: [The dashboard's own identity](../platform/oidc/dashboard-identity.md).
+other OIDC pages: [The dashboard's own identity](../oidc/dashboard-identity.md).
 
 The first two split by **who is reading**: the operator enrols and manages agents from
 the dashboard, and the host owner runs the container and writes its policy. They are
@@ -277,7 +289,7 @@ what an unauthenticated internet-facing endpoint actually needs.
 | `policy.yaml enables Config Management but names no ansible.directory_image (or db_image)` | A directory run has no image. Set `db_image` (or `directory_image`) to `chrweav/ansible-cloud`, which carries python-ldap, pywinrm and `microsoft.ad`, and `docker pull` it. Pull a fresh one if it predates directory support: an older image fails the run with a missing `ldap` module or `microsoft.ad` collection. |
 | The dashboard refuses a directory scan or run, naming agent **2.8** | Directory discovery, registration and runs need agent 2.8.0 or later. Pull `chrweav/dashboard-agent:latest` and restart; the agent keeps its identity, so no re-enrolment. |
 | A Directories scan finds a domain controller on 389 but not on 636 | The DC offers only TLS 1.0/1.1 on LDAPS; the probe requires TLS 1.2, like the rest of the agent. Register it on 389, or enable TLS 1.2 on the DC. |
-| A directory run fails with `bind` / `invalid credentials`, or WinRM `401` | The directory's Password Safe account is checked out per run. Check it is requestable by the dashboard's API identity and that its domain is right: a bare AD account name is sent as `user@domain`. For WinRM, the host must accept NTLM over HTTPS on 5986. See [On-premises directories](../preview/directories/on-premises.md#discover-register-and-change-them). |
+| A directory run fails with `bind` / `invalid credentials`, or WinRM `401` | The directory's Password Safe account is checked out per run. Check it is requestable by the dashboard's API identity and that its domain is right: a bare AD account name is sent as `user@domain`. For WinRM, the host must accept NTLM over HTTPS on 5986. See [On-premises directories](../../preview/directories/on-premises.md#discover-register-and-change-them). |
 | `could not write the run's files into the container (400): container rootfs is marked read-only` | An agent of 2.3.0 exactly. That build created the runner with a read-only rootfs and no mount, and the Engine refuses an archive extract into one — so every Config-Management run failed here, on every host, a few seconds in. Fixed in 2.3.1 by making `/opt/job` an anonymous volume: pull `chrweav/dashboard-agent:latest` and restart. The agent keeps its identity, so no re-enrolment. |
 | A VM is listed in the target picker but **disabled**, hover says "no address" | Its sync reports no guest address. All three of: guest powered on, guest tools installed in it, and `sync_guest_details: true` on that connection in `connections.yaml`. Then **Sync Now**. On Hyper-V this also needs a re-pulled `chrweav/hypervisor-runner` — that image is what asks the guest. |
 | A VM does not appear in the picker at all | Either its connection is not agent-bound, or the row is untagged and you are not an admin — an untagged synced VM is admin-only until an admin assigns a workgroup, the same rule every hypervisor page keeps. A Config-Management route does **not** make a VM appear: the address rules in the two rows above still decide that. |
@@ -290,7 +302,7 @@ what an unauthenticated internet-facing endpoint actually needs.
 | `the Gateway image … is not present on this host` | `docker pull` it on the agent host. The agent will not fetch it for you — a pull is a network fetch of executable content, and that is the operator's decision, not a job's. Same rule as the sibling runner. |
 | `the Gateway container exited (code N)` | Read `docker logs pov-gateway` on that host. **A wrong image tag and a kernel without `/dev/net/tun` look identical from here**, which is why the message names both. |
 | `the dashboard sent an empty Gateway deploy key` | The POV has a key stored but it is blank. Create a Gateway in PRA, copy its deploy key, and paste it onto the POV. Two preflight refusals cover the earlier cases — *"this POV has no Gateway deploy key stored"* and *"this POV names no Gateway"* (the name is what the status check and every later jump item look it up by). |
-| A Gateway job goes **green** but PRA shows no node | Expected, and not a contradiction: the agent only proves the container stayed up. The dashboard confirms registration separately against the tenant API. If it stays unregistered, the deploy key is the first suspect — and see [the stale-node case](../beyondtrust/gateways/troubleshooting.md) for the other explanation: a rebuilt host registers under the same Gateway **name** from a fresh address, so PRA lists the dead node too — compare node counts, not names. |
+| A Gateway job goes **green** but PRA shows no node | Expected, and not a contradiction: the agent only proves the container stayed up. The dashboard confirms registration separately against the tenant API. If it stays unregistered, the deploy key is the first suspect — and see [the stale-node case](../../beyondtrust/gateways/troubleshooting.md) for the other explanation: a rebuilt host registers under the same Gateway **name** from a fresh address, so PRA lists the dead node too — compare node counts, not names. |
 | `the Gateway container would not be removed` | Remove it by hand on that host: `docker rm -f pov-gateway`. A removal deliberately does not need the install grant, so a narrowed policy is not the cause. |
 | `Agent 'x' is not granted the Config-Management job type` | The dashboard operator's half of the permission. Agents page → that agent → grant `agent_ansible`. Your `policy.yaml` still has to grant it too. **The name in that message is the agent that would EXECUTE**, which is not always the one under Connections — a [Config-Management route](remote-agents/config-runs.md#which-agent-executes-a-run) may have sent this address elsewhere. Grant it to the agent the message names. |
 | The picker says a VM runs on an agent that did not discover it | Working as intended: a Config-Management route sends that address range to that agent. The line under the picker names the route that decided. Clear **Active** on it to go back to the discovering agent. |
@@ -350,7 +362,7 @@ Hypervisor brokering followed it and is described above. Next:
   **Migrate to SPIRE** on the Agents page (SPIRE entries, join token and trust domain,
   through the dashboard's own SPIRE server) with a banner recommending it. Agent host side:
   `examples/remote-agent/docker-compose.spire.yml`. Design, including
-  what `join_token` hosts still keep on disk: [agent-and-human-identity.md](../design/agent-and-human-identity.md).
+  what `join_token` hosts still keep on disk: [agent-and-human-identity.md](../../design/agent-and-human-identity.md).
 - ~~**Credentials held centrally, released to attested agents**~~ — shipped. With an agent key that no
   longer sits on disk, keeping credentials on the dashboard (`dashboard_secret`, ideally a
   `ps_account://` reference) is the recommended model rather than a trade, and

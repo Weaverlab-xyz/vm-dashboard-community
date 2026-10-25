@@ -116,7 +116,7 @@ your nodes as tabs and all VMs and containers listed within a few seconds.
 | **Reboot** | Graceful reboot for QEMU VMs |
 | **Status and resource usage** | CPU %, memory, running/stopped state |
 | **VM detail** | IP addresses (via QEMU guest agent), OS type, tags, description |
-| **Bulk power** | Tick several rows and send Start, Shutdown, Force Off or Reboot to the whole selection from the toolbar — one job per VM, sharing a batch you watch on one page. VMs already in the target state are skipped and the dialog says how many; fifty per operation is the cap. See [Powering a selection](../admin/remote-agents/hypervisors/power.md) |
+| **Bulk power** | Tick several rows and send Start, Shutdown, Force Off or Reboot to the whole selection from the toolbar — one job per VM, sharing a batch you watch on one page. VMs already in the target state are skipped and the dialog says how many; fifty per operation is the cap. See [Powering a selection](../platform/spiffe/remote-agents/hypervisors/power.md) |
 
 Templates are automatically hidden from the resource list.
 
@@ -131,10 +131,10 @@ dialled connection is written immediately. An agent-bound one is queued as a job
 agent. Proxmox tags are bare labels with no values. Chip colours, the refused
 dashboard-owned keys, and the audit entry are all in
 [Cloud VMs — Editing tags](../clouds/vms/tags.md#editing-tags). The agent path is described in
-[Agent-brokered hypervisors](../admin/remote-agents/hypervisors.md#the-verbs).
+[Agent-brokered hypervisors](../platform/spiffe/remote-agents/hypervisors.md#the-verbs).
 
 **Scheduling power.** On a connection bound to a
-[remote agent](../admin/remote-agents/hypervisors.md), the bulk power toolbar's **Schedule**
+[remote agent](../platform/spiffe/remote-agents/hypervisors.md), the bulk power toolbar's **Schedule**
 tick books the operation for a time or a change window. A directly dialled connection
 cannot be booked, and each of its VMs is refused by name. See [Scheduling](../operations/scheduling.md).
 
@@ -230,7 +230,7 @@ image still works.
 ## Over a remote agent
 
 A Proxmox cluster the dashboard has no network route to can be reached through a
-[remote agent](../admin/remote-agents/hypervisors.md#hypervisor-connections) instead. Tick *Reached
+[remote agent](../platform/spiffe/remote-agents/hypervisors.md#hypervisor-connections) instead. Tick *Reached
 through a remote agent* when adding the connection and give it the name that connection
 has in the agent's own `connections.yaml`.
 
@@ -252,7 +252,7 @@ worse than an empty cell.
 Power actions still work: they are dispatched to the agent as jobs and appear on `/jobs`
 with Live Output, exactly like a discovery scan. Every button this page offers — Start,
 Stop, Shutdown and Reboot — maps to a verb, so nothing here is refused; see
-[the verbs](../admin/remote-agents/hypervisors.md#the-verbs) for how the other products differ.
+[the verbs](../platform/spiffe/remote-agents/hypervisors.md#the-verbs) for how the other products differ.
 
 One upgrade note: Shutdown and Reboot use the `shutdown` and `reboot` verbs, which are
 newer than the agent image many installs are running. Until an agent is re-pulled it

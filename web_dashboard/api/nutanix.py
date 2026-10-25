@@ -374,7 +374,7 @@ async def _queue_one(db, current_user, *, op: str, payload: PowerOpRequest,
     # No agent branch, and that is a standing decision rather than an omission: a
     # Nutanix power change is a full spec PUT carrying a metadata version, not a simple
     # action, so getting one wrong writes to the VM instead of failing —
-    # docs/admin/remote-agents.md records it as worth doing carefully rather than quickly.
+    # docs/platform/spiffe/remote-agents.md records it as worth doing carefully rather than quickly.
     # Nutanix therefore has no entry in agent_hypervisor_meta.PAGE_OPS, `_power_nutanix`
     # in the agent refuses before reading a table, and calling `agent_power_job` here
     # would fail closed and 501 every button on this page.

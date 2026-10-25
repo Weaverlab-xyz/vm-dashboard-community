@@ -81,5 +81,5 @@ on-premises power booking needs an agent is under
   or held for approval, before it is ever queued.
 * [Cloud VMs](../clouds/vms.md) — suspend schedules and spend caps.
 * [Job Worker](job-worker.md) — how a booked job gets a turn once its time arrives.
-* [Remote Agents — hypervisors](../admin/remote-agents/hypervisors.md) — binding a hypervisor
+* [Remote Agents — hypervisors](../platform/spiffe/remote-agents/hypervisors.md) — binding a hypervisor
   connection to an agent, which is what makes its power operations bookable.

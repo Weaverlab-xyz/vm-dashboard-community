@@ -98,7 +98,7 @@ dashboard. With **Collect credentials from the dashboard** on (Settings → Ansi
    token first, then sends the presigned request to STS (only ever a regional STS host) or
    verifies the Google token. It checks that the identity is the configured runner and
    answers with the credential **sealed** to a key the task generated (the
-   [remote agents'](../remote-agents/credentials.md#central-storage-with-spire-the-recommended-model)
+   [remote agents'](../../platform/spiffe/remote-agents/credentials.md#central-storage-with-spire-the-recommended-model)
    format).
 5. The task merges it into the run's `0600` vars file. The grant is deleted when the run
    ends, whether redeemed or not.

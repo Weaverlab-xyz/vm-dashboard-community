@@ -9,7 +9,7 @@
 #   docker compose up -d
 #
 # This is a Linux image and it runs on a Windows host under Docker Desktop's Linux VM;
-# keep Docker Desktop in Linux-containers mode. See docs/admin/remote-agents.md, "Running on
+# keep Docker Desktop in Linux-containers mode. See docs/platform/spiffe/remote-agents.md, "Running on
 # Windows", for the handful of things that do differ there.
 #
 # The code is single-use and expires in 15 minutes. On first start the agent generates

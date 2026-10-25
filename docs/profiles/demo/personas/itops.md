@@ -59,7 +59,7 @@ into one compromised endpoint rather than all of them.
 Start, stop and reboot a machine through the agent — an operator who can manage the endpoint
 without any standing access to it.
 
-**Guide:** [Remote Agents](../../../admin/remote-agents.md)
+**Guide:** [Remote Agents](../../../platform/spiffe/remote-agents.md)
 
 ### Remote support with no VPN
 

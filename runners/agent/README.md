@@ -5,7 +5,7 @@ over HTTPS, and asks for work. Nothing listens; no inbound firewall rule is need
 
 Unlike the other images under `runners/`, this one is not launched by the dashboard —
 an operator runs it, on their own infrastructure, and the published tag is how it gets
-there. See [`docs/admin/remote-agents.md`](../../docs/admin/remote-agents.md) for the full setup.
+there. See [`docs/platform/spiffe/remote-agents.md`](../../docs/platform/spiffe/remote-agents.md) for the full setup.
 
 ## The contract
 
@@ -87,11 +87,11 @@ match the entry's `host:` and changing that address means sealing again.
 This is not protection from `root` on this host: the key is on the same machine, which is
 unavoidable for a container that restarts unattended. It protects the *config file*, which
 gets copied into repos, tickets and backups in a way the state volume does not. See
-[docs/admin/remote-agents/credentials.md](../../docs/admin/remote-agents/credentials.md#sealing-a-credential-this-host-keeps)
+[docs/platform/spiffe/remote-agents/credentials.md](../../docs/platform/spiffe/remote-agents/credentials.md#sealing-a-credential-this-host-keeps)
 for the full trade against `ps_managed_account` and `dashboard_secret`. Where the site
 allows it, the recommended model stores nothing here at all: `dashboard_secret: true`, with
-this agent attested through SPIRE ([how to attest it](../../docs/admin/remote-agents/spire-attestation.md)) — see
-[Central storage with SPIRE](../../docs/admin/remote-agents/credentials.md#central-storage-with-spire-the-recommended-model).
+this agent attested through SPIRE ([how to attest it](../../docs/platform/spiffe/remote-agents/spire-attestation.md)) — see
+[Central storage with SPIRE](../../docs/platform/spiffe/remote-agents/credentials.md#central-storage-with-spire-the-recommended-model).
 
 ## Bind mounts need `:ro,Z` on SELinux hosts
 
@@ -132,7 +132,7 @@ Two things behave differently here rather than merely looking different:
   UTF-8 BOM survives the whitespace trim and makes the code invalid. Write it with
   `Set-Content -Encoding ascii -NoNewline`.
 
-See [`docs/admin/remote-agents/agent-host.md`](../../docs/admin/remote-agents/agent-host.md#running-on-windows) for the host
+See [`docs/platform/spiffe/remote-agents/agent-host.md`](../../docs/platform/spiffe/remote-agents/agent-host.md#running-on-windows) for the host
 setup, including why `--restart unless-stopped` does not survive a logoff.
 
 ## Back-pressure

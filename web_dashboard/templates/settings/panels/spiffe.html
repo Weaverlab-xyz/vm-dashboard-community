@@ -1,0 +1,177 @@
+{# Settings slide-over panel "spiffe". Included by settings.html inside settingsPage(); the state it binds (panelCfg, panelOpen, …) lives in that page's script.
+
+   The dashboard's own SPIRE server and SPIFFE identity. Both used to sit in the Remote
+   Agents drawer, which put the dashboard's cloud credentials under a feature they have
+   nothing to do with: agents attest to this server, but so do service accounts and demo
+   cells, and the identity is the dashboard's own. Config-only: the switches that use the
+   server are agent attestation (Remote Agents) and the identity below. #}
+      <template x-if="panel?.key === 'spiffe' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            The dashboard runs a SPIRE server for its own trust domain. Remote agents attest to
+            it, and it gives the dashboard a SPIFFE identity of its own that a cloud can trust
+            instead of a stored key. See
+            <a href="/docs/platform/spiffe" class="underline text-blue-600" target="_blank">SPIFFE and SPIRE</a>.
+          </p>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">SPIRE server container</label>
+            <input type="text" x-model="panelCfg.spire_server_container"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="vmdash-spire-server">
+            <p class="text-[11px] text-gray-400 mt-1">
+              The dashboard's own SPIRE server from <code class="font-mono">docker-compose.spire.yml</code>.
+              <strong>Migrate to SPIRE</strong> on the Agents page creates the agent's entries and
+              join token in it with <code class="font-mono">docker exec</code>, and its trust bundle
+              is re-read daily so attestation keeps verifying across key rotation. Ignored on a
+              managed container runtime, where the app reaches its SPIRE sidecar through
+              <code class="font-mono">SPIRE_SERVER_SOCKET</code> instead.
+            </p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">SPIRE server address for agents</label>
+            <input type="text" x-model="panelCfg.spire_server_address"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="(blank: the agent gateway's host, port 8081)">
+            <p class="text-[11px] text-gray-400 mt-1">
+              <code class="font-mono">host</code> or <code class="font-mono">host:port</code> that an
+              agent host dials for SPIRE (mTLS gRPC, TCP passthrough). Leave blank when tcp/8081 is
+              published on the same name as the agent gateway; set it when it is not — for example
+              an AWS Network Load Balancer's own DNS name.
+            </p>
+          </div>
+
+          <!-- ── The dashboard's own SPIFFE identity ─────────────────────────────
+               docs/design/dashboard-workload-identity.md. Token files for federated
+               cloud access; a stored cloud key still wins, so turning this on changes
+               nothing until a key is retired on purpose. -->
+          <div class="rounded-lg border border-gray-200 p-3 space-y-2">
+            <label class="flex items-start gap-2">
+              <input type="checkbox" x-model="panelCfg.dashboard_spiffe_identity_enabled"
+                     class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+              <span class="text-sm text-gray-700">
+                Give the dashboard its own SPIFFE identity
+                <span class="block text-[11px] text-gray-500">
+                  Keeps a short-lived JWT-SVID for <code class="font-mono">spiffe://&lt;trust domain&gt;/dashboard</code>
+                  in a file per audience, and publishes the issuer's discovery document and
+                  keys at <code class="font-mono">&lt;issuer&gt;/.well-known/openid-configuration</code>.
+                  A cloud trusts that issuer instead of a stored key. Stored keys still win:
+                  clear one only once its cloud accepts the token. Needs the dashboard's own
+                  SPIRE server: <code class="font-mono">docker-compose.spire.yml</code> on Docker
+                  Compose, or the <code class="font-mono">examples/cloud-spire</code> sidecar on a
+                  managed container runtime, with <code class="font-mono">SPIRE_JWT_ISSUER</code>
+                  set to the issuer below.
+                </span>
+              </span>
+            </label>
+            <div x-show="panelCfg.dashboard_spiffe_identity_enabled" class="space-y-2 pl-6">
+              <div>
+                <label class="block text-xs font-medium text-gray-700 mb-1">Issuer</label>
+                <input type="text" x-model="panelCfg.dashboard_spiffe_issuer"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       :placeholder="(spiffeIdentity && spiffeIdentity.issuer) || 'https://agents.example.com/spiffe'">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  Blank uses the pinned agent audience plus <code class="font-mono">/spiffe</code>, which
+                  the agent gateway already publishes. Must equal <code class="font-mono">SPIRE_JWT_ISSUER</code>
+                  exactly, and be reachable from the internet over HTTPS for AWS and Azure.
+                </p>
+              </div>
+              <p class="text-xs font-medium text-gray-700">Audiences (one token file each)</p>
+              <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" x-model="panelCfg.dashboard_spiffe_aud_aws" class="rounded border-gray-300 text-blue-600">
+                AWS <span class="text-[11px] text-gray-500 font-mono">sts.amazonaws.com → aws.jwt</span>
+              </label>
+              <div x-show="panelCfg.dashboard_spiffe_aud_aws" class="pl-6">
+                <input type="text" x-model="panelCfg.aws_federation_role_arn"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="arn:aws:iam::123456789012:role/vm-dashboard">
+                <p class="text-[11px] text-gray-400 mt-1">The role the dashboard assumes with AssumeRoleWithWebIdentity.</p>
+              </div>
+              <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" x-model="panelCfg.dashboard_spiffe_aud_azure" class="rounded border-gray-300 text-blue-600">
+                Azure <span class="text-[11px] text-gray-500 font-mono">api://AzureADTokenExchange → azure.jwt</span>
+              </label>
+              <p x-show="panelCfg.dashboard_spiffe_aud_azure" class="pl-6 text-[11px] text-gray-400">
+                Uses the Azure setup's client id and tenant id, as a federated credential on
+                that app registration. Clear its client secret to switch.
+              </p>
+              <div x-show="panelCfg.dashboard_spiffe_aud_azure" x-cloak class="pl-6">
+                <label class="block text-[11px] text-gray-600 mb-0.5">Packer image builds: assertion lifetime (minutes)</label>
+                <input type="number" min="15" max="480" x-model.number="panelCfg.packer_azure_assertion_ttl_minutes"
+                       class="w-24 border border-gray-300 rounded-lg px-2 py-1 text-sm font-mono">
+                <p class="text-[11px] text-gray-400 mt-0.5">
+                  Packer's azure-arm builder reads its credential once, so with no secret and no
+                  Workload Credentials lease each build gets its own signed assertion that lasts
+                  this long. Set it above your longest Azure image build (15–480).
+                </p>
+              </div>
+              <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" x-model="panelCfg.dashboard_spiffe_aud_wlc" class="rounded border-gray-300 text-blue-600">
+                Workload Credentials <span class="text-[11px] text-gray-500">its identity audience → <span class="font-mono">wlc.jwt</span></span>
+              </label>
+              <div>
+                <label class="block text-xs text-gray-700 mb-1">GCP workload identity provider <span class="text-gray-400">→ gcp.jwt</span></label>
+                <input type="text" x-model="panelCfg.dashboard_spiffe_aud_gcp"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/x">
+                <input type="text" x-model="panelCfg.gcp_federation_service_account"
+                       class="mt-1 w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="service account to impersonate (optional) — vm-dashboard@project.iam.gserviceaccount.com">
+              </div>
+              <div class="rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-900">
+                In every cloud trust policy, pin the subject to this dashboard's exact SPIFFE ID,
+                never to the trust domain: remote agents and service-account workloads share it.
+              </div>
+              <template x-if="spiffeIdentity && spiffeIdentity.enabled">
+                <div class="text-[11px] space-y-1">
+                  <p x-show="spiffeIdentity.error" class="text-red-700" x-text="spiffeIdentity.error"></p>
+                  <template x-for="entry in Object.entries(spiffeIdentity.sources || {})" :key="'src-' + entry[0]">
+                    <div>
+                      <span class="font-medium text-gray-700" x-text="entry[0].toUpperCase()"></span>
+                      <span class="text-gray-500">uses</span>
+                      <span :class="entry[1] === 'SPIFFE federation' ? 'text-green-700' : 'text-gray-700'"
+                            x-text="entry[1]"></span>
+                    </div>
+                  </template>
+                  <!-- Federation ready, but a stored key outranks it: the panel above looks
+                       keyless and is not. cloud_federation.shadowed. -->
+                  <template x-for="cloud in (spiffeIdentity.shadowed || [])" :key="'shadow-' + cloud">
+                    <p class="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-900">
+                      <span class="font-medium" x-text="'SPIFFE federation is ready for ' + cloud.toUpperCase() + ', but the stored key still wins.'"></span>
+                      Remove the stored key to go keyless; until then every call uses it.
+                      <a href="/docs/platform/workload-identity#moving-a-surface-over" target="_blank" class="underline">How</a>
+                    </p>
+                  </template>
+                  <template x-for="entry in Object.entries(spiffeIdentity.tokens || {})" :key="entry[0]">
+                    <div>
+                      <span class="font-mono text-gray-800" x-text="entry[1].path"></span>
+                      <span x-show="entry[1].present && !entry[1].error" class="text-green-700"
+                            x-text="'valid until ' + new Date(entry[1].expires_at * 1000).toLocaleTimeString()"></span>
+                      <span x-show="entry[1].error" class="text-red-700" x-text="entry[1].error"></span>
+                    </div>
+                  </template>
+                  <!-- The clouds fetch discovery and keys from the issuer's public URL when a
+                       token is presented; this fetches them the same way before a key is
+                       retired, so a private name or an untrusted certificate shows up here
+                       rather than as a 403 from every cloud. -->
+                  <div class="pt-1">
+                    <button type="button" @click="checkSpiffeIssuer()" :disabled="spiffeIssuerCheck.running"
+                            class="text-xs bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium px-2.5 py-1 rounded-lg disabled:opacity-50"
+                            x-text="spiffeIssuerCheck.running ? 'Checking…' : 'Check the issuer is reachable'"></button>
+                    <template x-for="c in (spiffeIssuerCheck.result ? spiffeIssuerCheck.result.checks : [])" :key="c.name">
+                      <div>
+                        <span :class="c.ok ? 'text-green-700' : 'text-red-700'" x-text="c.ok ? '✓' : '✗'"></span>
+                        <span class="font-medium text-gray-700" x-text="c.name"></span>
+                        <span class="text-gray-500" x-text="c.detail"></span>
+                      </div>
+                    </template>
+                    <p x-show="spiffeIssuerCheck.error" class="text-red-700" x-text="spiffeIssuerCheck.error"></p>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+
+        </div>
+      </template>

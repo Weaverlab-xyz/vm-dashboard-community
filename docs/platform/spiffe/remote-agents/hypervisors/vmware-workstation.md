@@ -27,8 +27,8 @@ perfectly happily — an agent that is online and failing every Workstation job 
 refused connection is what that looks like from the dashboard. The agent cannot start it:
 a Linux container in Docker Desktop's VM can dial the host but cannot launch a process on
 it. Register the host-side autostart once, with
-[`scripts\Enable-VmrestAutostart.ps1`](../../../../scripts/Enable-VmrestAutostart.ps1) — see
-[Keep it running](../../../hypervisors/vmware.md#1a-keep-it-running-reboots-logouts-closed-windows).
+[`scripts\Enable-VmrestAutostart.ps1`](../../../../../scripts/Enable-VmrestAutostart.ps1) — see
+[Keep it running](../../../../hypervisors/vmware.md#1a-keep-it-running-reboots-logouts-closed-windows).
 
 Then add a `workstation` connection bound to that host's agent. It is **agent-bound
 only**: the dashboard has no transport for Workstation, so a connection without an agent

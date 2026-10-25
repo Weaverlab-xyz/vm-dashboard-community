@@ -74,9 +74,9 @@ those, and [docs/README.md](docs/README.md) is the index of them.
 | [Cloud services](docs/cloud-services.md) | menu → Cloud services | you're running containers (with or without Portainer), databases, Kubernetes (with or without Rancher) or functions |
 | [Preview](docs/preview.md) | menu → Preview | you're trying virtual desktops, directories (Active Directory, LDAP, Entra ID, Okta, PingOne) or the Workload Lab |
 | [Operations](docs/operations.md) | menu → Operations | you're running it day to day: Config Management, scheduling and change windows, images, storage, inventory, the job worker, costs and the auto-delete timer |
-| [Admin](docs/admin.md) | menu → Admin | you're deciding who and what may use the dashboard, where its secrets live and how you'd prove what happened, or running its remote agents, health checks and notifications |
+| [Admin](docs/admin.md) | menu → Admin | you're deciding who and what may use the dashboard, where its secrets live and how you'd prove what happened, or running its health checks and notifications |
 | [BeyondTrust](docs/beyondtrust.md) | Settings → BeyondTrust | you're wiring it into Privileged Remote Access, Password Safe, EPM for Linux or Entitle |
-| [Platform](docs/platform.md) | Settings → Platform | you want single sign-on, the dashboard's own identity in place of stored keys, SPIRE, hosting it in a cloud, its Ansible and Kubernetes runners, or the MCP server |
+| [Platform](docs/platform.md) | Settings → Platform | you want single sign-on, the dashboard's own identity in place of stored keys, SPIRE and the remote agents that attest to it, hosting it in a cloud, its Ansible and Kubernetes runners, or the MCP server |
 | [Demo and POV profiles](docs/profiles/README.md) | — | you're presenting to a particular role (the Personas: one page per role), or running customer proof-of-value work on a separate instance |
 | [Editions](docs/editions.md) | — | you're choosing between running the dashboard yourself and a hosted edition |
 
@@ -194,9 +194,10 @@ The wizard turns a flag on; the per-integration fields live in Settings:
 - **Remote Agents** — an outbound-dialing agent you run inside a private
   network so the dashboard can manage what it can't route to: hypervisor
   discovery and inventory, agent-executed Config Management, and Hyper-V /
-  bare-ESXi access via a one-shot sibling container. The agent holds the
-  credentials; the dashboard never needs a path in. See
-  [Admin](docs/admin.md).
+  bare-ESXi access via a one-shot sibling container. The dashboard never needs
+  a path in, and it does not trust an agent: each one attests through the
+  dashboard's SPIRE server (recommended) and signs every request. See
+  [Platform](docs/platform.md), under SPIFFE and SPIRE.
 - **Cloud Databases** — provision private Postgres / MySQL / SQL Server on
   AWS/Azure/GCP, Oracle on AWS RDS or OCI, and MongoDB on Atlas, brokered through a PRA tunnel, or register a
   database you already run (on-premises included) as a Config Management
@@ -249,7 +250,7 @@ on release:
 | [`chrweav/ansible-winrm`](https://hub.docker.com/r/chrweav/ansible-winrm) | Default Ansible config-management runner — upstream `willhallonline/ansible` **+ `pywinrm`**, so both Linux SSH and Windows WinRM targets work out of the box. Built from [`runners/ansible-winrm/`](runners/ansible-winrm/). |
 | [`chrweav/ansible-cloud`](https://hub.docker.com/r/chrweav/ansible-cloud) | Ansible runner for **Kubernetes cluster / database** targets — `kubernetes.core` + the helm CLI + the DB collections and client libs, for `hosts: localhost` plays on an in-cloud runner or — for on-prem targets — a sibling container on the dashboard host. Built from [`runners/ansible-cloud/`](runners/ansible-cloud/). |
 | [`chrweav/dashboard-promote-runner`](https://hub.docker.com/r/chrweav/dashboard-promote-runner) | One-shot cross-cloud image-promote runner (ECS / ACI / Cloud Run). Built from [`runners/promote/`](runners/promote/). |
-| [`chrweav/dashboard-agent`](https://hub.docker.com/r/chrweav/dashboard-agent) | The **remote on-prem agent** — a long-lived container an operator runs inside a private network, which dials the dashboard outbound (no inbound ports, no credentials in the dashboard). Carries exactly three dependencies and deliberately no ansible / kubectl / helm / container client. Built from [`runners/agent/`](runners/agent/). Unlike the runners above, **you pull this one** — the Agents page hands out an install command naming this tag, so the published image *is* the distribution channel. See [Admin](docs/admin.md). |
+| [`chrweav/dashboard-agent`](https://hub.docker.com/r/chrweav/dashboard-agent) | The **remote on-prem agent** — a long-lived container an operator runs inside a private network, which dials the dashboard outbound (no inbound ports) and attests to its SPIRE server. Carries exactly three dependencies and deliberately no ansible / kubectl / helm / container client. Built from [`runners/agent/`](runners/agent/). Unlike the runners above, **you pull this one** — the Agents page hands out an install command naming this tag, so the published image *is* the distribution channel. See [Platform](docs/platform.md). |
 | [`chrweav/hypervisor-runner`](https://hub.docker.com/r/chrweav/hypervisor-runner) | The agent's one-shot **sibling runner** for the two transports its three-dependency image can't carry: Hyper-V (WinRM/NTLM) and bare ESXi (SOAP). Built from [`runners/hypervisor/`](runners/hypervisor/). Operator-pulled as well — the agent never pulls it for you, because a pull is a network fetch of executable content and that's the operator's call, not a job's. |
 
 ## License

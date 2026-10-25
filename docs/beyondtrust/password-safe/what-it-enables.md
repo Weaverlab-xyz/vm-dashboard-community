@@ -40,7 +40,7 @@ Full walkthrough in
 
 ## Hypervisor credentials for a remote agent
 
-A [remote agent](../../admin/remote-agents.md) brokering hypervisor operations inside a private network
+A [remote agent](../../platform/spiffe/remote-agents.md) brokering hypervisor operations inside a private network
 has two ways to use Password Safe, and they differ in which host holds the OAuth client:
 
 | | Agent-side checkout | Dashboard-side checkout |

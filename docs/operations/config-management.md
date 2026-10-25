@@ -12,7 +12,7 @@ encodes, and how the on-premises and cloud paths fit together.
 > Docker" runner below cannot serve your on-premises targets: it is a sibling
 > container on the *dashboard's* host, which has neither a Docker socket nor a
 > route to your LAN. Those targets are reached by a
-> [remote agent](../admin/remote-agents/config-runs.md#agent-executed-config-management) instead, which
+> [remote agent](../platform/spiffe/remote-agents/config-runs.md#agent-executed-config-management) instead, which
 > runs the same one-shot container inside your network. Everything else in this
 > document — the asset types, the secret handling, the drift tracking — is
 > unchanged.

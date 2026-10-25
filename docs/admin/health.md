@@ -46,7 +46,7 @@ not counted.
 This is a recommendation, not a check: both kinds are supported, so the Identity line is
 always healthy and the note never makes the area degraded or failing. To move an agent
 over, use **Migrate to SPIRE** on the Agents page; see
-[Attesting an agent through SPIRE](remote-agents/spire-attestation.md). The note links
+[Attesting an agent through SPIRE](../platform/spiffe/remote-agents/spire-attestation.md). The note links
 to the workload identity guide when this build includes it.
 
 ### POVs on a shared Asset Group

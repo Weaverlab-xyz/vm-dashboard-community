@@ -3603,7 +3603,7 @@ def _dashboard_svid(cluster_id: str, now: Optional[float] = None) -> str:
                   "to the stored admin kubeconfig (break-glass).")
     if not dashboard_identity.enabled():
         raise K8sError("This cluster is marked as trusting the dashboard's identity, but "
-                       "the dashboard's SPIFFE identity is off (Settings → Remote Agents). "
+                       "the dashboard's SPIFFE identity is off (Settings → SPIFFE and SPIRE). "
                        + breakglass)
     audience = dashboard_audience(cluster_id)
     try:
@@ -3659,7 +3659,7 @@ def set_spiffe_trust(db: Session, cluster_id: str, trusted: bool) -> dict:
         raise K8sError("'Trusts dashboard identity' applies to on-prem clusters; managed "
                        "clusters already get short-lived tokens from their cloud")
     if trusted and not dashboard_identity.enabled():
-        raise K8sError("Turn on the dashboard's SPIFFE identity (Settings → Remote Agents) "
+        raise K8sError("Turn on the dashboard's SPIFFE identity (Settings → SPIFFE and SPIRE) "
                        "first: the cluster would trust a token nothing mints.")
     config_service.set(spiffe_trust_key(cluster_id), "1" if trusted else "")
     with _svid_lock:

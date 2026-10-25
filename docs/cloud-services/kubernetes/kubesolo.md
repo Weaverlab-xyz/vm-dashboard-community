@@ -19,7 +19,7 @@ The KubeSolo plays live in [`examples/playbooks/kubesolo/`](https://github.com/W
 and the Entitle agent plays, which serve KubeSolo and k3s alike, in
 [`examples/playbooks/ot/`](https://github.com/Weaverlab-xyz/vm-dashboard-community/tree/main/examples/playbooks/ot).
 Both run through [Config Management](../../operations/config-management.md), against an on-prem host
-reached by a [remote agent](../../admin/remote-agents.md).
+reached by a [remote agent](../../platform/spiffe/remote-agents.md).
 
 ## KubeSolo or k3s
 
@@ -186,7 +186,7 @@ Prerequisites, in the order their failures masquerade as each other:
    block with `enabled: true` and its own `ansible.targets:` entry covering the guest's
    address on port 22. The top-level `targets:` list is deliberately not consulted.
    `policy.yaml` is written at enrolment, so a change means re-enrolling. See
-   [Agent-executed Config Management](../../admin/remote-agents/config-runs.md).
+   [Agent-executed Config Management](../../platform/spiffe/remote-agents/config-runs.md).
 2. **The guest reports an address** — its hypervisor connection needs
    `sync_guest_details: true`, or the target is listed but disabled with "no address".
 3. **The plays are uploaded** to a storage backend. A run resolves an asset by bare
@@ -215,7 +215,7 @@ the play hands it to helm through a 0600 values file rather than `--set`, becaus
 ## See also
 
 - [Config Management](../../operations/config-management.md) — the run form, targets and runners
-- [Remote Agents](../../admin/remote-agents.md) — reaching an on-prem host at all
+- [Remote Agents](../../platform/spiffe/remote-agents.md) — reaching an on-prem host at all
 - [Entitle](../../beyondtrust/entitle.md) — the integration this agent serves
 - [OT Demo Cell](../../profiles/demo/ot-demo-cell.md) — the demo cell, which runs k3s, and its DMZ broker, which installs this agent
 - [Kubernetes](../kubernetes.md) — the hub for all three kinds of cluster the dashboard builds

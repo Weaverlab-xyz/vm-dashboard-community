@@ -27,7 +27,7 @@ Behind the scenes (see [`services/ansible_local_service.py`](../../../web_dashbo
   inventory directly from the dashboard host.
 
 Two limits of that path are worth knowing before you rely on it, and a
-[remote agent](../../admin/remote-agents/config-runs.md#agent-executed-config-management) is the answer
+[remote agent](../../platform/spiffe/remote-agents/config-runs.md#agent-executed-config-management) is the answer
 to both:
 
 - **It targets the hypervisor *hosts*, not their guests.** `build_inventory()`

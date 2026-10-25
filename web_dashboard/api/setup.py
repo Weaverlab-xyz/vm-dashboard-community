@@ -936,7 +936,7 @@ class RemoteAgentsFeatureConfig(BaseModel):
     ``public_base_url`` lives on this panel rather than somewhere more general because
     it is the single most common way an agent deployment breaks. The signing audience is
     pinned from it, and an audience pinned as ``http://`` makes every agent 401 in a way
-    that looks exactly like a revoked agent — see docs/admin/remote-agents.md. The operator
+    that looks exactly like a revoked agent — see docs/platform/spiffe/remote-agents.md. The operator
     turning this feature on is the operator who needs to set it.
 
     Both fields are bool/str on purpose: an unset *int* field reads back as ``""`` from
@@ -948,16 +948,31 @@ class RemoteAgentsFeatureConfig(BaseModel):
     # Opt-in: agents may attest through SPIRE (POST /api/agent/attest) instead of an
     # enrolment code. Off, the route 404s. Ed25519 enrolment works either way.
     spire_attest_enabled: bool = False
+    # Opt-in: credentials the dashboard holds are released only to agents that attested
+    # through SPIRE (auth_mode "spiffe"). Off, Ed25519 agents receive them as before.
+    dashboard_secrets_require_spire: bool = False
+    # The SPIRE server itself, and the dashboard's own SPIFFE identity, are not about
+    # agents: they are on SpiffeFeatureConfig ("spiffe"), the SPIFFE and SPIRE panel.
+
+
+class SpiffeFeatureConfig(BaseModel):
+    """The dashboard's own SPIRE server and SPIFFE identity. Config-only (see
+    ``_CONFIG_ONLY_FEATURES``): each feature that uses the server has its own switch —
+    agent attestation on Remote Agents, the identity below — so a panel-level toggle
+    would be a second source of truth.
+
+    These keys sat on the Remote Agents panel until 2026-10, which put the dashboard's
+    cloud credentials under a feature they have nothing to do with. Strings and bools
+    only, apart from the one int with a default — see RemoteAgentsFeatureConfig on unset
+    ints.
+    """
+    enabled: bool = False
     # The dashboard's own SPIRE server container (docker-compose.spire.yml), driven with
     # `docker exec` by "Migrate to SPIRE" and the daily trust-bundle re-sync.
     spire_server_container: str = "vmdash-spire-server"
     # Where agents dial it: "host" or "host:port"; blank = the agent audience host, 8081.
     spire_server_address: str = ""
-    # Opt-in: credentials the dashboard holds are released only to agents that attested
-    # through SPIRE (auth_mode "spiffe"). Off, Ed25519 agents receive them as before.
-    dashboard_secrets_require_spire: bool = False
     # The dashboard's own SPIFFE identity: token files for federated cloud access.
-    # Strings and bools only — see the class docstring on unset ints.
     dashboard_spiffe_identity_enabled: bool = False
     dashboard_spiffe_issuer: str = ""
     dashboard_spiffe_aud_aws: bool = False
@@ -969,6 +984,7 @@ class RemoteAgentsFeatureConfig(BaseModel):
     # own client and tenant id, with the client secret cleared.
     aws_federation_role_arn: str = ""
     gcp_federation_service_account: str = ""
+
 
 class PasswordSafeFeatureConfig(BaseModel):
     """Password Safe / Secrets Safe — secret and managed-account checkout, plus
@@ -1610,8 +1626,8 @@ class PovCloudFeatureConfig(BaseModel):
     aws_secret_access_key: str = ""     # encrypted at rest
     aws_region: str = "us-east-2"
     # Keyless AWS: the dashboard's own SPIFFE identity, assuming this role through
-    # AssumeRoleWithWebIdentity (services/cloud_federation.py). The SAME keys the Remote
-    # Agents panel binds — one setting shown in two places, not a POV copy — declared
+    # AssumeRoleWithWebIdentity (services/cloud_federation.py). The SAME keys the SPIFFE
+    # and SPIRE panel binds — one setting shown in two places, not a POV copy (the other is the SPIFFE and SPIRE panel) — declared
     # here because the panel's "SPIFFE identity" choice writes them, and an undeclared
     # bound field is discarded on save.
     dashboard_spiffe_identity_enabled: bool = False
@@ -1626,7 +1642,7 @@ class PovCloudFeatureConfig(BaseModel):
     dashboard_spiffe_aud_azure: bool = False
     wlc_azure_everyday_source: str = "lease"
     # GCP: the workload identity provider (a resource name — GCP's "audience") and the
-    # service account it acts as, both the Remote Agents panel's keys; and the Entitle
+    # service account it acts as, both the SPIFFE and SPIRE panel's keys; and the Entitle
     # just-in-time provision role (services/pov_cloud_gcp._privileged).
     dashboard_spiffe_aud_gcp: str = ""
     gcp_federation_service_account: str = ""
@@ -2345,6 +2361,7 @@ _FEATURE_MODELS = {
     # `remote_agents_enabled` with no special-casing. Renaming this key would silently
     # start writing a different config key and the toggle would stop doing anything.
     "remote_agents": RemoteAgentsFeatureConfig,
+    "spiffe":       SpiffeFeatureConfig,
     "mcp_server":   MCPServerFeatureConfig,
     "cloud_unmanaged_discovery": CloudUnmanagedDiscoveryFeatureConfig,
     "vm_spend_cap": VMSpendCapFeatureConfig,
@@ -2393,7 +2410,7 @@ _FEATURE_MODELS = {
 # would be a switch with one position.
 _CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region", "oidc", "worker",
                          "cert_lab", "spire_lab", "directories",
-                         "bt_platform_identity",
+                         "bt_platform_identity", "spiffe",
                          "change_windows"}
 
 # Never returned by a feature panel's GET. The app-wide list -- see
