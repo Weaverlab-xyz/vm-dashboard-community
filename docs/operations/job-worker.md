@@ -113,6 +113,11 @@ ever runs twice however many workers there are, because claiming a job is a sing
 Prefer raising the caps to adding replicas: another replica is another connection pool and
 another copy of a large import footprint, for the same concurrency.
 
+For Config Management on a large cloud estate there is a third option: run it on remote
+agents in those VPCs or VNets. An agent leases its jobs directly, so those runs hold no
+worker slot at all, and it sends Live Output in batches rather than one write per line. See
+[Scaling configuration in the cloud](../platform/where-work-runs.md#scaling-configuration-in-the-cloud).
+
 ---
 
 ## The configuration surface

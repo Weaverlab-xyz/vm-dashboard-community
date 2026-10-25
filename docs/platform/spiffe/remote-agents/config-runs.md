@@ -181,6 +181,74 @@ The same run kind joins a new GCE Windows server to an on-prem domain through a
 it after the deploy, against the server's private address on 5986, so that address must be
 in `ansible.targets` too.
 
+### Cloud VMs
+
+A dashboard-deployed AWS, Azure or GCP VM can also be configured from an agent: one running
+inside that VM's VPC or VNet, instead of the remote worker. It is opt-in for each address
+range. When a large estate outgrows the remote worker, it adds capacity outside the
+dashboard's job worker; [Where work runs](../../where-work-runs.md#scaling-configuration-in-the-cloud)
+says when that trade is worth making.
+
+1. Run an agent inside the VPC or VNet, and grant it `agent_ansible`.
+2. In its `policy.yaml`, give `ansible:` a `vm_image` and an `ansible.targets` entry for
+   the subnet, port 22.
+3. On **Remote Agents → Config Routes**, add a route for that range naming the agent, and
+   tick **Also route cloud VMs in this range**. The list shows how many cloud VMs each
+   route covers.
+
+From then on, the VMs whose private address is in the range appear under **Cloud VMs (via
+agent)** in the target picker instead of under their cloud, and bulk runs from the
+Inventory page send them to the agent as well. A route without the tick governs only
+hypervisor guests, exactly as before, which includes every route that existed before the
+option did.
+
+**The address is the deploy's, never the request's.** The dashboard reads the VM's
+**private** address off its deploy job, and only then works out which agent covers it. The
+same ordering protects synced guests: a request may propose an address and an agent, but
+neither decides. A run naming another agent is refused. So is a VM with no route: it runs
+on the remote worker, never on some fallback agent.
+
+**Its credentials follow the same rules as on the remote worker.** The SSH key is the
+keypair the VM was built with, else the cloud's Ansible key. The login is the run's
+`ansible_user`, else the administrator a Windows server's deploy recorded, else the
+per-cloud user. The dashboard reads the key at the moment the agent asks, and seals it to
+that agent for that one job. Tick **Release dashboard-held credentials only to
+SPIRE-attested agents** on **Settings → Integrations → Remote Agents**, so an agent with a
+key on disk never receives one.
+
+**Windows servers** are configured over OpenSSH, as the remote worker does it, and need
+agent **2.9** or later. An older agent is refused when the run is queued, with the upgrade
+named.
+
+### Several runs at once
+
+By default an agent runs one job at a time. To let it run several Config-Management runs at
+once, set `ansible.max_concurrent` in its `policy.yaml` (agent 2.9 or later):
+
+```yaml
+ansible:
+  enabled: true
+  vm_image: chrweav/ansible-winrm:latest
+  max_concurrent: 4
+  targets:
+    - cidr: 10.40.0.0/16
+      ports: [22]
+```
+
+- **Allowed values:** a whole number from 1 to 8. Anything else stops the agent at start
+  rather than being quietly clamped.
+- **Host size:** each run is its own one-shot container, capped at 1 GiB, so size the
+  host at about 1 GiB per slot.
+- **Only Config Management runs in parallel.** Discovery, hypervisor sync, the Gateway and
+  file shares still run one at a time, in their own slot.
+- **The agent asks only for work it can start.** When every slot is busy it leases nothing.
+- **The Agents page shows each agent's capacity**, as "N runs at once".
+
+With more than one slot, `docker stop` lets running jobs finish for up to
+`AGENT_DRAIN_SECONDS` (default 25), so give the container a longer `stop_grace_period`. A
+job still running when the agent goes away is failed by the dashboard once its heartbeat
+stops, as it always has been. To go past 8, run more agents and give each its own range.
+
 ### What the run looks like
 
 A one-shot container, created per job and deleted after it: `--read-only`, `--cap-drop ALL`,
