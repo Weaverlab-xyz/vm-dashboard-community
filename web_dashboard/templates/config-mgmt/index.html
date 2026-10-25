@@ -240,6 +240,19 @@
                 </optgroup>
               </template>
 
+              <!-- Cloud VMs a Config-Management route sends to an agent in their VPC or VNet,
+                   instead of the remote worker. The address is the private one the route
+                   matched; the server re-reads it from the deploy job before queueing. -->
+              <template x-if="agentCloudVms.length > 0">
+                <optgroup label="Cloud VMs (via agent)">
+                  <template x-for="v in agentCloudVms" :key="`agentcloud:${v.id}`">
+                    <option :value="`agentcloud:${v.id}`" :disabled="!!v.reason"
+                            :title="v.reason || v.executor_note"
+                            x-text="`${v.name} — ${v.agent_name} · ${v.ip}`"></option>
+                  </template>
+                </optgroup>
+              </template>
+
               <!-- On-prem databases behind a remote agent (localhost play on the agent host) -->
               <template x-if="agentDatabases.length > 0">
                 <optgroup label="On-Prem Databases (via agent)">
@@ -905,6 +918,7 @@ function configMgmt(tabSlugs) {
     managedSystems: [],
     // /agent-targets — on-prem resources reachable only through a remote agent.
     agentVms: [],
+    agentCloudVms: [],
     agentDatabases: [],
     agentDirectories: [],
     // A directory run: 'local' = LDAP from the runner (community.general.ldap_*),
@@ -958,6 +972,7 @@ function configMgmt(tabSlugs) {
     // yet — so it counts toward "has targets" only when something is actually runnable.
     get hasAgentTargets() {
       return this.agentVms.some(t => !t.reason)
+          || this.agentCloudVms.some(t => !t.reason)
           || this.agentDatabases.some(t => !t.reason)
           || this.agentDirectories.some(t => !t.reason);
     },
@@ -1009,6 +1024,8 @@ function configMgmt(tabSlugs) {
       const t = this.form.target;
       if (t.startsWith('agent:'))
         return this.agentVms.find(v => 'agent:' + v.id === t) || null;
+      if (t.startsWith('agentcloud:'))
+        return this.agentCloudVms.find(v => 'agentcloud:' + v.id === t) || null;
       if (t.startsWith('agentdb:'))
         return this.agentDatabases.find(d => 'agentdb:' + d.id === t) || null;
       if (t.startsWith('agentdir:'))
@@ -1402,11 +1419,13 @@ function configMgmt(tabSlugs) {
       try {
         const data = await API.get('/api/config-mgmt/agent-targets') || {};
         this.agentVms = data.vms || [];
+        this.agentCloudVms = data.cloud_vms || [];
         this.agentDatabases = data.databases || [];
         this.agentDirectories = data.directories || [];
       } catch (e) {
         // A 404 is the ordinary case: remote agents are off. Empty lists, no error.
         this.agentVms = [];
+        this.agentCloudVms = [];
         this.agentDatabases = [];
         this.agentDirectories = [];
       }
@@ -1579,6 +1598,9 @@ function configMgmt(tabSlugs) {
             target_id: at.target_id,
             agent_id: at.agent_id,
             connection_id: isDb ? '' : (at.connection_id || ''),
+            // Only a routed cloud VM sends its cloud: with no connection behind it, the
+            // cloud is what tells the server to read the address off its deploy job.
+            cloud: this.form.target.startsWith('agentcloud:') ? (at.cloud || '') : '',
             transport: isDir ? this.dirTransport : (isDb ? 'local' : (at.transport || '')),
             winrm_host: isDir && this.dirTransport === 'winrm' ? (this.dirWinrmHost || '').trim() : '',
             target: isDb ? (at.host || '') : (at.ip || ''),

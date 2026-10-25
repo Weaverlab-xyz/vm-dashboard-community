@@ -455,7 +455,7 @@ def authenticate(db: Session, *, agent_id: str, timestamp: str, nonce: str,
     # throttled flood stops growing `agent_nonces` at the cap instead of past it.
     # Raises AgentThrottled, which is NOT an AgentError: it must reach the client as 429,
     # not as the 401 that tells an agent it was revoked.
-    agent_guard.check_request(db, agent_id)
+    agent_guard.check_request(db, agent_id, slots=ansible_slots(agent))
 
     if not _consume_nonce(db, agent_id, nonce):
         raise AgentError("Replayed request.")
@@ -499,7 +499,8 @@ def sweep_nonces(db: Session, *, older_than_seconds: int = 0) -> int:
 
 # ── The lease ─────────────────────────────────────────────────────────────────
 
-def lease_one(db: Session, agent: RemoteAgent) -> Optional[dict]:
+def lease_one(db: Session, agent: RemoteAgent, *,
+              want_job_types=None) -> Optional[dict]:
     """Atomically lease this agent's oldest queued job, or return None.
 
     A near-copy of ``jobs_worker._claim_one`` with the filter changed from
@@ -521,6 +522,11 @@ def lease_one(db: Session, agent: RemoteAgent) -> Optional[dict]:
     through the shared predicate fixes that too.
     """
     allowed = allowed_job_types(agent)
+    # An agent running several jobs at once asks only for what it has a free slot for.
+    # Intersected with the grant, so the request can narrow the claim and never widen it.
+    if want_job_types is not None:
+        wanted = {str(t) for t in want_job_types}
+        allowed = tuple(t for t in allowed if t in wanted)
     if not allowed:
         return None
 
@@ -590,6 +596,17 @@ MIN_SHARE_SECRET_VERSION = (2, 7)
 # the scan kind is unknown and a directory run is refused by its closed run-kind map.
 MIN_DIRECTORY_VERSION = (2, 8)
 
+# The agent build that first understood the bundle's `windows_ssh` field (a Windows server
+# over OpenSSH, which is how dashboard-deployed cloud Windows servers are configured) and
+# ran several Config-Management jobs at once (`ansible.max_concurrent`). A Linux cloud VM
+# needs nothing new and runs on any agent with the Ansible handler.
+MIN_CLOUD_WINDOWS_VERSION = (2, 9)
+
+# The agent's own ceiling on `ansible.max_concurrent` (ANSIBLE_MAX_CONCURRENT_CEILING in
+# runners/agent/agent.py). A report above it is clamped: the value sizes a throttle, and an
+# agent claiming a thousand slots must not buy itself a thousand times the request budget.
+MAX_REPORTED_ANSIBLE_SLOTS = 8
+
 
 def _version_at_least(agent: RemoteAgent, minimum: tuple) -> bool:
     """Whether this agent's self-reported version is at least ``minimum``.
@@ -643,6 +660,20 @@ def ansible_upgrade_hint(agent: RemoteAgent) -> str:
 def supports_directory(agent: RemoteAgent) -> bool:
     """Whether this agent can discover directories and run playbooks against them."""
     return _version_at_least(agent, MIN_DIRECTORY_VERSION)
+
+
+def supports_cloud_windows(agent: RemoteAgent) -> bool:
+    """Whether this agent can configure a Windows server over OpenSSH."""
+    return _version_at_least(agent, MIN_CLOUD_WINDOWS_VERSION)
+
+
+def cloud_windows_upgrade_hint(agent: RemoteAgent) -> str:
+    return (f"Agent '{agent.name}' reports version {agent.agent_version or 'unknown'} and "
+            f"a Windows server over OpenSSH needs at least "
+            f"{'.'.join(str(p) for p in MIN_CLOUD_WINDOWS_VERSION)}. Pull "
+            f"chrweav/dashboard-agent:latest on that host and restart the container, or "
+            f"take this server's range off the route so it runs on the remote worker. "
+            f"Nothing was queued.")
 
 
 def directory_upgrade_hint(agent: RemoteAgent) -> str:
@@ -784,7 +815,8 @@ def set_allowed_job_types(db: Session, agent: RemoteAgent, types) -> RemoteAgent
 
 
 def record_self_report(db: Session, agent: RemoteAgent, *,
-                       agent_version: str = "", job_types=None) -> None:
+                       agent_version: str = "", job_types=None,
+                       ansible_slots: int = 0) -> None:
     """Store what the agent reported about itself on this lease.
 
     ``agent_version`` was previously written only at enrolment, so an operator who
@@ -808,8 +840,25 @@ def record_self_report(db: Session, agent: RemoteAgent, *,
             agent.reported_job_types = encoded
             changed = True
 
+    # 0 is "not reported" (an agent before 2.9), which leaves the stored value alone.
+    try:
+        slots = int(ansible_slots or 0)
+    except (TypeError, ValueError):
+        slots = 0
+    if slots > 0:
+        slots = min(slots, MAX_REPORTED_ANSIBLE_SLOTS)
+        if slots != (agent.reported_ansible_slots or 0):
+            agent.reported_ansible_slots = slots
+            changed = True
+
     if changed:
         db.commit()
+
+
+def ansible_slots(agent: RemoteAgent) -> int:
+    """How many Config-Management runs this agent says it runs at once; 1 if it never
+    said, which is every agent before 2.9."""
+    return max(1, min(int(agent.reported_ansible_slots or 1), MAX_REPORTED_ANSIBLE_SLOTS))
 
 
 # A cancelled job is still the agent's until it winds down. Cooperative cancel works

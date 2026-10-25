@@ -23,6 +23,15 @@ The address stays pinned to one the discovering agent itself reported, and
 route is an input to the agent decision and can never become an input to the address
 decision. That ordering is the anti-substitution control; do not reverse it.
 
+**Cloud VMs, opt-in per route.** A route with ``include_cloud_vms`` also decides which
+agent executes a run against a dashboard-deployed cloud VM whose private address it
+covers — an agent in that VPC or VNet, instead of the remote worker. Off by default and
+off for every route that predates the flag, so an upgrade never moves a cloud VM off the
+remote worker. A cloud lookup (``cloud_vm=True``) considers only flagged routes; a
+hypervisor-guest lookup considers every route, exactly as before. The address rule is the
+same one restated: for a cloud VM it is the private address its deploy job recorded,
+never one from the request.
+
 Matching is longest-prefix-first, like a routing table. The unique constraint on
 ``cidr`` is what makes that order total: two agents claiming one range is the single
 ambiguity prefix length cannot settle, so it is refused at write time instead.
@@ -137,6 +146,7 @@ class Route:
     network: object          # IPv4Network | IPv6Network
     label: str
     cidr: str
+    cloud_vms: bool = False  # also governs dashboard-deployed cloud VMs in this range
 
 
 @dataclass(frozen=True)
@@ -152,8 +162,13 @@ class RouteTable:
     def __bool__(self) -> bool:
         return bool(self.routes)
 
-    def match_for(self, address: str) -> Optional[Route]:
+    def match_for(self, address: str, *, cloud_vm: bool = False) -> Optional[Route]:
         """The most specific route covering ``address``, or None.
+
+        ``cloud_vm`` restricts the search to routes that opted in to cloud VMs. It is a
+        filter on the candidate set, not a second rule: the order (longest prefix first)
+        is the same one, so a flagged /24 inside an unflagged /16 still governs the cloud
+        VMs in that /24, and the /16's hypervisor guests are untouched.
 
         A non-IP (a hostname, or an empty string from a VM with no synced address) is
         *not* an error here — it simply matches nothing, so the caller falls back to the
@@ -165,20 +180,23 @@ class RouteTable:
         except ValueError:
             return None
         for route in self.routes:
+            if cloud_vm and not route.cloud_vms:
+                continue
             # `in` returns False across address families rather than raising, so v4 and
             # v6 rows can share one flat list.
             if addr in route.network:
                 return route
         return None
 
-    def executor_for(self, address: str, *, fallback: str = "") -> str:
+    def executor_for(self, address: str, *, fallback: str = "",
+                     cloud_vm: bool = False) -> str:
         """Which agent id executes a run against ``address``.
 
         ``fallback`` is the brokering agent. With an empty table this returns it
         unchanged, which is the backwards-compatibility contract: an install with no
         routes behaves exactly as it did before this module existed.
         """
-        match = self.match_for(address)
+        match = self.match_for(address, cloud_vm=cloud_vm)
         return match.agent_id if match else fallback
 
 
@@ -210,24 +228,25 @@ def load_table(db) -> RouteTable:
                            row.id, row.cidr)
             continue
         parsed.append(Route(id=row.id, agent_id=row.agent_id, network=network,
-                            label=row.label or "", cidr=row.cidr))
+                            label=row.label or "", cidr=row.cidr,
+                            cloud_vms=bool(row.include_cloud_vms)))
     parsed.sort(key=lambda r: (-r.network.prefixlen, r.network.version,
                                r.network.network_address))
     return RouteTable(tuple(parsed))
 
 
-def executor_for(db, address: str, *, fallback: str = "") -> str:
+def executor_for(db, address: str, *, fallback: str = "", cloud_vm: bool = False) -> str:
     """One-shot convenience for a single run. Same answer as :meth:`RouteTable.executor_for`.
 
     ``tests/test_config_mgmt_routes.py`` pins that those two agree — two entry points
     into one rule is exactly the drift this module is shaped to avoid.
     """
-    return load_table(db).executor_for(address, fallback=fallback)
+    return load_table(db).executor_for(address, fallback=fallback, cloud_vm=cloud_vm)
 
 
-def match_for(db, address: str) -> Optional[Route]:
+def match_for(db, address: str, *, cloud_vm: bool = False) -> Optional[Route]:
     """The route covering ``address``, for a refusal that needs to name it."""
-    return load_table(db).match_for(address)
+    return load_table(db).match_for(address, cloud_vm=cloud_vm)
 
 
 # ── CRUD ──────────────────────────────────────────────────────────────────────
@@ -241,6 +260,7 @@ def serialize(row) -> dict:
         "cidr": row.cidr,
         "label": row.label or "",
         "is_active": bool(row.is_active),
+        "include_cloud_vms": bool(row.include_cloud_vms),
         "created_by": row.created_by or "",
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
@@ -290,6 +310,22 @@ def match_counts(db) -> dict:
         # counting every interface would overstate what a route actually governs.
         first = next((str(i) for i in ips if str(i).strip()), "")
         route = table.match_for(first)
+        if route is not None:
+            counts[route.id] = counts.get(route.id, 0) + 1
+    return counts
+
+
+def cloud_match_counts(db, addresses) -> dict:
+    """``{route_id: how many cloud VMs' private addresses it governs}``.
+
+    The cloud half of :func:`match_counts`, for routes with ``include_cloud_vms``. The
+    caller supplies the addresses (``inventory_service.cloud_vm_private_ips``) so this
+    module keeps no knowledge of deploy-job metadata.
+    """
+    table = load_table(db)
+    counts = {r.id: 0 for r in table.routes if r.cloud_vms}
+    for address in addresses:
+        route = table.match_for(address, cloud_vm=True)
         if route is not None:
             counts[route.id] = counts.get(route.id, 0) + 1
     return counts
@@ -348,7 +384,7 @@ def _refuse_duplicate(db, cidr: str, *, excluding: str = "") -> None:
 
 
 def create(db, *, agent_id: str, cidr: str, label: str = "",
-           created_by: str = "") -> dict:
+           created_by: str = "", include_cloud_vms: bool = False) -> dict:
     from sqlalchemy.exc import IntegrityError
 
     from ..database import ConfigMgmtRoute
@@ -359,6 +395,7 @@ def create(db, *, agent_id: str, cidr: str, label: str = "",
     row = ConfigMgmtRoute(
         id=str(uuid.uuid4()), agent_id=agent_id, cidr=normalized,
         label=(label or "").strip() or None, is_active=True,
+        include_cloud_vms=bool(include_cloud_vms),
         created_by=created_by or None)
     db.add(row)
     try:
@@ -386,6 +423,8 @@ def update(db, route_id: str, **fields) -> dict:
         row.label = str(fields["label"]).strip() or None
     if fields.get("is_active") is not None:
         row.is_active = bool(fields["is_active"])
+    if fields.get("include_cloud_vms") is not None:
+        row.include_cloud_vms = bool(fields["include_cloud_vms"])
     row.updated_at = _utcnow()
     db.commit()
     db.refresh(row)

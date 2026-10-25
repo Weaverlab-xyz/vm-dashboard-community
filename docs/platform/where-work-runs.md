@@ -101,6 +101,9 @@ Configuration is the overlap. Everything else is specific to one of them.
 - **Config Management on on-premises targets**: VMs, databases and AD or LDAP directories.
   The agent runs each job in a one-shot container beside it, so the run itself is
   ephemeral even though the agent is not.
+- **Config Management on cloud VMs, if you opt in**: dashboard-deployed VMs in the VPC or
+  VNet an agent runs in, routed to it by address range. See
+  [Scaling configuration in the cloud](#scaling-configuration-in-the-cloud).
 - **Hypervisor discovery, inventory and power** for vCenter, ESXi, Proxmox, Hyper-V and
   VMware Workstation behind a firewall.
 - **Discovery** of on-premises databases, Kubernetes clusters, domain controllers and LDAP
@@ -119,6 +122,41 @@ network and identity, which an agent on someone else's network does not have.
 - **The targets are on-premises, or on any network the clouds cannot route to:** use a
   remote agent.
 - **Both:** use both. Each job goes wherever its target is reachable from.
+- **Many cloud VMs, configured often:** consider remote agents in those VPCs or VNets; see
+  [Scaling configuration in the cloud](#scaling-configuration-in-the-cloud).
+
+## Scaling configuration in the cloud
+
+On a large cloud estate, the remote worker's limit is the dashboard, not the clouds. Each
+cloud-VM run holds one of the dashboard's job-worker slots for as long as it runs. There
+are at most four heavy slots per worker, and every line of Live Output is its own database
+write. Raising the caps or adding worker replicas puts more load on the database, which is
+why [the job worker docs](../operations/job-worker.md#running-more-than-one-worker) advise
+raising the caps before adding replicas.
+
+Remote agents add capacity outside the dashboard's worker:
+
+- **Opt in per address range.** On **Remote Agents → Config Routes**, add a range covering
+  a VPC or VNet, name the agent that runs inside it, and tick **Also route cloud VMs in
+  this range**. Config Management runs on dashboard-deployed VMs whose private address is
+  in that range then go to the agent, single runs and bulk runs alike. VMs outside every
+  such route stay on the remote worker, and so does every route that has not ticked it.
+- **Run several at once.** Set `ansible.max_concurrent` in the agent's `policy.yaml`
+  (agent 2.9 or later, up to 8). Each run is still a one-shot container beside the agent,
+  so size the host at about 1 GiB per slot. To go further, run more agents and give each
+  its own range.
+- **What uses no worker slot.** An agent leases its jobs directly, and it sends Live
+  Output in batches of up to 500 lines rather than one database write per line.
+
+The tradeoffs to accept:
+
+- **A standing host.** Each agent is a long-running host with a Docker socket that someone
+  patches and monitors, in place of nothing at all between jobs.
+- **The VM's SSH key leaves the dashboard.** For each run, the dashboard seals the key to
+  that one agent, for that one job. Turn on **Release dashboard-held credentials only to
+  SPIRE-attested agents**, so an agent with a key on disk never receives one.
+
+The details are in [Agent-executed Config Management → Cloud VMs](spiffe/remote-agents/config-runs.md#cloud-vms).
 
 ## Read next
 

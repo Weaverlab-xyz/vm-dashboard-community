@@ -221,6 +221,14 @@ job_types:
 #   # that hangs waiting on something that will never answer.
 #   max_runtime_minutes: 30
 #
+#   # How many runs this agent executes at once (agent 2.9+), each in its own one-shot
+#   # container capped at 1 GiB, so size the host at about 1 GiB per slot. 1 to 8; 1, the
+#   # default, runs them one at a time. Only Config Management shares these slots — every
+#   # other job type still runs one at a time. Above 1, a `docker stop` waits up to
+#   # AGENT_DRAIN_SECONDS (default 25) for running jobs: give the container a longer
+#   # `stop_grace_period` than that.
+#   max_concurrent: 1
+#
 #   # Which Docker network the runner joins. Defaults to `sibling.network` above, then
 #   # `bridge`. `none` is refused: it makes every task fail as "unreachable", which reads
 #   # as a firewall or credential problem on the target.

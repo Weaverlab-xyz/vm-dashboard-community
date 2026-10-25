@@ -312,6 +312,11 @@ key written twice (YAML keeps only the last, which in this file silently drops a
 Being loud is the only safe direction here: a target that is skipped rather than rejected
 leaves an agent running with an allow-list you believe you wrote.
 
+An agent that runs Config Management takes an `ansible:` block too. Its
+`max_concurrent` key sets how many runs execute at once, from 1 to 8 (agent 2.9 or
+later). Size the host at about 1 GiB of memory per slot; see
+[Several runs at once](config-runs.md#several-runs-at-once).
+
 Mount it `:ro,Z`, as the emitted command does. The `Z` is the SELinux relabel and it is not
 cosmetic: on Fedora, RHEL, CentOS, Rocky or Alma a bind mount keeps its host label, and the
 container may not read a file in your home directory however permissive its mode is — the

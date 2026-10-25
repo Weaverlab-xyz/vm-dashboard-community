@@ -312,11 +312,12 @@ async def build(db, *, job, agent) -> tuple:
 
     # Credential refs → values, through the SAME resolver the dashboard-local runner uses.
     #
-    # `cloud=""` is correct rather than lazy: there is no cloud secret store in play here, so
-    # nothing should be looked for in one. The name hint is the VM's own name, which matters
-    # because a Password Safe managed system for an on-prem host is as often onboarded by
-    # NAME as by address — and unlike the cloud paths there is no deploy job to read a name
-    # off, so this label is the only one available.
+    # `cloud=""` for an on-prem target is correct rather than lazy: there is no cloud secret
+    # store in play there, so nothing should be looked for in one. A routed CLOUD VM is the
+    # exception and passes its cloud, so a managed-account lookup searches the same place the
+    # remote worker's would. The name hint is the VM's own name, which matters because a
+    # Password Safe managed system is as often onboarded by NAME as by address.
+    cloud = meta.get("cloud") if meta.get("cloud_deploy_job_id") else ""
     try:
         creds = await ansible_credentials.resolve(
             db,
@@ -326,12 +327,34 @@ async def build(db, *, job, agent) -> tuple:
             epml_token_var=meta.get("epml_token_var"),
             managed_account=meta.get("managed_account"),
             managed_become=meta.get("managed_become"),
-            target=target, cloud="",
+            target=target, cloud=cloud or "",
             name_hint=meta.get("target_label") or "")
     except ansible_credentials.CredentialError as exc:
         raise BundleError(str(exc)) from exc
 
     scrub = [v for v in creds.scrub if v]
+
+    # A routed cloud VM with no key named on the run: the keypair it was BUILT with, else
+    # the cloud's Ansible key — the same rule, in the same function, as the remote worker
+    # (ansible_local_run_service.cloud_ssh_key_for_deploy). Read off the deploy job the
+    # enqueue gate pinned, never looked up again by address.
+    ssh_pem = creds.ssh_pem or ""
+    if cloud and not ssh_pem:
+        from ..database import Job
+        from .ansible_local_run_service import cloud_ssh_key_for_deploy
+        deploy = db.query(Job).filter(Job.id == meta["cloud_deploy_job_id"]).first()
+        if deploy is None or (deploy.metadata_dict or {}).get("destroyed"):
+            raise BundleError("That cloud VM is no longer deployed.")
+        try:
+            ssh_pem = await cloud_ssh_key_for_deploy(cloud, deploy.metadata_dict or {}) or ""
+        except Exception as exc:  # noqa: BLE001 — named for the operator, below
+            raise BundleError(f"Could not read this VM's SSH key from {cloud.upper()}: "
+                              f"{exc}") from exc
+        if not ssh_pem:
+            raise BundleError(
+                f"No SSH key for this VM was found in {cloud.upper()}: neither the keypair "
+                f"it was built with nor the cloud's Ansible key. Name one on the run form.")
+        scrub.append(ssh_pem)
 
     # Operator vars, plus resolved named secret_vars — but never the connection material the
     # resolver merged into extra_vars for the inline runners. Those go in typed fields below,
@@ -384,7 +407,10 @@ async def build(db, *, job, agent) -> tuple:
         # strips `ansible_*` out of `extra_vars` above, so this could not travel as one.
         # The agent re-checks it against its own allowlist before using it.
         "become_method": str(meta.get("become_method") or ""),
-        "ssh_private_key": creds.ssh_pem or "",
+        "ssh_private_key": ssh_pem,
+        # A Windows server over OpenSSH: the agent sets the PowerShell shell itself, from
+        # this one typed bool, because `ansible_*` from the dashboard is refused by name.
+        "windows_ssh": bool(meta.get("windows_ssh")),
         "winrm": _winrm_options(transport, meta["target_port"]),
     }
 

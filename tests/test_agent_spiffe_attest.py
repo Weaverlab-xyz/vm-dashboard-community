@@ -71,7 +71,8 @@ _spec = importlib.util.spec_from_file_location(
     "agent_runner_attest", os.path.join(_ROOT, "runners", "agent", "agent.py"))
 agent_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(agent_mod)
-agent_mod.POLICY = SimpleNamespace(digest="b" * 64, job_types=set())
+agent_mod.POLICY = SimpleNamespace(digest="b" * 64, job_types=set(),
+                                   ansible_max_concurrent=1)
 
 
 class _Admin:

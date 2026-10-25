@@ -54,6 +54,7 @@ reads like credential spraying in a customer's SIEM.
 | `AGENT_POLICY_FILE` | `/etc/dashboard-agent/policy.yaml` | Mount read-only, as `:ro,Z`. |
 | `AGENT_MODE` | `normal` | `audit` logs what it would do and executes nothing. |
 | `AGENT_POLL_INTERVAL` | `5` | Seconds, jittered. |
+| `AGENT_DRAIN_SECONDS` | `25` | Only with `ansible.max_concurrent` above 1: on SIGTERM the agent stops leasing and waits this long for running jobs. Set the container's stop timeout higher. |
 | `AGENT_CA_BUNDLE` | — | For a TLS-inspecting corporate proxy. |
 | `AGENT_INSECURE_TLS` | — | Lab only. Warns once at startup. Case-sensitive: `1`, `true` or `yes`. |
 | `KUBECONFIG` | `/etc/dashboard-agent/kubeconfig` | Optional. Only the server URL and version are reported. |

@@ -815,6 +815,11 @@ class RemoteAgent(Base):
     # what the DASHBOARD permits — one is capability, the other is trust, and the UI
     # needs both to say "granted, but this agent's policy refuses it".
     reported_job_types = Column(Text)              # JSON list
+    # How many Config-Management runs the agent says it executes at once
+    # (`ansible.max_concurrent` in its policy.yaml), from its lease self-report. Advisory,
+    # like the two above: it sizes the per-agent request throttle and the Agents page's
+    # "N at once", and grants nothing. NULL — every agent before 2.9 — reads as one.
+    reported_ansible_slots = Column(Integer, nullable=True)
     enrolled_at = Column(DateTime, nullable=True)
     last_seen_at = Column(DateTime, nullable=True, index=True)
     last_seen_ip = Column(String(45))              # 45 = max INET6_ADDRSTRLEN
@@ -1098,6 +1103,12 @@ class ConfigMgmtRoute(Base):
     cidr = Column(String(64), nullable=False)
     label = Column(String(64))      # "vmnet1 host-only" — display only
     is_active = Column(Boolean, default=True, nullable=False)
+    # Opt-in: this range also decides which agent executes a run against a
+    # dashboard-deployed CLOUD VM whose private address it covers, instead of the remote
+    # worker. NULLABLE, and NULL means False: schema_migrations 0001 adds it as a bare
+    # BOOLEAN with no DEFAULT (see approval_required on Job for why), so every route that
+    # predates it keeps routing hypervisor guests only and an upgrade moves no cloud VM.
+    include_cloud_vms = Column(Boolean, nullable=True, default=False)
     created_at = Column(DateTime, default=utcnow, nullable=False)
     created_by = Column(String(100))
     updated_at = Column(DateTime, default=utcnow)

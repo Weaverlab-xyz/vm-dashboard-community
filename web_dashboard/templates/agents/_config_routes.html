@@ -78,6 +78,7 @@
             <td class="px-4 py-3">
               <div class="font-mono text-gray-800" x-text="r.cidr"></div>
               <div x-show="r.label" class="text-xs text-gray-500" x-text="r.label"></div>
+              <div x-show="r.include_cloud_vms" class="text-xs text-blue-700">also cloud VMs</div>
             </td>
             <td class="px-4 py-3">
               <span class="inline-block bg-purple-50 text-purple-700 text-xs px-2 py-0.5 rounded"
@@ -154,6 +155,20 @@
           <input x-model="form.label" type="text" placeholder="vmnet1 host-only"
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
         </div>
+
+        <!-- Opt-in, so an existing range never starts capturing cloud VMs on its own. -->
+        <label class="flex items-start gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="form.include_cloud_vms" class="mt-0.5 rounded border-gray-300">
+          <span>
+            Also route cloud VMs in this range
+            <span class="block text-xs text-gray-400">
+              Dashboard-deployed AWS, Azure and GCP VMs whose private address is in this range
+              run their Config Management on this agent instead of the remote worker. Run the
+              agent inside that VPC or VNet. Their SSH key is sealed to the agent per job:
+              consider "Release dashboard-held credentials only to SPIRE-attested agents".
+            </span>
+          </span>
+        </label>
 
         <label class="flex items-center gap-2 text-sm text-gray-700">
           <input type="checkbox" x-model="form.is_active" class="rounded border-gray-300">
@@ -240,7 +255,10 @@ function configRoutesPage() {
     isGranted(id) { return this.grantedIds.includes(id); },
     coverage(r) {
       const n = r.matches || 0;
-      return n === 1 ? '1 VM' : n + ' VMs';
+      const vms = n === 1 ? '1 VM' : n + ' VMs';
+      if (!r.include_cloud_vms) return vms;
+      const c = r.cloud_matches || 0;
+      return vms + ' · ' + (c === 1 ? '1 cloud VM' : c + ' cloud VMs');
     },
     policySnippet() {
       return ['ansible:', '  enabled: true', '  vm_image: chrweav/ansible-winrm:latest',
@@ -249,7 +267,7 @@ function configRoutesPage() {
     },
     flash(m, t) { this.toast = m; this.toastType = t || 'success'; setTimeout(() => this.toast = '', 4500); },
 
-    _blank() { return {cidr: '', agent_id: '', label: '', is_active: true}; },
+    _blank() { return {cidr: '', agent_id: '', label: '', is_active: true, include_cloud_vms: false}; },
 
     openAdd() {
       this.editingId = '';
@@ -261,7 +279,7 @@ function configRoutesPage() {
     openEdit(r) {
       this.editingId = r.id;
       this.form = {cidr: r.cidr, agent_id: r.agent_id, label: r.label || '',
-                   is_active: !!r.is_active};
+                   is_active: !!r.is_active, include_cloud_vms: !!r.include_cloud_vms};
       this.formError = '';
       this.showForm = true;
     },
@@ -273,7 +291,8 @@ function configRoutesPage() {
       this.formError = '';
       try {
         const body = {cidr: this.form.cidr, agent_id: this.form.agent_id,
-                      label: this.form.label || ''};
+                      label: this.form.label || '',
+                      include_cloud_vms: !!this.form.include_cloud_vms};
         if (this.editingId) {
           body.is_active = !!this.form.is_active;
           await API.patch('/api/connections/config-mgmt-routes/' + this.editingId, body);

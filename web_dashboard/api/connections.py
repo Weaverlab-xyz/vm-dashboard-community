@@ -121,6 +121,9 @@ class RouteRequest(BaseModel):
     agent_id: str
     cidr: str
     label: str = ""
+    # Also route dashboard-deployed cloud VMs whose private address is in this range to
+    # this agent, instead of the remote worker. Off unless asked for.
+    include_cloud_vms: bool = False
 
 
 class RouteUpdate(BaseModel):
@@ -128,6 +131,7 @@ class RouteUpdate(BaseModel):
     cidr: Optional[str] = None
     label: Optional[str] = None
     is_active: Optional[bool] = None
+    include_cloud_vms: Optional[bool] = None
 
 
 @router.get("/config-mgmt-routes")
@@ -142,10 +146,14 @@ def list_config_routes(db: Session = Depends(get_db),
     """
     from ..services import agent_service
 
+    from ..services import inventory_service
+
     counts = cmr.match_counts(db)
+    cloud_counts = cmr.cloud_match_counts(db, inventory_service.cloud_vm_private_ips(db))
     routes = cmr.list_routes(db)
     for row in routes:
         row["matches"] = counts.get(row["id"], 0)
+        row["cloud_matches"] = cloud_counts.get(row["id"], 0)
     granted = [a.id for a in db.query(RemoteAgent).filter(
         RemoteAgent.is_active.is_(True)).all()
         if "agent_ansible" in agent_service.allowed_job_types(a)]
@@ -154,7 +162,7 @@ def list_config_routes(db: Session = Depends(get_db),
 
 
 @router.get("/config-mgmt-routes/resolve")
-def resolve_config_route(address: str,
+def resolve_config_route(address: str, cloud_vm: bool = False,
                                db: Session = Depends(get_db),
                                current_user: User = Depends(require_explicit_permission("connections", "read"))):
     """Which agent would execute a run against ``address``.
@@ -162,9 +170,11 @@ def resolve_config_route(address: str,
     The question operators actually ask, answered without queueing anything. ``source``
     is ``"route"`` when a range decided it and ``"none"`` when nothing did — in which
     case the executor is whichever agent brokers the target's connection, which this
-    endpoint cannot know from an address alone.
+    endpoint cannot know from an address alone. With ``cloud_vm`` it answers for a cloud
+    VM's private address, where only routes that opted in count and "none" means the
+    remote worker.
     """
-    route = cmr.match_for(db, address)
+    route = cmr.match_for(db, address, cloud_vm=cloud_vm)
     if route is None:
         return {"agent_id": "", "agent_name": "", "cidr": "", "source": "none"}
     agent = db.query(RemoteAgent).filter(RemoteAgent.id == route.agent_id).first()
@@ -179,12 +189,14 @@ def create_config_route(req: RouteRequest,
                               current_user: User = Depends(require_explicit_permission("connections", "write"))):
     try:
         out = cmr.create(db, agent_id=req.agent_id, cidr=req.cidr, label=req.label,
-                         created_by=current_user.username)
+                         created_by=current_user.username,
+                         include_cloud_vms=req.include_cloud_vms)
     except cmr.ConfigRouteError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     job_service.log_audit(db, current_user.username, "config_mgmt_route_create",
                           details={"id": out["id"], "cidr": out["cidr"],
-                                   "agent_id": out["agent_id"]})
+                                   "agent_id": out["agent_id"],
+                                   "include_cloud_vms": out["include_cloud_vms"]})
     return out
 
 

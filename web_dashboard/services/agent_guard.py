@@ -142,8 +142,15 @@ def _request_window() -> timedelta:
     return timedelta(seconds=seconds)
 
 
-def check_request(db: Session, agent_id: str, *, now: Optional[datetime] = None) -> None:
+def check_request(db: Session, agent_id: str, *, now: Optional[datetime] = None,
+                  slots: int = 1) -> None:
     """Raise :class:`AgentThrottled` if this agent is over its request cap.
+
+    ``slots`` is how many Config-Management runs the agent says it executes at once. Each
+    sends Live Output and a heartbeat every two seconds, so an agent running four is four
+    times the ordinary traffic and not a flood; the cap scales with it, still bounded by
+    the rows one check may scan. One — the default, and every agent before 2.9 — is the
+    cap exactly as configured.
 
     Call **after** the signature verifies and **before** the nonce is recorded; see the
     module docstring for why that order is the whole point.
@@ -153,7 +160,7 @@ def check_request(db: Session, agent_id: str, *, now: Optional[datetime] = None)
     cap = _cfg_int("agent_max_requests_per_minute", DEFAULT_MAX_REQUESTS_PER_WINDOW)
     if cap <= 0:                      # 0 disables the cap, matching login_guard
         return
-    cap = min(cap, _MAX_ROWS_SCANNED)
+    cap = min(cap * max(1, int(slots or 1)), _MAX_ROWS_SCANNED)
 
     now = now or utcnow()
     window = _request_window()
