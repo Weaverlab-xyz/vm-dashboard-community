@@ -94,7 +94,21 @@ RUN_META_KEYS = (
     # never a credential — the bundle reads the password from its secret store at fetch
     # time. The dir_* vars are still the directory's own account: the join identity.
     "join_deploy_job_id",
+    # A dashboard-deployed CLOUD VM routed to an agent (a Config-Management route with
+    # include_cloud_vms): the deploy job its address was read from, the cloud whose secret
+    # store holds its default SSH key, and whether it is a Windows server over OpenSSH.
+    # The job id plays the part connection_id plays for a synced guest — proof the address
+    # was resolved by the dashboard, not supplied by a caller. None of the three is a
+    # credential, and none crosses the wire: the agent learns of windows_ssh only as a
+    # typed field in the sealed bundle.
+    "cloud_deploy_job_id",
+    "cloud",
+    "windows_ssh",
 )
+
+# The clouds whose deploys an agent may configure: the ones with a default SSH key in a
+# cloud secret store (ansible_local_service.fetch_ssh_key), matching the remote worker.
+CLOUD_VM_CLOUDS = ("aws", "azure", "gcp")
 
 # The subset that crosses to the agent in the signed envelope. Scalars, enums and a network
 # address — nothing else. Kept as its own tuple, not a slice of the above, so widening the
@@ -128,6 +142,9 @@ _DEFAULTS = {
     "pov_environment_id": "",
     "pov_vm_id": "",
     "join_deploy_job_id": "",
+    "cloud_deploy_job_id": "",
+    "cloud": "",
+    "windows_ssh": False,
 }
 
 # Every RUN_META_KEYS entry that normalize() coerces with str(). Listed rather than derived
@@ -136,6 +153,7 @@ _STRING_KEYS = (
     "connection_id", "target_id", "target_label", "asset", "asset_backend",
     "login_user", "secret_become_source", "secret_ssh_key_source", "epml_token_var",
     "become_method", "pov_environment_id", "pov_vm_id", "join_deploy_job_id",
+    "cloud_deploy_job_id", "cloud",
 )
 
 # Default port per transport, used when a caller supplies none. WinRM over HTTP (5985) is
@@ -270,6 +288,10 @@ def normalize(meta: dict) -> dict:
         value = _plain(out.get(key))
         out[key] = value if isinstance(value, dict) else None
 
+    out["cloud"] = out["cloud"].lower()
+    # A real bool, never truthy text: "false" is a non-empty string.
+    out["windows_ssh"] = out.get("windows_ssh") is True
+
     return out
 
 
@@ -305,9 +327,16 @@ def check(meta: dict) -> str:
         # login comes from the platform too. So it names an environment and a VM instead —
         # which is the same thing this clause is really asking for, namely that the
         # address was resolved by the dashboard rather than supplied by a caller.
-        if not (meta["pov_environment_id"] and meta["pov_vm_id"]):
+        # A routed cloud VM is the third: its address came from its deploy job, which it
+        # names instead, with the cloud whose store holds its key.
+        cloud_vm = bool(meta["cloud_deploy_job_id"]) and meta["cloud"] in CLOUD_VM_CLOUDS
+        if not (meta["pov_environment_id"] and meta["pov_vm_id"]) and not cloud_vm:
             return ("A VM run must name the agent-bound connection its target was synced "
-                    "from, or the POV environment and VM it belongs to.")
+                    "from, the POV environment and VM it belongs to, or the cloud deploy "
+                    "it was read from.")
+    if meta["windows_ssh"] and not (meta["run_kind"] == "vm"
+                                    and meta["transport"] == "ssh"):
+        return "Only an SSH run against a VM can target a Windows server over OpenSSH."
     if meta["run_kind"] == "database" and not meta["target_id"]:
         return "A database run must name the database it targets."
     allowed = _ALLOWED_TRANSPORTS.get(meta["run_kind"])

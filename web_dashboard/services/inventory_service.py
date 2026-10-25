@@ -45,12 +45,26 @@ def _iso(dt):
     return dt.isoformat() if dt else None
 
 
-def _vm_item(job) -> dict:
+# The clouds whose deployed VMs a Config-Management route may send to an agent — those with
+# a default SSH key in a cloud store. Mirrors agent_ansible_meta.CLOUD_VM_CLOUDS, which the
+# enqueue gate reads; a literal here so this module keeps no agent imports at load time.
+_AGENT_ROUTABLE_CLOUDS = ("aws", "azure", "gcp")
+
+
+def _vm_item(job, routes: "cmr.RouteTable" = cmr.EMPTY) -> dict:
     """Normalize a completed, non-destroyed VM deploy Job into an inventory item.
     Name/region are pulled from whichever metadata key the provider used, so this
-    stays robust across the per-cloud deploy shapes."""
+    stays robust across the per-cloud deploy shapes.
+
+    ``routes`` decides whether a Config-Management route (one with ``include_cloud_vms``)
+    sends this VM's runs to an agent. It defaults to the empty table, which is the remote
+    worker for every VM — the answer for callers that do not route, post-deploy runs among
+    them."""
     meta = job.metadata_dict
     cloud, href = _VM_JOBS[job.job_type]
+    private_ip = str(meta.get("private_ip") or "").strip()
+    route_agent = (routes.executor_for(private_ip, cloud_vm=True)
+                   if cloud in _AGENT_ROUTABLE_CLOUDS and private_ip else "")
     name = (meta.get("instance_name") or meta.get("vm_name") or meta.get("name")
             or job.cloud_resource_id or "(unnamed)")
     region = (meta.get("region") or meta.get("location") or meta.get("zone")
@@ -77,6 +91,14 @@ def _vm_item(job) -> dict:
         # deploy job records no address — Proxmox/Nutanix store node/vmid instead, and
         # those VMs are configured through their hypervisor GROUP, not individually.
         "ip": meta.get("public_ip") or meta.get("private_ip") or "",
+        # The address an agent INSIDE the VPC or VNet reaches it on, and the one a route
+        # matches. Separate from `ip`, which prefers the public address for the remote
+        # worker and must keep meaning exactly that.
+        "private_ip": private_ip,
+        # Who executes a Config-Management run against it: an agent a cloud-VM route names,
+        # or None for the remote worker. Resolved here so the picker, the bulk fan-out and
+        # the enqueue gate read one answer (config_mgmt_route_service).
+        "agent_id": route_agent or None,
         # EVERY usable address, for matching against records in another product — as
         # opposed to `ip` above, which names the ONE address Ansible connects on and must
         # keep meaning exactly that. `wired_address` leads because it is the address this
@@ -633,7 +655,7 @@ def _row_tags(row):
     return raw
 
 
-def _hypervisor_items(db: Session, claimed: set) -> list:
+def _hypervisor_items(db: Session, claimed: set, routes: "cmr.RouteTable") -> list:
     """Synced hypervisor VMs, minus any a deploy Job already accounts for.
 
     One row query, one Config-Management route table, and one bulk override lookup per
@@ -656,7 +678,8 @@ def _hypervisor_items(db: Session, claimed: set) -> list:
     if not rows:
         return []
 
-    routes = cmr.load_table(db)
+    # `routes` is threaded in by collect(), which loads it once for the cloud VMs and
+    # these alike — one query per page, never one per VM.
 
     by_kind: dict = {}
     for row, conn in rows:
@@ -686,6 +709,22 @@ def _hypervisor_items(db: Session, claimed: set) -> list:
     return items
 
 
+def cloud_vm_private_ips(db: Session) -> list:
+    """The private address of every live, dashboard-deployed cloud VM a route could govern.
+    Feeds the Config Routes page's "how many cloud VMs does this range cover" count."""
+    out = []
+    for job in (db.query(Job)
+                .filter(Job.job_type.in_(tuple(_VM_JOBS)), Job.status == "completed")
+                .all()):
+        meta = job.metadata_dict
+        if meta.get("destroyed") or _VM_JOBS[job.job_type][0] not in _AGENT_ROUTABLE_CLOUDS:
+            continue
+        ip = str(meta.get("private_ip") or "").strip()
+        if ip:
+            out.append(ip)
+    return out
+
+
 def collect(db: Session) -> list:
     """Assemble the full (unfiltered) inventory from DB records. The returned
     dicts are detached from the session (all primitives), so the caller may close
@@ -704,11 +743,14 @@ def collect(db: Session) -> list:
     # `destroyed` guard, so a VM the dashboard destroyed but the agent has not re-synced
     # yet still shows up from the cache — which is the honest reading of that state.
     claimed: set = set()
+    # One table for every VM row, not a lookup per row — the same reason _hypervisor_items
+    # loads it once.
+    vm_routes = cmr.load_table(db)
     for job in vm_jobs:
         if job.metadata_dict.get("destroyed"):
             continue
         claimed |= _job_match_keys(job)
-        items.append(_vm_item(job))
+        items.append(_vm_item(job, vm_routes))
 
     for row in (db.query(CloudDatabase)
                 .filter(CloudDatabase.status.notin_(("deleted", "decommissioned"))).all()):
@@ -770,7 +812,7 @@ def collect(db: Session) -> list:
                 .filter(PovEnvironment.status.notin_(("destroyed", "destroying"))).all()):
         items.append(_pov_item(row))
 
-    items.extend(_hypervisor_items(db, claimed))
+    items.extend(_hypervisor_items(db, claimed, vm_routes))
 
     # Annotate each row with whether it can be a Config-Management target, and why
     # not when it can't. Derived from the same _target_spec the bulk-run endpoint
@@ -925,6 +967,16 @@ def _target_spec(item: dict):
             return ("no recorded IP address — its deploy job stored none. Proxmox and "
                     "Nutanix VMs are configured through their hypervisor group target "
                     "on the Config Management page, not selected individually.")
+        # A cloud VM a route sends to an agent in its VPC or VNet. The address is the
+        # PRIVATE one the route matched; the enqueue gate re-reads it from the deploy job,
+        # so this is a proposal, never the authority.
+        if item.get("source") == "provisioned" and item.get("agent_id"):
+            return {"agent_id": item["agent_id"],
+                    "connection_id": "",
+                    "target_id": item.get("job_id") or "",
+                    "target": item.get("private_ip") or "",
+                    "transport": "ssh",
+                    "cloud": cloud}
         # A VM behind an agent-bound connection is on a network the dashboard has no route
         # to, so the run has to be queued FOR that agent — the local runner would resolve
         # the address and then time out. This is the one case where an address alone is not

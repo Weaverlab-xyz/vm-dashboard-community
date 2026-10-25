@@ -130,9 +130,14 @@ def test_the_route_table_is_loaded_once_per_collect_not_per_vm():
     item = _func_source(_CONSUMERS[2], "_hv_item")
     assert "load_table(" not in item, \
         "_hv_item loads the route table itself — that is one query per VM"
+    # collect() loads it once and threads it into BOTH bulk projections — the cloud VMs
+    # (a route may send them to an agent) and the synced guests.
+    collect = _func_source(_CONSUMERS[2], "collect")
+    assert "cmr.load_table(" in collect, \
+        "collect() no longer loads the table once for the whole page"
     items = _func_source(_CONSUMERS[2], "_hypervisor_items")
-    assert "cmr.load_table(" in items, \
-        "the bulk loader no longer loads the table where the other bulk lookups happen"
+    assert "load_table(" not in items, \
+        "_hypervisor_items loads its own table — a second read per collect()"
 
 
 def test_only_the_resolver_module_knows_the_route_table():

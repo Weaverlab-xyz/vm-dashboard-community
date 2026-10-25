@@ -4711,7 +4711,7 @@ def _check_extra_vars(extra_vars: dict) -> None:
 
 
 def _vm_inventory(*, ip: str, port: int, transport: str, login_user: str,
-                  winrm: dict) -> str:
+                  winrm: dict, windows_ssh: bool = False) -> str:
     """A one-host Ansible inventory, authored HERE rather than received.
 
     Every value comes from the signed job envelope or from the typed credential fields —
@@ -4735,6 +4735,11 @@ def _vm_inventory(*, ip: str, port: int, transport: str, login_user: str,
         })
     else:
         hostvars["ansible_connection"] = "ssh"
+        # A Windows server over OpenSSH — how a dashboard-deployed cloud Windows server is
+        # configured. A CONSTANT, chosen by one typed bool: the shell name never comes from
+        # the dashboard, and services/ansible_vm_cmd.WINDOWS_SSH_VARS is the same pair.
+        if windows_ssh:
+            hostvars["ansible_shell_type"] = "powershell"
     if login_user:
         hostvars["ansible_user"] = login_user
     # JSON, which is valid YAML, so ansible's yaml inventory plugin reads it. Written by
@@ -4860,7 +4865,9 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
         files[f"{_JOB_DIR.strip('/')}/inventory.json"] = _vm_inventory(
             ip=ip, port=port, transport=transport,
             login_user=str(bundle.get("login_user") or ""),
-            winrm=bundle.get("winrm") or {}).encode("utf-8")
+            winrm=bundle.get("winrm") or {},
+            windows_ssh=(run_kind == "vm" and transport == "ssh"
+                         and bundle.get("windows_ssh") is True)).encode("utf-8")
         if bundle.get("ssh_private_key"):
             files[f"{_JOB_DIR.strip('/')}/id_rsa"] = \
                 str(bundle["ssh_private_key"]).encode("utf-8")

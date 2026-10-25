@@ -590,6 +590,12 @@ MIN_SHARE_SECRET_VERSION = (2, 7)
 # the scan kind is unknown and a directory run is refused by its closed run-kind map.
 MIN_DIRECTORY_VERSION = (2, 8)
 
+# The agent build that first understood the bundle's `windows_ssh` field (a Windows server
+# over OpenSSH, which is how dashboard-deployed cloud Windows servers are configured) and
+# ran several Config-Management jobs at once (`ansible.max_concurrent`). A Linux cloud VM
+# needs nothing new and runs on any agent with the Ansible handler.
+MIN_CLOUD_WINDOWS_VERSION = (2, 9)
+
 
 def _version_at_least(agent: RemoteAgent, minimum: tuple) -> bool:
     """Whether this agent's self-reported version is at least ``minimum``.
@@ -643,6 +649,20 @@ def ansible_upgrade_hint(agent: RemoteAgent) -> str:
 def supports_directory(agent: RemoteAgent) -> bool:
     """Whether this agent can discover directories and run playbooks against them."""
     return _version_at_least(agent, MIN_DIRECTORY_VERSION)
+
+
+def supports_cloud_windows(agent: RemoteAgent) -> bool:
+    """Whether this agent can configure a Windows server over OpenSSH."""
+    return _version_at_least(agent, MIN_CLOUD_WINDOWS_VERSION)
+
+
+def cloud_windows_upgrade_hint(agent: RemoteAgent) -> str:
+    return (f"Agent '{agent.name}' reports version {agent.agent_version or 'unknown'} and "
+            f"a Windows server over OpenSSH needs at least "
+            f"{'.'.join(str(p) for p in MIN_CLOUD_WINDOWS_VERSION)}. Pull "
+            f"chrweav/dashboard-agent:latest on that host and restart the container, or "
+            f"take this server's range off the route so it runs on the remote worker. "
+            f"Nothing was queued.")
 
 
 def directory_upgrade_hint(agent: RemoteAgent) -> str:

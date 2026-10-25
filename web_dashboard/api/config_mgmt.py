@@ -199,12 +199,18 @@ def get_cloud_targets(
 
     from .aws import _accessible_workgroups
     accessible = _accessible_workgroups(current_user)
+    # A VM a route sends to an agent is listed once, under /agent-targets' cloud_vms,
+    # where the picker names the agent that will run it. Listing it here too would offer
+    # the remote worker for a VM whose network the operator has said an agent serves.
+    routes = cmr.load_table(db)
 
     for job in deploy_jobs:
         if accessible is not None and (job.workgroup or "").strip().lower() not in accessible:
             continue
         meta = job.metadata_dict
         if meta.get("destroyed"):
+            continue
+        if routes.match_for(str(meta.get("private_ip") or ""), cloud_vm=True) is not None:
             continue
         ip = meta.get("public_ip") or meta.get("private_ip")
         if not ip:
@@ -275,7 +281,14 @@ def get_agent_targets(
                   executor_note}, …],
          "databases": [{id, name, agent_id, agent_name, target_id, host, engine, reason}, …],
          "directories": [{id, name, agent_id, agent_name, target_id, host, port, provider,
-                          reason}, …]}
+                          reason}, …],
+         "cloud_vms": [{id, name, agent_id, agent_name, target_id, ip, cloud, transport,
+                        executor_via, executor_note, reason}, …]}
+
+    ``cloud_vms`` are dashboard-deployed cloud VMs a route with ``include_cloud_vms`` sends
+    to an agent in their VPC or VNet; ``ip`` is the private address that route matched.
+    A cloud VM outside every such route is not listed here — it is a remote-worker target,
+    on ``/cloud-targets``.
     """
     from ..database import RemoteAgent
     from ..services import inventory_service
@@ -286,7 +299,7 @@ def get_agent_targets(
     # inventory_service loads it once.
     routes = cmr.load_table(db)
     accessible = inventory_service.accessible_workgroups(current_user)
-    out: dict = {"vms": [], "databases": [], "directories": []}
+    out: dict = {"vms": [], "databases": [], "directories": [], "cloud_vms": []}
     for item in inventory_service.collect(db):
         if not item.get("agent_id"):
             continue
@@ -308,6 +321,23 @@ def get_agent_targets(
                         "port": item.get("port") or 0,
                         "target_id": item["id"].split(":", 1)[1]})
             out["directories"].append(row)
+        elif item.get("source") == "provisioned":
+            route = routes.match_for(item.get("private_ip") or "", cloud_vm=True)
+            via = (route.label or route.cidr) if route else ""
+            row.update({"cloud": item.get("cloud") or "",
+                        "target_id": item.get("job_id") or "",
+                        "ip": item.get("private_ip") or "",
+                        "transport": "ssh",
+                        "executor_source": "route",
+                        "executor_via": via,
+                        "executor_note": (
+                            f"Executed by {row['agent_name']}, in this VM's network: the "
+                            f"Config-Management route {via} ({route.cidr if route else ''}) "
+                            f"sends cloud VMs at {item.get('private_ip')} to it instead of "
+                            f"the remote worker.")})
+            if not row["reason"]:
+                row["reason"] = _executor_unusable(agents.get(row["agent_id"]), route)
+            out["cloud_vms"].append(row)
         else:
             broker = item.get("broker_agent_id") or ""
             route = routes.match_for(item.get("ip") or "")
@@ -693,7 +723,77 @@ def _wrong_executor(db, conn, host: str, agent, expected: str) -> str:
             f"Remote Agents → Config Management.")
 
 
-def _resolve_agent_target(payload: "RunRequest", db) -> dict:
+def _resolve_cloud_vm_target(payload: "RunRequest", db, agent, current_user) -> dict:
+    """The cloud-VM branch of :func:`_resolve_agent_target`: a dashboard-deployed VM whose
+    private address a Config-Management route (``include_cloud_vms``) sends to an agent.
+
+    The same two-step rule as a synced guest, restated for a deploy job: the ADDRESS is
+    read from the deploy job's own metadata — never from the request — and only then is the
+    executor resolved from that pinned address. A caller that names a different address
+    gets the recorded one; a caller that names an agent the route does not get a 400.
+    """
+    from ..services import agent_ansible_meta, agent_service
+    from ..services.ansible_local_run_service import cloud_login_user, windows_target
+    from .aws import _accessible_workgroups
+
+    cloud = str(getattr(payload, "cloud", "") or "").strip().lower()
+    deploy_type = {"aws": "ec2_deploy", "azure": "azure_deploy", "gcp": "gce_deploy"}[cloud]
+    deploy = (db.query(Job)
+              .filter(Job.id == (payload.target_id or ""), Job.job_type == deploy_type,
+                      Job.status == "completed").first())
+    meta = deploy.metadata_dict if deploy else {}
+    # The rule the cloud target picker applies, and the one a VM's own cloud tab applies:
+    # an administrator sees every VM, anybody else the ones in their workstreams. Checked
+    # BEFORE anything is said about the VM, so another workstream's VM is "not found".
+    accessible = _accessible_workgroups(current_user) if current_user is not None else set()
+    if (deploy is None or meta.get("destroyed")
+            or (accessible is not None
+                and (deploy.workgroup or "").strip().lower() not in accessible)):
+        raise HTTPException(status_code=404, detail="No such cloud VM.")
+
+    host = str(meta.get("private_ip") or "").strip()
+    if not host:
+        raise HTTPException(
+            status_code=400,
+            detail=("This VM's deploy recorded no private address, so no agent route can "
+                    "cover it. It runs on the remote worker instead."))
+
+    # ONLY NOW, from the pinned address — the same ordering as the synced-guest branch.
+    # No fallback: with no cloud route the remote worker runs it, never some agent.
+    expected = cmr.executor_for(db, host, fallback="", cloud_vm=True)
+    if not expected:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"No Config-Management route sends cloud VMs at {host} to an agent, so "
+                    f"this VM runs on the remote worker. Leave the agent unset, or add a "
+                    f"route with \"Also route cloud VMs\" under Remote Agents → Config "
+                    f"Routes."))
+    if agent.id != expected:
+        runner = db.query(type(agent)).filter(type(agent).id == expected).first()
+        route = cmr.match_for(db, host, cloud_vm=True)
+        raise HTTPException(
+            status_code=400,
+            detail=(f"This VM's address {host} is routed to agent "
+                    f"'{runner.name if runner else expected}' by the Config-Management "
+                    f"route {route.cidr if route else ''}, so agent '{agent.name}' cannot "
+                    f"run against it. Select the target again — the picker names the agent "
+                    f"that will execute — or change that route."))
+
+    windows = bool(windows_target(meta))
+    if windows and not agent_service.supports_cloud_windows(agent):
+        raise HTTPException(status_code=400,
+                            detail=agent_service.cloud_windows_upgrade_hint(agent))
+    name = (meta.get("instance_name") or meta.get("vm_name") or meta.get("name")
+            or deploy.cloud_resource_id or deploy.id[:8])
+    return {"run_kind": "vm", "transport": "ssh", "target_host": host,
+            "target_port": payload.port or 0, "target_id": deploy.id,
+            "connection_id": "", "target_label": f"{cloud}/{name}",
+            "cloud_deploy_job_id": deploy.id, "cloud": cloud, "windows_ssh": windows,
+            "login_user": cloud_login_user(cloud, meta, getattr(payload, "ansible_user", "") or ""),
+            "executor_name": agent.name}
+
+
+def _resolve_agent_target(payload: "RunRequest", db, current_user=None) -> dict:
     """Verify an agent-executed run against the dashboard's own rows, and return the job's
     resolved target fields.
 
@@ -816,6 +916,14 @@ def _resolve_agent_target(payload: "RunRequest", db) -> dict:
                 "target_label": f"{row.engine}/{row.id[:8]}",
                 "executor_name": agent.name}
 
+    # A dashboard-deployed cloud VM, sent to an agent by a route with include_cloud_vms.
+    # Recognised by its cloud and the absence of a hypervisor connection: a synced guest
+    # always names the connection it came from, and a cloud VM never has one.
+    from ..services.agent_ansible_meta import CLOUD_VM_CLOUDS
+    if (str(getattr(payload, "cloud", "") or "").strip().lower() in CLOUD_VM_CLOUDS
+            and not payload.connection_id):
+        return _resolve_cloud_vm_target(payload, db, agent, current_user)
+
     # A VM: the address must be one the agent itself reported for that VM, and the run's
     # agent must be the one that EXECUTES for that address. The first check is what stops
     # an arbitrary address being substituted for a legitimately-synced one; the second
@@ -925,7 +1033,7 @@ async def _run_agent_ansible(payload: "RunRequest", db, current_user):
             status_code=403,
             detail="Requires 'directories:write' permission or administrator.")
 
-    overrides = _resolve_agent_target(payload, db)
+    overrides = _resolve_agent_target(payload, db, current_user)
     # Popped, not left in: `run_meta` silently drops any key outside RUN_META_KEYS, so
     # leaving it there would work by accident and stop working the day that changes.
     executor_name = overrides.pop("executor_name", "")

@@ -120,6 +120,28 @@ def _managed_name_hint(db, cloud: str, target: str,
     return meta.get("instance_name") or meta.get("vm_name") or ""
 
 
+_CLOUD_USER_KEYS = {"aws": "ansible_aws_user", "azure": "ansible_azure_user",
+                    "gcp": "ansible_gcp_user"}
+_CLOUD_DEFAULT_USERS = {"aws": "ec2-user", "azure": "azureuser", "gcp": "gcp-user",
+                        "oci": "opc"}
+
+
+def cloud_login_user(cloud: str, meta: dict, override: str = "") -> str:
+    """The SSH login for a dashboard-deployed cloud VM.
+
+    The run's own ``ansible_user`` wins, then the administrator a Windows server's deploy
+    recorded (never the Linux image's user), then the per-cloud config key, the global
+    default, and the stock image's user. Shared by the remote worker and the agent bundle
+    so a VM logs on as the same user whichever of them configures it.
+    """
+    win = windows_target(meta)
+    return (override
+            or win.get("user")
+            or _cfg(_CLOUD_USER_KEYS.get(cloud, ""))
+            or _cfg("ansible_default_user")
+            or _CLOUD_DEFAULT_USERS.get(cloud, "ec2-user"))
+
+
 def _vm_build_key_secret(cloud: str, meta: dict) -> str:
     """The secret name holding the keypair the VM was built with: the per-launch
     override recorded on the deploy job, else the cloud's configured deploy default.
@@ -138,7 +160,15 @@ async def _resolve_cloud_ssh_key(db, cloud: str, ip: str) -> str | None:
     built with (resolved from its deploy metadata) first, then the per-cloud global
     Ansible key as a fallback. Never raises — a retrieval error yields the fallback
     (and ultimately None), matching the prior "proceed without key" behaviour."""
-    build_secret = _vm_build_key_secret(cloud, _find_cloud_deploy_meta(db, cloud, ip))
+    return await cloud_ssh_key_for_deploy(cloud, _find_cloud_deploy_meta(db, cloud, ip))
+
+
+async def cloud_ssh_key_for_deploy(cloud: str, meta: dict) -> str | None:
+    """:func:`_resolve_cloud_ssh_key` for a caller that already holds the deploy job's
+    metadata — the agent bundle, which read the deploy job by id rather than by address.
+    One rule for both, so a VM routed to an agent gets the same key the remote worker
+    would have used."""
+    build_secret = _vm_build_key_secret(cloud, meta or {})
     if build_secret:
         try:
             pem = await ansible_local_service.fetch_ssh_key(cloud, secret_name=build_secret)
@@ -416,29 +446,11 @@ async def _run_job(
             # runner backend for the legacy global path (no `cloud` supplied).
             key_cloud = cloud or {"ecs": "aws", "aci": "azure", "gcp": "gcp"}.get(runner, runner)
 
-            # SSH user: explicit ansible_user from the run request wins,
-            # else the per-cloud config key, else the global fallback.
-            cloud_user_keys = {
-                "aws":   "ansible_aws_user",
-                "azure": "ansible_azure_user",
-                "gcp":   "ansible_gcp_user",
-            }
-            cloud_default = {
-                "aws":   "ec2-user",
-                "azure": "azureuser",
-                "gcp":   "gcp-user",
-                "oci":   "opc",
-            }.get(key_cloud, "ec2-user")
-            # A Windows server over OpenSSH logs on as the administrator its deploy
-            # recorded, never the Linux image's user.
-            win = windows_target(_find_cloud_deploy_meta(db, key_cloud, target))
-            resolved_user = (
-                ansible_user
-                or win.get("user")
-                or _cfg(cloud_user_keys.get(key_cloud, ""))
-                or _cfg("ansible_default_user")
-                or cloud_default
-            )
+            # SSH user: explicit ansible_user from the run request wins, then the
+            # Windows administrator its deploy recorded, then the per-cloud config key.
+            deploy_meta = _find_cloud_deploy_meta(db, key_cloud, target)
+            win = windows_target(deploy_meta)
+            resolved_user = cloud_login_user(key_cloud, deploy_meta, ansible_user)
             # A managed account is the login identity — its name wins as the SSH user.
             if managed_plain_vars.get("ansible_user"):
                 resolved_user = managed_plain_vars["ansible_user"]

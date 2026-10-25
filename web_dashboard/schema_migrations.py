@@ -186,7 +186,12 @@ def sql(statement: str, params: dict | None = None) -> Step:
 
 #: Every schema change since the legacy list was frozen, oldest first. Append; never
 #: reorder, rename or edit one that has shipped -- databases have recorded it.
-MIGRATIONS: tuple = ()
+MIGRATIONS: tuple = (
+    # Config-Management routes may also govern cloud VMs (config_mgmt_route_service).
+    # Bare BOOLEAN, no DEFAULT: NULL reads as off, so existing routes are unchanged.
+    Migration("0001_config_route_cloud_vms",
+              (add_column("config_mgmt_routes", "include_cloud_vms", "BOOLEAN"),)),
+)
 
 
 def apply_numbered(conn, migrations=None) -> list:
