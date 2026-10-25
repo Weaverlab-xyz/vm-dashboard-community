@@ -3605,6 +3605,9 @@ class AgentRelease(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     version = Column(String(32), nullable=False, unique=True, index=True)
+    # Where the image is: the project's repository, or a mirror's (an air-gapped site
+    # mirrors the image and pins the mirror in its policy.yaml `upgrades.repository`).
+    repository = Column(String(200), nullable=False, default="chrweav/dashboard-agent")
     digest = Column(String(71), nullable=False)        # "sha256:" + 64 hex
     notes = Column(Text)
     source = Column(String(16), nullable=False, default="manual")   # manual | registry

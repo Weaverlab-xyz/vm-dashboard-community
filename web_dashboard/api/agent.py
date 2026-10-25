@@ -1496,6 +1496,8 @@ def _load(db: Session, agent_id: str) -> RemoteAgent:
 class ReleaseRequest(BaseModel):
     version: str
     digest: str
+    # Blank: chrweav/dashboard-agent. A mirror's name for a mirror's digest.
+    repository: str = ""
     notes: str = ""
 
 
@@ -1537,12 +1539,14 @@ def add_release(body: ReleaseRequest, request: Request,
     an air-gapped site). Not verified here; each host's updater verifies the signature."""
     try:
         row = agent_release_service.add(db, version=body.version, digest=body.digest,
-                                        notes=body.notes, actor=current_user.username)
+                                        repository=body.repository, notes=body.notes,
+                                        actor=current_user.username)
     except agent_lifecycle_service.LifecycleError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     job_service.log_audit(db, current_user.username, "agent.release_add",
                           ip_address=_client_ip(request),
-                          details={"version": row.version, "digest": row.digest})
+                          details={"version": row.version, "digest": row.digest,
+                                   "repository": row.repository})
     return agent_release_service.release_dict(row)
 
 

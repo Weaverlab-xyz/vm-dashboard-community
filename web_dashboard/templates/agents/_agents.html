@@ -375,6 +375,7 @@
         <template x-for="r in releases" :key="r.id">
           <tr class="border-b border-gray-50">
             <td class="py-1.5 pr-4 font-mono text-xs text-gray-800" x-text="r.version"></td>
+            <td class="py-1.5 pr-4 font-mono text-xs text-gray-500" x-text="r.repository"></td>
             <td class="py-1.5 pr-4 font-mono text-xs text-gray-500 break-all" :title="r.digest"
                 x-text="r.digest.slice(0, 19) + '…'"></td>
             <td class="py-1.5 pr-4 text-xs text-gray-500" x-text="r.source"></td>
@@ -389,6 +390,8 @@
     <div class="flex flex-wrap items-end gap-2 mb-6">
       <input x-model="releaseForm.version" placeholder="2.10.1"
              class="w-28 text-sm border border-gray-300 rounded-lg px-2 py-1.5 font-mono"/>
+      <input x-model="releaseForm.repository" placeholder="chrweav/dashboard-agent (or a mirror)"
+             class="w-64 text-sm border border-gray-300 rounded-lg px-2 py-1.5 font-mono"/>
       <input x-model="releaseForm.digest" placeholder="sha256:…"
              class="flex-1 min-w-[16rem] text-sm border border-gray-300 rounded-lg px-2 py-1.5 font-mono"/>
       <button @click="addRelease()" :disabled="releaseBusy || !releaseForm.version || !releaseForm.digest"
@@ -780,7 +783,7 @@ function agentsPage() {
     rollouts: [],
     newestRelease: null,
     releaseBusy: false,
-    releaseForm: {version: '', digest: ''},
+    releaseForm: {version: '', repository: '', digest: ''},
     upgrade: {open: false, rollout: false, agentId: '', name: '', from: '', release_id: '',
               force: false, busy: false},
     loading: true,
@@ -999,7 +1002,7 @@ function agentsPage() {
       this.releaseBusy = true;
       try {
         await API.post('/api/agents/releases', {...this.releaseForm});
-        this.releaseForm = {version: '', digest: ''};
+        this.releaseForm = {version: '', repository: '', digest: ''};
         await this.loadLifecycle();
       } catch (e) {
         this.flash('Could not add the release: ' + (e.message || e), 'error');

@@ -136,8 +136,10 @@ The **Lifecycle** panel lists the releases the dashboard may offer.
 - **Check Docker Hub** reads `chrweav/dashboard-agent:latest`: the image's digest, and
   its version from the `dashboard-agent.version` label. The image tag is the dashboard
   release, not the agent version.
-- **Add release** records a version and a digest by hand. Use it for a mirror, or for a
-  dashboard with no route to Docker Hub.
+- **Add release** records a version, a digest and, for a mirror, the mirror's repository
+  (blank means `chrweav/dashboard-agent`). Use it for a mirror, or for a dashboard with no
+  route to Docker Hub. The repository must be the one the host's `upgrades.repository`
+  names.
 
 ### Rollouts
 
@@ -156,7 +158,7 @@ canary agents, the rollout goes straight to everyone.
 
 | Symptom | Cause |
 |---|---|
-| The upgrade fails with "upgrades are allowed only from …" | The release's repository is not the one `upgrades.repository` names. Mirrors need a release recorded with the mirror's digest. |
+| The upgrade fails with "upgrades are allowed only from …" | The release's repository is not the one `upgrades.repository` names. A mirror needs a release recorded with the mirror's repository and digest. |
 | It fails with "no matching signatures" or a certificate identity error | The image was not signed by the identity your policy pins: a fork's image, a mirror not re-signed, or an identity regex typo. |
 | It fails with "rolled back" | The new agent exited or never reported ready. Its log is in `docker logs dashboard-agent` if it exits fast, and the updater's in `docker logs dashboard-agent-updater`. A SPIRE agent that can't fetch a fresh JWT-SVID within the timeout looks like this too. |
 | Upgrade stays disabled with "Add the updater container" | The agent sees no fresh `updater.alive` in the control volume. Check that the updater is running and that both containers mount the same `agent_control` volume. |

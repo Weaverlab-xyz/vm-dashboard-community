@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from ..database import AgentRelease
 from .agent_lifecycle_service import (DEFAULT_REPOSITORY, LifecycleError,
-                                      validate_release, version_tuple)
+                                      validate_release, validate_repository, version_tuple)
 
 #: The label the agent image carries with its own version (runners/agent/Dockerfile).
 #: The image TAG is the dashboard release, not the agent version, so the tag cannot say.
@@ -38,8 +38,9 @@ def list_releases(db: Session) -> list:
     return sorted(rows, key=lambda r: version_tuple(r.version), reverse=True)
 
 
-def newest(db: Session) -> Optional[AgentRelease]:
-    rows = list_releases(db)
+def newest(db: Session, repository: str = "") -> Optional[AgentRelease]:
+    rows = [r for r in list_releases(db)
+            if not repository or (r.repository or DEFAULT_REPOSITORY) == repository]
     return rows[0] if rows else None
 
 
@@ -48,15 +49,17 @@ def get(db: Session, release_id: str) -> Optional[AgentRelease]:
 
 
 def add(db: Session, *, version: str, digest: str, notes: str = "", actor: str,
-        source: str = "manual") -> AgentRelease:
+        source: str = "manual", repository: str = "") -> AgentRelease:
     version, digest = validate_release(version, digest)
+    repository = validate_repository(repository)
     existing = db.query(AgentRelease).filter(AgentRelease.version == version).first()
     if existing is not None:
-        if existing.digest == digest:
+        if existing.digest == digest and existing.repository == repository:
             return existing
         raise LifecycleError(f"{version} is already recorded with digest {existing.digest}. "
                              "Delete it first if that one is wrong.")
-    row = AgentRelease(version=version, digest=digest, notes=(notes or "")[:2000] or None,
+    row = AgentRelease(version=version, repository=repository, digest=digest,
+                       notes=(notes or "")[:2000] or None,
                        source=source, created_by=actor)
     db.add(row)
     db.commit()
@@ -70,6 +73,7 @@ def delete(db: Session, release: AgentRelease) -> None:
 
 def release_dict(row: AgentRelease) -> dict:
     return {"id": row.id, "version": row.version, "digest": row.digest,
+            "repository": row.repository or DEFAULT_REPOSITORY,
             "notes": row.notes or "", "source": row.source,
             "created_at": row.created_at.isoformat() if row.created_at else None,
             "created_by": row.created_by or ""}

@@ -216,7 +216,8 @@ def agent_image(db) -> str:
     there is one (what the fleet is being moved to), else the latest tag."""
     from . import agent_release_service
     from .agent_lifecycle_service import DEFAULT_REPOSITORY
-    row = agent_release_service.newest(db)
+    # Only a release of the project's repository: that is what the generated policy pins.
+    row = agent_release_service.newest(db, DEFAULT_REPOSITORY)
     return f"{DEFAULT_REPOSITORY}@{row.digest}" if row else AGENT_IMAGE
 
 

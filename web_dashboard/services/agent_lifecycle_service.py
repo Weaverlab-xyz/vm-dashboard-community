@@ -51,6 +51,10 @@ RINGS = ("canary", "default")
 
 _ACTIVE = ("queued", "running")
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+# The agent's own rule for `upgrades.repository` (runners/agent/agent.py _REPO_RE): an
+# image name, optionally behind a registry host; no tag, no digest.
+_REPO_RE = re.compile(
+    r"^(?:[a-z0-9.-]+(?::\d{1,5})?/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$")
 _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 
@@ -126,7 +130,7 @@ def upgrade(db: Session, agent: RemoteAgent, release: AgentRelease, *, actor: st
         raise LifecycleError(
             f"{release.version} is older than {agent.name} ({agent.agent_version}). A "
             "downgrade needs force, and the agent's policy.yaml must allow it too.")
-    meta = {"repository": DEFAULT_REPOSITORY, "digest": release.digest,
+    meta = {"repository": release.repository or DEFAULT_REPOSITORY, "digest": release.digest,
             "version": release.version, "release_id": release.id,
             "from_version": agent.agent_version or ""}
     if rollout_id:
@@ -337,6 +341,14 @@ def rollout_dict(db: Session, rollout: AgentRollout) -> dict:
             "skipped": json.loads(rollout.skipped or "{}"),
             "created_at": rollout.created_at.isoformat() if rollout.created_at else None,
             "finished_at": rollout.finished_at.isoformat() if rollout.finished_at else None}
+
+
+def validate_repository(repository: str) -> str:
+    repository = (repository or "").strip() or DEFAULT_REPOSITORY
+    if len(repository) > 200 or not _REPO_RE.match(repository):
+        raise LifecycleError("the repository must be a plain image name such as "
+                             "chrweav/dashboard-agent (a registry host is allowed; no tag)")
+    return repository
 
 
 def validate_release(version: str, digest: str) -> tuple:

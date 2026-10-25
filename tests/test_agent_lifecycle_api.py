@@ -297,6 +297,24 @@ def test_a_release_needs_a_version_and_a_digest_not_a_tag():
                               reverse=True)
 
 
+def test_a_mirror_release_names_its_repository_in_the_envelope():
+    mirror = "registry.corp.example:5000/mirror/dashboard-agent"
+    resp = CLIENT.post("/api/agents/releases", json={
+        "version": "2.10.8", "digest": "sha256:" + "9" * 64, "repository": mirror})
+    assert resp.status_code == 201 and resp.json()["repository"] == mirror
+    bad = CLIENT.post("/api/agents/releases", json={
+        "version": "2.10.9", "digest": "sha256:" + "8" * 64, "repository": "x/y:latest"})
+    assert bad.status_code == 400
+    agent_id, private = _agent()
+    CLIENT.post(f"/api/agents/{agent_id}/upgrade", json={"release_id": resp.json()["id"]})
+    out = _signed(private, agent_id, "/api/agent/lease").json()
+    assert out["job"]["payload"]["repository"] == mirror
+    with SessionLocal() as db:
+        from web_dashboard.services import agent_host_service as ahs
+        assert mirror not in ahs.agent_image(db), "a deployed host would pin a mirror"
+    _clear_control_jobs()
+
+
 class _Resp:
     def __init__(self, doc, headers=None):
         self._doc, self.headers = doc, headers or {}
@@ -477,7 +495,7 @@ def test_a_code_mode_host_gets_no_updater_and_no_opt_in():
 def test_a_new_host_starts_the_newest_release_by_digest():
     from web_dashboard.services import agent_host_service as ahs
     with SessionLocal() as db:
-        newest = agent_release_service.newest(db)
+        newest = agent_release_service.newest(db, "chrweav/dashboard-agent")
         assert ahs.agent_image(db) == f"chrweav/dashboard-agent@{newest.digest}"
     try:
         ahs.bootstrap_script(url="https://d.example.com", policy="x",
