@@ -1485,7 +1485,7 @@ def _volume_tag_spec(tags: list) -> dict:
 def _run_ec2_container_node_sync(
     region: str, ami_id: str, instance_type: str, subnet_id: str,
     security_group_ids: list, user_data: str, name_tag: str, purpose: str,
-    root_disk_gb: int,
+    root_disk_gb: int, public_ip: bool = True,
 ) -> dict:
     ec2 = _get_ec2(region)
     node_tags = [
@@ -1503,12 +1503,14 @@ def _run_ec2_container_node_sync(
         "MaxCount": 1,
         # Auto-assigned public IP, not an Elastic IP: the node is disposable and an
         # unattached EIP bills. This matches the GCE side's ephemeral external IP, and
-        # with it the caveat that a recreate changes the address.
+        # with it the caveat that a recreate changes the address. None at all for a node
+        # that only dials OUT (a deployed remote agent): it sits in the private subnet and
+        # reaches the internet through the VMs' NAT.
         "NetworkInterfaces": [{
             "DeviceIndex": 0,
             "SubnetId": subnet_id,
             "Groups": security_group_ids,
-            "AssociatePublicIpAddress": True,
+            "AssociatePublicIpAddress": bool(public_ip),
         }],
         "UserData": user_data,  # boto3 base64-encodes for run_instances
         # Unconditional, not `if root_disk_gb`: the mapping is what pins
@@ -1525,13 +1527,14 @@ def _run_ec2_container_node_sync(
 async def run_ec2_container_node(
     region: str, *, ami_id: str, instance_type: str, subnet_id: str,
     security_group_ids: list, user_data: str, name_tag: str, purpose: str,
-    root_disk_gb: int = 0,
+    root_disk_gb: int = 0, public_ip: bool = True,
 ) -> dict:
-    """Launch a managed container node (no instance profile, auto public IP)."""
+    """Launch a managed container node (no instance profile; an auto-assigned public IP
+    unless ``public_ip`` is False)."""
     try:
         return await _to_thread(
             _run_ec2_container_node_sync, region, ami_id, instance_type, subnet_id,
-            security_group_ids, user_data, name_tag, purpose, root_disk_gb,
+            security_group_ids, user_data, name_tag, purpose, root_disk_gb, public_ip,
         )
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to launch the {purpose} node: {e}") from e

@@ -3721,6 +3721,86 @@ def _run_gce_portainer_sync(
     }
 
 
+def _run_gce_startup_node_sync(project_id: str, region: str, zone: str, name: str, *,
+                               startup_script: str, subnetwork: str, network: str,
+                               machine_type: str, boot_disk_gb: int, labels: dict,
+                               network_tag: str) -> dict:
+    """A Container-Optimized OS VM with NO external IP that runs ``startup_script`` at
+    boot. COS ships Docker and runs the ``startup-script`` metadata key on every boot, so
+    a node that only dials out — a deployed remote agent — needs nothing else. Egress is
+    the VM subnet's Cloud NAT, ensured by the caller."""
+    _require_compute()
+    from google.cloud import compute_v1
+
+    creds = _gcp_creds()
+    client = compute_v1.InstancesClient(credentials=creds)
+    candidate_zones = _rancher_candidate_zones(project_id, region, zone, creds,
+                                               log_label=labels.get("purpose", "node"))
+    if not candidate_zones:
+        raise GCPError(f"No available zone found in region '{region}' for node '{name}'.")
+
+    instance = compute_v1.Instance()
+    instance.name = name
+    disk = compute_v1.AttachedDisk()
+    disk.boot = True
+    disk.auto_delete = True
+    disk.initialize_params = compute_v1.AttachedDiskInitializeParams()
+    disk.initialize_params.source_image = "projects/cos-cloud/global/images/family/cos-stable"
+    disk.initialize_params.disk_size_gb = boot_disk_gb
+    instance.disks = [disk]
+
+    nic = compute_v1.NetworkInterface()
+    if subnetwork:
+        nic.subnetwork = (subnetwork if "/" in subnetwork
+                          else f"projects/{project_id}/regions/{region}/subnetworks/{subnetwork}")
+    elif network:
+        nic.network = network if "/" in network else f"global/networks/{network}"
+    # No access_configs: no external IP, by design.
+    instance.network_interfaces = [nic]
+    instance.metadata = compute_v1.Metadata(items=[
+        compute_v1.Items(key="startup-script", value=startup_script),
+        compute_v1.Items(key="google-logging-enabled", value="true"),
+    ])
+    instance.labels = {"managed-by": "vm-dashboard", **labels}
+    if network_tag:
+        instance.tags = compute_v1.Tags(items=[network_tag])
+
+    last_err = None
+    for cand in candidate_zones:
+        instance.machine_type = f"zones/{cand}/machineTypes/{machine_type}"
+        try:
+            client.insert(project=project_id, zone=cand, instance_resource=instance).result(
+                timeout=300)
+        except Exception as e:
+            if _should_try_next_zone(e) and cand != candidate_zones[-1]:
+                logger.warning("node %s: zone %s could not take it (%s) — trying the next",
+                               name, cand, e)
+                last_err = e
+                continue
+            raise
+        info = client.get(project=project_id, zone=cand, instance=name)
+        return {"name": name, "zone": cand, "internal_ip": _internal_ip_of(info)}
+    raise GCPError(f"Failed to launch node '{name}' in region '{region}': {last_err}")
+
+
+async def run_gce_startup_node(project_id: str, region: str, zone: str, name: str, *,
+                               startup_script: str, subnetwork: str = "",
+                               network: str = "", machine_type: str = "e2-small",
+                               boot_disk_gb: int = 20, labels: Optional[dict] = None,
+                               network_tag: str = "") -> dict:
+    """Launch a private COS node that runs a startup script. See the sync half."""
+    try:
+        return await _to_thread(
+            _run_gce_startup_node_sync, project_id, region, zone, name,
+            startup_script=startup_script, subnetwork=subnetwork, network=network,
+            machine_type=machine_type, boot_disk_gb=boot_disk_gb,
+            labels=labels or {}, network_tag=network_tag)
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to launch node '{name}': {e}") from e
+
+
 async def run_gce_portainer(
     project_id: str,
     zone: str,
