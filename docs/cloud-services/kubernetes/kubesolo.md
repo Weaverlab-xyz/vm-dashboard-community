@@ -48,7 +48,7 @@ equivalent, and the Config Management runner for an SSH target
 (`chrweav/ansible-winrm`) carries neither kubectl nor helm nor `kubernetes.core`. So
 `kubesolo-install.yml` installs both clients on the host and every play shells out to
 them — the same constraint and the same answer as the
-[k3s samples](../../platform/ansible/playbooks.md).
+[k3s samples](../../platform/remote-worker/playbooks.md).
 
 State lives under `/var/lib/kubesolo`, with Kine over SQLite standing in for etcd. The
 kubeconfig is at `/var/lib/kubesolo/pki/admin/admin.kubeconfig`.
@@ -210,7 +210,7 @@ the agent fetches the job bundle, and scrubs the value from job output. Setting
 `entitle_agent_token_secret` instead fetches it from Password Safe mid-run. Either way
 the play hands it to helm through a 0600 values file rather than `--set`, because
 `--set` would put it in argv where `ps` shows it to every local user on the node. See
-[Secrets in a run](../../platform/ansible/secrets.md).
+[Secrets in a run](../../platform/remote-worker/secrets.md).
 
 ## See also
 

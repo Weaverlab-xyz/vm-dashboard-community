@@ -2,7 +2,7 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you are writing or adapting a playbook for the dashboard to run.
 
-Part of [Remote Worker](../ansible.md). What the runner expects of a playbook, and the samples to start from.
+Part of [Remote Worker](../remote-worker.md). What the runner expects of a playbook, and the samples to start from.
 
 ## Ansible playbook structure
 

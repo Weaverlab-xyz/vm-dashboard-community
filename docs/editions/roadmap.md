@@ -158,7 +158,7 @@ the next things queued for QA.
 > [config-management.md](../operations/config-management.md#secret-scanning-advisory).
 > A rotation *primitive* also shipped: a Password Safe managed-account
 > checkout used on a cloud run can be flagged **rotate-on-check-in**
-> ([Ansible → Managed-account checkout](../platform/ansible/secrets.md#managed-account-checkout-beyondtrust-password-safe)).
+> ([Ansible → Managed-account checkout](../platform/remote-worker/secrets.md#managed-account-checkout-beyondtrust-password-safe)).
 
 - **What community does:** stores + resolves secrets, **alerts on
   staleness**, and **scans executed artefacts** for embedded secrets;

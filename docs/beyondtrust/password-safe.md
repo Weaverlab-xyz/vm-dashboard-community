@@ -38,7 +38,7 @@ half of the story.
   `beyondtrust.secrets_safe` Galaxy collection. The dashboard reuses this same OAuth
   client (`pscli_*`) — auto-injecting it into the runner as `PASSWORD_SAFE_*` — so no
   separate credential is needed. See
-  [Ansible secrets](../platform/ansible/secrets.md#in-playbook-password-safe-lookup-beyondtrustsecrets_safe)
+  [Ansible secrets](../platform/remote-worker/secrets.md#in-playbook-password-safe-lookup-beyondtrustsecrets_safe)
   and [examples/playbooks/password-safe/](../../examples/playbooks/password-safe/).
 
 ---

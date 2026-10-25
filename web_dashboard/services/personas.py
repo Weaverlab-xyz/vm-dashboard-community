@@ -333,7 +333,7 @@ _DEVOPS = Persona(
                     "inventory file, nothing on disk when it finishes.",
             target="/config-mgmt",
             minutes=10,
-            docs="platform/ansible",
+            docs="platform/remote-worker",
             requires_flags=("ansible_enabled", "password_safe_enabled"),
         ),
         UseCase(

@@ -181,6 +181,9 @@ _MOVED = {
     # Remote agents under SPIFFE, 2026-10: an agent is a workload the dashboard does not
     # trust until it attests, so its pages live with the SPIRE server it attests to.
     "admin/remote-agents":                       "platform/spiffe/remote-agents",
+    # Remote Worker, 2026-10: the page and its folder take the panel's name. The runners
+    # it configures run Kubernetes and image-promote jobs too, not only Ansible.
+    "platform/ansible":                          "platform/remote-worker",
     # Sections, 2026-10: the flat top level grouped into hub + folder sections the way
     # oidc/ is -- cloud/, access/, operations/, editions/, and kubesolo under kubernetes/.
     "cloud-vms":                                 "clouds/vms",
@@ -224,7 +227,7 @@ _MOVED = {
     # Settings and Getting started. A folder that moved whole is one entry, which
     # carries every page under it.
     "directories":                               "preview/directories",
-    "integrations/ansible":                      "platform/ansible",
+    "integrations/ansible":                      "platform/remote-worker",
     "integrations/beyondtrust":                  "beyondtrust",
     "integrations/portainer":                    "cloud-services/portainer",
     "integrations/rancher":                      "cloud-services/rancher",
@@ -354,7 +357,7 @@ _INDEX_SECTIONS = {
     "platform/spiffe/remote-agents/hypervisors",
     "platform/cloud-hosting",
     "platform/cloud-hosting/azure-container-apps",
-    "platform/ansible",
+    "platform/remote-worker",
     "editions",
     "profiles",
     "profiles/demo",
@@ -413,7 +416,7 @@ _SECTION_LABELS = {
     "platform/spiffe/remote-agents/hypervisors":"Platform · SPIFFE · remote agents · hypervisors",
     "platform/cloud-hosting":       "Platform · cloud hosting",
     "platform/cloud-hosting/azure-container-apps":"Platform · cloud hosting · Azure Container Apps",
-    "platform/ansible":             "Platform · Remote Worker runners",
+    "platform/remote-worker":       "Platform · Remote Worker",
     "editions":                     "Editions",
     "profiles":                     "Demo and POV profiles",
     "profiles/demo":                "Demo profile",
@@ -497,6 +500,7 @@ _TITLE_OVERRIDES = {
     "platform/oidc/k8s-federation/oidc":          "Kubernetes federation: other OIDC",
     "platform/oidc/dashboard-identity":           "The dashboard's own identity",
     "platform/spiffe":                            "SPIFFE and SPIRE",
+    "platform/where-work-runs":                   "Where work runs: remote workers and remote agents",
     "platform/oidc/dex":                          "Dex",
     # The section hubs and their pages. Folder names were dropped from the filenames
     # (cloud-vms -> cloud/vms), so the derived titles lose the word that said what they were.
@@ -530,12 +534,12 @@ _TITLE_OVERRIDES = {
     "beyondtrust/workload-credentials": "BeyondTrust Workload Credentials",
     "preview/workload-lab/dynamic-credentials":  "Dynamic AWS and Azure credentials",
     "preview/workload-lab/consumers":            "What consumes these credentials",
-    "platform/ansible/config-reference":  "Config field reference",
-    "platform/ansible/shared-cloud":      "Shared cloud infrastructure",
-    "platform/ansible/ansible-runner":    "The Ansible runner",
-    "platform/ansible/kubernetes-runner": "The Kubernetes runner",
-    "platform/ansible/secrets":           "Secrets in a run",
-    "platform/ansible/playbooks":         "Playbook structure",
+    "platform/remote-worker/config-reference":  "Config field reference",
+    "platform/remote-worker/shared-cloud":      "Shared cloud infrastructure",
+    "platform/remote-worker/ansible-runner":    "The Ansible runner",
+    "platform/remote-worker/kubernetes-runner": "The Kubernetes runner",
+    "platform/remote-worker/secrets":           "Secrets in a run",
+    "platform/remote-worker/playbooks":         "Playbook structure",
     "platform/spiffe/remote-agents/enrolment":               "Enrolling an agent",
     "platform/spiffe/remote-agents/agent-host":              "Running the agent on your host",
     "platform/spiffe/remote-agents/hypervisors":             "Hypervisor connections",

@@ -2,9 +2,11 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you are configuring the runner images that execute Config Management, k8s and promote jobs.
 
-> **Formerly "Ansible."** The Settings panel is now
-> **Configuration → Remote Worker**. The doc path
-> (`docs/platform/ansible.md`) is unchanged so existing links resolve.
+Part of [Platform](../platform.md). It is one of the two ways the dashboard does work on
+infrastructure; [Where work runs](where-work-runs.md) compares it with remote agents.
+
+> **Formerly "Ansible."** The Settings panel is **Settings → Integrations → Platform → Remote Worker**, and this
+> page and its folder now carry the same name. Old `platform/ansible` links redirect here.
 
 ## What is it?
 
@@ -98,7 +100,7 @@ runs in the destination cloud, where it stages the converted disk).
 |---|---|---|
 | `ansible_runner_aws` / `_azure` / `_gcp` | the Ansible runner, by the run's target cloud | `local` \| matching service — blank inherits `ansible_runner` |
 | `k8s_runner_aws` / `_azure` / `_gcp` | the Kubernetes runner, by the cluster's cloud | `local` \| matching service — blank inherits `k8s_runner` |
-| `ansible_runner_portainer` | the Ansible runner for a **Portainer** target (no cloud — see [Portainer targets](ansible/kubernetes-runner.md#portainer-targets)) | `local` \| `ecs` \| `aci` \| `gcp` — blank inherits `ansible_runner` |
+| `ansible_runner_portainer` | the Ansible runner for a **Portainer** target (no cloud — see [Portainer targets](remote-worker/kubernetes-runner.md#portainer-targets)) | `local` \| `ecs` \| `aci` \| `gcp` — blank inherits `ansible_runner` |
 | `ansible_runner` / `k8s_runner` | global fallback for any cloud left blank | `local` \| `ecs` \| `aci` \| `gcp` |
 
 A per-cloud key takes precedence; when blank, the runner falls back to the
@@ -114,12 +116,12 @@ see the effective config and can then adjust each cloud.
 
 | Page | What's in it |
 |---|---|
-| [Remote Worker config field reference](ansible/config-reference.md) | Every field on the Settings panel, and the config key behind it. |
-| [Shared cloud infrastructure for the runners](ansible/shared-cloud.md) | The cluster, registry and network each runner backend needs, and the per-cloud prerequisites. |
-| [The Ansible runner](ansible/ansible-runner.md) | VM targets: SSH keys, discovery, provisioning assets, bulk runs and the local Docker runner. |
-| [The Kubernetes runner](ansible/kubernetes-runner.md) | Cluster and database targets, which run as localhost jobs rather than over SSH. |
-| [Secrets in a Remote Worker run](ansible/secrets.md) | Hardened per-provider lookups, Password Safe managed-account checkout, and in-playbook lookups. |
-| [Playbook structure](ansible/playbooks.md) | What the runner expects of a playbook, and the samples to start from. |
+| [Remote Worker config field reference](remote-worker/config-reference.md) | Every field on the Settings panel, and the config key behind it. |
+| [Shared cloud infrastructure for the runners](remote-worker/shared-cloud.md) | The cluster, registry and network each runner backend needs, and the per-cloud prerequisites. |
+| [The Ansible runner](remote-worker/ansible-runner.md) | VM targets: SSH keys, discovery, provisioning assets, bulk runs and the local Docker runner. |
+| [The Kubernetes runner](remote-worker/kubernetes-runner.md) | Cluster and database targets, which run as localhost jobs rather than over SSH. |
+| [Secrets in a Remote Worker run](remote-worker/secrets.md) | Hardened per-provider lookups, Password Safe managed-account checkout, and in-playbook lookups. |
+| [Playbook structure](remote-worker/playbooks.md) | What the runner expects of a playbook, and the samples to start from. |
 
 The image-promote runner is documented with the runner itself, in
 [`runners/promote/README.md`](../../runners/promote/README.md).
@@ -131,9 +133,9 @@ The image-promote runner is documented with the runner itself, in
 2. Open **Settings → Integrations**. The **Remote Worker** toggle, previously
    greyed out, is now selectable.
 3. Click **Configure** on the Remote Worker row to set the
-   [runner backends](ansible/config-reference.md#runner-backends) — pick Local or the matching cloud
+   [runner backends](remote-worker/config-reference.md#runner-backends) — pick Local or the matching cloud
    service per target cloud for each runner — the per-cloud SSH usernames, and,
-   for cloud backends, the [shared cloud infrastructure](ansible/shared-cloud.md#shared-cloud-infrastructure).
+   for cloud backends, the [shared cloud infrastructure](remote-worker/shared-cloud.md#shared-cloud-infrastructure).
 4. Toggle Remote Worker **on**. This is the `ansible_enabled` feature flag. No restart required.
 
 ### Per-cloud SSH user (Ansible runner)

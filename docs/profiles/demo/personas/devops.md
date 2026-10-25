@@ -33,7 +33,7 @@ at run time and scoped to the run**, so there is nothing durable to leak.
 Run an Ansible playbook that looks its own credential up from Password Safe as it executes.
 Nothing in the repository, nothing in the inventory file, nothing on disk when it finishes.
 
-**Guide:** [Ansible](../../../platform/ansible.md) ·
+**Guide:** [Ansible](../../../platform/remote-worker.md) ·
 [Password Safe](../../../beyondtrust/password-safe.md)
 
 ### A workload that mints its own cloud credential

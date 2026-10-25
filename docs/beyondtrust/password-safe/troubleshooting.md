@@ -59,7 +59,7 @@ directly and keep the bytes, the way the agent worker already calls `Requests` a
 
 In a playbook none of this applies for text bundles — the `beyondtrust.secrets_safe`
 lookup resolves all three types in one call by `folder/title` (it decodes as text too, so
-the PEM-only caveat carries over). See [Secrets in a Remote Worker run](../../platform/ansible/secrets.md#in-playbook-password-safe-lookup-beyondtrustsecrets_safe).
+the PEM-only caveat carries over). See [Secrets in a Remote Worker run](../../platform/remote-worker/secrets.md#in-playbook-password-safe-lookup-beyondtrustsecrets_safe).
 
 **A checkout returns `4031` / 403** — usually the API identity is missing the **Requestor**
 role or an access policy granting View on a Smart Rule containing the account. There is no

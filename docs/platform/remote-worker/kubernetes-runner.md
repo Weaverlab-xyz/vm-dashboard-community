@@ -2,7 +2,7 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** your target is a Kubernetes cluster or a database rather than a VM.
 
-Part of [Remote Worker](../ansible.md). Cluster and database targets, which run as localhost jobs rather than over SSH.
+Part of [Remote Worker](../remote-worker.md). Cluster and database targets, which run as localhost jobs rather than over SSH.
 
 ## Kubernetes runner
 

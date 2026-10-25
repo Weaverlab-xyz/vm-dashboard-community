@@ -3,7 +3,7 @@
 Ready-to-adapt playbooks for configuring **Linux** and **Windows** cloud VMs, plus
 **Kubernetes clusters** and **databases**, via the dashboard's **Config
 Management** feature
-(see [docs/platform/ansible.md](../../docs/platform/ansible.md)). They are
+(see [docs/platform/remote-worker.md](../../docs/platform/remote-worker.md)). They are
 the Ansible counterpart to [`examples/compose/`](../compose/) — upload one, edit
 the placeholders, and run.
 
@@ -29,7 +29,7 @@ shown, never stored on the job, and is scrubbed from the job output (requires th
 - **As a BeyondTrust Password Safe managed account** — pick the account from the
   live list; the credential is checked out just-in-time.
 
-See [Using a Secrets-Management secret in a run](../../docs/platform/ansible/secrets.md#using-a-secrets-management-secret-in-a-run).
+See [Using a Secrets-Management secret in a run](../../docs/platform/remote-worker/secrets.md#using-a-secrets-management-secret-in-a-run).
 Plaintext extra vars still work for non-sensitive parameters.
 
 ### Optional: fetch a secret from Password Safe inside the play
