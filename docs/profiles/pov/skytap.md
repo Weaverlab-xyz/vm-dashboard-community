@@ -20,7 +20,7 @@ instance the integration is masked off and Settings refuses to enable it.
 > through that Resource Broker, and **Entitle registration** for the Linux guests
 > ([wiring the VMs](wiring.md#wiring-the-vms-into-pra-password-safe-and-entitle)).
 > Publish a **customer-facing share link** for the whole environment
-> ([the share link](customer-access.md#the-customer-facing-share-link)) — Skytap calls it a
+> ([the share link](customer-access/share-link.md)) — Skytap calls it a
 > publish set, and the dashboard always gives it a generated password and an expiry. And
 > reap the environment on an **auto-delete timer**
 > ([the auto-delete timer](lifecycle.md#the-auto-delete-timer)), which warns on a

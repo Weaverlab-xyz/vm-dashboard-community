@@ -270,7 +270,7 @@ it; the first token a cloud accepts is the final proof.
 
 The SPIRE server also serves its trust bundle on **tcp/8082**, a SPIFFE bundle endpoint.
 That is a different thing from the issuer: another SPIRE server fetches it once a
-[Workload Lab is federated](../../preview/workload-lab/spiffe.md#federating-with-the-dashboard) with
+[Workload Lab is federated](../../preview/workload-lab/spiffe/federation.md) with
 this one. `docker-compose.spire.yml` publishes it directly, not through Caddy, because it is
 TLS with the server's own SVID. Firewall it to the lab hosts, or leave it closed if you
 federate nothing.

@@ -100,11 +100,11 @@ launch), which a checked-out (ephemeral) credential has none of — so they're
 
 - **Collect credentials from the dashboard** (preferred). The task proves its own cloud
   identity and collects the credential sealed, with no copy in any store. See
-  [Collect from the dashboard](../../admin/secrets-management.md#collect-from-the-dashboard-no-store-copy).
+  [Collect from the dashboard](../../admin/secrets-management/ansible-runs.md#collect-from-the-dashboard-no-store-copy).
 - **Ephemeral cloud secrets.** The credential is written to that cloud's store as a
   short-lived, RBAC-locked secret, injected via the provider's channel, then force-deleted
   after the run. See
-  [Ephemeral cloud secrets](../../admin/secrets-management.md#ephemeral-cloud-secrets).
+  [Ephemeral cloud secrets](../../admin/secrets-management/ansible-runs.md#ephemeral-cloud-secrets).
 
 SSH-password targets require `sshpass` in the runner image (already true for the
 built-in on-prem SSH path). The lookup and checkout go through `ps-cli`,

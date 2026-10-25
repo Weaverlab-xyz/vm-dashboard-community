@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 _KIND_FLAGS = {"pra": "pra_enabled", "password_safe": "password_safe_enabled"}
 
 # "### A POV wired before this will say so": what the move does and what it costs.
-DOCS_HREF = "/docs/profiles/pov/customer-access#a-pov-wired-before-this-will-say-so"
+DOCS_HREF = "/docs/profiles/pov/customer-access/vendor-access#a-pov-wired-before-this-will-say-so"
 # Named in the detail, up to this many; the rest are a count.
 _NAMED = 5
 

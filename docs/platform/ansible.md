@@ -65,7 +65,7 @@ The four backends:
 store assets in S3 and run them against on-premises Proxmox hosts, or store
 them on a corporate UNC share and target EC2 instances — any combination
 works (with one constraint: cloud runners can't read from a UNC backend; see
-[storage-management.md](../operations/storage-management.md#constraint-local-backend-only-works-with-the-local-ansible-runner)).
+[storage-management.md](../operations/storage-management/configuring.md#constraint-local-backend-only-works-with-the-local-ansible-runner)).
 The Kubernetes runner has no storage dependency — it streams manifests over
 stdin.
 

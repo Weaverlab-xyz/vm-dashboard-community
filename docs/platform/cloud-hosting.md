@@ -68,7 +68,7 @@ have"). It used to read as the ciphertext.
 
 Supply it as a platform secret. Back it up somewhere you can find in a year —
 lose it and every credential must be re-entered by hand. See
-[secrets-management.md](../admin/secrets-management.md#why-the-jwt-root-key-cannot-be-migrated)
+[secrets-management.md](../admin/secrets-management/external-vault.md#why-the-jwt-root-key-cannot-be-migrated)
 for why the community edition cannot bootstrap it from a vault.
 
 **`CONFIG_ENCRYPTION_KEY` (optional) separates the two jobs.** Set it, as an env var,

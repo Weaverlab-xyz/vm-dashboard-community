@@ -47,7 +47,7 @@ delivery paths, and the run is refused until one is on:
   Secrets Manager or GCP Secret Manager for the run and deletes it afterwards.
 
 Both are under **Settings → Ansible**; how each works, and what each one trusts, is in
-[Secrets management](../../admin/secrets-management.md#collect-from-the-dashboard-no-store-copy).
+[Secrets management](../../admin/secrets-management/ansible-runs.md#collect-from-the-dashboard-no-store-copy).
 ACI injects the credential inline and needs neither.
 
 ## Why one-shot runners (the security argument)

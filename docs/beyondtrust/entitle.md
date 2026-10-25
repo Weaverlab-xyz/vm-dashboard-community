@@ -211,7 +211,7 @@ Two things about it are easy to miss:
   only. **Your** machine needs its own route, so start a PRA **Network Tunnel** through
   the gateway (`clouddb-jumpoint` on Azure) before you run `ssh`. Without it, `ssh`
   reports `Connection timed out`. See
-  [Network tunnels need an address pool](gateways.md#network-tunnels-need-an-address-pool)
+  [Network tunnels need an address pool](gateways/address-pool.md)
   if the tunnel itself won't come up.
 
 On Linux or macOS, paste the one-liner as it is.

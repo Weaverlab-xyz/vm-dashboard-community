@@ -74,7 +74,7 @@ channel as `CONN_VARS_B64` — the ECS task override env, ACI `secure_value`, th
 env, or a `0600 --env-file` locally — decoded to a `0600` file and passed as `-e @…`.
 Nothing needs to pre-exist in a cloud secret store, so the ephemeral-store opt-in that
 governs a **VM SSH** managed-account run (`ansible_cloud_ephemeral_secrets_enabled`, see
-[Secrets Management](../../admin/secrets-management.md#ephemeral-cloud-secrets)) does **not** apply
+[Secrets Management](../../admin/secrets-management/ansible-runs.md#ephemeral-cloud-secrets)) does **not** apply
 here. That opt-in exists only because the SSH path injects named/become secrets by
 *reference* (`valueFrom`) on ECS and Cloud Run; the database path never does.
 

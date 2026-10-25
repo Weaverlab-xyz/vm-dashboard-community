@@ -80,13 +80,13 @@ The [SPIRE lab](../../preview/workload-lab/spiffe.md) uses k3s twice:
 
 - **The `k8s` deployment mode** runs k3s on the lab host (`k3s-server-init.yml`) and SPIRE
   on top of it from the hardened Helm charts. See
-  [Deployment modes](../../preview/workload-lab/spiffe.md#deployment-modes-vm-docker-or-kubernetes).
+  [Deployment modes](../../preview/workload-lab/spiffe/building.md#deployment-modes-vm-docker-or-kubernetes).
 - **The linked k3s node** is a second VM where a SPIRE-attested workload reaches the
   Kubernetes API with a JWT-SVID instead of a stored token. `k3s-spiffe-auth.yml` makes the
   API server accept those tokens, and it can only do so because k3s takes the
   authentication flag. See
-  [Reaching a Kubernetes cluster with a JWT-SVID](../../preview/workload-lab/spiffe.md#reaching-a-kubernetes-cluster-with-a-jwt-svid)
-  and [Why it is k3s](../../preview/workload-lab/spiffe.md#why-it-is-k3s-and-why-that-is-a-real-limit).
+  [Reaching a Kubernetes cluster with a JWT-SVID](../../preview/workload-lab/spiffe/kubernetes.md)
+  and [Why it is k3s](../../preview/workload-lab/spiffe/kubernetes.md#why-it-is-k3s-and-why-that-is-a-real-limit).
 
 `k3s-spiffe-auth.yml`, `k3s-dex-auth.yml` and `k3s-dashboard-auth.yml` share one
 `AuthenticationConfiguration`. Each replaces only its own entry, so any of them can be run,

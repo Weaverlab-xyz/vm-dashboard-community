@@ -245,12 +245,12 @@ all**: it has neither socket, so it relays, and it keeps its own token files.
 
 The agent's connection is mTLS gRPC and must reach the server **untouched**: TCP
 passthrough, never an HTTP load balancer or a TLS-inspecting proxy. Port 8082, for
-[federation with a Workload Lab](../preview/workload-lab/spiffe.md#federating-with-the-dashboard),
+[federation with a Workload Lab](../preview/workload-lab/spiffe/federation.md),
 has the same requirement. Restrict both to the networks that need them.
 
 | Platform | 8081 for agents | Notes |
 |---|---|---|
-| **Azure Container Apps** | an `additionalPortMappings` entry on the app's ingress: `external: true`, `targetPort: 8081`, `exposedPort: 8081` (and the same for 8082) | TCP ports are per environment, so each exposed port can be used by only one app in it. The agent gateway's custom domain resolves to the same environment address, so **SPIRE server address for agents** can stay blank. [Walkthrough](cloud-hosting/azure-container-apps.md#spire-sidecar) |
+| **Azure Container Apps** | an `additionalPortMappings` entry on the app's ingress: `external: true`, `targetPort: 8081`, `exposedPort: 8081` (and the same for 8082) | TCP ports are per environment, so each exposed port can be used by only one app in it. The agent gateway's custom domain resolves to the same environment address, so **SPIRE server address for agents** can stay blank. [Walkthrough](cloud-hosting/azure-container-apps/spire-sidecar.md) |
 | **AWS ECS/Fargate** | a **Network Load Balancer** with TCP listeners on 8081/8082, target group type `ip` on the sidecar's container ports | Not the ALB, which terminates TLS. The NLB has its own DNS name: put it in **SPIRE server address for agents** (`spire_server_address`). [Notes](cloud-hosting/aws-ecs.md#spire-sidecar) |
 | **Kubernetes** | a `Service` of type `LoadBalancer` (or `NodePort`) on the pod's 8081/8082 | Same as ECS when the load balancer's name differs from the agent gateway's |
 | **GCP Cloud Run** | **not possible.** Cloud Run ingress is HTTPS only and terminates TLS itself | The sidecar still gives the dashboard [its own identity](oidc/dashboard-identity.md) and Workload Lab federation in the dashboard's direction. Agents stay on Ed25519. [Notes](cloud-hosting/gcp-cloud-run.md#spire-sidecar) |
