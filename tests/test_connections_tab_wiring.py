@@ -223,12 +223,22 @@ def test_a_route_form_never_offers_a_host_a_port_or_a_secret():
     """THE INVARIANT, ASSERTED IN THE MARKUP. A route designates who runs a playbook,
     never what it runs against: the address stays pinned to one the discovering agent
     reported. A host or credential field here would be the substitution this feature was
-    careful not to introduce."""
+    careful not to introduce.
+
+    The one connection the form may name is the SCOPE narrower (``scope_connection_id``,
+    migration 0003): it restricts which already-discovered guests the route covers, and
+    can only make a route match fewer targets. It never names what a run is aimed at —
+    tests/test_config_mgmt_route_scopes.py drives that through the real gate. A field
+    named for the TARGET connection (``form.connection_id``) stays forbidden."""
     src = _read(*_TPL, "agents", "_config_routes.html")
     for forbidden in ("form.host", "form.port", "form.secret", "form.username",
                       "form.transport", "form.connection_id"):
         assert forbidden not in src, \
             f"the route form binds {forbidden} — it must name an agent and a range only"
+    # The narrower exists only beside an on-premises scope, labelled as narrowing.
+    if "form.scope_connection_id" in src:
+        assert "Only guests discovered through this connection" in src, \
+            "the route form's connection field no longer says it only narrows coverage"
 
 
 def test_the_route_form_tells_the_operator_about_the_second_policy_file():

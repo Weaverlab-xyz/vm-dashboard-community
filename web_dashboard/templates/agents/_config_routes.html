@@ -185,11 +185,11 @@
 
         <div x-show="form.scope === 'onprem'">
           <label class="block text-xs font-medium text-gray-600 mb-1">Connection <span class="text-gray-400">(optional)</span></label>
-          <select x-model="form.connection_id"
+          <select x-model="form.scope_connection_id"
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             <option value="">Every connection</option>
             <template x-for="c in connections" :key="c.id">
-              <option :value="c.id" x-text="c.name" :selected="c.id === form.connection_id"></option>
+              <option :value="c.id" x-text="c.name" :selected="c.id === form.scope_connection_id"></option>
             </template>
           </select>
           <p class="text-xs text-gray-400 mt-1">
@@ -315,7 +315,7 @@ function configRoutesPage() {
 
     _blank() {
       return {cidr: '', agent_id: '', label: '', is_active: true, scope: 'onprem',
-              region: '', connection_id: ''};
+              region: '', scope_connection_id: ''};
     },
 
     // The region picker follows the scope's cloud: only regions with a per-region config
@@ -334,7 +334,7 @@ function configRoutesPage() {
 
     scopeChanged() {
       this.form.region = '';
-      this.form.connection_id = '';
+      this.form.scope_connection_id = '';
       this.loadRegions();
     },
 
@@ -350,7 +350,7 @@ function configRoutesPage() {
       this.editingId = r.id;
       this.form = {cidr: r.cidr, agent_id: r.agent_id, label: r.label || '',
                    is_active: !!r.is_active, scope: r.scope || 'onprem',
-                   region: r.region || '', connection_id: r.connection_id || ''};
+                   region: r.region || '', scope_connection_id: r.connection_id || ''};
       this.formError = '';
       this.loadRegions();
       this.showForm = true;
@@ -365,7 +365,9 @@ function configRoutesPage() {
         const body = {cidr: this.form.cidr, agent_id: this.form.agent_id,
                       label: this.form.label || '', scope: this.form.scope || 'onprem',
                       region: this.form.scope === 'onprem' ? '' : (this.form.region || ''),
-                      connection_id: this.form.scope === 'onprem' ? (this.form.connection_id || '') : ''};
+                      // The scope narrower, sent as the API's connection_id: which
+                      // discovered guests this route covers, never what a run targets.
+                      connection_id: this.form.scope === 'onprem' ? (this.form.scope_connection_id || '') : ''};
         if (this.editingId) {
           body.is_active = !!this.form.is_active;
           await API.patch('/api/connections/config-mgmt-routes/' + this.editingId, body);
