@@ -127,6 +127,7 @@ class RouteRequest(BaseModel):
     region: str = ""
     connection_id: str = ""
     workstream: str = ""
+    network: str = ""             # cloud: one VPC / VNet / GCP network
     # Superseded by `scope`. Accepted only to refuse it: `true` used to mean "every cloud
     # too", and silently creating an on-premises route instead would route nothing.
     include_cloud_vms: Optional[bool] = None
@@ -141,6 +142,7 @@ class RouteUpdate(BaseModel):
     region: Optional[str] = None
     connection_id: Optional[str] = None
     workstream: Optional[str] = None
+    network: Optional[str] = None
     include_cloud_vms: Optional[bool] = None
 
 
@@ -164,7 +166,16 @@ def list_config_routes(db: Session = Depends(get_db),
     from ..services import inventory_service
 
     counts = cmr.match_counts(db)
-    cloud_counts = cmr.cloud_match_counts(db, inventory_service.cloud_vm_private_ips(db))
+    cloud_vms = inventory_service.cloud_vm_private_ips(db)
+    cloud_counts = cmr.cloud_match_counts(db, cloud_vms)
+    # The networks this dashboard has deployed into, per cloud, for the Network picker —
+    # and how many VMs it could not place, for the "Look up networks" banner.
+    networks: dict = {}
+    for scope, _region, _ws, network, _ip in cloud_vms:
+        if network:
+            networks.setdefault(scope, {}).setdefault(network, 0)
+            networks[scope][network] += 1
+    without_network = sum(1 for vm in cloud_vms if not vm[3])
     routes = cmr.list_routes(db)
     for row in routes:
         row["matches"] = counts.get(row["id"], 0)
@@ -175,7 +186,7 @@ def list_config_routes(db: Session = Depends(get_db),
     for row in routes:
         row["scope_text"] = cmr.scope_text(row["scope"], row["region"],
                                            connections.get(row["connection_id"], ""),
-                                           row["workstream"])
+                                           row["workstream"], row["network"])
     granted = [a.id for a in db.query(RemoteAgent).filter(
         RemoteAgent.is_active.is_(True)).all()
         if "agent_ansible" in agent_service.allowed_job_types(a)]
@@ -185,12 +196,16 @@ def list_config_routes(db: Session = Depends(get_db),
                             for cid, name in sorted(connections.items(),
                                                     key=lambda kv: kv[1].lower())],
             "scopes": [{"id": s, "label": cmr.SCOPE_LABELS[s]} for s in cmr.SCOPES],
-            "workstreams": sorted(workgroup_service.list_names(db))}
+            "workstreams": sorted(workgroup_service.list_names(db)),
+            "networks": {scope: [{"id": n, "label": cmr.network_label(n), "vms": c}
+                                 for n, c in sorted(found.items())]
+                         for scope, found in networks.items()},
+            "cloud_vms_without_network": without_network}
 
 
 @router.get("/config-mgmt-routes/resolve")
 def resolve_config_route(address: str, scope: str = "onprem", region: str = "",
-                         connection_id: str = "", workstream: str = "",
+                         connection_id: str = "", workstream: str = "", network: str = "",
                                db: Session = Depends(get_db),
                                current_user: User = Depends(require_explicit_permission("connections", "read"))):
     """Which agent would execute a run against ``address``.
@@ -204,7 +219,8 @@ def resolve_config_route(address: str, scope: str = "onprem", region: str = "",
     remote worker; with ``onprem`` and a ``connection_id``, for that connection's guests.
     """
     route = cmr.match_for(db, address, scope=scope, region=region,
-                          connection_id=connection_id, workstream=workstream)
+                          connection_id=connection_id, workstream=workstream,
+                          network=cmr.normalize_network(scope, network) if network else "")
     if route is None:
         return {"agent_id": "", "agent_name": "", "cidr": "", "source": "none"}
     agent = db.query(RemoteAgent).filter(RemoteAgent.id == route.agent_id).first()
@@ -223,16 +239,37 @@ def create_config_route(req: RouteRequest,
         out = cmr.create(db, agent_id=req.agent_id, cidr=req.cidr, label=req.label,
                          created_by=current_user.username, scope=req.scope,
                          region=req.region, connection_id=req.connection_id,
-                         workstream=req.workstream)
+                         workstream=req.workstream, network=req.network)
     except cmr.ConfigRouteError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _backfill_for(db, out, current_user)
     job_service.log_audit(db, current_user.username, "config_mgmt_route_create",
                           details={"id": out["id"], "cidr": out["cidr"],
                                    "agent_id": out["agent_id"],
                                    "scope": out["scope"], "region": out["region"],
                                    "connection_id": out["connection_id"],
-                                   "workstream": out["workstream"]})
+                                   "workstream": out["workstream"],
+                                   "network": out["network"]})
     return out
+
+
+def _backfill_for(db: Session, route: dict, user: User) -> None:
+    """A network-narrowed route governs only VMs whose network is recorded. Queue the one
+    lookup for the rest, rather than leave them silently falling through."""
+    if route.get("network"):
+        from ..services import route_network_backfill
+        route_network_backfill.enqueue_if_needed(db, created_by=user.username)
+
+
+@router.post("/config-mgmt-routes/lookup-networks", status_code=202)
+def lookup_networks(db: Session = Depends(get_db),
+                    current_user: User = Depends(require_explicit_permission("connections", "write"))):
+    """Ask each cloud once for the network of VMs deployed before it was recorded."""
+    from ..services import route_network_backfill
+    job_id = route_network_backfill.enqueue(db, created_by=current_user.username)
+    job_service.log_audit(db, current_user.username, "config_mgmt_route_lookup_networks",
+                          details={"job_id": job_id})
+    return {"job_id": job_id, "already_running": not job_id}
 
 
 @router.patch("/config-mgmt-routes/{route_id}")
@@ -246,6 +283,7 @@ def update_config_route(route_id: str, req: RouteUpdate,
         out = cmr.update(db, route_id, **fields)
     except cmr.ConfigRouteError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _backfill_for(db, out, current_user)
     job_service.log_audit(db, current_user.username, "config_mgmt_route_update",
                           details={"id": route_id, "fields": sorted(fields)})
     return out

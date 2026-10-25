@@ -42,6 +42,23 @@
     <a href="/docs/platform/spiffe/remote-agents/config-runs" target="_blank" class="text-blue-600 hover:underline">Feature guide</a>.
   </p>
 
+  <!-- Cloud VMs deployed before their network was recorded cannot match a route narrowed
+       to a network (they fall back to a broader route or the remote worker). One lookup
+       per VM fills it in. -->
+  <div x-show="!noAccess && withoutNetwork > 0" x-cloak
+       class="mb-4 border border-amber-200 bg-amber-50 rounded-lg px-4 py-3 text-sm text-amber-800 flex items-center justify-between gap-4">
+    <span>
+      <span x-text="withoutNetwork"></span>
+      <span x-text="withoutNetwork === 1 ? 'cloud VM has' : 'cloud VMs have'"></span>
+      no recorded network, so a route narrowed to a network will not cover
+      <span x-text="withoutNetwork === 1 ? 'it' : 'them'"></span> yet.
+    </span>
+    <button @click="lookupNetworks()" :disabled="lookingUp"
+            class="shrink-0 text-sm bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded-lg font-medium disabled:opacity-50">
+      Look up networks
+    </button>
+  </div>
+
   <div x-show="toast" x-cloak x-transition
        :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
        class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
@@ -214,6 +231,21 @@
         </div>
 
         <div x-show="form.scope !== 'onprem'">
+          <label class="block text-xs font-medium text-gray-600 mb-1">Network <span class="text-gray-400">(optional)</span></label>
+          <select x-model="form.network"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">Every network</option>
+            <template x-for="n in networksFor(form.scope)" :key="n.id">
+              <option :value="n.id" x-text="networkOptionLabel(n)" :selected="n.id === form.network"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-400 mt-1">
+            Only VMs deployed into this VPC, VNet or network — the exact answer when two
+            networks share a range. Listed from the networks this dashboard has deployed into.
+          </p>
+        </div>
+
+        <div x-show="form.scope !== 'onprem'">
           <label class="block text-xs font-medium text-gray-600 mb-1">Workstream <span class="text-gray-400">(optional)</span></label>
           <select x-model="form.workstream"
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
@@ -268,6 +300,7 @@
 function configRoutesPage() {
   return {
     routes: [], agents: [], grantedIds: [], connections: [], regions: [], workstreams: [],
+    networks: {}, withoutNetwork: 0, lookingUp: false,
     scopes: [{id: 'onprem', label: 'On-premises'}],
     loading: true, busy: '',
     noAccess: '',   // the 403 text when this user holds no `connections` permission
@@ -288,6 +321,8 @@ function configRoutesPage() {
         this.grantedIds = data.ansible_agent_ids || [];
         this.connections = data.connections || [];
         this.workstreams = data.workstreams || [];
+        this.networks = data.networks || {};
+        this.withoutNetwork = data.cloud_vms_without_network || 0;
         if ((data.scopes || []).length) this.scopes = data.scopes;
         this.noAccess = '';
       } catch (e) {
@@ -332,7 +367,7 @@ function configRoutesPage() {
 
     _blank() {
       return {cidr: '', agent_id: '', label: '', is_active: true, scope: 'onprem',
-              region: '', scope_connection_id: '', workstream: ''};
+              region: '', scope_connection_id: '', workstream: '', network: ''};
     },
 
     // The region picker follows the scope's cloud: only regions with a per-region config
@@ -349,10 +384,36 @@ function configRoutesPage() {
       if (this.form.region && !this.regions.includes(this.form.region)) this.regions.push(this.form.region);
     },
 
+    // A route being edited may name a network no live VM is in any more; keep it offered.
+    networksFor(scope) {
+      const list = (this.networks[scope] || []).slice();
+      if (this.form.network && this.form.scope === scope && !list.some(n => n.id === this.form.network)) {
+        list.push({id: this.form.network, label: this.form.network.split('/').pop(), vms: 0});
+      }
+      return list;
+    },
+    networkOptionLabel(n) {
+      return n.label + ' (' + (n.vms === 1 ? '1 VM' : n.vms + ' VMs') + ')';
+    },
+
+    async lookupNetworks() {
+      this.lookingUp = true;
+      try {
+        const r = await API.post('/api/connections/config-mgmt-routes/lookup-networks', {});
+        this.flash(r && r.already_running ? 'A network lookup is already running.'
+                                          : 'Looking up networks — this takes a minute.');
+      } catch (e) {
+        this.flash(e.message || 'Could not start the lookup.', 'error');
+      } finally {
+        this.lookingUp = false;
+      }
+    },
+
     scopeChanged() {
       this.form.region = '';
       this.form.scope_connection_id = '';
       this.form.workstream = '';
+      this.form.network = '';
       this.loadRegions();
     },
 
@@ -369,7 +430,7 @@ function configRoutesPage() {
       this.form = {cidr: r.cidr, agent_id: r.agent_id, label: r.label || '',
                    is_active: !!r.is_active, scope: r.scope || 'onprem',
                    region: r.region || '', scope_connection_id: r.connection_id || '',
-                   workstream: r.workstream || ''};
+                   workstream: r.workstream || '', network: r.network || ''};
       this.formError = '';
       this.loadRegions();
       this.showForm = true;
@@ -385,6 +446,7 @@ function configRoutesPage() {
                       label: this.form.label || '', scope: this.form.scope || 'onprem',
                       region: this.form.scope === 'onprem' ? '' : (this.form.region || ''),
                       workstream: this.form.scope === 'onprem' ? '' : (this.form.workstream || ''),
+                      network: this.form.scope === 'onprem' ? '' : (this.form.network || ''),
                       // The scope narrower, sent as the API's connection_id: which
                       // discovered guests this route covers, never what a run targets.
                       connection_id: this.form.scope === 'onprem' ? (this.form.scope_connection_id || '') : ''};

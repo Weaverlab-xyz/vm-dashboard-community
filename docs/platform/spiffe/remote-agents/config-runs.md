@@ -109,13 +109,13 @@ to**, and a run only ever consults routes for its own target:
 | Applies to | Governs | Optional narrower |
 |---|---|---|
 | On-premises guests | VMs synced from a hypervisor connection | One connection: only guests it discovered |
-| AWS, Azure or Google Cloud VMs | That cloud's dashboard-deployed VMs, by private address | One region, one workstream, or both |
+| AWS, Azure or Google Cloud VMs | That cloud's dashboard-deployed VMs, by private address | Any of: one region, one workstream, one network |
 
 So the same range can be routed once per scope — an on-premises route and an AWS route for
 `10.40.0.0/16` live side by side and never capture each other's targets — and two regions,
 or two connections, with the same range can each name their own agent. At an equal prefix
-the route with more narrowers wins: region and workstream beat either, and either beats
-none.
+the route with more narrowers wins: one narrowed by network, region and workstream beats
+one narrowed by two of them, and so on down to none.
 
 **A workstream narrower stands for that workstream's network.** Two teams' VPCs in one
 region often share a range like `10.0.0.0/16`, and region cannot tell them apart. Every
@@ -124,6 +124,15 @@ route for `10.0.0.0/16` in AWS · us-east-2 · team-a governs only team-a's VMs.
 tenancy line: one team's agent is never handed another team's VM, or the SSH key sealed
 for it. The match is on the workstream a VM was **deployed** in. Reassigning a VM to
 another workstream does not move its network, so it does not move which agent runs it.
+
+**A network narrower is the exact answer** that region and workstream approximate: one AWS
+VPC, Azure VNet or GCP network. The picker lists the networks this dashboard has deployed
+into, with how many VMs each. New deploys record their network as they launch. VMs deployed
+before that have none recorded, and **a VM with no recorded network never matches a route
+narrowed to a network** — it falls back to a broader route, or to the remote worker, rather
+than to a guess. The Config Routes page says how many there are and offers **Look up
+networks**, which asks each cloud once; saving a network-narrowed route queues that lookup
+on its own. A VM the cloud no longer has is skipped, not marked destroyed.
 
 **A connection narrows which guests are covered, never who runs them.** The route's agent
 still executes. A route narrowed to your Workstation connection means "guests that

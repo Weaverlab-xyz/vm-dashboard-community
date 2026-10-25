@@ -113,7 +113,9 @@ for any other time is refused, and the refusal names when the agent is next up.
 [Config-Management route](config-runs.md#which-agent-executes-a-run) for each range,
 scoped to the agent's cloud and region. That is the step that sends cloud-VM runs to the
 agent. A range that already has a route in that cloud and region is skipped, and the
-deploy says so; an on-premises route for the same range is no clash.
+deploy says so; an on-premises route for the same range is no clash. After the host's first successful start, those routes are also narrowed to the network
+it runs in (its VPC, VNet or GCP network), since that is the only network the agent can
+reach. Routes you narrowed or added yourself are left as they are.
 
 **Delete** takes the host down, then revokes and deletes the agent and its routes. Runs for
 those ranges then go back to the remote worker.
