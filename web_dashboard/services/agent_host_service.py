@@ -50,6 +50,10 @@ LIVE_STATUSES = ("starting", "running", "stopping")
 
 PURPOSE = "dashboard-agent"
 AGENT_IMAGE = "chrweav/dashboard-agent:latest"
+# Beside a SPIRE-attested agent, so the dashboard can upgrade and restart it
+# (docs/platform/spiffe/remote-agents/lifecycle.md). It verifies every agent image's
+# signature against the identity in the policy.yaml below before it pulls.
+UPDATER_IMAGE = "chrweav/dashboard-agent-updater:latest"
 ANSIBLE_IMAGE = "chrweav/ansible-winrm:latest"
 # The SPIRE pair, pinned by digest exactly as examples/remote-agent/docker-compose.spire.yml
 # pins them. A tag here would let a registry change what runs beside the agent.
@@ -170,8 +174,11 @@ def validate_lifecycle(db, *, mode: str, until_at=None, change_window_id: str = 
 
 # ── what the host is told ─────────────────────────────────────────────────────
 
-def policy_yaml(cidrs: list, max_concurrent: int) -> str:
+def policy_yaml(cidrs: list, max_concurrent: int, *, upgrades: bool = False) -> str:
     """The agent's policy.yaml: Config Management only, for these ranges.
+
+    ``upgrades`` (SPIRE hosts, which get the updater) opts the host into central upgrades,
+    accepting only images the project's release workflow signed (keyless).
 
     Built as data and dumped by yaml.safe_dump, never formatted as text, so no value can
     add a key. Every range was normalised by :func:`normalize_cidrs` already; this re-checks
@@ -193,7 +200,24 @@ def policy_yaml(cidrs: list, max_concurrent: int) -> str:
             "targets": [{"cidr": c, "ports": list(ANSIBLE_PORTS)} for c in ranges],
         },
     }
+    if upgrades:
+        from .agent_lifecycle_service import (DEFAULT_REPOSITORY, SIGNING_IDENTITY,
+                                              SIGNING_ISSUER)
+        doc["upgrades"] = {
+            "enabled": True,
+            "repository": DEFAULT_REPOSITORY,
+            "verify": {"keyless": {"identity": SIGNING_IDENTITY, "issuer": SIGNING_ISSUER}},
+        }
     return yaml.safe_dump(doc, sort_keys=False)
+
+
+def agent_image(db) -> str:
+    """The agent image a new host starts: the newest recorded release, by digest, when
+    there is one (what the fleet is being moved to), else the latest tag."""
+    from . import agent_release_service
+    from .agent_lifecycle_service import DEFAULT_REPOSITORY
+    row = agent_release_service.newest(db)
+    return f"{DEFAULT_REPOSITORY}@{row.digest}" if row else AGENT_IMAGE
 
 
 def dashboard_url_problem() -> str:
@@ -230,7 +254,8 @@ def _b64(text: str) -> str:
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
-def bootstrap_script(*, url: str, policy: str, material: dict) -> str:
+def bootstrap_script(*, url: str, policy: str, material: dict,
+                     image: str = AGENT_IMAGE) -> str:
     """The Bash every cloud runs at first boot to start the agent.
 
     One script for all three clouds — ECS-optimised Amazon Linux, Ubuntu with docker.io, and
@@ -242,12 +267,19 @@ def bootstrap_script(*, url: str, policy: str, material: dict) -> str:
     decoded INTO A FILE, never interpolated into a command line, so no value can become
     shell. The few interpolated values (the URL, the SPIRE address and trust domain) are
     validated and quoted. Re-running it is a no-op once the agent container exists.
+
+    A SPIRE host also gets the updater (examples/remote-agent/docker-compose.updater.yml):
+    the control directory it shares with the agent, and the label marking the one
+    container it may replace. A code-mode host does not: its identity is a file in the
+    container, so a replacement would be a different agent.
     """
     mode = material.get("mode")
     if mode not in ("spire", "code"):
         raise AgentHostError("No identity to give the agent.")
     q = shlex.quote
     d = _HOST_DIR
+    if not re.match(r"^[a-z0-9./_-]+(:[A-Za-z0-9._-]+|@sha256:[0-9a-f]{64})$", image):
+        raise AgentHostError("The agent image is not a plain reference.")
     lines = [
         "#!/bin/bash",
         "set -euo pipefail",
@@ -259,7 +291,7 @@ def bootstrap_script(*, url: str, policy: str, material: dict) -> str:
         'chmod 0444 "$D/etc/policy.yaml"',
         'chown 10001:10001 "$D/state" && chmod 0700 "$D/state"',
         'GID=$(stat -c %g /var/run/docker.sock)',
-        f"docker pull {AGENT_IMAGE}",
+        f"docker pull {image}",
         f"docker pull {ANSIBLE_IMAGE}",
     ]
     agent_env = [
@@ -349,13 +381,29 @@ def bootstrap_script(*, url: str, policy: str, material: dict) -> str:
         ]
         agent_env.append("-e AGENT_SPIFFE_JWT_FILE=/run/spiffe/jwt/attest.jwt")
         agent_vols.append("-v spiffe_jwt:/run/spiffe/jwt:ro")
+        lines += [
+            'mkdir -p "$D/control"',
+            'chown 10001:10001 "$D/control" && chmod 0700 "$D/control"',
+            f"docker pull {UPDATER_IMAGE}",
+            'docker run -d --name dashboard-agent-updater --restart unless-stopped '
+            '--user 10001:10001 --group-add "$GID" --read-only --cap-drop ALL '
+            '--security-opt no-new-privileges:true --pids-limit 64 '
+            '--tmpfs /tmp:noexec,nosuid,nodev,size=16m '
+            '--log-driver json-file --log-opt max-size=10m --log-opt max-file=3 '
+            '-e UPDATER_STOP_TIMEOUT=40 '
+            '-v "$D/control:/var/lib/dashboard-agent-control" '
+            '-v "$D/etc/policy.yaml:/etc/dashboard-agent/policy.yaml:ro" '
+            f'-v /var/run/docker.sock:/var/run/docker.sock {UPDATER_IMAGE}',
+        ]
+        agent_vols.append('-v "$D/control:/var/lib/dashboard-agent-control"')
+        agent_env.append("--label dashboard-agent.role=agent")
     lines.append(
         "docker run -d --name dashboard-agent --restart unless-stopped --stop-timeout 40 "
         "--user 10001:10001 --group-add \"$GID\" --read-only --cap-drop ALL "
         "--security-opt no-new-privileges:true --pids-limit 200 "
         "--tmpfs /tmp:noexec,nosuid,nodev,size=16m "
         "--log-driver json-file --log-opt max-size=10m --log-opt max-file=3 "
-        + " ".join(agent_env) + " " + " ".join(agent_vols) + f" {AGENT_IMAGE}")
+        + " ".join(agent_env) + " " + " ".join(agent_vols) + f" {image}")
     if mode == "code":
         # Read once by the agent at enrolment; useless after, so not left on disk.
         lines += ["sleep 120", 'rm -f "$D/code/enroll.code"']
@@ -708,9 +756,11 @@ async def _start(db, host, job_id: str) -> None:
     job_service.update_progress(db, job_id, 10, "Minting a single-use identity")
     url = dashboard_url()
     material = identity_material(db, agent)
+    spire = material.get("mode") == "spire"
     script = bootstrap_script(url=url, policy=policy_yaml(cidrs_of(host),
-                                                         host.max_concurrent),
-                              material=material)
+                                                         host.max_concurrent,
+                                                         upgrades=spire),
+                              material=material, image=agent_image(db))
 
     job_service.update_progress(db, job_id, 20, "Opening egress for the subnet")
     await _ensure_egress(host)

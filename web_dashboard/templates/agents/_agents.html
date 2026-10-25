@@ -12,6 +12,7 @@
    with x-show rather than x-if, so this component mounts on page load and its poll starts
    whether or not the tab is in front -- the same one request the standalone page made. #}
 
+{% from "partials/schedule_picker.html" import schedule_picker %}
 <div x-data="agentsPage()">
 
   <p class="text-sm text-gray-500 mb-8">
@@ -192,7 +193,19 @@
                             ? 'text-amber-700 font-medium' : 'text-gray-500'"
                     x-text="a.created_by || '—'"></td>
                 <td class="py-2.5 pr-4 font-mono text-xs text-gray-500" x-text="a.last_seen_ip || '—'"></td>
-                <td class="py-2.5 pr-4 font-mono text-xs text-gray-500" x-text="a.agent_version || '—'"></td>
+                <td class="py-2.5 pr-4 font-mono text-xs text-gray-500">
+                  <span x-text="a.agent_version || '—'"></span>
+                  <!-- Against the newest release recorded under Lifecycle, below. -->
+                  <span x-show="updateAvailable(a)" x-cloak
+                        :title="'Release ' + (newestRelease ? newestRelease.version : '') + ' is recorded'"
+                        class="ml-1 inline-flex px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-sans text-[10px] font-medium">update</span>
+                  <span x-show="a.upgrade_ring === 'canary'" x-cloak
+                        title="Upgrades first in a rollout"
+                        class="ml-1 inline-flex px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 font-sans text-[10px] font-medium">canary</span>
+                  <span x-show="a.paused" x-cloak
+                        title="Paused: heartbeating, but handed no new jobs"
+                        class="ml-1 inline-flex px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 font-sans text-[10px] font-medium">paused</span>
+                </td>
                 <td class="py-2.5 pr-4 text-xs text-gray-500" x-text="a.last_seen_at ? fmt(a.last_seen_at) : 'never'"></td>
                 <td class="py-2.5 pr-4 text-xs text-gray-700" x-text="a.running_jobs"></td>
                 <td class="py-2.5 text-right whitespace-nowrap">
@@ -216,6 +229,27 @@
                           class="text-xs font-medium transition mr-2 text-indigo-600 hover:text-indigo-800">
                     New SPIRE token
                   </button>
+                  <!-- Upgrade and Restart run on the agent's host, through its updater, so
+                       they are offered only when the host can take them; the title says
+                       what to do otherwise. Pause is the dashboard's alone: any agent. -->
+                  <button x-show="a.status !== 'revoked'" @click="openUpgrade(a)"
+                          :disabled="!!a.lifecycle_blocked || releases.length === 0"
+                          :title="a.lifecycle_blocked || (releases.length === 0 ? 'Record a release under Lifecycle first' : 'Upgrade to a signed release')"
+                          :class="a.lifecycle_blocked || releases.length === 0 ? 'text-gray-300 cursor-not-allowed' : 'text-blue-600 hover:text-blue-800'"
+                          class="text-xs font-medium transition mr-2">
+                    Upgrade
+                  </button>
+                  <button x-show="a.status !== 'revoked'" @click="restartAgent(a)"
+                          :disabled="!!a.lifecycle_blocked"
+                          :title="a.lifecycle_blocked || 'Restart the agent container (under SPIRE this also rotates its key)'"
+                          :class="a.lifecycle_blocked ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:text-gray-800'"
+                          class="text-xs font-medium transition mr-2">
+                    Restart
+                  </button>
+                  <button x-show="a.status !== 'revoked'" @click="setPaused(a, !a.paused)"
+                          :title="a.paused ? 'Hand this agent jobs again' : 'Hand this agent no new jobs; it keeps heartbeating'"
+                          class="text-xs font-medium transition mr-2 text-amber-600 hover:text-amber-800"
+                          x-text="a.paused ? 'Resume' : 'Pause'"></button>
                   <button @click="reissue(a)"
                           :disabled="a.status === 'revoked'"
                           :class="a.status === 'revoked' ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:text-gray-800'"
@@ -273,6 +307,19 @@
                       <dd x-show="(a.ansible_slots || 1) === 1 && !versionAtLeast(a.agent_version, '2.9.0')"
                           class="text-gray-400">2.9+ can run several: ansible.max_concurrent</dd>
                     </div>
+                    <div class="col-span-2">
+                      <dt class="text-gray-400 uppercase tracking-wide">Lifecycle</dt>
+                      <dd class="text-gray-700"
+                          x-text="a.lifecycle_blocked || 'Can be upgraded and restarted from here'"></dd>
+                      <dd class="text-gray-500 mt-1">
+                        Rollout ring
+                        <select :value="a.upgrade_ring" @change="setRing(a, $event.target.value)"
+                                class="ml-1 text-xs border border-gray-300 rounded px-1 py-0.5">
+                          <option value="default">default</option>
+                          <option value="canary">canary (first)</option>
+                        </select>
+                      </dd>
+                    </div>
                     <div x-show="a.status === 'enrolling'" class="col-span-2">
                       <dt class="text-gray-400 uppercase tracking-wide">Enrolment code expires</dt>
                       <dd class="text-gray-700"
@@ -288,6 +335,134 @@
           </tbody>
         </template>
       </table>
+    </div>
+  </div>
+
+  <!-- Lifecycle: the releases this dashboard may offer, and canary-first rollouts.
+       docs/platform/spiffe/remote-agents/lifecycle.md. The dashboard only chooses a
+       release; each host's policy.yaml and updater decide, and the updater verifies the
+       image's signature, which is why nothing here does. -->
+  <div x-show="!notEnabled && !noAccess" x-cloak
+       class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mt-6">
+    <div class="flex flex-wrap items-center justify-between mb-2 gap-2">
+      <h2 class="text-base font-semibold text-gray-700">Lifecycle</h2>
+      <div class="flex items-center gap-2">
+        <button @click="checkHub()" :disabled="releaseBusy"
+                class="text-sm border border-gray-300 hover:bg-gray-50 text-gray-700 px-3 py-1.5 rounded-lg font-medium transition">
+          Check Docker Hub
+        </button>
+        <button @click="openRollout()" :disabled="releases.length === 0"
+                :class="releases.length === 0 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-blue-800'"
+                class="text-sm bg-blue-700 text-white px-3 py-1.5 rounded-lg font-medium transition">
+          New rollout
+        </button>
+      </div>
+    </div>
+    <p class="text-xs text-gray-500 mb-4">
+      Upgrade and restart need an agent attested through SPIRE, on 2.10 or newer, whose
+      <code class="font-mono">policy.yaml</code> enables <code class="font-mono">upgrades:</code> and
+      which has the updater container beside it. The updater verifies each image's
+      signature before it pulls; a release recorded here is only a choice.
+      <a href="/docs/platform/spiffe/remote-agents/lifecycle" class="text-blue-600 hover:underline">How it works</a>
+    </p>
+
+    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Releases</h3>
+    <div x-show="releases.length === 0" class="text-sm text-gray-400 mb-3">
+      None recorded. Check Docker Hub, or add one by hand (an air-gapped mirror's digest).
+    </div>
+    <table x-show="releases.length > 0" class="w-full text-sm mb-3">
+      <tbody>
+        <template x-for="r in releases" :key="r.id">
+          <tr class="border-b border-gray-50">
+            <td class="py-1.5 pr-4 font-mono text-xs text-gray-800" x-text="r.version"></td>
+            <td class="py-1.5 pr-4 font-mono text-xs text-gray-500 break-all" :title="r.digest"
+                x-text="r.digest.slice(0, 19) + '…'"></td>
+            <td class="py-1.5 pr-4 text-xs text-gray-500" x-text="r.source"></td>
+            <td class="py-1.5 pr-4 text-xs text-gray-400" x-text="r.notes"></td>
+            <td class="py-1.5 text-right">
+              <button @click="deleteRelease(r)" class="text-xs text-red-500 hover:text-red-700">Remove</button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+    <div class="flex flex-wrap items-end gap-2 mb-6">
+      <input x-model="releaseForm.version" placeholder="2.10.1"
+             class="w-28 text-sm border border-gray-300 rounded-lg px-2 py-1.5 font-mono"/>
+      <input x-model="releaseForm.digest" placeholder="sha256:…"
+             class="flex-1 min-w-[16rem] text-sm border border-gray-300 rounded-lg px-2 py-1.5 font-mono"/>
+      <button @click="addRelease()" :disabled="releaseBusy || !releaseForm.version || !releaseForm.digest"
+              class="text-sm border border-gray-300 hover:bg-gray-50 text-gray-700 px-3 py-1.5 rounded-lg font-medium transition">
+        Add release
+      </button>
+    </div>
+
+    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Rollouts</h3>
+    <div x-show="rollouts.length === 0" class="text-sm text-gray-400">None yet.</div>
+    <template x-for="ro in rollouts" :key="ro.id">
+      <div class="border border-gray-100 rounded-lg px-3 py-2 mb-2 text-xs">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="font-mono font-medium text-gray-800" x-text="ro.version"></span>
+          <span :class="rolloutClass(ro.status)" class="px-1.5 py-0.5 rounded font-medium" x-text="ro.status"></span>
+          <span class="text-gray-400" x-text="fmt(ro.created_at)"></span>
+          <span class="text-red-600" x-text="ro.detail"></span>
+        </div>
+        <div class="mt-1 text-gray-600">
+          <template x-for="j in ro.jobs" :key="j.job_id">
+            <a :href="'/jobs/' + j.job_id" class="inline-block mr-3 hover:underline">
+              <span x-text="j.agent"></span>
+              <span class="text-gray-400" x-text="'(' + j.ring + ', ' + j.status + ')'"></span>
+            </a>
+          </template>
+        </div>
+        <!-- Ineligible agents are listed with why, never silently left behind. -->
+        <ul x-show="Object.keys(ro.skipped || {}).length > 0" class="mt-1 text-gray-500">
+          <template x-for="name in Object.keys(ro.skipped || {})" :key="name">
+            <li><span class="font-medium" x-text="name"></span>: <span x-text="ro.skipped[name]"></span></li>
+          </template>
+        </ul>
+      </div>
+    </template>
+  </div>
+
+  <!-- Upgrade one agent, or start a rollout: the same release choice and "when". -->
+  <div x-show="upgrade.open" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg p-6">
+      <h3 class="text-lg font-semibold text-gray-800 mb-1"
+          x-text="upgrade.rollout ? 'New rollout' : 'Upgrade ' + upgrade.name"></h3>
+      <p class="text-xs text-gray-500 mb-4" x-show="upgrade.rollout">
+        Every eligible agent: the canary ring first, the rest once every canary is up on
+        the release. Any failure stops the rollout.
+      </p>
+      <p class="text-xs text-gray-500 mb-4" x-show="!upgrade.rollout">
+        Its updater verifies the release's signature, swaps the container, and rolls back
+        if the new agent does not come up. It currently reports
+        <span class="font-mono" x-text="upgrade.from || 'no version'"></span>.
+      </p>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Release</label>
+          <select x-model="upgrade.release_id"
+                  class="w-full text-sm border border-gray-300 rounded-lg px-3 py-2">
+            <template x-for="r in releases" :key="r.id">
+              <option :value="r.id" x-text="r.version + '  ' + r.digest.slice(0, 19) + '…'"></option>
+            </template>
+          </select>
+        </div>
+        <label x-show="!upgrade.rollout" class="flex items-center gap-2 text-xs text-gray-600">
+          <input type="checkbox" x-model="upgrade.force" class="rounded border-gray-300"/>
+          Allow a downgrade (the agent's policy.yaml must allow it too)
+        </label>
+        {{ schedule_picker() }}
+      </div>
+      <div class="flex justify-end gap-2 mt-6">
+        <button @click="upgrade.open = false"
+                class="text-sm px-4 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50">Cancel</button>
+        <button @click="submitUpgrade()" :disabled="upgrade.busy || !upgrade.release_id || !scheduleReady()"
+                class="text-sm px-4 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white font-medium disabled:opacity-50"
+                x-text="scheduleVerb(upgrade.busy ? 'Queuing…' : '', upgrade.rollout ? 'Start rollout' : 'Upgrade')"></button>
+      </div>
     </div>
   </div>
 
@@ -598,7 +773,16 @@ function detectShell(nav) {
 
 function agentsPage() {
   return {
+    ...scheduleState(),
     agents: [],
+    // Lifecycle (docs/platform/spiffe/remote-agents/lifecycle.md)
+    releases: [],
+    rollouts: [],
+    newestRelease: null,
+    releaseBusy: false,
+    releaseForm: {version: '', digest: ''},
+    upgrade: {open: false, rollout: false, agentId: '', name: '', from: '', release_id: '',
+              force: false, busy: false},
     loading: true,
     notEnabled: false,
     noAccess: '',        // the 403 text when this user holds no `agents` permission
@@ -671,6 +855,8 @@ function agentsPage() {
       requireAuth();
       this.spireDismissed = this.loadSpireDismissed();
       await this.load();
+      this.loadLifecycle();
+      this.loadChangeWindows();
       // Status is derived from last_seen_at, so it only changes as the agent polls.
       this._timer = setInterval(() => this.load(true), 15000);
     },
@@ -683,6 +869,7 @@ function agentsPage() {
         this.spireEnabled = !!r.spire_attest_enabled;
         this.spireMinVersion = r.spire_min_agent_version || '2.6.0';
         this.secretsRequireSpire = !!r.dashboard_secrets_require_spire;
+        this.newestRelease = r.newest_release || null;
         this.notEnabled = false;
         this.noAccess = '';
       } catch (e) {
@@ -702,6 +889,145 @@ function agentsPage() {
         }
       } finally {
         this.loading = false;
+      }
+    },
+
+    // ── Lifecycle ──
+    // Methods, not getters, so tests/template_helpers_check.js can reach them.
+
+    async loadLifecycle() {
+      try {
+        const [rel, ro] = await Promise.all([API.get('/api/agents/releases'),
+                                             API.get('/api/agents/rollouts')]);
+        this.releases = rel.releases || [];
+        this.rollouts = ro.rollouts || [];
+        this.newestRelease = this.releases[0] || null;
+      } catch (e) {
+        // The agents list already reports a feature-off or denied state.
+      }
+    },
+
+    versionTuple(v) {
+      const m = String(v || '').match(/(\d+)\.(\d+)\.(\d+)/);
+      return m ? [+m[1], +m[2], +m[3]] : [0, 0, 0];
+    },
+
+    newerThan(a, b) {
+      const x = this.versionTuple(a), y = this.versionTuple(b);
+      for (let i = 0; i < 3; i++) { if (x[i] !== y[i]) return x[i] > y[i]; }
+      return false;
+    },
+
+    updateAvailable(a) {
+      return !!(this.newestRelease && a.status !== 'revoked' && a.agent_version
+                && this.newerThan(this.newestRelease.version, a.agent_version));
+    },
+
+    rolloutClass(s) {
+      return {canary: 'bg-purple-50 text-purple-700', default: 'bg-blue-50 text-blue-700',
+              done: 'bg-green-50 text-green-700', stopped: 'bg-red-50 text-red-700'}[s]
+             || 'bg-gray-50 text-gray-600';
+    },
+
+    openUpgrade(a) {
+      this.scheduleReset();
+      this.upgrade = {open: true, rollout: false, agentId: a.id, name: a.name,
+                      from: a.agent_version, release_id: (this.releases[0] || {}).id || '',
+                      force: false, busy: false};
+    },
+
+    openRollout() {
+      this.scheduleReset();
+      this.upgrade = {open: true, rollout: true, agentId: '', name: '', from: '',
+                      release_id: (this.releases[0] || {}).id || '', force: false, busy: false};
+    },
+
+    async submitUpgrade() {
+      this.upgrade.busy = true;
+      try {
+        if (this.upgrade.rollout) {
+          const r = await API.post('/api/agents/rollouts',
+                                   {release_id: this.upgrade.release_id, ...this.schedulePayload()});
+          const skipped = Object.keys(r.skipped || {}).length;
+          this.flash(`Rollout of ${r.version} started: ${r.jobs.length} queued` +
+                     (skipped ? `, ${skipped} not eligible (listed under Lifecycle).` : '.'), 'success');
+        } else {
+          const r = await API.post(`/api/agents/${encodeURIComponent(this.upgrade.agentId)}/upgrade`,
+                                   {release_id: this.upgrade.release_id, force: this.upgrade.force,
+                                    ...this.schedulePayload()});
+          this.flash(r.scheduled_for ? `Upgrade scheduled for ${this.scheduleStamp(r.scheduled_for)} UTC.`
+                                     : 'Upgrade queued.', 'success');
+        }
+        this.upgrade.open = false;
+        await Promise.all([this.load(true), this.loadLifecycle()]);
+      } catch (e) {
+        this.flash('Could not queue it: ' + (e.message || e), 'error');
+      } finally {
+        this.upgrade.busy = false;
+      }
+    },
+
+    async restartAgent(a) {
+      if (!confirm(`Restart "${a.name}"? Running jobs finish first; under SPIRE it attests again with a fresh key.`)) return;
+      try {
+        await API.post(`/api/agents/${encodeURIComponent(a.id)}/restart`, {});
+        this.flash('Restart queued.', 'success');
+      } catch (e) {
+        this.flash('Could not restart: ' + (e.message || e), 'error');
+      }
+    },
+
+    async setPaused(a, paused) {
+      try {
+        await API.post(`/api/agents/${encodeURIComponent(a.id)}/${paused ? 'pause' : 'resume'}`, {});
+        await this.load(true);
+      } catch (e) {
+        this.flash((paused ? 'Pause' : 'Resume') + ' failed: ' + (e.message || e), 'error');
+      }
+    },
+
+    async setRing(a, ring) {
+      try {
+        await API.patch(`/api/agents/${encodeURIComponent(a.id)}`, {upgrade_ring: ring});
+        await this.load(true);
+      } catch (e) {
+        this.flash('Could not set the ring: ' + (e.message || e), 'error');
+      }
+    },
+
+    async addRelease() {
+      this.releaseBusy = true;
+      try {
+        await API.post('/api/agents/releases', {...this.releaseForm});
+        this.releaseForm = {version: '', digest: ''};
+        await this.loadLifecycle();
+      } catch (e) {
+        this.flash('Could not add the release: ' + (e.message || e), 'error');
+      } finally {
+        this.releaseBusy = false;
+      }
+    },
+
+    async checkHub() {
+      this.releaseBusy = true;
+      try {
+        const r = await API.post('/api/agents/releases/check', {tag: 'latest'});
+        this.flash(`Docker Hub: ${r.version} (${r.digest.slice(0, 19)}…) recorded.`, 'success');
+        await this.loadLifecycle();
+      } catch (e) {
+        this.flash(e.message || String(e), 'error');
+      } finally {
+        this.releaseBusy = false;
+      }
+    },
+
+    async deleteRelease(r) {
+      if (!confirm(`Remove release ${r.version}? Queued upgrades to it are not cancelled.`)) return;
+      try {
+        await API.delete(`/api/agents/releases/${encodeURIComponent(r.id)}`);
+        await this.loadLifecycle();
+      } catch (e) {
+        this.flash('Could not remove it: ' + (e.message || e), 'error');
       }
     },
 

@@ -439,6 +439,54 @@ def test_the_release_table_is_its_own_and_the_migration_is_recorded():
     assert len(mig) == 1 and len(mig[0].steps) == 4
 
 
+# ── deployed agents ──────────────────────────────────────────────────────────
+
+_SPIRE = {"mode": "spire", "join_token": "t", "trust_domain": "dash.example.com",
+          "bootstrap_pem": "-----BEGIN CERTIFICATE-----\n",
+          "server_address": "spire.example.com", "server_port": 8081}
+
+
+def test_a_spire_host_gets_the_updater_and_opts_into_signed_upgrades():
+    import yaml
+    from web_dashboard.services import agent_host_service as ahs
+    policy = ahs.policy_yaml(["10.40.0.0/16"], 2, upgrades=True)
+    up = yaml.safe_load(policy)["upgrades"]
+    assert up["repository"] == "chrweav/dashboard-agent"
+    assert up["verify"]["keyless"]["identity"] == agent_lifecycle_service.SIGNING_IDENTITY
+    image = "chrweav/dashboard-agent@" + DIGEST
+    script = ahs.bootstrap_script(url="https://dash.example.com", policy=policy,
+                                  material=dict(_SPIRE), image=image)
+    lines = script.splitlines()
+    agent_line = next(x for x in lines if "--name dashboard-agent " in x)
+    updater_line = next(x for x in lines if "--name dashboard-agent-updater" in x)
+    assert agent_line.endswith(image) and "--label dashboard-agent.role=agent" in agent_line
+    assert "/var/lib/dashboard-agent-control" in agent_line
+    assert "--cap-drop ALL" in updater_line and "policy.yaml:ro" in updater_line
+    assert lines.index(updater_line) < lines.index(agent_line)
+
+
+def test_a_code_mode_host_gets_no_updater_and_no_opt_in():
+    from web_dashboard.services import agent_host_service as ahs
+    assert "upgrades" not in ahs.policy_yaml(["10.40.0.0/16"], 2)
+    script = ahs.bootstrap_script(url="https://dash.example.com",
+                                  policy=ahs.policy_yaml(["10.40.0.0/16"], 2),
+                                  material={"mode": "code", "code": "c"})
+    assert "updater" not in script and "dashboard-agent.role" not in script
+
+
+def test_a_new_host_starts_the_newest_release_by_digest():
+    from web_dashboard.services import agent_host_service as ahs
+    with SessionLocal() as db:
+        newest = agent_release_service.newest(db)
+        assert ahs.agent_image(db) == f"chrweav/dashboard-agent@{newest.digest}"
+    try:
+        ahs.bootstrap_script(url="https://d.example.com", policy="x",
+                             material={"mode": "code", "code": "c"}, image="x; curl evil")
+    except ahs.AgentHostError:
+        return
+    raise AssertionError("a shell-shaped image was accepted")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
     failures = 0

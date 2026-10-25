@@ -107,6 +107,13 @@ nothing on the host's disk can ask for them any more. See
 and tick **Release dashboard-held credentials only to SPIRE-attested agents**
 (`dashboard_secrets_require_spire`) once every agent that needs a credential has migrated.
 
+## Then: upgrade it from the dashboard
+
+An attested agent is also the one the dashboard can upgrade and restart, because its
+identity survives a new container. Add the updater and opt in through `policy.yaml`; see
+[Upgrading and restarting agents centrally](lifecycle.md). A restart is also how an
+attested agent's key is rotated.
+
 ## Rolling back
 
 Drop the overlay on the agent host, and **re-issue an enrolment code** for the agent. That

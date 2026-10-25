@@ -40,6 +40,13 @@ MIN_LIFECYCLE_VERSION = (2, 10)
 #: repository than the one its policy.yaml names, so this is the common case, not a grant.
 DEFAULT_REPOSITORY = "chrweav/dashboard-agent"
 
+#: The keyless signing identity of this project's release workflow
+#: (.github/workflows/publish-images.yml), as a policy.yaml `upgrades.verify.keyless` pins
+#: it. Written into the policy of every SPIRE host the dashboard deploys.
+SIGNING_IDENTITY = ("^https://github.com/Weaverlab-xyz/vm-dashboard-community/"
+                    ".github/workflows/publish-images.yml@refs/tags/v")
+SIGNING_ISSUER = "https://token.actions.githubusercontent.com"
+
 RINGS = ("canary", "default")
 
 _ACTIVE = ("queued", "running")
