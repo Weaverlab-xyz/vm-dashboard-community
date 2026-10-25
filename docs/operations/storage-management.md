@@ -517,7 +517,7 @@ Other things to know:
 - **The scope follows the asset.** **Move** carries it to the new backend, **Migrate**
   copies it with each copied asset, and deleting the asset drops it.
 - **Workstream post-deploy runs** can only use assets that are global or scoped to that
-  workstream (see [Workstream post-deploy runs](../clouds/vms.md#workstream-post-deploy-runs)).
+  workstream (see [Workstream post-deploy runs](../clouds/vms/pra.md#workstream-post-deploy-runs)).
 - **A workstream can't be deleted** while assets are scoped to it. Make them global or
   scope them elsewhere first.
 - **Jobs already queued still run.** The check is made when a run is requested, not

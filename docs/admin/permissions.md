@@ -430,16 +430,16 @@ A scope says *what*, not *which*. Two mechanisms narrow the *which*:
 
   Its **deploy defaults** take the same authority as editing it, and are audited too. They
   are a fixed list holding no secrets — see
-  [Workstream deploy defaults](../clouds/vms.md#workstream-deploy-defaults). Its **network
+  [Workstream deploy defaults](../clouds/vms/pra.md#workstream-deploy-defaults). Its **network
   defaults** take the same authority — see
-  [Workstream network defaults](../clouds/vms.md#workstream-network-defaults).
+  [Workstream network defaults](../clouds/vms/pra.md#workstream-network-defaults).
   Its **bound secrets** (an SSH key secret per cloud and a PRA credential) are
   **administrator-only** to change; members can see which are bound. See
-  [Workstream secret bindings](../clouds/vms.md#workstream-secret-bindings). A registered vault can be
+  [Workstream secret bindings](../clouds/vms/pra.md#workstream-secret-bindings). A registered vault can be
   limited to a workstream by an administrator, so only that workstream's deploys read it —
   see [Vaults](secrets-management.md#vaults-and-a-workstreams-own-vault).
   Its **post-deploy runs** (assets run on every VM deployed into it) are administrator-only
-  to change too — see [Workstream post-deploy runs](../clouds/vms.md#workstream-post-deploy-runs).
+  to change too — see [Workstream post-deploy runs](../clouds/vms/pra.md#workstream-post-deploy-runs).
   **Stored assets** can be limited to one workstream by an administrator; only its
   members then see, run or replace them — see
   [Scoping an asset to a workstream](../operations/storage-management.md#scoping-an-asset-to-a-workstream).

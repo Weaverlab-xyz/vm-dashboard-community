@@ -368,7 +368,7 @@ the same as a secret that can't be read, and a warning is logged. So a team's ow
 that team's secrets and no one else's deploys can read them.
 
 - A workstream's **bound PRA credential**
-  ([Workstream secret bindings](../clouds/vms.md#workstream-secret-bindings)) can name a
+  ([Workstream secret bindings](../clouds/vms/pra.md#workstream-secret-bindings)) can name a
   reference into its own vault or an unlimited one; one into another workstream's vault is
   refused when it's saved. Type the reference in the editor's **or a reference** field, since
   the picker lists only the configured store.

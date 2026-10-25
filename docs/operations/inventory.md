@@ -57,7 +57,7 @@ their tags from the per-cloud caches those pages already fill, so for about a mi
 a restart they can show none. Hypervisor rows carry their tags natively.
 
 Tags are **edited** on the cloud and Proxmox pages, not here. Which platforms report tags,
-and how editing works, is in [Cloud VMs — Tags and labels](../clouds/vms.md#tags-and-labels).
+and how editing works, is in [Cloud VMs — Tags and labels](../clouds/vms/tags.md).
 
 ---
 
