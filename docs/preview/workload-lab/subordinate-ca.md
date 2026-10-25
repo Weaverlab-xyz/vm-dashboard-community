@@ -14,7 +14,7 @@
 sign one. Everything on the other two pages still applies — the same
 [address grammar](certificates.md#the-address-is-the-entire-configuration-surface), the
 same store, the same [two-halves split](certificates.md#what-the-plugin-does-in-one-paragraph),
-and a CA [built and torn down](certificate-lab.md#building-a-ca) the same way — with one
+and a CA [built and torn down](certificate-lab/building-a-ca.md) the same way — with one
 inversion that changes what the demonstration is about.
 
 **The managed credential here is the issuer, not a certificate.** Password Safe obtains a

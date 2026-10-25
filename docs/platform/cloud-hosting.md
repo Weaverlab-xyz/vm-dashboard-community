@@ -125,7 +125,7 @@ The same on all three platforms:
 command. It needs no ingress and no volume, but it does need the same database,
 the same JWT key, and the same cloud credentials — it is what actually runs
 every provision. Without it, jobs sit `pending` forever with nothing logged.
-[job-worker.md](../operations/job-worker.md#deploying-the-worker) covers it in full; do not
+[job-worker.md](../operations/job-worker/deploying.md) covers it in full; do not
 skip the part about `minReplicas: 0` meaning *off* rather than *scale to zero*.
 
 **The gateway is a sidecar, not a separate service.** Two reasons, and the
@@ -240,7 +240,7 @@ for a long time it had no port and could not be probed at all — it now serves
 `/api/health` on `WORKER_HEALTH_PORT` (8080) for exactly this purpose, and reports
 unhealthy until its run loop is turning. Probe config, and the reason you must not point a
 probe at it before the deployed image contains the listener, are in
-[job-worker.md](../operations/job-worker.md#health-endpoint).
+[job-worker.md](../operations/job-worker/health-endpoint.md).
 
 ### Replicas
 

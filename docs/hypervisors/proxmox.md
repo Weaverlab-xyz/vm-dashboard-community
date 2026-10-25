@@ -116,7 +116,7 @@ your nodes as tabs and all VMs and containers listed within a few seconds.
 | **Reboot** | Graceful reboot for QEMU VMs |
 | **Status and resource usage** | CPU %, memory, running/stopped state |
 | **VM detail** | IP addresses (via QEMU guest agent), OS type, tags, description |
-| **Bulk power** | Tick several rows and send Start, Shutdown, Force Off or Reboot to the whole selection from the toolbar — one job per VM, sharing a batch you watch on one page. VMs already in the target state are skipped and the dialog says how many; fifty per operation is the cap. See [Powering a selection](../admin/remote-agents/hypervisors.md#powering-a-selection) |
+| **Bulk power** | Tick several rows and send Start, Shutdown, Force Off or Reboot to the whole selection from the toolbar — one job per VM, sharing a batch you watch on one page. VMs already in the target state are skipped and the dialog says how many; fifty per operation is the cap. See [Powering a selection](../admin/remote-agents/hypervisors/power.md) |
 
 Templates are automatically hidden from the resource list.
 

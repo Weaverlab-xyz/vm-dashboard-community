@@ -172,7 +172,7 @@ arithmetically from a CIDR you wrote down.
 
 The exception is **the host the agent is running on**. Inside the container `127.0.0.1` is
 the container, so `allow_loopback` cannot reach a service listening on the Windows machine's
-own loopback — see [VMware Workstation Pro](hypervisors.md#vmware-workstation-pro), where that is the
+own loopback — see [VMware Workstation Pro](hypervisors/vmware-workstation.md), where that is the
 whole question. Docker Desktop's `host.docker.internal` resolves to the host and is a
 legitimate `fqdn:` target, but it only helps if the service is listening on an address other
 than `127.0.0.1`.

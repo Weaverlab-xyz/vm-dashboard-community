@@ -526,7 +526,7 @@ both certificate packages:
    else — no `Text`, no `Password`. `--decrypt` cannot help, because it only adds a
    query parameter and there is no payload field for it to fill. The body comes from a
    separate call that takes **only a GUID**, so even the happy path is two round trips.
-   See [Password Safe → Troubleshooting](../beyondtrust/password-safe.md#troubleshooting).
+   See [Password Safe → Troubleshooting](../beyondtrust/password-safe/troubleshooting.md).
 2. **On the leaf package it is binary — which rules out ps-cli, not the API.** `bundle`
    defaults to `Pkcs12` for `Certificate` and `PemBundle` for `Subordinate CA`. The
    endpoint returns `application/octet-stream` and is byte-faithful; every route ps-cli
@@ -541,7 +541,7 @@ both certificate packages:
    downloaded through the API came back larger than the original and did not match the
    web console's copy, so a non-human identity would have retrieved a corrupt bundle no
    matter how careful the client was. That floor is already a
-   [Certificate Lab prerequisite](../preview/workload-lab/certificate-lab.md#password-safe).
+   [Certificate Lab prerequisite](../preview/workload-lab/certificate-lab/prerequisites.md#password-safe).
 
 None of this is a structural objection of the kind `cloud` has — a certificate is a
 credential a workload legitimately spends, and an agent answerable for one is a coherent
@@ -690,7 +690,7 @@ came back empty, so a tenant that disagrees says so in one line.
 **And a floor §5d already records applies here too:** below BeyondInsight 26.1.0.878, file
 secrets downloaded through the API came back larger than the original, so this episode
 would retrieve a corrupt bundle however careful the client is. It is already a
-[Certificate Lab prerequisite](../preview/workload-lab/certificate-lab.md#password-safe), which is
+[Certificate Lab prerequisite](../preview/workload-lab/certificate-lab/prerequisites.md#password-safe), which is
 why it is not a new one — but it is the version this episode silently depends on, and the
 DER check is not a guard against it: a too-large bundle still starts `0x30`.
 

@@ -128,7 +128,7 @@ az containerapp create \
 ```
 
 Full detail, including why the worker is its own Container App rather than
-another sidecar: [job-worker.md](../../operations/job-worker.md#container-apps).
+another sidecar: [job-worker.md](../../operations/job-worker/deploying.md#container-apps).
 
 ## Pages
 

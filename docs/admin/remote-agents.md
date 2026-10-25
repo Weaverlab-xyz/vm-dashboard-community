@@ -248,7 +248,7 @@ what an unauthenticated internet-facing endpoint actually needs.
 | The dashboard refuses to queue: *"needs at least 2.1"* | This connection takes its credential from the dashboard and the agent image predates that. Pull `chrweav/dashboard-agent:latest` and restart the container; the agent keeps its identity, so no re-enrolment. |
 | A connection shows `takes its credential from Password Safe, but this dashboard has no Password Safe API client configured` | Set the BeyondTrust API URL, client id and client secret under Settings. Refused at enqueue rather than as a failed job, because a checkout that cannot authenticate is a configuration state, not a run failure. |
 | A job logs *"the `password` left in connections.yaml is IGNORED"* | Exactly what it says — the entry has `dashboard_secret: true` and a leftover local credential. Not fatal, but that plaintext is still sitting on this host, which is the thing you moved the credential to avoid. Delete it. |
-| `could not reach vmrest at 127.0.0.1:8697` | Either `vmrest` is not running, or the connection lacks `allow_loopback: true` in policy.yaml — the agent denies loopback by default. **On Docker Desktop `allow_loopback` cannot fix this**, because `127.0.0.1` inside the container is the container: point the connection at `host.docker.internal` and add it as a target instead. See [VMware Workstation Pro](remote-agents/hypervisors.md#vmware-workstation-pro). |
+| `could not reach vmrest at 127.0.0.1:8697` | Either `vmrest` is not running, or the connection lacks `allow_loopback: true` in policy.yaml — the agent denies loopback by default. **On Docker Desktop `allow_loopback` cannot fix this**, because `127.0.0.1` inside the container is the container: point the connection at `host.docker.internal` and add it as a target instead. See [VMware Workstation Pro](remote-agents/hypervisors/vmware-workstation.md). |
 | `vmrest rejected the credential` | Set them with `vmrest -C`, and check the username matches connections.yaml. |
 | `vmrest has no 'restart' operation` | Working as intended — its API has no reset, reboot or snapshot. Use power_off then power_on. |
 | A sync never runs, and the connection shows an error | Read it — the enqueuer records why rather than queueing a job that would wait indefinitely. Usually the bound agent is offline or lacks the `agent_hypervisor` grant. |
@@ -345,7 +345,7 @@ Hypervisor brokering followed it and is described above. Next:
   same job by polling outward instead of the dashboard holding an inbound SSH key to a
   Windows desktop.
 - ~~VMware Workstation over a co-located agent~~ — shipped; see
-  [VMware Workstation Pro](remote-agents/hypervisors.md#vmware-workstation-pro).
+  [VMware Workstation Pro](remote-agents/hypervisors/vmware-workstation.md).
 
 `config.py`'s singleton hypervisor keys (one `proxmox_host`, one `vsphere_host`) were
 the blocker for all of this. They are now a one-time **seed** for the

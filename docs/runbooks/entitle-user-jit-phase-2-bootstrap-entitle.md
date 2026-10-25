@@ -194,7 +194,7 @@ the new scope declared — not always three. The new resources now carry the
 > non-admin with an explicit map could already reach: the full level set
 > for a previously ungated route, and *nothing* for one that required the
 > Admin flag. See
-> [Permissions → Adding a scope](../admin/permissions.md#adding-a-scope-for-contributors).
+> [Permissions → Adding a scope](../admin/permissions/adding-a-scope.md).
 
 ## Step 9 — Where this fits
 

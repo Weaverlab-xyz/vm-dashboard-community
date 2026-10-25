@@ -252,7 +252,7 @@ Three ways out:
    long. The deploy reports which of the four first-run steps it is on, and the
    worker log has a `Rancher API (runner): <METHOD> <path>` line on each side of
    every call with its elapsed time — check those before concluding a deploy is
-   hung — see [Troubleshooting](../rancher.md#troubleshooting).
+   hung — see [Troubleshooting](troubleshooting.md).
 
 **Downstream clusters are unaffected** either way — cattle-cluster-agents dial out
 from their cloud NAT, not through your corp proxy. The Rancher **UI** in your

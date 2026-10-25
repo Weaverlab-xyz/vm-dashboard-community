@@ -96,7 +96,7 @@ before stashing because that path destroys by id and never needs the value). So 
 (and the name) from that state and restores the ref, minting only if there is nothing to
 recover — or if a *different* name was requested, which is how an operator deliberately
 forces a fresh token. An unrecoverable conflict is a dead end by construction and fails with the
-remedies spelled out in the message — see the [troubleshooting entry](../beyondtrust/entitle.md#troubleshooting).
+remedies spelled out in the message — see the [troubleshooting entry](../beyondtrust/entitle/troubleshooting.md).
 
 **The mint's lifecycle ends with the agent's** (`destroy_agent_token`). Because the
 conflict above is a dead end, a minted token must never outlive its agent: the `remove`

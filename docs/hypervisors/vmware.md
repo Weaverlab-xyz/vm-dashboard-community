@@ -165,7 +165,7 @@ the VMs on that host, badged with the agent's name.
 |---|---|
 | **Workstation page** | Every VM the agent reports, from every Workstation host you have enrolled |
 | **Start / Stop** | Per-VM power, queued as an agent job with live output on the Jobs page. When the job finishes the dashboard queues an inventory sync of its own, so the page reflects the new state without a manual Sync Now |
-| **Bulk Start / Force Off** | Tick several rows and power the whole selection from the toolbar — one job per VM, sharing a batch you can watch on one page. The agent runs them one at a time, VMs already in the target state are skipped (the dialog says how many), and fifty per operation is the cap. See [Powering a selection](../admin/remote-agents/hypervisors.md#powering-a-selection) |
+| **Bulk Start / Force Off** | Tick several rows and power the whole selection from the toolbar — one job per VM, sharing a batch you can watch on one page. The agent runs them one at a time, VMs already in the target state are skipped (the dialog says how many), and fifty per operation is the cap. See [Powering a selection](../admin/remote-agents/hypervisors/power.md) |
 | **OS and Path columns** | The guest OS and the VMX file's location on the agent's host |
 | **Workstream assignment** | Admins select VMs and tag them into a workstream, which is what makes them visible to non-admins. Tagging is admin-only; the power buttons beside it are not — they need `vms:write` and access to the VM's workstream, the same as the per-row buttons |
 | **Sync Now** | Asks the agent to re-read its host immediately rather than waiting for the scheduled pass. Rarely needed after a Start or a Stop — those re-sync themselves |

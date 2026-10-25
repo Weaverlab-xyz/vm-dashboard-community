@@ -104,7 +104,7 @@ what it means that this one does not.
   through the API came back larger than the original, so this episode would retrieve a
   corrupt bundle however careful it is — and the DER check does not catch it, because a
   too-large bundle still starts `0x30`. It is already a
-  [Certificate Lab prerequisite](../../../preview/workload-lab/certificate-lab.md#password-safe);
+  [Certificate Lab prerequisite](../../../preview/workload-lab/certificate-lab/prerequisites.md#password-safe);
   it is named again here because this episode depends on it silently.
 - **Revocation on six of nine backends only.** EST, step-ca and `selfsigned` have no
   revocation operation at all, so on those the certificate stays valid until it expires

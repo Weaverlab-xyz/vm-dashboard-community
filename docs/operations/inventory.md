@@ -132,7 +132,7 @@ writable Password Safe record, so it never promises more than it can do.
 
 A workstream can set attributes that every system it onboards carries, such as
 `Workstream = team-a`, so a Smart Rule can follow the dashboard's workstreams. See
-[Password Safe → Workstream attributes](../beyondtrust/password-safe.md#workstream-attributes).
+[Password Safe → Workstream attributes](../beyondtrust/password-safe/workstream-attributes.md).
 
 ### Re-running a Smart Rule
 
