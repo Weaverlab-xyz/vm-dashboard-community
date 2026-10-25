@@ -121,9 +121,15 @@ class RouteRequest(BaseModel):
     agent_id: str
     cidr: str
     label: str = ""
-    # Also route dashboard-deployed cloud VMs whose private address is in this range to
-    # this agent, instead of the remote worker. Off unless asked for.
-    include_cloud_vms: bool = False
+    # onprem | aws | azure | gcp, with optional narrowers: a connection for onprem; a
+    # region and/or a workstream for a cloud. See config_mgmt_route_service.
+    scope: str = "onprem"
+    region: str = ""
+    connection_id: str = ""
+    workstream: str = ""
+    # Superseded by `scope`. Accepted only to refuse it: `true` used to mean "every cloud
+    # too", and silently creating an on-premises route instead would route nothing.
+    include_cloud_vms: Optional[bool] = None
 
 
 class RouteUpdate(BaseModel):
@@ -131,7 +137,16 @@ class RouteUpdate(BaseModel):
     cidr: Optional[str] = None
     label: Optional[str] = None
     is_active: Optional[bool] = None
+    scope: Optional[str] = None
+    region: Optional[str] = None
+    connection_id: Optional[str] = None
+    workstream: Optional[str] = None
     include_cloud_vms: Optional[bool] = None
+
+
+_FLAG_SUPERSEDED = ("include_cloud_vms is replaced by scope: create one route per target "
+                    "scope — scope \"onprem\" for hypervisor guests, or \"aws\", \"azure\" "
+                    "or \"gcp\" for that cloud's VMs, optionally with a region.")
 
 
 @router.get("/config-mgmt-routes")
@@ -154,15 +169,28 @@ def list_config_routes(db: Session = Depends(get_db),
     for row in routes:
         row["matches"] = counts.get(row["id"], 0)
         row["cloud_matches"] = cloud_counts.get(row["id"], 0)
+    from ..database import HypervisorConnection
+    from ..services import workgroup_service
+    connections = {c.id: c.name for c in db.query(HypervisorConnection).all()}
+    for row in routes:
+        row["scope_text"] = cmr.scope_text(row["scope"], row["region"],
+                                           connections.get(row["connection_id"], ""),
+                                           row["workstream"])
     granted = [a.id for a in db.query(RemoteAgent).filter(
         RemoteAgent.is_active.is_(True)).all()
         if "agent_ansible" in agent_service.allowed_job_types(a)]
     return {"routes": routes, "agents": _active_agents(db),
-            "ansible_agent_ids": granted}
+            "ansible_agent_ids": granted,
+            "connections": [{"id": cid, "name": name}
+                            for cid, name in sorted(connections.items(),
+                                                    key=lambda kv: kv[1].lower())],
+            "scopes": [{"id": s, "label": cmr.SCOPE_LABELS[s]} for s in cmr.SCOPES],
+            "workstreams": sorted(workgroup_service.list_names(db))}
 
 
 @router.get("/config-mgmt-routes/resolve")
-def resolve_config_route(address: str, cloud_vm: bool = False,
+def resolve_config_route(address: str, scope: str = "onprem", region: str = "",
+                         connection_id: str = "", workstream: str = "",
                                db: Session = Depends(get_db),
                                current_user: User = Depends(require_explicit_permission("connections", "read"))):
     """Which agent would execute a run against ``address``.
@@ -170,11 +198,13 @@ def resolve_config_route(address: str, cloud_vm: bool = False,
     The question operators actually ask, answered without queueing anything. ``source``
     is ``"route"`` when a range decided it and ``"none"`` when nothing did — in which
     case the executor is whichever agent brokers the target's connection, which this
-    endpoint cannot know from an address alone. With ``cloud_vm`` it answers for a cloud
-    VM's private address, where only routes that opted in count and "none" means the
-    remote worker.
+    endpoint cannot know from an address alone. With a cloud ``scope`` it answers for a
+    cloud VM's private address in that cloud (and ``region`` and ``workstream``), where
+    "none" means the
+    remote worker; with ``onprem`` and a ``connection_id``, for that connection's guests.
     """
-    route = cmr.match_for(db, address, cloud_vm=cloud_vm)
+    route = cmr.match_for(db, address, scope=scope, region=region,
+                          connection_id=connection_id, workstream=workstream)
     if route is None:
         return {"agent_id": "", "agent_name": "", "cidr": "", "source": "none"}
     agent = db.query(RemoteAgent).filter(RemoteAgent.id == route.agent_id).first()
@@ -187,16 +217,21 @@ def resolve_config_route(address: str, cloud_vm: bool = False,
 def create_config_route(req: RouteRequest,
                               db: Session = Depends(get_db),
                               current_user: User = Depends(require_explicit_permission("connections", "write"))):
+    if req.include_cloud_vms:
+        raise HTTPException(status_code=400, detail=_FLAG_SUPERSEDED)
     try:
         out = cmr.create(db, agent_id=req.agent_id, cidr=req.cidr, label=req.label,
-                         created_by=current_user.username,
-                         include_cloud_vms=req.include_cloud_vms)
+                         created_by=current_user.username, scope=req.scope,
+                         region=req.region, connection_id=req.connection_id,
+                         workstream=req.workstream)
     except cmr.ConfigRouteError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     job_service.log_audit(db, current_user.username, "config_mgmt_route_create",
                           details={"id": out["id"], "cidr": out["cidr"],
                                    "agent_id": out["agent_id"],
-                                   "include_cloud_vms": out["include_cloud_vms"]})
+                                   "scope": out["scope"], "region": out["region"],
+                                   "connection_id": out["connection_id"],
+                                   "workstream": out["workstream"]})
     return out
 
 
@@ -205,6 +240,8 @@ def update_config_route(route_id: str, req: RouteUpdate,
                               db: Session = Depends(get_db),
                               current_user: User = Depends(require_explicit_permission("connections", "write"))):
     fields = req.model_dump(exclude_unset=True)
+    if fields.pop("include_cloud_vms", None) is not None:
+        raise HTTPException(status_code=400, detail=_FLAG_SUPERSEDED)
     try:
         out = cmr.update(db, route_id, **fields)
     except cmr.ConfigRouteError as exc:

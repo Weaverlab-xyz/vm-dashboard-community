@@ -137,10 +137,10 @@ raising the caps before adding replicas.
 Remote agents add capacity outside the dashboard's worker:
 
 - **Opt in per address range.** On **Remote Agents → Config Routes**, add a range covering
-  a VPC or VNet, name the agent that runs inside it, and tick **Also route cloud VMs in
-  this range**. Config Management runs on dashboard-deployed VMs whose private address is
-  in that range then go to the agent, single runs and bulk runs alike. VMs outside every
-  such route stay on the remote worker, and so does every route that has not ticked it.
+  a VPC or VNet, name the agent that runs inside it, and set **Applies to** to that cloud
+  (and, optionally, its region). Config Management runs on that cloud's dashboard-deployed
+  VMs whose private address is in the range then go to the agent, single runs and bulk
+  runs alike. VMs outside every such route stay on the remote worker.
 - **Run several at once.** Set `ansible.max_concurrent` in the agent's `policy.yaml`
   (agent 2.9 or later, up to 8). Each run is still a one-shot container beside the agent,
   so size the host at about 1 GiB per slot. To go further, run more agents and give each

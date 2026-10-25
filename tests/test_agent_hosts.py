@@ -526,7 +526,7 @@ def test_delete_takes_the_host_down_and_removes_agent_and_routes():
     from web_dashboard.services import config_mgmt_route_service as cmr
     db = _fresh()
     host, agent = _deploy(db)
-    cmr.create(db, agent_id=agent.id, cidr="10.40.0.0/16", include_cloud_vms=True)
+    cmr.create(db, agent_id=agent.id, cidr="10.40.0.0/16", scope="aws")
     with _FakeCloud() as cloud:
         _run(db, host, "start")
         job = _run(db, ahs.get(db, host.id), "delete")
@@ -612,7 +612,8 @@ def test_deploy_routes_the_ranges_and_queues_the_start():
     assert body["job_id"] and body["status"] == "provisioning"
     assert body["routes"] == ["10.50.0.0/16"]
     route = db.query(ConfigMgmtRoute).first()
-    assert route.include_cloud_vms and route.agent_id == body["agent_id"]
+    assert (route.scope, route.scope_region) == ("aws", "us-east-2")
+    assert route.agent_id == body["agent_id"]
     assert c.get("/api/agent-hosts").json()["hosts"][0]["name"] == "vpc-b-agent"
 
 
@@ -620,14 +621,17 @@ def test_a_range_already_routed_is_left_and_reported():
     from web_dashboard.services import config_mgmt_route_service as cmr
     db = _fresh()
     _first, other = _deploy(db, name="first-agent")
-    cmr.create(db, agent_id=other.id, cidr="10.50.0.0/16", include_cloud_vms=True)
+    cmr.create(db, agent_id=other.id, cidr="10.50.0.0/16", scope="aws", region="us-east-2")
+    # An on-premises route for the same range is no clash for an AWS agent.
+    cmr.create(db, agent_id=other.id, cidr="10.51.0.0/16")
     r = _client().post("/api/agent-hosts", json={"name": "second-agent", "cloud": "aws",
                                                  "region": "us-east-2",
                                                  "ranges": ["10.50.0.0/16", "10.51.0.0/16"]})
     assert r.status_code == 201, r.text
     assert r.json()["routes"] == ["10.51.0.0/16"]
     assert r.json()["route_errors"] == [
-        "10.50.0.0/16 is already routed to agent 'first-agent'; left as it is."]
+        "10.50.0.0/16 is already routed to agent 'first-agent' for AWS · us-east-2; "
+        "left as it is."]
 
 
 def test_the_options_name_the_agent_address_problem():

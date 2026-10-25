@@ -1108,7 +1108,24 @@ class ConfigMgmtRoute(Base):
     # worker. NULLABLE, and NULL means False: schema_migrations 0001 adds it as a bare
     # BOOLEAN with no DEFAULT (see approval_required on Job for why), so every route that
     # predates it keeps routing hypervisor guests only and an upgrade moves no cloud VM.
+    # Superseded by `scope` (migration 0003). Kept so old rows keep reading; never read or
+    # written now — the API derives the old meaning from `scope`.
     include_cloud_vms = Column(Boolean, nullable=True, default=False)
+    # Which targets this route may govern: "onprem" (hypervisor guests) or one cloud's
+    # dashboard-deployed VMs. An address alone does not name a machine — every AWS
+    # region's default VPC is 172.31.0.0/16 — so a lookup only considers routes in the
+    # target's own scope. See config_mgmt_route_service.
+    scope = Column(String(16), nullable=False, default="onprem", server_default="onprem")
+    # Narrowers, "" for none (never NULL: NULLs are distinct in a unique index). A region
+    # for a cloud scope; a hypervisor connection id for onprem. The connection narrows
+    # WHICH guests are covered, never who executes: `agent_id` stays the executing agent,
+    # independent of the agent brokering that connection.
+    scope_region = Column(String(64), nullable=False, default="", server_default="")
+    scope_connection_id = Column(String(36), nullable=False, default="", server_default="")
+    # Cloud scopes: one workstream's VMs (the one each was DEPLOYED in). It stands for that
+    # workstream's network — two teams' VPCs in one region often share a range — and is a
+    # tenancy line: one team's agent is never handed another team's VM or its key.
+    scope_workstream = Column(String(100), nullable=False, default="", server_default="")
     created_at = Column(DateTime, default=utcnow, nullable=False)
     created_by = Column(String(100))
     updated_at = Column(DateTime, default=utcnow)
@@ -1118,7 +1135,9 @@ class ConfigMgmtRoute(Base):
     # refused at write time with a message naming the existing row rather than settled
     # by an invisible created_at comparison. Overlapping ranges of DIFFERENT prefix
     # length are legal and the longest wins, exactly like a routing table.
-    __table_args__ = (UniqueConstraint("cidr", name="uq_config_mgmt_route_cidr"),)
+    __table_args__ = (UniqueConstraint("cidr", "scope", "scope_region", "scope_connection_id",
+                                       "scope_workstream",
+                                       name="uq_config_mgmt_route_scope"),)
 
 
 class Job(Base):

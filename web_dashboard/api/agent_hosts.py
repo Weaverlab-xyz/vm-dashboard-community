@@ -174,21 +174,27 @@ def deploy(body: DeployRequest, request: Request,
 
     routes, route_errors = [], []
     if body.create_routes:
-        # A range that is already routed is the one refusal to expect, so it is found from
-        # the data and reported as such. Not caught and stringified: CodeQL
-        # py/stack-trace-exposure fires on an exception's text reaching the response.
-        taken = {r["cidr"]: r for r in cmr.list_routes(db)}
+        # A range that is already routed in this agent's cloud and region is the one
+        # refusal to expect, so it is found from the data and reported as such. Not
+        # caught and stringified: CodeQL py/stack-trace-exposure fires on an exception's
+        # text reaching the response. An on-premises route for the same range is no
+        # clash: routes are scoped (config_mgmt_route_service).
+        taken = {r["cidr"]: r for r in cmr.list_routes(db)
+                 if r["scope"] == host.cloud and r["region"] == host.region.lower()
+                 and not r["workstream"]}
         names = {a.id: a.name for a in db.query(RemoteAgent).all()}
         for cidr in ahs.cidrs_of(host):
             clash = taken.get(cidr)
             if clash is not None:
                 route_errors.append(
                     f"{cidr} is already routed to agent "
-                    f"'{names.get(clash['agent_id'], clash['agent_id'])}'; left as it is.")
+                    f"'{names.get(clash['agent_id'], clash['agent_id'])}' for "
+                    f"{cmr.scope_text(host.cloud, host.region)}; left as it is.")
                 continue
             try:
                 cmr.create(db, agent_id=agent.id, cidr=cidr, label=f"{host.name} (deployed)",
-                           created_by=current_user.username, include_cloud_vms=True)
+                           created_by=current_user.username, scope=host.cloud,
+                           region=host.region)
                 routes.append(cidr)
             except cmr.ConfigRouteError as exc:
                 # A race with another operator saving the same range. The deploy stands.

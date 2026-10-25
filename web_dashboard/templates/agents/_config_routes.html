@@ -66,6 +66,7 @@
       <thead>
         <tr class="text-left text-xs uppercase text-gray-500 bg-gray-50 border-b border-gray-200">
           <th class="px-4 py-3">Range</th>
+          <th class="px-4 py-3">Scope</th>
           <th class="px-4 py-3">Executes on</th>
           <th class="px-4 py-3">Covers</th>
           <th class="px-4 py-3">Status</th>
@@ -78,7 +79,13 @@
             <td class="px-4 py-3">
               <div class="font-mono text-gray-800" x-text="r.cidr"></div>
               <div x-show="r.label" class="text-xs text-gray-500" x-text="r.label"></div>
-              <div x-show="r.include_cloud_vms" class="text-xs text-blue-700">also cloud VMs</div>
+            </td>
+            <!-- Which targets the range governs. One address can be an on-premises guest
+                 and a cloud VM at once, so a route only ever matches targets in its scope. -->
+            <td class="px-4 py-3 text-xs">
+              <span class="inline-block px-2 py-0.5 rounded"
+                    :class="r.scope === 'onprem' ? 'bg-gray-100 text-gray-700' : 'bg-blue-50 text-blue-700'"
+                    x-text="r.scope_text || r.scope"></span>
             </td>
             <td class="px-4 py-3">
               <span class="inline-block bg-purple-50 text-purple-700 text-xs px-2 py-0.5 rounded"
@@ -156,19 +163,71 @@
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
         </div>
 
-        <!-- Opt-in, so an existing range never starts capturing cloud VMs on its own. -->
-        <label class="flex items-start gap-2 text-sm text-gray-700">
-          <input type="checkbox" x-model="form.include_cloud_vms" class="mt-0.5 rounded border-gray-300">
-          <span>
-            Also route cloud VMs in this range
-            <span class="block text-xs text-gray-400">
-              Dashboard-deployed AWS, Azure and GCP VMs whose private address is in this range
-              run their Config Management on this agent instead of the remote worker. Run the
-              agent inside that VPC or VNet. Their SSH key is sealed to the agent per job:
-              consider "Release dashboard-held credentials only to SPIRE-attested agents".
-            </span>
-          </span>
-        </label>
+        <!-- The scope. One address can be an on-premises guest, an EC2 VM and an Azure VM
+             at once (every AWS region's default VPC is 172.31.0.0/16), so a route names
+             which of them it governs and is never consulted for the others. -->
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Applies to</label>
+          <select x-model="form.scope" @change="scopeChanged()"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <template x-for="sc in scopes" :key="sc.id">
+              <option :value="sc.id" x-text="sc.id === 'onprem' ? 'On-premises guests' : sc.label + ' VMs'"
+                      :selected="sc.id === form.scope"></option>
+            </template>
+          </select>
+          <p x-show="form.scope !== 'onprem'" class="text-xs text-gray-400 mt-1">
+            Dashboard-deployed VMs in this cloud whose private address is in the range run
+            their Config Management on this agent instead of the remote worker. Run the agent
+            inside that VPC or VNet. Their SSH key is sealed to the agent per job: consider
+            "Release dashboard-held credentials only to SPIRE-attested agents".
+          </p>
+        </div>
+
+        <div x-show="form.scope === 'onprem'">
+          <label class="block text-xs font-medium text-gray-600 mb-1">Connection <span class="text-gray-400">(optional)</span></label>
+          <select x-model="form.scope_connection_id"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">Every connection</option>
+            <template x-for="c in connections" :key="c.id">
+              <option :value="c.id" x-text="c.name" :selected="c.id === form.scope_connection_id"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-400 mt-1">
+            Only guests discovered through this connection — for two sites that use the same
+            range. The agent above still executes; the connection's own agent only discovers.
+          </p>
+        </div>
+
+        <div x-show="form.scope !== 'onprem'">
+          <label class="block text-xs font-medium text-gray-600 mb-1">Region <span class="text-gray-400">(optional)</span></label>
+          <select x-model="form.region"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">Every region</option>
+            <template x-for="rg in regions" :key="rg">
+              <option :value="rg" x-text="rg" :selected="rg === form.region"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-400 mt-1">
+            Only VMs deployed to this region — for VPCs in different regions that use the
+            same range, such as the default VPCs.
+          </p>
+        </div>
+
+        <div x-show="form.scope !== 'onprem'">
+          <label class="block text-xs font-medium text-gray-600 mb-1">Workstream <span class="text-gray-400">(optional)</span></label>
+          <select x-model="form.workstream"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">Every workstream</option>
+            <template x-for="ws in workstreams" :key="ws">
+              <option :value="ws" x-text="ws" :selected="ws === form.workstream"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-400 mt-1">
+            Only VMs deployed in this workstream — for teams whose networks use the same
+            range in one region. It also keeps one team's agent from ever being handed
+            another team's VMs or their keys.
+          </p>
+        </div>
 
         <label class="flex items-center gap-2 text-sm text-gray-700">
           <input type="checkbox" x-model="form.is_active" class="rounded border-gray-300">
@@ -208,7 +267,8 @@
 // Agents panels, and the container in agents/index.html owns only which tab is showing.
 function configRoutesPage() {
   return {
-    routes: [], agents: [], grantedIds: [],
+    routes: [], agents: [], grantedIds: [], connections: [], regions: [], workstreams: [],
+    scopes: [{id: 'onprem', label: 'On-premises'}],
     loading: true, busy: '',
     noAccess: '',   // the 403 text when this user holds no `connections` permission
     toast: '', toastType: 'success',
@@ -226,6 +286,9 @@ function configRoutesPage() {
         this.routes = data.routes || [];
         this.agents = data.agents || [];
         this.grantedIds = data.ansible_agent_ids || [];
+        this.connections = data.connections || [];
+        this.workstreams = data.workstreams || [];
+        if ((data.scopes || []).length) this.scopes = data.scopes;
         this.noAccess = '';
       } catch (e) {
         // A 403 from require_explicit_permission('connections', …) is a state with a
@@ -256,9 +319,9 @@ function configRoutesPage() {
     coverage(r) {
       const n = r.matches || 0;
       const vms = n === 1 ? '1 VM' : n + ' VMs';
-      if (!r.include_cloud_vms) return vms;
+      if (r.scope === 'onprem') return vms;
       const c = r.cloud_matches || 0;
-      return vms + ' · ' + (c === 1 ? '1 cloud VM' : c + ' cloud VMs');
+      return c === 1 ? '1 cloud VM' : c + ' cloud VMs';
     },
     policySnippet() {
       return ['ansible:', '  enabled: true', '  vm_image: chrweav/ansible-winrm:latest',
@@ -267,20 +330,48 @@ function configRoutesPage() {
     },
     flash(m, t) { this.toast = m; this.toastType = t || 'success'; setTimeout(() => this.toast = '', 4500); },
 
-    _blank() { return {cidr: '', agent_id: '', label: '', is_active: true, include_cloud_vms: false}; },
+    _blank() {
+      return {cidr: '', agent_id: '', label: '', is_active: true, scope: 'onprem',
+              region: '', scope_connection_id: '', workstream: ''};
+    },
+
+    // The region picker follows the scope's cloud: only regions with a per-region config
+    // set, the same list every deploy form offers.
+    async loadRegions() {
+      this.regions = [];
+      if (!this.form.scope || this.form.scope === 'onprem') return;
+      try {
+        const r = await API.get('/api/regions?cloud=' + encodeURIComponent(this.form.scope));
+        this.regions = (r && r.configured) || [];
+      } catch (e) {
+        this.regions = [];
+      }
+      if (this.form.region && !this.regions.includes(this.form.region)) this.regions.push(this.form.region);
+    },
+
+    scopeChanged() {
+      this.form.region = '';
+      this.form.scope_connection_id = '';
+      this.form.workstream = '';
+      this.loadRegions();
+    },
 
     openAdd() {
       this.editingId = '';
       this.form = this._blank();
       this.formError = '';
+      this.regions = [];
       this.showForm = true;
     },
 
     openEdit(r) {
       this.editingId = r.id;
       this.form = {cidr: r.cidr, agent_id: r.agent_id, label: r.label || '',
-                   is_active: !!r.is_active, include_cloud_vms: !!r.include_cloud_vms};
+                   is_active: !!r.is_active, scope: r.scope || 'onprem',
+                   region: r.region || '', scope_connection_id: r.connection_id || '',
+                   workstream: r.workstream || ''};
       this.formError = '';
+      this.loadRegions();
       this.showForm = true;
     },
 
@@ -291,8 +382,12 @@ function configRoutesPage() {
       this.formError = '';
       try {
         const body = {cidr: this.form.cidr, agent_id: this.form.agent_id,
-                      label: this.form.label || '',
-                      include_cloud_vms: !!this.form.include_cloud_vms};
+                      label: this.form.label || '', scope: this.form.scope || 'onprem',
+                      region: this.form.scope === 'onprem' ? '' : (this.form.region || ''),
+                      workstream: this.form.scope === 'onprem' ? '' : (this.form.workstream || ''),
+                      // The scope narrower, sent as the API's connection_id: which
+                      // discovered guests this route covers, never what a run targets.
+                      connection_id: this.form.scope === 'onprem' ? (this.form.scope_connection_id || '') : ''};
         if (this.editingId) {
           body.is_active = !!this.form.is_active;
           await API.patch('/api/connections/config-mgmt-routes/' + this.editingId, body);

@@ -110,9 +110,10 @@ for any other time is refused, and the refusal names when the agent is next up.
 ## Routes
 
 **Route cloud VMs in these ranges to it** (on by default) adds a
-[Config-Management route](config-runs.md#which-agent-executes-a-run) for each range, with
-**Also route cloud VMs in this range** ticked. That is the step that sends cloud-VM runs to
-the agent. A range that already has a route is skipped, and the deploy says so.
+[Config-Management route](config-runs.md#which-agent-executes-a-run) for each range,
+scoped to the agent's cloud and region. That is the step that sends cloud-VM runs to the
+agent. A range that already has a route in that cloud and region is skipped, and the
+deploy says so; an on-premises route for the same range is no clash.
 
 **Delete** takes the host down, then revokes and deletes the agent and its routes. Runs for
 those ranges then go back to the remote worker.

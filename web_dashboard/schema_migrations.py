@@ -184,6 +184,87 @@ def sql(statement: str, params: dict | None = None) -> Step:
     return step
 
 
+# ── 0003: scoped Config-Management routes ────────────────────────────────────
+
+_ROUTES = "config_mgmt_routes"
+
+
+def _route_constraint_names(conn) -> set:
+    insp = inspect(conn)
+    return ({u["name"] for u in insp.get_unique_constraints(_ROUTES)}
+            | {i["name"] for i in insp.get_indexes(_ROUTES)})
+
+
+def _drop_cidr_only_unique(conn) -> None:
+    """Drop ``uq_config_mgmt_route_cidr``: one CIDR may now be routed once PER SCOPE.
+
+    PostgreSQL drops a constraint in place. SQLite cannot, so the table is rebuilt from
+    the model (which carries the new constraint) and the rows copied across — the
+    documented SQLite procedure, and cheap for a table of a few dozen rows.
+    """
+    if "uq_config_mgmt_route_cidr" not in _route_constraint_names(conn):
+        return                      # a fresh create_all table, or already done
+    if conn.dialect.name == "postgresql":
+        conn.execute(text(f"ALTER TABLE {_ROUTES} "
+                          f"DROP CONSTRAINT IF EXISTS uq_config_mgmt_route_cidr"))
+        return
+    from .database import ConfigMgmtRoute
+    table = ConfigMgmtRoute.__table__
+    # Index names are global in SQLite, so the old table's go first or the new table's
+    # same-named ones cannot be created.
+    for (name,) in conn.execute(text(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=:t "
+            "AND sql IS NOT NULL"), {"t": _ROUTES}).fetchall():
+        conn.execute(text(f'DROP INDEX "{name}"'))
+    conn.execute(text(f"ALTER TABLE {_ROUTES} RENAME TO {_ROUTES}_pre0003"))
+    table.create(conn)
+    cols = ", ".join(c.name for c in table.columns)
+    conn.execute(text(f"INSERT INTO {_ROUTES} ({cols}) "
+                      f"SELECT {cols} FROM {_ROUTES}_pre0003"))
+    conn.execute(text(f"DROP TABLE {_ROUTES}_pre0003"))
+
+
+def _route_scope_unique(conn) -> None:
+    if "uq_config_mgmt_route_scope" not in _route_constraint_names(conn):
+        conn.execute(text(
+            f"CREATE UNIQUE INDEX uq_config_mgmt_route_scope ON {_ROUTES} "
+            f"(cidr, scope, scope_region, scope_connection_id, scope_workstream)"))
+
+
+def _split_cloud_routes(conn) -> None:
+    """Keep every lookup's answer across the upgrade.
+
+    Before scopes, a route with ``include_cloud_vms`` governed hypervisor guests AND the
+    VMs of all three clouds. It stays as the on-premises row, keeping its id, and gains
+    one row per cloud with the same agent, range, label and state. An operator who meant
+    only one cloud deletes the other rows; nothing moves until they do.
+    """
+    import uuid
+    rows = conn.execute(text(
+        f"SELECT id, agent_id, cidr, label, is_active, created_at, created_by "
+        f"FROM {_ROUTES} WHERE include_cloud_vms = :t AND scope = 'onprem' "
+        f"AND scope_region = '' AND scope_connection_id = '' AND scope_workstream = ''"),
+        {"t": True}).fetchall()
+    for row in rows:
+        for cloud in ("aws", "azure", "gcp"):
+            conn.execute(text(
+                f"INSERT INTO {_ROUTES} (id, agent_id, cidr, label, is_active, "
+                f"include_cloud_vms, scope, scope_region, scope_connection_id, "
+                f"scope_workstream, created_at, created_by, updated_at) VALUES (:id, :agent, "
+                f":cidr, :label, :active, :f, :scope, '', '', '', :created, :by, :created)"),
+                {"id": str(uuid.uuid4()), "agent": row.agent_id, "cidr": row.cidr,
+                 "label": row.label, "active": row.is_active, "f": False, "scope": cloud,
+                 "created": row.created_at, "by": row.created_by})
+        conn.execute(text(f"UPDATE {_ROUTES} SET include_cloud_vms = :f WHERE id = :id"),
+                     {"f": False, "id": row.id})
+
+
+_split_cloud_routes.describe = "split cloud-flagged routes into one row per scope"
+_drop_cidr_only_unique.describe = "drop uq_config_mgmt_route_cidr"
+_route_scope_unique.describe = ("unique (cidr, scope, scope_region, scope_connection_id, "
+                               "scope_workstream)")
+
+
 #: Every schema change since the legacy list was frozen, oldest first. Append; never
 #: reorder, rename or edit one that has shipped -- databases have recorded it.
 MIGRATIONS: tuple = (
@@ -194,6 +275,17 @@ MIGRATIONS: tuple = (
     # How many Config-Management runs an agent says it runs at once (agent 2.9+).
     Migration("0002_agent_reported_ansible_slots",
               (add_column("remote_agents", "reported_ansible_slots", "INTEGER"),)),
+    # A route has a scope: on-premises guests (optionally one connection's) or one cloud's
+    # VMs (optionally one region's and/or one workstream's). One CIDR may be routed once per scope, so the
+    # CIDR-only unique constraint goes; flagged routes split so no lookup changes answer.
+    Migration("0003_config_route_scopes",
+              (add_column(_ROUTES, "scope", "VARCHAR(16) NOT NULL DEFAULT 'onprem'"),
+               add_column(_ROUTES, "scope_region", "VARCHAR(64) NOT NULL DEFAULT ''"),
+               add_column(_ROUTES, "scope_connection_id", "VARCHAR(36) NOT NULL DEFAULT ''"),
+               add_column(_ROUTES, "scope_workstream", "VARCHAR(100) NOT NULL DEFAULT ''"),
+               _drop_cidr_only_unique,
+               _route_scope_unique,
+               _split_cloud_routes)),
 )
 
 
