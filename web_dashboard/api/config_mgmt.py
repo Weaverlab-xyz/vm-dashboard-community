@@ -824,10 +824,18 @@ def _resolve_agent_target(payload: "RunRequest", db, current_user=None) -> dict:
         raise HTTPException(status_code=400,
                             detail=agent_service.ansible_upgrade_hint(agent))
     if agent_service.status_of(agent) != "online":
-        raise HTTPException(
-            status_code=400,
-            detail=(f"Agent '{agent.name}' is not online, so this run would sit queued "
-                    f"indefinitely. Nothing was queued."))
+        # A deployed agent is offline between windows by design: a run booked into a time
+        # its host will be up is accepted, and anything else is refused naming that time.
+        from ..services import agent_host_service
+        if agent_host_service.for_agent(db, agent.id) is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"Agent '{agent.name}' is not online, so this run would sit queued "
+                        f"indefinitely. Nothing was queued."))
+        at = _schedule_kwargs(payload, db).get("scheduled_for")
+        refusal = agent_host_service.booking_refusal(db, agent, at)
+        if refusal:
+            raise HTTPException(status_code=400, detail=refusal)
 
     if payload.target_kind == "k8s":
         # Out of scope for now, and refused by name rather than falling through to the VM

@@ -154,11 +154,18 @@ def has_work(db: Session) -> bool:
     # ONLY use of the scheduler is a weekly playbook has nothing pending between
     # occurrences, so no sweep is ever enqueued, so the occurrence is never created —
     # the feature would appear to work right up until it silently never fired.
-    from ..database import JobSchedule
+    from ..database import AgentHost, JobSchedule
     recurring = (db.query(JobSchedule.id)
                  .filter(JobSchedule.enabled.isnot(False))
                  .first())
-    return bool(recurring)
+    if recurring:
+        return True
+    # Deployed agents that follow a change window or an end time, for the same reason:
+    # between windows nothing is pending, and the pass is what starts the next host.
+    scheduled_hosts = (db.query(AgentHost.id)
+                       .filter(AgentHost.mode.in_(("until", "window")))
+                       .first())
+    return bool(scheduled_hosts)
 
 
 def enqueue_sweep_if_due(db: Session, *, min_gap_seconds: "int | None" = None) -> "str | None":
@@ -345,6 +352,20 @@ def _note_finished(db: Session, now: datetime) -> None:
             logger.warning("could not record result of %s", job.id, exc_info=True)
 
 
+def _sweep_agent_hosts(db: Session, now: datetime) -> list:
+    """Start and stop the deployed agents that follow a window or an end time.
+
+    Isolated from the rest of the pass: a broken agent-host row must not stop missed
+    windows being reaped, which is the guard this sweep exists for."""
+    from . import agent_host_service
+    try:
+        return [f"{name}: {action}" for name, action in agent_host_service.sweep(db, now)]
+    except Exception as exc:  # noqa: BLE001
+        logger.error("schedule sweep: agent-host pass failed: %s", exc)
+        db.rollback()
+        return []
+
+
 async def run(db: Session, *, job_id: str, meta: dict) -> None:
     """One pass: reap missed windows, materialise due schedules, record outcomes."""
     job_service.set_running(db, job_id)
@@ -354,6 +375,7 @@ async def run(db: Session, *, job_id: str, meta: dict) -> None:
         created = _materialise_due(db, job_id, now)
         _note_finished(db, now)
         db.commit()
+        hosts = _sweep_agent_hosts(db, now)
         # This sweep writes a row per pass whether or not it found anything, so it prunes
         # its own history the way the auto-delete sweep does — otherwise it would push
         # real deploys off the first page of /jobs within days. Shares that feature's
@@ -366,6 +388,7 @@ async def run(db: Session, *, job_id: str, meta: dict) -> None:
             "scheduled": created,
             "scheduled_count": len(created),
             "pruned": pruned,
+            "agent_hosts": hosts,
         })
     except Exception as exc:
         logger.error("schedule sweep failed: %s", exc)
