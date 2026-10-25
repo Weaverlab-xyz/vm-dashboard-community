@@ -6,7 +6,7 @@ agent on top of it. Three `hosts: all`, `become: true` plays here, and the agent
 Management against an on-prem host reached by a remote agent.
 
 The operator-facing write-up — egress, trust stores, sizing, and the limitation worth
-raising before a customer finds it — is [docs/kubernetes/kubesolo.md](../../../docs/kubernetes/kubesolo.md).
+raising before a customer finds it — is [docs/cloud-services/kubernetes/kubesolo.md](../../../docs/cloud-services/kubernetes/kubesolo.md).
 This file is the quick reference.
 
 The [OT demo cell](../../../docs/profiles/demo/ot-demo-cell.md) does **not** run

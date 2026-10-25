@@ -122,7 +122,7 @@ def _verify_split(patch, *, configured=True, session=None):
     patch.set(pov_cloud_aws, "default_region", lambda: "us-east-2")
     patch.set(leases, "dynamic_enabled", lambda cloud: True)
     patch.set(leases, "everyday_from_federation", lambda cloud: True)
-    patch.set(leases, "secret_name_for", lambda cloud, purpose: "dashboard-provision")
+    patch.set(leases, "dynamic_name_for", lambda cloud, purpose: "dashboard-provision")
     patch.set(cloud_federation, "source", lambda cloud: cloud_federation.SOURCE)
     patch.set(cloud_federation, "active", lambda cloud: True)
     patch.set(wlc, "configured", lambda: configured)

@@ -33,8 +33,8 @@ Credentials lease, so nothing that can create or hand out roles is live between 
   `wlc_azure_everyday_source = federation`.
 - **GCP** has no Workload Credentials tier; the federated identity is the credential.
 
-See [dynamic credentials](../../docs/workload-lab/dynamic-credentials.md) and
-[the dashboard's SPIFFE identity](../../docs/oidc/dashboard-identity.md).
+See [dynamic credentials](../../docs/preview/workload-lab/dynamic-credentials.md) and
+[the dashboard's SPIFFE identity](../../docs/platform/oidc/dashboard-identity.md).
 
 ## Without Workload Credentials
 

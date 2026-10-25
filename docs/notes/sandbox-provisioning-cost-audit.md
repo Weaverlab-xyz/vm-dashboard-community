@@ -28,7 +28,7 @@ Three findings reframed the exercise:
 
 ## Standing idle cost, corrected
 
-Per cloud, sandbox created, nothing deployed. `docs/cloud/sandbox.md` previously said
+Per cloud, sandbox created, nothing deployed. `docs/clouds/sandbox.md` previously said
 Azure was ~$5 and omitted the private DNS zones.
 
 | Cloud | Idle/mo | What actually bills | Opt-out |
@@ -268,7 +268,7 @@ unretried `ecsTaskExecutionRole` attach now uses it too.
 1. **Dead VM modules.** `terraform/ec2_instance`, `terraform/azure_vm`,
    `terraform/gce_instance` are referenced by nothing, shipped in nothing, and untouched
    since their initial commits. `terraform.py:35-37`'s vestigial `_TEMPLATE_DIR` default
-   still points at `ec2_instance`. (`docs/cloud/infrastructure-as-code.md` claimed VM deploys ran
+   still points at `ec2_instance`. (`docs/clouds/infrastructure-as-code.md` claimed VM deploys ran
    Terraform — corrected in this pass.)
 2. **`rollback.sh` leaves GCP privilege behind.** `:531-533` revokes 6 of the 16 project
    role bindings granted at `setup-gcp.sh:460-470`, and the **10 grants on Cloud Build's

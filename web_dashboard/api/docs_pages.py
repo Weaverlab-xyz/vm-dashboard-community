@@ -67,8 +67,8 @@ def _relative_link_extension(page: str):
     ``docs/`` is authored and reviewed on GitHub, so a cross-reference is written the way
     GitHub resolves it — ``[Cloud VMs](cloud-vms.md)``, or ``../../cloud-vms.md`` from a
     nested page. Nothing rewrote those, and there is no ``<base>`` in ``_SHELL``, so the
-    browser resolved them against the current route: ``/docs/cloud/vms.md``, which makes
-    ``doc_page`` look for ``docs/cloud/vms.md.md`` and 404. Every relative link in the tree
+    browser resolved them against the current route: ``/docs/clouds/vms.md``, which makes
+    ``doc_page`` look for ``docs/clouds/vms.md.md`` and 404. Every relative link in the tree
     was dead in this viewer while working perfectly on GitHub — the same split
     ``tests/test_app_docs_links.py`` was written about, one layer down.
 
@@ -153,50 +153,50 @@ _MOVED = {
     # Hub folders, 2026-09 (docs/scheduling/, docs/integrations/beyondtrust/, ot-demo-cell/)
     "change-windows":                            "operations/scheduling/change-windows",
     "policy-guardrails":                         "operations/scheduling/policy-guardrails",
-    "integrations/password-safe":                "integrations/beyondtrust/password-safe",
-    "integrations/privileged-remote-access":     "integrations/beyondtrust/privileged-remote-access",
-    "integrations/gateways":                     "integrations/beyondtrust/gateways",
-    "integrations/entitle":                      "integrations/beyondtrust/entitle",
-    "integrations/entitle-dashboard-permissions": "integrations/beyondtrust/entitle-dashboard-permissions",
-    "integrations/epml":                         "integrations/beyondtrust/epml",
-    "integrations/databases":                    "integrations/beyondtrust/password-safe/databases",
-    "integrations/databases/password-safe":      "integrations/beyondtrust/password-safe/databases",
-    "integrations/databases/password-safe-gcp":  "integrations/beyondtrust/password-safe/databases-gcp",
+    "integrations/password-safe":                "beyondtrust/password-safe",
+    "integrations/privileged-remote-access":     "beyondtrust/privileged-remote-access",
+    "integrations/gateways":                     "beyondtrust/gateways",
+    "integrations/entitle":                      "beyondtrust/entitle",
+    "integrations/entitle-dashboard-permissions": "beyondtrust/entitle-dashboard-permissions",
+    "integrations/epml":                         "beyondtrust/epml",
+    "integrations/databases":                    "beyondtrust/password-safe/databases",
+    "integrations/databases/password-safe":      "beyondtrust/password-safe/databases",
+    "integrations/databases/password-safe-gcp":  "beyondtrust/password-safe/databases-gcp",
     "profiles/demo/ot-protocol-clients":         "profiles/demo/ot-demo-cell/ot-protocol-clients",
     # The Workload Lab folder, 2026-09. certificates.md was split three ways; its opening
     # section, the plugin reference, is what kept the name.
-    "integrations/workload-cloud":               "workload-lab/cloud",
-    "integrations/workload-kubernetes":          "workload-lab/kubernetes",
-    "integrations/spiffe":                       "workload-lab/spiffe",
-    "integrations/workload-credentials":         "workload-lab/workload-credentials",
-    "integrations/certificates":                 "workload-lab/certificates",
+    "integrations/workload-cloud":               "preview/workload-lab/cloud",
+    "integrations/workload-kubernetes":          "preview/workload-lab/kubernetes",
+    "integrations/spiffe":                       "preview/workload-lab/spiffe",
+    "integrations/workload-credentials":         "beyondtrust/workload-credentials",
+    "integrations/certificates":                 "preview/workload-lab/certificates",
     # The OIDC section, 2026-10: SSO, Dex, the two Entra pages and the dashboard's own
     # identity (which had lived under remote-agents/ though it is about the clouds).
-    "integrations/oidc":                         "oidc",
-    "integrations/entra-oauth":                  "oidc/entra-oauth",
-    "integrations/entra-k8s-federation":         "oidc/k8s-federation/entra",
+    "integrations/oidc":                         "platform/oidc",
+    "integrations/entra-oauth":                  "platform/oidc/entra-oauth",
+    "integrations/entra-k8s-federation":         "platform/oidc/k8s-federation/entra",
     # Kubernetes federation, 2026-10: one hub plus a page per IdP, Entra's among them.
-    "oidc/entra-k8s-federation":                 "oidc/k8s-federation/entra",
-    "remote-agents/dashboard-identity":          "oidc/dashboard-identity",
+    "oidc/entra-k8s-federation":                 "platform/oidc/k8s-federation/entra",
+    "remote-agents/dashboard-identity":          "platform/oidc/dashboard-identity",
     # Sections, 2026-10: the flat top level grouped into hub + folder sections the way
     # oidc/ is -- cloud/, access/, operations/, editions/, and kubesolo under kubernetes/.
-    "cloud-vms":                                 "cloud/vms",
-    "cloud-containers":                          "cloud/containers",
-    "costs":                                     "cloud/costs",
-    "image-management":                          "cloud/image-management",
-    "infrastructure-as-code":                    "cloud/infrastructure-as-code",
-    "CLOUD_SANDBOX":                             "cloud/sandbox",
-    "virtual-desktops":                          "cloud/virtual-desktops",
-    "permissions":                               "access/permissions",
-    "service-accounts":                          "access/service-accounts",
-    "audit-log":                                 "access/audit-log",
-    "secrets-management":                        "access/secrets-management",
+    "cloud-vms":                                 "clouds/vms",
+    "cloud-containers":                          "cloud-services/containers",
+    "costs":                                     "operations/costs",
+    "image-management":                          "operations/image-management",
+    "infrastructure-as-code":                    "clouds/infrastructure-as-code",
+    "CLOUD_SANDBOX":                             "clouds/sandbox",
+    "virtual-desktops":                          "preview/virtual-desktops",
+    "permissions":                               "admin/permissions",
+    "service-accounts":                          "admin/service-accounts",
+    "audit-log":                                 "admin/audit-log",
+    "secrets-management":                        "admin/secrets-management",
     "job-worker":                                "operations/job-worker",
-    "notifications":                             "operations/notifications",
+    "notifications":                             "admin/notifications",
     "auto-delete-timer":                         "operations/auto-delete-timer",
-    "config-migration":                          "operations/config-migration",
-    "cloud-hosting":                             "operations/cloud-hosting",
-    "kubesolo":                                  "kubernetes/kubesolo",
+    "config-migration":                          "platform/config-migration",
+    "cloud-hosting":                             "platform/cloud-hosting",
+    "kubesolo":                                  "cloud-services/kubernetes/kubesolo",
     "saas-comparison":                           "editions/comparison",
     "saas-roadmap":                              "editions/roadmap",
     # Operations, 2026-10: managing what already runs and what the user built --
@@ -206,26 +206,79 @@ _MOVED = {
     "storage-management":                        "operations/storage-management",
     # Directories, 2026-10: out of cloud/ into its own section, split into cloud AD,
     # on-premises directories and identity providers. The old page lands on the hub.
-    "cloud/directories":                         "directories",
+    "cloud/directories":                         "preview/directories",
     # Password Safe for databases, 2026-10: out of beyondtrust/databases/ and into the
     # Password Safe section beside VM onboarding and token rotation, one page per cloud.
     # The old AWS + Azure page lands on the shared-model page, which links both.
-    "integrations/beyondtrust/databases":        "integrations/beyondtrust/password-safe/databases",
+    "integrations/beyondtrust/databases":        "beyondtrust/password-safe/databases",
     "integrations/beyondtrust/databases/password-safe":
-        "integrations/beyondtrust/password-safe/databases",
+        "beyondtrust/password-safe/databases",
     "integrations/beyondtrust/databases/password-safe-gcp":
-        "integrations/beyondtrust/password-safe/databases-gcp",
+        "beyondtrust/password-safe/databases-gcp",
+
+    # Sections that mirror the app, 2026-10: one hub per nav group (Hypervisors, Clouds,
+    # Cloud services, Preview, Operations, Admin), plus BeyondTrust and Platform from
+    # Settings and Getting started. A folder that moved whole is one entry, which
+    # carries every page under it.
+    "directories":                               "preview/directories",
+    "integrations/ansible":                      "platform/ansible",
+    "integrations/beyondtrust":                  "beyondtrust",
+    "integrations/portainer":                    "cloud-services/portainer",
+    "integrations/rancher":                      "cloud-services/rancher",
+    "kubernetes":                                "cloud-services/kubernetes",
+    "oidc":                                      "platform/oidc",
+    "onboarding":                                "getting-started",
+    "operations/cloud-hosting":                  "platform/cloud-hosting",
+    "remote-agents":                             "admin/remote-agents",
+    "workload-lab":                              "preview/workload-lab",
+    # Workload Credentials is generally available and configured under Settings ->
+    # BeyondTrust, so its guide went to that section rather than into preview/ with the lab.
+    "workload-lab/workload-credentials":         "beyondtrust/workload-credentials",
+    "ONBOARDING":                                "getting-started",
+    "access":                                    "admin",
+    "access/audit-log":                          "admin/audit-log",
+    "access/permissions":                        "admin/permissions",
+    "access/secrets-management":                 "admin/secrets-management",
+    "access/service-accounts":                   "admin/service-accounts",
+    "access/workload-identity":                  "platform/workload-identity",
+    "cloud":                                     "clouds",
+    "cloud/containers":                          "cloud-services/containers",
+    "cloud/costs":                               "operations/costs",
+    "cloud/image-management":                    "operations/image-management",
+    "cloud/infrastructure-as-code":              "clouds/infrastructure-as-code",
+    "cloud/sandbox":                             "clouds/sandbox",
+    "cloud/virtual-desktops":                    "preview/virtual-desktops",
+    "cloud/vms":                                 "clouds/vms",
+    "cloud/windows-servers":                     "clouds/windows-servers",
+    "databases":                                 "cloud-services/databases",
+    "integrations":                              "README",
+    "integrations/cloud-functions":              "cloud-services/functions",
+    "integrations/hyperv":                       "hypervisors/hyperv",
+    "integrations/mcp-server":                   "platform/mcp-server",
+    "integrations/nutanix":                      "hypervisors/nutanix",
+    "integrations/proxmox":                      "hypervisors/proxmox",
+    "integrations/vmware":                       "hypervisors/vmware",
+    "integrations/vsphere":                      "hypervisors/vsphere",
+    "integrations/xcpng":                        "hypervisors/xcpng",
+    "inventory":                                 "operations/inventory",
+    "operations/config-migration":               "platform/config-migration",
+    "operations/container-user":                 "platform/container-user",
+    "operations/health":                         "admin/health",
+    "operations/notifications":                  "admin/notifications",
+    "spiffe":                                    "platform/spiffe",
 }
 
 
 def _moved_to(rel: str):
     """Where a moved page lives now, or None. An exact key wins; otherwise the longest key
     that is a folder prefix of ``rel`` carries the rest of the path with it, so
-    a page under a moved folder follows its folder."""
+    a page under a moved folder follows its folder. Only into a folder: a key whose target
+    is a page (``integrations`` -> the docs index) carries nothing, so an unknown page under
+    it is a 404 rather than a redirect to ``README/<page>``."""
     if rel in _MOVED:
         return _MOVED[rel]
     for old in sorted(_MOVED, key=len, reverse=True):
-        if rel.startswith(old + "/"):
+        if rel.startswith(old + "/") and (_DOCS_DIR / _MOVED[old]).is_dir():
             return _MOVED[old] + rel[len(old):]
     return None
 
@@ -249,45 +302,71 @@ def _moved_to(rel: str):
 # filtered by install_profile(): making index *content* vary with instance state is the leak
 # above wearing a different hat. A demo instance already lists the POV pages today.
 _INDEX_SECTIONS = {
-    "General", "integrations",
-    "profiles", "profiles/demo", "profiles/demo/personas", "profiles/pov",
-    "integrations/beyondtrust", "onboarding",
-    "integrations/ansible", "remote-agents", "workload-lab", "operations/scheduling",
-    "profiles/demo/ot-demo-cell", "oidc", "cloud", "access", "operations", "kubernetes",
-    "editions", "directories", "integrations/rancher", "integrations/portainer",
-    "integrations/beyondtrust/password-safe", "operations/cloud-hosting",
-    "oidc/k8s-federation",
+    "General",
+    "getting-started",
+    "hypervisors",
+    "clouds",
+    "cloud-services",
+    "cloud-services/kubernetes",
+    "cloud-services/portainer",
+    "cloud-services/rancher",
+    "preview",
+    "preview/directories",
+    "preview/workload-lab",
+    "operations",
+    "operations/scheduling",
+    "admin",
+    "admin/remote-agents",
+    "beyondtrust",
+    "beyondtrust/password-safe",
+    "platform",
+    "platform/oidc",
+    "platform/oidc/k8s-federation",
+    "platform/cloud-hosting",
+    "platform/ansible",
+    "editions",
+    "profiles",
+    "profiles/demo",
+    "profiles/demo/personas",
+    "profiles/demo/ot-demo-cell",
+    "profiles/pov",
 }
 
-# Heading text per section. Without this a nested section renders as
-# <h2>profiles/demo/personas</h2> — a directory path where the index wants a phrase.
+
+# Heading text per section, in the order the /docs index lists them: the app's own order.
+# Without this a nested section renders as <h2>profiles/demo/personas</h2> — a directory
+# path where the index wants a phrase.
 _SECTION_LABELS = {
-    "General":                    "Platform reference",
-    "integrations":               "Integrations",
-    "profiles":                   "Demo and POV profiles",
-    "profiles/demo":              "Demo profile",
-    "profiles/demo/personas":     "Demo profile · personas",
-    "profiles/pov":               "POV profile",
-    "integrations/beyondtrust":   "BeyondTrust products",
-    "onboarding":                 "Onboarding · per-cloud setup",
-    "integrations/ansible":       "Remote Worker runners",
-    "remote-agents":              "Remote agents",
-    "workload-lab":               "Workload Lab",
-    "operations/scheduling":      "Operations · scheduling",
-    "profiles/demo/ot-demo-cell": "OT Demo Cell",
-    "oidc":                       "OIDC and single sign-on",
-    "cloud":                      "Cloud",
-    "access":                     "Identity and access",
-    "operations":                 "Operations",
-    "kubernetes":                 "Kubernetes",
-    "editions":                   "Editions",
-    "directories":                "Directories",
-    "integrations/rancher":       "Rancher",
-    "integrations/portainer":     "Portainer",
-    "integrations/beyondtrust/password-safe": "BeyondTrust · Password Safe",
-    "operations/cloud-hosting":   "Operations · cloud hosting",
-    "oidc/k8s-federation":        "OIDC · Kubernetes federation",
+    "General":                      "Platform reference",
+    "getting-started":              "Getting started · per-cloud setup",
+    "hypervisors":                  "Hypervisors",
+    "clouds":                       "Clouds",
+    "cloud-services":               "Cloud services",
+    "cloud-services/kubernetes":    "Cloud services · Kubernetes",
+    "cloud-services/portainer":     "Cloud services · Portainer",
+    "cloud-services/rancher":       "Cloud services · Rancher",
+    "preview":                      "Preview",
+    "preview/directories":          "Preview · Directories",
+    "preview/workload-lab":         "Preview · Workload Lab",
+    "operations":                   "Operations",
+    "operations/scheduling":        "Operations · scheduling",
+    "admin":                        "Admin",
+    "admin/remote-agents":          "Admin · remote agents",
+    "beyondtrust":                  "BeyondTrust",
+    "beyondtrust/password-safe":    "BeyondTrust · Password Safe",
+    "platform":                     "Platform",
+    "platform/oidc":                "Platform · OIDC and single sign-on",
+    "platform/oidc/k8s-federation": "Platform · OIDC · Kubernetes federation",
+    "platform/cloud-hosting":       "Platform · cloud hosting",
+    "platform/ansible":             "Platform · Remote Worker runners",
+    "editions":                     "Editions",
+    "profiles":                     "Demo and POV profiles",
+    "profiles/demo":                "Demo profile",
+    "profiles/demo/personas":       "Demo profile · personas",
+    "profiles/demo/ot-demo-cell":   "OT Demo Cell",
+    "profiles/pov":                 "POV profile",
 }
+
 
 # Titles for docs whose filename is an identifier rather than a phrase. The persona pages are
 # named after the persona key so /docs/profiles/demo/personas/<key> matches the
@@ -319,9 +398,9 @@ _TITLE_OVERRIDES = {
     "profiles/demo/personas/idarch":     "Identity architect",
     # Not personas. The derived title is the filename title-cased, which reads as a
     # filename ("Ps Runbook", "Standing One Up") rather than as the page.
-    "kubernetes/kubesolo":               "KubeSolo",
-    "kubernetes/k8s":                    "Managed Kubernetes (k8s)",
-    "kubernetes/k3s":                    "k3s",
+    "cloud-services/kubernetes/kubesolo": "KubeSolo",
+    "cloud-services/kubernetes/k8s": "Managed Kubernetes (k8s)",
+    "cloud-services/kubernetes/k3s": "k3s",
     "profiles/demo/ot-demo-cell":        "OT Demo Cell",
     "profiles/demo/net-demo-cell":       "Network Demo Cell",
     "profiles/demo/agent-demo-cell":     "Agent Demo Cell",
@@ -333,50 +412,50 @@ _TITLE_OVERRIDES = {
     "profiles/pov/customer-access":      "What the customer sees",
     "profiles/pov/lifecycle":            "Keeping a POV true, and reaping it",
     "profiles/pov/ps-runbook":           "Password Safe POC runbook",
-    "integrations/beyondtrust/password-safe/databases":       "Databases: the shared model",
-    "integrations/beyondtrust/password-safe/databases-aws":   "Databases on AWS (dbssm)",
-    "integrations/beyondtrust/password-safe/databases-azure": "Databases on Azure (dbazure)",
-    "integrations/beyondtrust/password-safe/databases-gcp":   "Databases on GCP Cloud SQL (dbgcp)",
-    "operations/cloud-hosting/azure-container-apps": "Azure Container Apps",
-    "operations/cloud-hosting/gcp-cloud-run":        "GCP Cloud Run",
-    "operations/cloud-hosting/aws-ecs":              "AWS ECS Fargate",
+    "beyondtrust/password-safe/databases":       "Databases: the shared model",
+    "beyondtrust/password-safe/databases-aws":   "Databases on AWS (dbssm)",
+    "beyondtrust/password-safe/databases-azure": "Databases on Azure (dbazure)",
+    "beyondtrust/password-safe/databases-gcp":   "Databases on GCP Cloud SQL (dbgcp)",
+    "platform/cloud-hosting/azure-container-apps": "Azure Container Apps",
+    "platform/cloud-hosting/gcp-cloud-run":        "GCP Cloud Run",
+    "platform/cloud-hosting/aws-ecs":              "AWS ECS Fargate",
     "profiles/demo/ot-demo-cell/identity":           "Who brokers identity",
     "profiles/demo/ot-demo-cell/deploying":          "Deploying a cell",
     "profiles/demo/ot-demo-cell/verification":       "End-to-end verification",
-    "onboarding/aws":                    "AWS setup",
-    "onboarding/azure":                  "Azure setup",
-    "onboarding/gcp":                    "GCP setup",
-    "onboarding/after-first-run":        "After the first run",
-    "onboarding/feature-test":           "Feature-test checklist",
-    "onboarding/troubleshooting":        "Onboarding troubleshooting",
+    "getting-started/aws":                    "AWS setup",
+    "getting-started/azure":                  "Azure setup",
+    "getting-started/gcp":                    "GCP setup",
+    "getting-started/after-first-run":        "After the first run",
+    "getting-started/feature-test":           "Feature-test checklist",
+    "getting-started/troubleshooting":        "Onboarding troubleshooting",
     # The OIDC section. "Oidc" and "Entra K8s Federation" read as filenames.
-    "oidc":                              "OIDC and single sign-on",
-    "oidc/entra-oauth":                  "Sign in with Microsoft (Entra)",
-    "oidc/k8s-federation":               "Kubernetes federation",
-    "oidc/k8s-federation/entra":         "Kubernetes federation: Entra ID",
-    "oidc/k8s-federation/okta":          "Kubernetes federation: Okta",
-    "oidc/k8s-federation/pingone":       "Kubernetes federation: PingOne",
-    "oidc/k8s-federation/oidc":          "Kubernetes federation: other OIDC",
-    "oidc/dashboard-identity":           "The dashboard's own identity",
-    "spiffe":                            "SPIFFE and SPIRE",
-    "oidc/dex":                          "Dex",
+    "platform/oidc":                              "OIDC and single sign-on",
+    "platform/oidc/entra-oauth":                  "Sign in with Microsoft (Entra)",
+    "platform/oidc/k8s-federation":               "Kubernetes federation",
+    "platform/oidc/k8s-federation/entra":         "Kubernetes federation: Entra ID",
+    "platform/oidc/k8s-federation/okta":          "Kubernetes federation: Okta",
+    "platform/oidc/k8s-federation/pingone":       "Kubernetes federation: PingOne",
+    "platform/oidc/k8s-federation/oidc":          "Kubernetes federation: other OIDC",
+    "platform/oidc/dashboard-identity":           "The dashboard's own identity",
+    "platform/spiffe":                            "SPIFFE and SPIRE",
+    "platform/oidc/dex":                          "Dex",
     # The section hubs and their pages. Folder names were dropped from the filenames
     # (cloud-vms -> cloud/vms), so the derived titles lose the word that said what they were.
-    "access":                            "Identity and access",
+    "admin":                            "Identity and access",
     "editions":                          "Editions",
-    "cloud/vms":                         "Cloud VMs",
-    "cloud/containers":                  "Cloud Containers",
-    "cloud/costs":                       "Cloud Costs",
-    "cloud/sandbox":                     "Cloud Sandbox",
-    "cloud/infrastructure-as-code":      "Infrastructure as Code",
+    "clouds/vms":                         "Cloud VMs",
+    "cloud-services/containers":                  "Cloud Containers",
+    "operations/costs":                       "Cloud Costs",
+    "clouds/sandbox":                     "Cloud Sandbox",
+    "clouds/infrastructure-as-code":      "Infrastructure as Code",
     "operations/auto-delete-timer":      "Auto-delete Timer",
     "editions/comparison":               "Community vs. hosted",
     "editions/roadmap":                  "SaaS Roadmap",
     # The BeyondTrust folder. "Epml" is not a word, and "Entitle Dashboard Permissions"
     # reads as a settings page rather than the Entitle mechanism it describes.
-    "integrations/beyondtrust/epml":     "EPM for Linux",
-    "integrations/beyondtrust/entitle-dashboard-permissions": "Entitle dashboard permissions",
-    "integrations/beyondtrust/gateways": "Gateway hosts",
+    "beyondtrust/epml":     "EPM for Linux",
+    "beyondtrust/entitle-dashboard-permissions": "Entitle dashboard permissions",
+    "beyondtrust/gateways": "Gateway hosts",
     "profiles/demo/ot-demo-cell/ot-protocol-clients": "OT protocol clients on Windows",
     # The filename predates the product name; Settings and the page's own H1 say this.
     "operations/scheduling/policy-guardrails": "Action Guardrails",
@@ -384,26 +463,26 @@ _TITLE_OVERRIDES = {
     # "Kubernetes", "Subordinate Ca" -- and the last of those is simply wrong. "Cloud" and
     # "Kubernetes" are also the short names of two unrelated top-level pages, so without
     # these the index lists the same word twice under different sections.
-    "workload-lab/spiffe":               "SPIFFE and SPIRE",
-    "workload-lab/cloud":                "Short-lived cloud credentials",
-    "workload-lab/kubernetes":           "Workload access to Kubernetes",
-    "workload-lab/certificate-lab":      "The Certificate Lab",
-    "workload-lab/subordinate-ca":       "Onboarding a subordinate CA",
-    "workload-lab/workload-credentials": "BeyondTrust Workload Credentials",
-    "workload-lab/dynamic-credentials":  "Dynamic AWS and Azure credentials",
-    "workload-lab/consumers":            "What consumes these credentials",
-    "integrations/ansible/config-reference":  "Config field reference",
-    "integrations/ansible/shared-cloud":      "Shared cloud infrastructure",
-    "integrations/ansible/ansible-runner":    "The Ansible runner",
-    "integrations/ansible/kubernetes-runner": "The Kubernetes runner",
-    "integrations/ansible/secrets":           "Secrets in a run",
-    "integrations/ansible/playbooks":         "Playbook structure",
-    "remote-agents/enrolment":               "Enrolling an agent",
-    "remote-agents/agent-host":              "Running the agent on your host",
-    "remote-agents/hypervisors":             "Hypervisor connections",
-    "remote-agents/credentials":             "Credentials an agent uses",
-    "remote-agents/config-runs":             "Agent-executed Config Management",
-    "remote-agents/file-shares":             "Agent-brokered file shares",
+    "preview/workload-lab/spiffe":               "SPIFFE and SPIRE",
+    "preview/workload-lab/cloud":                "Short-lived cloud credentials",
+    "preview/workload-lab/kubernetes":           "Workload access to Kubernetes",
+    "preview/workload-lab/certificate-lab":      "The Certificate Lab",
+    "preview/workload-lab/subordinate-ca":       "Onboarding a subordinate CA",
+    "beyondtrust/workload-credentials": "BeyondTrust Workload Credentials",
+    "preview/workload-lab/dynamic-credentials":  "Dynamic AWS and Azure credentials",
+    "preview/workload-lab/consumers":            "What consumes these credentials",
+    "platform/ansible/config-reference":  "Config field reference",
+    "platform/ansible/shared-cloud":      "Shared cloud infrastructure",
+    "platform/ansible/ansible-runner":    "The Ansible runner",
+    "platform/ansible/kubernetes-runner": "The Kubernetes runner",
+    "platform/ansible/secrets":           "Secrets in a run",
+    "platform/ansible/playbooks":         "Playbook structure",
+    "admin/remote-agents/enrolment":               "Enrolling an agent",
+    "admin/remote-agents/agent-host":              "Running the agent on your host",
+    "admin/remote-agents/hypervisors":             "Hypervisor connections",
+    "admin/remote-agents/credentials":             "Credentials an agent uses",
+    "admin/remote-agents/config-runs":             "Agent-executed Config Management",
+    "admin/remote-agents/file-shares":             "Agent-brokered file shares",
 }
 
 _SHELL = """<!doctype html>
@@ -552,8 +631,8 @@ async def doc_index() -> HTMLResponse:
             indexes[section] = href if section == "General" else section
             # Registers the section even when the README is the only .md in it, which is the
             # case for docs/profiles/ -- otherwise that folder's index is unreachable from
-            # here. Also keeps the `sorted(groups)` loop below the one place sections are
-            # ordered.
+            # here. Also keeps the loop below, ordered by _SECTION_LABELS, the one place
+            # sections are ordered.
             groups.setdefault(section, [])
             continue
         title = (_TITLE_OVERRIDES.get(href)
@@ -583,7 +662,10 @@ async def doc_index() -> HTMLResponse:
     parts = ["<h1>Documentation</h1>",
              '<p>Shipped with this build. The API explorer lives at '
              '<a href="/swagger">/swagger</a>.</p>']
-    for section in sorted(groups):
+    # In _SECTION_LABELS's order, which is the app's: its menu groups, then the Settings
+    # groups, then the profiles. Every indexed section has a label (test_docs_conventions).
+    order = list(_SECTION_LABELS)
+    for section in sorted(groups, key=lambda s: (order.index(s) if s in order else len(order), s)):
         label = _html.escape(_SECTION_LABELS.get(section, section))
         index_href = indexes.get(section)
         if index_href:

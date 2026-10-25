@@ -42,7 +42,7 @@ The delegated administrator is onboarded on an Active Directory platform and rot
 away. On AWS, the password Terraform had to pass at create is reset before the build finishes, so
 the value in state no longer works.
 
-**Guide:** [Active Directory in the cloud](../../../directories/active-directory.md)
+**Guide:** [Active Directory in the cloud](../../../preview/directories/active-directory.md)
 
 ### Is every directory answering?
 
@@ -54,7 +54,7 @@ account: replication, FSMO holders, core services, clock skew, SYSVOL and the LD
 certificate. It covers the directory service only. Accounts and privilege are left to
 Identity Security Insights.
 
-**Guide:** [Directory health](../../../directories/health.md)
+**Guide:** [Directory health](../../../preview/directories/health.md)
 
 ### Start from the directories Password Safe already manages
 
@@ -62,7 +62,7 @@ Identity Security Insights.
 already holds, with the accounts the dashboard can request. Each imported directory binds as a
 managed account that is checked out per run and never written to the dashboard.
 
-**Guide:** [On-premises directories](../../../directories/on-premises.md)
+**Guide:** [On-premises directories](../../../preview/directories/on-premises.md)
 
 ### Privileged groups and stale accounts, audited from inside the network
 
@@ -71,7 +71,7 @@ Config Management, through the remote agent on that domain's network. They cover
 group membership, stale accounts and stale computers. The bind credential is checked out for
 that run only, and nobody's laptop holds domain rights.
 
-**Guide:** [On-premises directories](../../../directories/on-premises.md)
+**Guide:** [On-premises directories](../../../preview/directories/on-premises.md)
 
 ### Change a group membership, with the change on the record
 
@@ -81,7 +81,7 @@ confirmation and is written to the audit log with the tenant, group and user ids
 provider API should not change, such as on-prem synced, dynamic or role-assignable groups, are
 refused whatever the setting.
 
-**Guide:** [Identity providers](../../../directories/identity-providers.md)
+**Guide:** [Identity providers](../../../preview/directories/identity-providers.md)
 
 ### Nobody holds directory write by default
 
@@ -89,7 +89,7 @@ Map the dashboard's `directories` write scope to an Entitle resource, request it
 and show the grant end on its own. The people who change the directory follow the same rule
 they enforce on everyone else.
 
-**Guide:** [Entitle dashboard permissions](../../../integrations/beyondtrust/entitle-dashboard-permissions.md)
+**Guide:** [Entitle dashboard permissions](../../../beyondtrust/entitle-dashboard-permissions.md)
 
 ## What to enable
 

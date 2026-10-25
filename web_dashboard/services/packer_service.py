@@ -151,11 +151,11 @@ def generate_aws_template(
     image_name: str,
     has_provisioner: bool,
     provisioner_env: dict = None,
-    provisioner_secret_vars: dict = None,
+    provisioner_sensitive_var_names: dict = None,
 ) -> str:
     safe = _safe_ami_name(image_name)
-    envb = _provisioner_env_block(provisioner_env, provisioner_secret_vars)
-    decls = _sensitive_var_decls(provisioner_secret_vars)
+    envb = _provisioner_env_block(provisioner_env, provisioner_sensitive_var_names)
+    decls = _sensitive_var_decls(provisioner_sensitive_var_names)
     prov = ('\n  provisioner "shell" {\n    script = "provision.sh"\n' + envb + '  }\n') if has_provisioner else ""
     return (
         'packer {\n'
@@ -228,11 +228,11 @@ def generate_azure_template(
     image_name: str,
     has_provisioner: bool,
     provisioner_env: dict = None,
-    provisioner_secret_vars: dict = None,
+    provisioner_sensitive_var_names: dict = None,
 ) -> str:
     safe = _safe_azure_name(image_name)
-    envb = _provisioner_env_block(provisioner_env, provisioner_secret_vars)
-    decls = _sensitive_var_decls(provisioner_secret_vars)
+    envb = _provisioner_env_block(provisioner_env, provisioner_sensitive_var_names)
+    decls = _sensitive_var_decls(provisioner_sensitive_var_names)
     # Azure requires waagent deprovision to generalize the image
     prov = (
         '\n  provisioner "shell" {\n'
@@ -292,7 +292,7 @@ def generate_azure_linux_gallery_template(
     image_name: str,
     has_provisioner: bool,
     provisioner_env: dict = None,
-    provisioner_secret_vars: dict = None,
+    provisioner_sensitive_var_names: dict = None,
 ) -> str:
     """Linux build → Shared Image Gallery *version* (instead of a managed image).
 
@@ -304,8 +304,8 @@ def generate_azure_linux_gallery_template(
     azure_service before the build; their coordinates arrive as sensitive-free
     PKR_VAR_gallery_* vars. Mirrors generate_azure_template otherwise (same shell
     provisioner + waagent generalize)."""
-    envb = _provisioner_env_block(provisioner_env, provisioner_secret_vars)
-    decls = _sensitive_var_decls(provisioner_secret_vars)
+    envb = _provisioner_env_block(provisioner_env, provisioner_sensitive_var_names)
+    decls = _sensitive_var_decls(provisioner_sensitive_var_names)
     prov = (
         '\n  provisioner "shell" {\n'
         '    execute_command = "chmod +x {{ .Path }}; {{ .Vars }} sudo -E sh \'{{ .Path }}\'"\n'
@@ -543,15 +543,15 @@ def generate_gcp_template(
     zone: str,
     has_provisioner: bool,
     provisioner_env: dict = None,
-    provisioner_secret_vars: dict = None,
+    provisioner_sensitive_var_names: dict = None,
     disk_type: str = "pd-ssd",
     disk_size: Optional[int] = None,
     source_image_name: str = "",
     source_image_project: str = "",
 ) -> str:
     safe = _safe_gcp_name(image_name)
-    envb = _provisioner_env_block(provisioner_env, provisioner_secret_vars)
-    decls = _sensitive_var_decls(provisioner_secret_vars)
+    envb = _provisioner_env_block(provisioner_env, provisioner_sensitive_var_names)
+    decls = _sensitive_var_decls(provisioner_sensitive_var_names)
     prov = ('\n  provisioner "shell" {\n    script = "provision.sh"\n' + envb + '  }\n') if has_provisioner else ""
     # Boot disk. The googlecompute builder defaults to pd-standard (a spinning
     # HDD): low IOPS, which drags out unpacking hundreds of RPMs/debs during a
@@ -731,7 +731,7 @@ def generate_oci_template(
         # reaches the transient build instance over the public internet. Without a
         # public IP the build hangs at "Waiting for SSH" until it times out. The
         # subnet must also permit ingress on 22 from the dashboard's egress address
-        # — see docs/cloud/image-management.md.
+        # — see docs/operations/image-management.md.
         '  create_vnic_details {\n'
         '    assign_public_ip = true\n'
         '  }\n\n'

@@ -59,7 +59,7 @@ The worker holds no identity document. It attests itself to a SPIRE trust domain
 loop and names the SPIFFE ID it was given — so deleting the registration entry is enough
 to make it anonymous, and nothing has to be revoked from the host.
 
-**Guide:** [SPIFFE and SPIRE](../../../workload-lab/spiffe.md)
+**Guide:** [SPIFFE and SPIRE](../../../preview/workload-lab/spiffe.md)
 
 ### What the agent could see, and why
 
@@ -68,7 +68,7 @@ this agent reach" is a row in the RBAC table rather than a guess. The cell refus
 an agent token against an administrator, which is the one choice that would quietly make
 the whole demo say the opposite of what it means to.
 
-**Guide:** [MCP Server](../../../integrations/mcp-server.md)
+**Guide:** [MCP Server](../../../platform/mcp-server.md)
 
 ### Every call it made, and when
 
@@ -76,7 +76,7 @@ Three records that agree: the token's own `last_used_at`, the job trail, and the
 log naming the identity behind each call. For a principal most estates are not watching at
 all, that is the difference between an incident and an investigation.
 
-**Guide:** [Audit log](../../../access/audit-log.md)
+**Guide:** [Audit log](../../../admin/audit-log.md)
 
 ### A credential that was never a secret to begin with
 
@@ -85,7 +85,7 @@ credential minted per run and leased, with its own issuance audit. Carry the cav
 honestly: on AWS a lease **cannot be revoked**, so the TTL is the only control there is.
 Azure honours the revoke.
 
-**Guide:** [Short-lived cloud credentials](../../../workload-lab/cloud.md)
+**Guide:** [Short-lived cloud credentials](../../../preview/workload-lab/cloud.md)
 
 ## What to enable
 

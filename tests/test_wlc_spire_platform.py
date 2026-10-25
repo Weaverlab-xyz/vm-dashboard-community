@@ -112,7 +112,7 @@ def test_the_panel_offers_it_and_asks_for_its_audience():
     # The audience field is shown on every platform but the projected-file ones.
     assert "x-show=\"!['aws', 'file'].includes(panelCfg.wlc_identity_platform)\"" in html
     assert "panelCfg.wlc_identity_platform === 'spire'" in html
-    assert "/docs/oidc/dashboard-identity#beyondtrust-workload-credentials" in html
+    assert "/docs/platform/oidc/dashboard-identity#beyondtrust-workload-credentials" in html
 
 
 def test_the_test_button_names_what_is_missing_for_the_mode_in_use():

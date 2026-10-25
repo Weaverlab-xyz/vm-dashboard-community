@@ -1,6 +1,6 @@
 """Regression: the BeyondTrust doc hub stays a hub, and stays true.
 
-`docs/integrations/beyondtrust.md` was a 662-line single page covering three products. It
+`docs/beyondtrust.md` was a 662-line single page covering three products. It
 is now a thin hub in front of `password-safe.md`, `privileged-remote-access.md` and
 `epml.md`. Two things the existing doc tests cannot see:
 
@@ -23,7 +23,7 @@ import re
 import sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_DOCS = os.path.join(_ROOT, "docs", "integrations")
+_DOCS = os.path.join(_ROOT, "docs")
 _HUB = os.path.join(_DOCS, "beyondtrust.md")
 # The product pages live in the folder named after the hub, the way workload-lab/ sits
 # beside workload-lab.md -- so a reader browsing integrations/ sees them as one set.
@@ -44,9 +44,9 @@ def test_the_product_pages_exist():
     sidebar entry — no error anywhere."""
     for page in PRODUCT_PAGES:
         path = os.path.join(_PRODUCTS, page)
-        assert os.path.exists(path), f"docs/integrations/beyondtrust/{page} is missing"
+        assert os.path.exists(path), f"docs/beyondtrust/{page} is missing"
         assert len(_read(path)) > 2000, (
-            f"docs/integrations/beyondtrust/{page} is a stub; the split moved content, it did not "
+            f"docs/beyondtrust/{page} is a stub; the split moved content, it did not "
             f"leave placeholders")
 
 
@@ -97,18 +97,18 @@ def test_each_product_page_names_its_own_flag():
                        ("privileged-remote-access.md", "pra_enabled"),
                        ("epml.md", "epml_enabled")):
         body = _read(os.path.join(_PRODUCTS, page))
-        assert flag in body, f"docs/integrations/beyondtrust/{page} never names `{flag}`"
+        assert flag in body, f"docs/beyondtrust/{page} never names `{flag}`"
 
 
 def test_the_token_rotation_anchor_survived_the_move():
-    """Three sites depend on this exact slug — docs/kubernetes.md, settings.html and
+    """Three sites depend on this exact slug — docs/cloud-services/kubernetes.md, settings.html and
     k8s/index.html. The heading text was kept byte-identical on purpose through both moves
     (out of the hub, then into password-safe/kubernetes-tokens.md), so each was a path-only
     edit; renaming it now breaks all three (test_app_docs_links catches two)."""
     ps = _read(os.path.join(_PRODUCTS, "password-safe", "kubernetes-tokens.md"))
     assert "## Kubernetes ServiceAccount token rotation" in ps, (
         "the token-rotation heading changed; its slug is depended on by "
-        "docs/kubernetes.md, settings.html and k8s/index.html")
+        "docs/cloud-services/kubernetes.md, settings.html and k8s/index.html")
 
 
 def test_no_doc_points_at_a_moved_section_of_the_hub():

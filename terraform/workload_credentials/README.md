@@ -1,7 +1,7 @@
 # Workload Credentials Terraform module
 
 Provisions the **BeyondTrust side** of the dynamic-credential tier described in
-[`docs/workload-lab/workload-credentials.md`](../../docs/workload-lab/workload-credentials.md),
+[`docs/beyondtrust/workload-credentials.md`](../../docs/beyondtrust/workload-credentials.md),
 plus the AWS IAM trust chain it needs. One `terraform apply` creates:
 
 1. A **folder** for the dashboard's dynamic secrets.
@@ -54,7 +54,7 @@ dashboard's everyday Azure calls at its SPIFFE identity instead
 (`wlc_azure_everyday_source = federation`) and pass `--everyday-sp <azure_client_id>` to the
 script: that app gets the same roles minus anything that can write role assignments, and
 this module's one dynamic secret is minted only inside jobs. See
-[the everyday credential from the SPIFFE identity](../../docs/workload-lab/dynamic-credentials.md#the-everyday-credential-from-the-spiffe-identity).
+[the everyday credential from the SPIFFE identity](../../docs/preview/workload-lab/dynamic-credentials.md#the-everyday-credential-from-the-spiffe-identity).
 
 ## Prerequisites
 

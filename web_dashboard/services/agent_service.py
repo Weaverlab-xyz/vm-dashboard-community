@@ -637,7 +637,7 @@ def ansible_upgrade_hint(agent: RemoteAgent) -> str:
             f"needs `agent_ansible` in its policy.yaml `job_types`, an `ansible:` block "
             f"with its own `targets:` list, and the runner image for the kind of run "
             f"pulled — chrweav/ansible-winrm for VMs, chrweav/ansible-cloud for databases, "
-            f"not the hypervisor sibling; see docs/remote-agents.md. Nothing was queued.")
+            f"not the hypervisor sibling; see docs/admin/remote-agents.md. Nothing was queued.")
 
 
 def supports_directory(agent: RemoteAgent) -> bool:

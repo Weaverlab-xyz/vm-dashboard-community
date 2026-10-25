@@ -483,7 +483,7 @@ def test_every_declared_key_is_bound_in_its_own_panel():
     ``passwordsafe_azure_db_registration_method`` was declared on config.py's ``Settings``
     *and* on ``PasswordSafeFeatureConfig``, was read at two runtime sites
     (cloud_database_service, jumpoint_host_service), and had its own row in the
-    docs/databases.md config table — but nothing in settings.html bound it, so the only
+    docs/cloud-services/databases.md config table — but nothing in settings.html bound it, so the only
     ways to set it were the setup wizard, an env var, or a hand-rolled
     ``PATCH /api/setup/feature/password_safe``. It is the only switch that turns Azure
     database onboarding off while leaving the AWS SSM path on

@@ -4,8 +4,8 @@ on GitHub.
 ``docs/`` is authored and reviewed on GitHub, so a cross-reference is written the way
 GitHub resolves it -- ``[Cloud VMs](cloud-vms.md)``, or ``../../cloud-vms.md`` from a
 nested page. Nothing rewrote those and ``_SHELL`` has no ``<base>``, so the browser
-resolved them against the current route: ``/docs/cloud/vms.md``, which makes ``doc_page``
-append its own suffix, look for ``docs/cloud/vms.md.md``, and 404. Every relative link in
+resolved them against the current route: ``/docs/clouds/vms.md``, which makes ``doc_page``
+append its own suffix, look for ``docs/clouds/vms.md.md``, and 404. Every relative link in
 the tree -- 500-odd of them -- was dead in this viewer while working perfectly on GitHub.
 
 That is the same split ``tests/test_app_docs_links.py`` was written about, one layer down,
@@ -71,9 +71,9 @@ def test_the_fragment_survives_the_rewrite():
     """The fragment is the whole value of a deep link. Dropping it silently leaves the
     reader at the top of a 700-line page, which is the failure test_docs_anchors exists
     for -- reintroducing it in the renderer would be a fine joke."""
-    html = _render("[k8s](../../integrations/beyondtrust/password-safe.md#kubernetes-serviceaccount-token-rotation)")
+    html = _render("[k8s](../../beyondtrust/password-safe.md#kubernetes-serviceaccount-token-rotation)")
     assert _hrefs(html) == [
-        "/docs/integrations/beyondtrust/password-safe#kubernetes-serviceaccount-token-rotation"]
+        "/docs/beyondtrust/password-safe#kubernetes-serviceaccount-token-rotation"]
 
 
 def test_a_directory_link_lands_on_that_folders_index():
@@ -217,7 +217,7 @@ def test_every_section_heading_on_the_index_resolves():
 def test_every_index_href_names_a_file_with_its_real_case():
     """The /docs index links each section heading to that folder's index -- its README, or
     the sibling hub a split was cut out of. Resolving that hub with a plain is_file() is a
-    trap: docs/ONBOARDING.md indexes docs/onboarding/, and
+    trap: docs/getting-started.md indexes docs/getting-started/, and
     (docs / "onboarding.md").is_file() is TRUE on an NTFS dev checkout and FALSE in the
     Linux image. So the buggy version links the heading here, drops it silently in
     production, and emits /docs/onboarding -- a URL that 404s there.

@@ -1,0 +1,625 @@
+# Secrets Management
+
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you are deciding where to store cloud credentials, and how to evolve that over time.
+
+Part of [Identity and access](../admin.md).
+
+This document explains how the dashboard stores and protects credentials,
+the security philosophy behind the design, and how to migrate secrets to
+an external vault once you are ready.
+
+---
+
+## Philosophy
+
+The dashboard operates on a **tiered secrets model**. Every tier is more
+secure than the one before it. You start at Tier 1 on first run and can
+advance at your own pace.
+
+| Tier | Where secrets live | Who can read them | Best for |
+|---|---|---|---|
+| **1 — Encrypted database** | Application DB (AES-256) | Anyone with DB access + JWT key | Getting started; local dev |
+| **2 — External vault (migrated)** | AWS SM / Azure KV / GCP SM / BT Secrets Safe | Vault IAM policy | Shared or long-lived deployments |
+| **3 — Vault-backed cloud credentials** | External vault; fetched at runtime by BeyondTrust | Password Safe audit log | Regulated environments; zero-standing-access |
+| **4 — Dynamic cloud credentials** | Nowhere — minted per lease by BeyondTrust Workload Credentials | Workload Credentials audit log | Removing the standing cloud credential entirely |
+
+**The recommended destination is to store no cloud secret at all.** Every tier above
+is about where a secret *lives*; the dashboard's own
+[workload identity](../platform/workload-identity.md) removes the AWS, Azure and GCP keys outright, and
+pairing it with Tier 4 or an Entitle grant for writes removes standing privilege as well.
+Use this ladder for what still has to be stored (an OCI key, a Terraform provider's
+credential, a hypervisor password), and for a cloud you have not moved over yet.
+
+Every tier stays supported. Tier 1 is secure enough for a
+single-user local deployment. Tier 2 is the right target for any shared or
+persistent environment. Tier 3 adds checkout audit trails and is worth the added
+complexity when compliance or separation-of-duties is a requirement. Tier 4 goes
+further and removes the standing cloud credential altogether.
+
+Each tier is selected **per cloud**, so a mixed deployment is normal rather than
+a half-finished migration — AWS on Tier 4 alongside GCP on Tier 1 is a supported
+configuration, not a gap. Nothing here changes on upgrade: a deployment stays on
+whichever tier it is on until an operator moves it.
+
+---
+
+## What counts as a secret
+
+| Category | Examples | Where stored |
+|---|---|---|
+| **Cloud provider credentials** | AWS access key + secret, Azure SP client secret, GCP service account JSON | Encrypted DB (Tier 1) or external vault (Tier 2+) |
+| **Integration API tokens** | Portainer PAT, Entitle API token, BeyondTrust client secret | Encrypted DB (Tier 1) or external vault (Tier 2+) |
+| **SSH private keys** | EC2 keypair, GCP SSH key | External vault only (AWS SM / GCP SM); never in the DB |
+| **JWT root key** | `.jwt_secret_key` | Host filesystem (owner-read-only) or Docker secret — see [why this can't be migrated](#why-the-jwt-root-key-cannot-be-migrated) |
+| **Database password** | `POSTGRES_PASSWORD` | `.env` (non-secret bootstrap; not an application credential) |
+
+The database password in `.env` is intentionally left there — it is only
+reachable from within the Docker Compose network and protects the DB service
+process, not application data. It is not a credential the application uses to
+authenticate to external services.
+
+---
+
+## Tier 1 — Encrypted database (default)
+
+All credentials entered through the setup wizard or **Settings → Integrations**
+are encrypted with AES-256 before being written to PostgreSQL. The encryption
+key is derived from the JWT root key (`.jwt_secret_key`).
+
+**What this means in practice:**
+
+- A copy of the database without the JWT key is useless — the ciphertext cannot
+  be decrypted.
+- The JWT key on disk is protected by owner-only filesystem permissions
+  (`chmod 600` on Linux/macOS, Windows ACL on Windows).
+- Credentials never appear in `.env`, in Docker environment variables, or in
+  container inspect output.
+- The setup wizard stores credentials immediately on submission — they are not
+  held in browser memory or logged.
+
+**Limitations of Tier 1:**
+
+- The JWT key is a plaintext file on the host. Physical access to the machine
+  or root access to the filesystem can expose it.
+- There is no audit log of which application component read which credential,
+  or when.
+- Rotating a credential requires updating it in the dashboard Settings panel —
+  there is no automated rotation.
+
+**One exception: Windows VM administrator passwords never use Tier 1.** They are
+credentials for machines the dashboard built, not credentials the dashboard itself uses,
+so a Windows build writes its administrator password to Password Safe, an external
+backend or the cloud's own vault, and refuses to build when none is configured. The
+**Windows VM administrator passwords** setting on the Secrets page picks the store
+explicitly. See [Windows servers](../clouds/windows-servers.md).
+
+---
+
+## Tier 2 — External vault (migration)
+
+The **Settings → Secrets Backend** page (`/secrets`) lets you migrate any
+stored secret from the encrypted database to an external vault. After migration,
+the database stores only a reference string (e.g. `aws_sm://dashboard/my-key`).
+When the application needs the value, `config_service` resolves the reference
+by calling the vault API, caches the result for 5 minutes, and discards it.
+
+### Supported backends
+
+| Backend | Reference prefix | Auth method |
+|---|---|---|
+| **AWS Secrets Manager** | `aws_sm://` | The dashboard's AWS credential: a Workload Credentials lease, the stored key, or its SPIFFE identity |
+| **Azure Key Vault** | `azure_kv://` | The dashboard's Azure app: the stored secret or its SPIFFE identity |
+| **GCP Secret Manager** | `gcp_sm://` | The dashboard's service account: the stored key or its SPIFFE identity |
+| **BeyondTrust Secrets Safe** | `bt_safe://` | ps-cli credentials already configured in the dashboard |
+| **BeyondTrust Workload Credentials** | `wlc://` | Site ID, plus either a personal access token or the container's own Azure workload identity (see below) |
+
+Each backend reuses the cloud provider credentials you have already entered —
+no additional IAM setup is needed beyond granting the existing SP / SA / IAM
+user access to the vault. On a key-less install, where the dashboard reaches a
+cloud with [its own SPIFFE identity](../platform/oidc/dashboard-identity.md), grant the
+federated role, app or service account instead. With no dashboard credential at all,
+AWS Secrets Manager falls back to boto3's default chain (environment, instance role).
+
+The OCI API signing key and its passphrase are on the list too. OCI has no backend
+here, so they move to one of the vaults above, which keeps the PEM out of the
+dashboard's database. Every OCI path (the console pages, Packer, Terraform, image
+promotion) reads it through the same resolver.
+
+### How to migrate a secret
+
+1. Log in as admin and navigate to **Settings → Secrets Backend** (`/secrets`).
+2. Select the backend you want to migrate to.
+3. Choose the secret to migrate and enter the target secret name in the vault.
+4. Click **Migrate**. The dashboard:
+   - Reads the current plaintext value from the encrypted DB.
+   - Writes it to the vault under the name you specified.
+   - Replaces the DB value with the reference string.
+   - Verifies the reference resolves correctly before committing.
+5. The plaintext value is no longer stored in the database. Future reads go
+   to the vault.
+
+**Bootstrap credentials are held back.** Each backend authenticates with one of
+the dashboard's own secrets — the AWS secret key for Secrets Manager, the Azure
+client secret for Key Vault, the service-account JSON for GCP SM, the ps-cli
+client secret for Secrets Safe — and a migration that moved one into the backend
+it unlocks would leave the dashboard unable to read its own credentials on the
+next restart. Those appear in the results as skipped bootstrap credentials and
+stay in the encrypted database. Workload Credentials is the exception: on
+workload-identity auth it authenticates with no stored secret at all, so it holds
+nothing back.
+
+### Why the JWT root key cannot be migrated
+
+The JWT root key derives the Fernet key that encrypts every value in the
+application database — including the cloud credentials the dashboard would
+need to call any external vault. There is no startup ordering in the
+community edition that resolves this:
+
+```
+read JWT root key
+  └─ derive Fernet DEK
+       └─ decrypt DB row
+            └─ get vault credentials
+                 └─ call vault to fetch JWT root key  ← the loop
+```
+
+The community edition therefore reads the JWT root key from one of these
+sources only, in order:
+
+1. The path in `JWT_SECRET_KEY_FILE` (set by `docker-compose.yml` to
+   `/run/secrets/jwt_key` when the host file exists).
+2. `/run/secrets/jwt_key` directly (Docker / Compose secret mount).
+3. The `JWT_SECRET_KEY` environment variable.
+4. A freshly generated random key — **only suitable for first-run/dev**;
+   it does not survive a restart and invalidates all existing sessions
+   and DB-encrypted values.
+
+> The hosted SaaS edition removes this limitation by fetching the root key
+> from Azure Key Vault using a workload-managed identity and OIDC federation
+> — no static credential is required to bootstrap. See
+> [SaaS comparison](../editions/comparison.md) for details.
+
+To rotate the JWT root key in the community edition: stop the application,
+write a new key to the file/secret, restart. **All existing sessions are
+invalidated and every DB-encrypted value must be re-entered** through the
+setup wizard / Settings panels. Plan rotation accordingly.
+
+### IAM permissions required per backend
+
+**AWS Secrets Manager:**
+```
+secretsmanager:GetSecretValue
+secretsmanager:CreateSecret
+secretsmanager:PutSecretValue
+secretsmanager:DescribeSecret
+```
+Scope to `arn:aws:secretsmanager:<region>:<account>:secret:dashboard/*`
+(or your configured prefix).
+
+**Azure Key Vault:**
+The service principal needs the **Key Vault Secrets Officer** role on the vault,
+or a custom role with `Microsoft.KeyVault/vaults/secrets/read` and
+`Microsoft.KeyVault/vaults/secrets/write`.
+
+Add `Microsoft.KeyVault/vaults/secrets/recover/action` if you use a custom role.
+Soft delete is mandatory on every vault created since 2020 and cannot be turned
+off, so deleting a secret does not free its name — the name stays reserved by a
+deleted-but-recoverable object for the vault's retention window (7–90 days), and
+writing it again fails with `Conflict … ObjectIsDeletedButRecoverable`. That
+matters for the fixed-name secrets the dashboard stages for its adapters (for
+example `portainer-adapter-pat`), where a retire followed by a re-pair reuses the
+same name. The dashboard recovers such a secret and writes the new value over it;
+without the `recover` action it can only tell you to run
+`az keyvault secret recover --vault-name <vault> --name <secret>` yourself.
+Key Vault Secrets Officer already includes the action.
+
+**GCP Secret Manager:**
+```
+roles/secretmanager.secretAccessor
+roles/secretmanager.secretVersionAdder
+```
+Scoped to the specific secrets, or `roles/secretmanager.admin` on the project.
+
+**BeyondTrust Secrets Safe:**
+The API Registration needs **Secrets → Read** and **Secrets → Write** permissions
+on the folder where dashboard secrets will be stored.
+
+---
+
+## Browse & Edit — full CRUD on individual secrets
+
+Migration covers the "move everything across" path. For day-to-day work
+the `/secrets` page also provides full CRUD on individual secrets in any
+configured backend — no need to drop into the AWS console, Azure Portal,
+GCP console, or `ps-cli` for one-off edits.
+
+The **Browse & Edit** section lets you:
+
+- Pick any backend (Database, AWS SM, Azure KV, GCP SM, BT Secrets Safe).
+- List every secret in that backend.
+- Create a new secret, edit an existing one, or delete one.
+- For BeyondTrust Secrets Safe specifically: navigate the full
+  `Safe → Folder → Secret` hierarchy with create / rename / delete
+  actions on Safes and create / delete on Folders, all driven by the
+  ps-cli subcommands (`create-safe`, `update-safe`, `delete-safe`,
+  `create`, `delete`). If a secret only sits one level deep, that
+  folder acts as both the Safe and the Folder (per the BeyondInsight
+  convention).
+
+### JSON-only values
+
+All secret values are constrained to **valid JSON** — same format across
+every backend. The editor enforces this client-side (live parse) and
+server-side (`validate_json_value` raises before the backend write). The
+default scaffold for new secrets is:
+
+```json
+{
+  "username": "",
+  "password": ""
+}
+```
+
+Add whatever fields your consumers expect — multi-line bodies (private
+keys, certificates) work fine inside a JSON string. The **Format JSON**
+button in the editor pretty-prints the current value to canonical
+multi-line layout. This uniformity means downstream code can `json.loads`
+the value from any backend without backend-specific parsing.
+
+### What the dashboard can and cannot do per backend
+
+| Operation | DB | AWS SM | Azure KV | GCP SM | BT Secrets Safe |
+|---|---|---|---|---|---|
+| List secrets | ✅ | ✅ | ✅ | ✅ | ✅ (per folder) |
+| Read secret value | ✅ | ✅ | ✅ | ✅ | ✅ (file secrets: text only) |
+| Create / update secret | ✅ | ✅ | ✅ | ✅ | ✅ (text or file) |
+| Delete secret | ✅ | ✅ | ✅ | ✅ | ✅ |
+| List Safes | — | — | — | — | ✅ |
+| Create / rename / delete Safe | — | — | — | — | ✅ |
+| List Folders | — | — | — | — | ✅ |
+| Create / delete Folder | — | — | — | — | ✅ |
+
+**Reading a file secret takes a second call, and it is made for you.** `ps-cli secrets
+get` returns a file secret's `FileName` and `FileHash` and no contents — there is no
+payload field in that projection for `--decrypt` to fill — so the read would otherwise
+resolve to an empty string rather than failing. The dashboard detects `SecretType: File`
+and fetches the body from `GET Secrets-Safe/Secrets/{id}/file/download` over `ps-cli
+raw`. **Text payloads only:** that endpoint is byte-faithful, but every ps-cli route
+decodes its response to text, so a PEM bundle, a config file or JSON round-trips and a
+PKCS#12 or DER payload does not. A payload showing decode damage is **refused rather
+than returned**, since a corrupt bundle that looks like a value fails much later and
+somewhere unrelated. See
+[Password Safe → Troubleshooting](../beyondtrust/password-safe.md#troubleshooting).
+
+**Writing one goes through a file, because ps-cli has no inline route.** The type is
+inferred from the argument: `--text` makes a text secret, `-fp <path>` makes a file
+one, and there is no way to hand the CLI a file body directly. The dashboard writes the
+value to a `0600` file inside a `0700` private directory, passes that path, and removes
+the directory afterwards — including when the write fails, which is when a leftover
+would go unnoticed. The file's *name* is chosen rather than left as a temp name,
+because Password Safe records the basename as the secret's `FileName`. Dashboard config
+values stay **text** secrets by default; the file type is opt-in.
+
+**An edit preserves the type.** Writing `--text` over a file secret would not just fail
+to update it — it would change what the secret *is*, and reads route on that field. So
+an update reads the existing type first and matches it, carrying the recorded
+`FileName` over so the edit does not rename the file either. One consequence worth
+knowing: a file secret's body comes back on ps-cli's stdout, which is stripped, so a
+**trailing newline cannot survive a round trip**. That is not treated as a failed
+write.
+
+BeyondTrust hierarchy management is driven through the
+[ps-cli subcommands](https://docs.beyondtrust.com/bips/docs/ps-cli-application):
+`list-safes` / `create-safe` / `update-safe` / `delete-safe` for Safes,
+and `list` / `create` / `delete` (parent identified via `-pid`) for
+Folders. Deletes require the container to be empty — ps-cli refuses to
+remove a Safe that still has Folders or a Folder that still has
+Folders or Secrets, and the dashboard surfaces that error verbatim.
+
+---
+
+### Non-goals — what Browse & Edit deliberately does *not* include
+
+The Browse & Edit feature is intentionally lightweight day-to-day CRUD.
+It is **not** a replacement for the audit-and-compliance capabilities
+of an enterprise vault (BeyondTrust Password Safe, CyberArk PAM,
+HashiCorp Vault Enterprise, AWS Audit Manager + CloudTrail, etc.):
+
+- **No enterprise audit trail.** The dashboard does not record who
+  viewed, changed, or deleted a secret beyond the standard request log.
+  If you need an immutable, queryable, regulator-grade audit trail —
+  with session recording, four-eyes approval, time-bounded checkout,
+  break-glass replay, etc. — keep using your vault's native UI / API
+  for those workflows. The dashboard's Browse & Edit is for operator
+  convenience, not compliance.
+- **No plans to add it to the community edition.** Building a credible
+  audit-and-compliance layer is a large undertaking and is not on the
+  community roadmap. The community build exists to let small teams
+  operate a multi-cloud workstation lab, not to replace their
+  procurement decision for a PAM/secret-vault platform.
+- **No plans on the SaaS roadmap either.** The hosted SaaS edition's
+  differentiation (see [SaaS comparison](../editions/comparison.md)) is
+  managed hosting and operator UX — not vault feature parity.
+  Customers who need an enterprise vault should keep using one and
+  point the dashboard at it via the existing migration / reference
+  flow above.
+
+If you spot a per-secret operation in this page that should land in
+your vault's audit log but doesn't, treat that as a sign you should
+do that operation in the vault's native UI instead — not as a gap to
+file against the dashboard.
+
+---
+
+## Vaults, and a workstream's own vault
+
+Besides the one configured store, an administrator can register more vaults on **Secrets →
+Backend → Vaults**: an id, a backend (Azure Key Vault, AWS Secrets Manager, GCP Secret
+Manager or Secrets Safe) and an endpoint (the Key Vault URL, the AWS region or the GCP
+project). A reference names one by putting its id first, like
+`azure_kv://team-a-kv/pra-client`; a reference whose first segment is not a registered
+vault reads from the configured store as before.
+
+A vault can be **limited to one workstream**. Such a vault resolves only for that
+workstream's cloud VM deploys and their **Add to PRA** actions — the PRA credential and the
+Gateway deploy key. Resolved for anyone else, including a global Settings key, a
+Config-Management secret variable or another workstream's deploy, it resolves to nothing,
+the same as a secret that can't be read, and a warning is logged. So a team's own vault holds
+that team's secrets and no one else's deploys can read them.
+
+- A workstream's **bound PRA credential**
+  ([Workstream secret bindings](../clouds/vms.md#workstream-secret-bindings)) can name a
+  reference into its own vault or an unlimited one; one into another workstream's vault is
+  refused when it's saved. Type the reference in the editor's **or a reference** field, since
+  the picker lists only the configured store.
+- **Changing a vault's workstream** applies immediately; resolved values are not cached
+  past it.
+- **A vault still bound** as a workstream's PRA credential can't be deleted.
+- A vault's **backend** can't change after it is registered, because references to it name
+  that backend.
+
+Managing vaults is administrator-only and audited (`secret_vault_update`,
+`secret_vault_delete`). The API is `GET /api/secrets/vaults`, `PUT
+/api/secrets/vaults/{id}` with `{"backend", "endpoint", "workgroup"}` (`null` for all
+workstreams), and `DELETE /api/secrets/vaults/{id}`.
+
+## Tier 3 — Vault-backed cloud credentials (BeyondTrust)
+
+With the BeyondTrust integration enabled, the dashboard can retrieve AWS, Azure,
+and SSH credentials directly from Password Safe at runtime rather than from the
+application database. See [docs/beyondtrust/password-safe.md](../beyondtrust/password-safe.md)
+for setup instructions.
+
+**How it differs from Tier 2:**
+
+| | Tier 2 | Tier 3 (BeyondTrust) |
+|---|---|---|
+| Where credentials live | External vault | BeyondTrust Password Safe |
+| Checkout record | No | Yes — every retrieval creates a Password Safe audit entry |
+| Rotation | Manual vault update | Rotate in Password Safe; dashboard gets new value immediately |
+| SSH key | Stored as vault secret | Managed Account checkout (key never written to disk) |
+| Requires BeyondTrust licence | No | Yes (Secrets Safe) |
+
+### Tier 4 — dynamic cloud credentials (Workload Credentials)
+
+Tier 3 still keeps a credential somewhere and fetches it when needed. **Tier 4
+has nothing to fetch**: BeyondTrust Workload Credentials mints a short-lived AWS
+or Azure credential on demand, and it expires on its own.
+
+It is off by default. It is enabled under Settings → Integrations → BeyondTrust →
+**Workload Credentials**, per cloud, and turning it on is
+also what unlocks retiring that deployment's own static keys. Workload
+Credentials additionally works as a Tier 2 backend for ordinary static secrets
+(`wlc://`), which is the cheapest way to verify the connection before anything
+dynamic is switched on.
+
+One caveat, and the one way out of it. On the default auth mode the dashboard
+still holds a Workload Credentials personal access token, so this collapses three
+standing cloud credentials into one platform token rather than eliminating
+secrets outright. On the **Azure workload-identity** auth mode it holds nothing:
+the container mints a short-lived Entra token from its own managed identity, and
+`wlc_pat` is read by no code path. That is the one posture in which migrating
+*every* database secret — the PAT included — into `wlc://` leaves the database
+with references only. The migration refuses to move the PAT on the token mode,
+and reports it as a skipped bootstrap credential.
+
+See [workload-lab/workload-credentials.md](../beyondtrust/workload-credentials.md).
+
+### Hypervisor credentials for a remote agent
+
+An agent-bound hypervisor connection can take its credential from any of the tiers above,
+which is what lets an on-prem agent host store no hypervisor password at all. The
+connection's `secret_ref` accepts the usual backend prefixes, plus one that is specific to
+this path:
+
+`ps_account://<managed-account-id>` — the dashboard checks a credential out of Password Safe
+for the duration of one agent job, seals it to that agent, checks it back in when the job
+ends, and **rotates the password on release** so the value the agent held is dead
+immediately. Combined with `dashboard_secret: true` in the agent's own `connections.yaml`,
+neither the agent host nor the application database holds a standing hypervisor credential.
+
+Unlike the four backend prefixes, `ps_account://` is deliberately **not** resolvable through
+`config_service.get()`. The others are stateless reads; this one opens a request that
+something has to close, so it is handled only on the agent-credential path where the release
+lifecycle exists. See
+[Remote Agents → credentials](remote-agents/credentials.md#the-credential-the-dashboard-holds).
+
+---
+
+## Using a secret in an Ansible run (without seeing it)
+
+Stored secrets aren't only consumed by cloud-credential lookups — an operator can
+inject one directly into a **Config Management** run without ever seeing the value.
+On `/config-mgmt` the **Use a secret** panel offers three bindings, resolved
+just-in-time, scrubbed from job output, and audited (kinds + var names only, never
+the value):
+
+| Binding | Becomes | Runners |
+|---|---|---|
+| Named variable | an extra var (`-e`) | local + cloud |
+| Become / sudo password | `ansible_become_password` (`no_log`) | local + cloud |
+| SSH private key | the connection key | local + cloud |
+
+- **Permission:** requires **`secrets:use`** (admins bypass).
+  The value is never shown, stored on the job, or placed on a command line.
+- **Cloud runners are hardened per provider:** the value is delivered through
+  ECS `valueFrom` / Cloud Run secret-env / ACI `secure_value`, not plaintext task
+  env. Because ECS/Cloud Run *reference* a store secret, a variable/become secret
+  used there must already live in that cloud's store (`aws_sm://` / `gcp_sm://`) —
+  otherwise the run is rejected with a *move it via Secrets → migrate* message.
+
+**Managed-account checkout (Tier 3):** with BeyondTrust enabled, the same panel
+also lets the operator pick a Password Safe **managed account** from a live list
+and use it as the login identity — the credential is checked out just-in-time (an
+SSH-key account → the connection key; a password account → `ansible_ssh_pass`).
+Managed-account checkout works on the **local and Azure (ACI) runners** (both
+inject inline); on **ECS / Cloud Run** it requires the opt-in below.
+
+Full operator detail lives in
+[Ansible secrets → Using a Secrets-Management secret in a run](../platform/ansible/secrets.md#using-a-secrets-management-secret-in-a-run).
+
+### Ephemeral cloud secrets
+
+The ECS and Cloud Run runners inject a secret by *referencing* one in that cloud's
+store (the task identity fetches it at launch); a just-in-time managed-account
+credential has no such store entry. Enabling **Ephemeral cloud secrets**
+(Settings → Ansible, **off by default**) bridges that: for the run, the dashboard
+
+1. checks the credential out of Password Safe,
+2. writes it to the cloud store as a **short-lived, RBAC-locked** secret,
+3. injects it via the provider's secret channel (ECS `valueFrom` / Cloud Run
+   secret-env), and
+4. **force-deletes** it in a `finally` when the run ends.
+
+**RBAC lock-down — only the runner can read it:**
+
+| Cloud | How access is restricted |
+|---|---|
+| **GCP** | The Cloud Run job runs as a configured **runner service account**, and `roles/secretmanager.secretAccessor` is granted **on that one secret** to **only** that SA (no project-level accessor). Requires `gcp_ansible_runner_service_account`. |
+| **AWS** | A resource policy scopes `GetSecretValue` to the **ECS execution role**. For a *cryptographic* lock, set `ansible_ephemeral_kms_key_id` to a CMK whose key policy grants `kms:Decrypt` to only that role — then reading requires decrypt permission even for account IAM admins. |
+
+**Rotate-on-release (best-effort).** The dashboard uses a **long-enough Password
+Safe request** (`ansible_managed_request_duration_min`, default 60 min — must
+outlast the run) so the request is still open to flag **rotate-on-check-in** and
+then **check it in** after the run. Rotation isn't enforceable (it depends on the
+account being auto-managed), so the reliable backstop is enabling **Change Password
+After Release** on the managed account — either way a missed cleanup then leaves a
+rotated, dead credential.
+
+**Garbage collection.** Each run reaps its own ephemerals; a sweeper (on startup and
+before each run) force-deletes any tagged ephemeral older than the TTL, covering a
+crash between create and cleanup. The TTL is **GC TTL** on the same panel
+(`ansible_ephemeral_secret_ttl_min`, default 30 minutes), and must be at least the longest
+run, or a sweep deletes a secret a task is still reading.
+
+**The trade-off.** This briefly writes a PAM-vaulted credential into the cloud store
+(a second trust domain) for the task's lifetime. Mitigations shrink but don't erase
+that: the per-secret RBAC lock, optional CMK, short request duration, rotate-on-
+check-in / Change-After-Release, force-delete + GC, and dashboard-side audit of the
+use. If that trade-off isn't acceptable, use the local or ACI runner (inline, no
+store copy) — the default.
+
+Full operator detail:
+[Ansible secrets → Managed-account checkout](../platform/ansible/secrets.md#managed-account-checkout-beyondtrust-password-safe).
+
+### Collect from the dashboard (no store copy)
+
+The alternative to the copy above, and the one to prefer when the runner can reach the
+dashboard. With **Collect credentials from the dashboard** on (Settings → Ansible,
+**off by default**), the credential never goes into a cloud store. Instead:
+
+1. The dashboard checks it out and parks it under a **single-use, ten-minute token**. Only
+   the token's SHA-256 is stored, and the credential is encrypted with the dashboard's own
+   key.
+2. The task gets the token in its per-run environment: the RunTask override on ECS, never
+   the task definition. It also gets a small fetch script.
+3. The task **proves its own cloud identity, bound to that token**:
+   - **ECS:** a presigned `sts:GetCallerIdentity`, signed with the **task role**. The
+     token's hash is in a signed header.
+   - **Cloud Run:** a Google-signed ID token for the runner **service account**. The
+     token's hash is in its audience.
+4. The task calls `POST <agent URL>/api/agent/runner-credential`. The dashboard burns the
+   token first, then sends the presigned request to STS (only ever a regional STS host) or
+   verifies the Google token. It checks that the identity is the configured runner and
+   answers with the credential **sealed** to a key the task generated (the
+   [remote agents'](remote-agents/credentials.md#central-storage-with-spire-the-recommended-model)
+   format).
+5. The task merges it into the run's `0600` vars file. The grant is deleted when the run
+   ends, whether redeemed or not.
+
+| Needs | Why |
+|---|---|
+| The agent URL pinned (Settings → Remote Agents) and reachable from the runner | The task calls `/api/agent/runner-credential` there. That vhost publishes only `/api/agent/*`. |
+| ECS: `ansible_ecs_task_role_arn` | The identity the task proves. It needs no permissions; it only has to be *who* the task runs as. |
+| Cloud Run: `gcp_ansible_runner_service_account` | The same, for Cloud Run. |
+
+A copied token is worth nothing without the runner's own cloud identity, and a proof made
+for one token is refused with another. Every collection and refusal is audited
+(`agent.runner_credential` / `agent.runner_credential_refused`). Rotate-on-check-in still
+applies. When both settings are on, collect-from-dashboard wins wherever it is fully
+configured. It is **not SPIFFE**: a Fargate or Cloud Run task cannot run a SPIRE agent, so
+the platform's own attestation is the stronger statement.
+
+---
+
+## Secret staleness — age alerting
+
+The dashboard can flag stored secrets that haven't changed in a while, so a
+long-forgotten credential doesn't sit un-rotated indefinitely. It's **read-only**
+— it never rotates or touches the secret; it only surfaces an age.
+
+- **Turn it on** on the `/secrets` page: *"Flag secrets older than N days"*
+  (`secret_max_age_days`; **0 disables**, the default).
+- **What's tracked** — the config-secret registry (cloud credentials, integration
+  tokens/passwords). A secret is flagged once its age reaches the threshold.
+- **How age is measured** — this is the important part:
+  - **Database-stored secrets** use the dashboard's own last-saved time
+    (`AppConfig.updated_at`, stamped whenever you save the value).
+  - **External-vault references** (`aws_sm://` / `azure_kv://` / `gcp_sm://` /
+    `bt_safe://`) use **the vault's own last-changed / last-rotated date** — so a
+    secret you rotate in AWS Secrets Manager or BeyondTrust Password Safe reads as
+    *fresh*, not stale-since-you-pasted-the-reference. If a backend can't report a
+    date, it falls back to when the reference was configured here.
+- **Where it shows** — `GET /api/secrets/staleness` (admin) returns the per-secret
+  ages; the dashboard's **Needs attention** panel rolls up *"N secrets not rotated
+  in X+ days."*
+
+This is deliberately the safe half of secret lifecycle — staleness signalling
+only. Automated rotation is a hosted-edition concern (see the *SaaS roadmap*).
+
+---
+
+## Security best practices
+
+**Do immediately after first run:**
+- [ ] Verify the JWT root key file (`.jwt_secret_key` or
+  `/run/secrets/jwt_key`) has owner-only read permissions.
+- [ ] Back up the JWT root key to a secure offline location — losing it
+  renders the entire encrypted database unrecoverable.
+- [ ] Change the auto-generated admin password (`Settings → Security → Change Password`).
+
+**For any shared or long-lived deployment:**
+- [ ] Migrate all cloud provider credentials (AWS, Azure, GCP) to your vault.
+- [ ] Restrict vault IAM policies to the minimum permissions listed above.
+- [ ] Enable MFA for the dashboard admin account (`Settings → Security → Security Keys`).
+- [ ] Set `POSTGRES_PASSWORD` in `.env` to a strong unique value (the onboard
+  script auto-generates one — do not replace it with something weaker).
+- [ ] Do not expose the PostgreSQL port (5432) outside the Docker Compose
+  network. The `docker-compose.yml` publishes it for convenience; remove
+  the `ports:` block under `db:` for any internet-facing deployment.
+
+**If BeyondTrust is available:**
+- [ ] Configure Password Safe as the credential source for AWS and Azure.
+- [ ] Store SSH private keys as Managed Accounts rather than Secrets, so
+  checkout requires an active session and creates a full audit record.
+
+---
+
+## What is never stored as a secret
+
+- The **database password** (`POSTGRES_PASSWORD`) — in `.env` only; only
+  reachable inside the Compose network.
+- **Feature flags** (`VMWARE_ENABLED`, etc.) — configuration, not credentials.
+- **Public cloud region and zone settings** — not sensitive.
+- **Webhook URLs** — not sensitive; only the signing secret that validates
+  inbound webhooks is treated as a credential.

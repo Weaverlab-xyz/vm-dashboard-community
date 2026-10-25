@@ -85,4 +85,4 @@ misconfiguration — see the docs page for the mitigation.
 `tests/test_playbook_kubesolo.py` the hand-rolled idempotency and the three chart values
 that are load-bearing findings rather than preferences. If you change
 `entitle_agent_replicas`, `datadog.sidecarLogs` or `platform.mode`, those tests and
-[docs/kubernetes/kubesolo.md](../../../docs/kubernetes/kubesolo.md) have to move with you.
+[docs/cloud-services/kubernetes/kubesolo.md](../../../docs/cloud-services/kubernetes/kubesolo.md) have to move with you.

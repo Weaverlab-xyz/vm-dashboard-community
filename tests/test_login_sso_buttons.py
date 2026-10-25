@@ -2,7 +2,7 @@
 
 The Sign in with Microsoft button used to render unconditionally, so a default install,
 or one that had moved to generic OIDC, showed it anyway, and clicking it ended on a bare
-501 from ``/api/auth/oauth/azure/login``. docs/oidc/entra-oauth.md already said the button
+501 from ``/api/auth/oauth/azure/login``. docs/platform/oidc/entra-oauth.md already said the button
 appears once Entra OAuth is saved; this pins the page to that.
 
 The error messages are shared too: the OIDC callback reuses ``not_registered``,

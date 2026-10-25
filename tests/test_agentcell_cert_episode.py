@@ -5,7 +5,7 @@ The agent cell now demonstrates three credentials, and the arc is the point:
   * the **PAT** is revocable — pull it and the loop stops mid-poll;
   * the **cluster token** is gated at retrieval — a person decides, and once released it
     lives out its TTL;
-  * a **certificate** is neither. `docs/workload-lab/certificates.md`:
+  * a **certificate** is neither. `docs/preview/workload-lab/certificates.md`:
     *"No revocation checking. The plugin consults neither CRLs nor OCSP. Short lifetimes
     are the mitigation, and that is a deliberate design position."*
 
@@ -398,7 +398,7 @@ def test_the_key_is_written_private_and_the_passphrase_never_reaches_argv():
 
 # -- Secrets Safe: the bytes, unmangled, on the session already open -----------
 #
-# The whole reason this path is not ps-cli. `docs/integrations/beyondtrust/password-safe.md` and
+# The whole reason this path is not ps-cli. `docs/beyondtrust/password-safe.md` and
 # `services/secrets_backend_service._read_bt_file_secret` both establish it: the endpoint
 # returns application/octet-stream faithfully, and every ps-cli route decodes the body to
 # text before anyone sees it, so a PEM bundle survives and a .pfx is CORRUPTED RATHER THAN
@@ -557,7 +557,7 @@ def test_the_bundle_does_not_go_back_through_ps_cli():
     body = _code(_WORKER).split("def secrets_safe_file(", 1)[1].split("\ndef ")[0]
     for gone in ("ps-cli", "subprocess", "PSCLI"):
         assert gone not in body, \
-            f"the bundle is back on {gone!r} — see docs/integrations/beyondtrust/password-safe.md, " \
+            f"the bundle is back on {gone!r} — see docs/beyondtrust/password-safe.md, " \
             "every ps-cli route decodes the body to text and corrupts a PKCS#12"
 
 

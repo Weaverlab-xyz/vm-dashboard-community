@@ -1,7 +1,7 @@
 """Release dashboard-held credentials only to SPIRE-attested agents, driven against a real
 SQLite database and the real routes.
 
-docs/remote-agents/credentials.md, "Central storage with SPIRE". With
+docs/admin/remote-agents/credentials.md, "Central storage with SPIRE". With
 ``dashboard_secrets_require_spire`` on, the three routes that hand out a credential the
 dashboard holds — /jobs/{id}/secret, /gateway-key and /ansible-bundle — answer only an
 agent whose key came from /api/agent/attest (``auth_mode == "spiffe"``). Pinned here:

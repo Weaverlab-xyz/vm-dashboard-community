@@ -3,7 +3,7 @@
 Ready-to-adapt playbooks for configuring **Linux** and **Windows** cloud VMs, plus
 **Kubernetes clusters** and **databases**, via the dashboard's **Config
 Management** feature
-(see [docs/integrations/ansible.md](../../docs/integrations/ansible.md)). They are
+(see [docs/platform/ansible.md](../../docs/platform/ansible.md)). They are
 the Ansible counterpart to [`examples/compose/`](../compose/) — upload one, edit
 the placeholders, and run.
 
@@ -29,7 +29,7 @@ shown, never stored on the job, and is scrubbed from the job output (requires th
 - **As a BeyondTrust Password Safe managed account** — pick the account from the
   live list; the credential is checked out just-in-time.
 
-See [Using a Secrets-Management secret in a run](../../docs/integrations/ansible/secrets.md#using-a-secrets-management-secret-in-a-run).
+See [Using a Secrets-Management secret in a run](../../docs/platform/ansible/secrets.md#using-a-secrets-management-secret-in-a-run).
 Plaintext extra vars still work for non-sensitive parameters.
 
 ### Optional: fetch a secret from Password Safe inside the play
@@ -302,7 +302,7 @@ agent's primary channel and is plain HTTP, not TLS. A tenant onboarded before
 The values in `ot/entitle-agent-install.yml` deliberately override three chart defaults
 that are wrong for one node — three replicas with no anti-affinity, a Datadog sidecar
 that `datadog.enabled: false` does *not* remove, and a cloud `platform.mode`. See
-[docs/kubernetes/kubesolo.md](../../docs/kubernetes/kubesolo.md) for why each one, the two separate trust
+[docs/cloud-services/kubernetes/kubesolo.md](../../docs/cloud-services/kubernetes/kubesolo.md) for why each one, the two separate trust
 stores TLS inspection breaks, and the hardcoded `imagePullPolicy: Always` that stops a
 pod restarting while the WAN is down.
 
@@ -552,7 +552,7 @@ formats, and a standalone `docker run` smoke test.
 ## Directories: Active Directory and LDAP (`directory/`)
 
 Plays that change an **on-premises directory** registered on the Directories page
-through a remote agent (see [docs/directories/on-premises.md](../../docs/directories/on-premises.md#discover-register-and-change-them)).
+through a remote agent (see [docs/preview/directories/on-premises.md](../../docs/preview/directories/on-premises.md#discover-register-and-change-them)).
 In Config Management, pick the directory under **On-Prem Directories (via agent)** and
 choose the transport:
 
@@ -599,7 +599,7 @@ To run these plays outside the dashboard, set the `dir_*` vars yourself, plus
 | `ad-audit-stale-accounts.yml` | Enabled users with no logon in N days (default 90) or never logged on, plus "password never expires" and "password not required" |
 | `ad-audit-privileged-groups.yml` | Recursive members of Domain Admins, Enterprise Admins, Schema Admins, Administrators and the other operator groups |
 | `ad-audit-stale-computers.yml` | Enabled computer accounts with no logon in N days. Clean them up with `ad-remove-computer.yml` |
-| `ad-dc-health.yml` | Domain controller health: replication, FSMO holders, and per DC its core services, clock offset, SYSVOL state and LDAPS certificate. The [Directory health](../../docs/directories/health.md#the-domain-controller-check) page runs it as `builtin:ad-dc-health` and reads its report back |
+| `ad-dc-health.yml` | Domain controller health: replication, FSMO holders, and per DC its core services, clock offset, SYSVOL state and LDAPS certificate. The [Directory health](../../docs/preview/directories/health.md#the-domain-controller-check) page runs it as `builtin:ad-dc-health` and reads its report back |
 
 The reports print a summary and record it with `set_stats`, so it is in the job's
 output. Every play supports `--check`.
@@ -621,7 +621,7 @@ agent that reaches it, and refuses without `confirm: true`. The tunnel keys come
 `--check` first. The runner needs the `vyos.vyos` and `ansible.netcommon` collections.
 
 Why VyOS on-prem with the cloud's managed VPN, and what it costs: see
-[Connecting on-prem AD to the cloud](../../docs/directories/on-premises.md#connecting-on-prem-ad-to-the-cloud).
+[Connecting on-prem AD to the cloud](../../docs/preview/directories/on-premises.md#connecting-on-prem-ad-to-the-cloud).
 
 ## Notes
 

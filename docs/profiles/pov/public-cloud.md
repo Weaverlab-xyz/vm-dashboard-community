@@ -112,9 +112,9 @@ last two, nothing secret is stored. The dashboard presents its own JWT-SVID —
 `spiffe://<trust domain>/dashboard`, audience `sts.amazonaws.com` — to AWS STS and assumes a
 role with `AssumeRoleWithWebIdentity`. The app and the worker each keep their own token, so
 the provision jobs use it too. The mechanism, and the same identity for Azure, GCP and
-Workload Credentials, is in [The dashboard's own identity](../../oidc/dashboard-identity.md).
+Workload Credentials, is in [The dashboard's own identity](../../platform/oidc/dashboard-identity.md).
 
-It needs the dashboard's own SPIRE server ([SPIFFE and SPIRE](../../spiffe.md)), and it needs
+It needs the dashboard's own SPIRE server ([SPIFFE and SPIRE](../../platform/spiffe.md)), and it needs
 an **issuer AWS can reach from the internet**. With the cloud gateway that is the agent
 hostname plus `/spiffe`, e.g. `https://pov-agents.example.com/spiffe`, and it must equal the
 SPIRE server's `SPIRE_JWT_ISSUER` exactly.
@@ -178,7 +178,7 @@ else about Workload Credentials stays on its own panel.
 1. **Register the dashboard in Pathfinder** as a Custom IDP Workload Identity. Use the issuer
    above, a `sub` condition of exactly `spiffe://<trust domain>/dashboard`, and an `aud`
    condition. The steps are in
-   [Workload Credentials with the SPIFFE identity](../../oidc/dashboard-identity.md#beyondtrust-workload-credentials).
+   [Workload Credentials with the SPIFFE identity](../../platform/oidc/dashboard-identity.md#beyondtrust-workload-credentials).
 2. **Apply the target side** with
    [`terraform/workload_credentials`](../../../terraform/workload_credentials/README.md):
 
@@ -329,7 +329,7 @@ Workload Credentials authenticates the dashboard with the same SPIFFE identity, 
 no PAT either. Choosing the option sets `wlc_azure_everyday_source = federation`.
 
 1. **Register the dashboard in Pathfinder.** Register it as a Custom IDP, exactly as for AWS
-   ([steps](../../oidc/dashboard-identity.md#beyondtrust-workload-credentials)).
+   ([steps](../../platform/oidc/dashboard-identity.md#beyondtrust-workload-credentials)).
 2. **Create the target app.** Create it, and its Azure integration and dynamic secret, with
    [`terraform/workload_credentials`](../../../terraform/workload_credentials/README.md), or
    with `scripts/wlc/setup-azure-apps.sh`.
@@ -455,7 +455,7 @@ grant.
    **Entitle machine user**, the role or bundle id, and the **grant duration**, which must be
    one the workflow allows.
 5. **Authenticate to Entitle.** The dashboard does this through the
-   [platform identity](../../integrations/beyondtrust/platform-identity.md) (Entitle in the
+   [platform identity](../../beyondtrust/platform-identity.md) (Entitle in the
    registration's Product Scopes), so no Entitle token is stored. The native API token
    still works.
 6. **Save, then Test connection.** It reads the service account's permissions and looks up

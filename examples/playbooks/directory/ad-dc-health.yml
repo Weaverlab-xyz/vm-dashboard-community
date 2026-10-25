@@ -14,7 +14,7 @@
 #   - per DC over CIM: core service state, clock offset, SYSVOL (DFSR) state
 #   - per DC: the LDAPS (636) certificate's expiry
 # Changes nothing. A DC the account cannot reach over CIM is reported with the error
-# rather than failing the run. Rights needed for each part: docs/directories/health.md.
+# rather than failing the run. Rights needed for each part: docs/preview/directories/health.md.
 #
 # The report is printed as base64 chunks, "DIRHEALTH_B64:<i>/<n>:<chunk>", which the
 # dashboard reassembles from the job's log lines (Ansible's default output quotes JSON;

@@ -12,18 +12,18 @@ encodes, and how the on-premises and cloud paths fit together.
 > Docker" runner below cannot serve your on-premises targets: it is a sibling
 > container on the *dashboard's* host, which has neither a Docker socket nor a
 > route to your LAN. Those targets are reached by a
-> [remote agent](../remote-agents/config-runs.md#agent-executed-config-management) instead, which
+> [remote agent](../admin/remote-agents/config-runs.md#agent-executed-config-management) instead, which
 > runs the same one-shot container inside your network. Everything else in this
 > document — the asset types, the secret handling, the drift tracking — is
 > unchanged.
 
 The companion docs:
 
-- [Infrastructure as Code](../cloud/infrastructure-as-code.md) — how the dashboard
+- [Infrastructure as Code](../clouds/infrastructure-as-code.md) — how the dashboard
   stands the infra up in the first place
-- [Image Management](../cloud/image-management.md) — what's *on* the VMs
+- [Image Management](image-management.md) — what's *on* the VMs
   before config-management runs against them
-- [Secrets Management](../access/secrets-management.md) — where credentials live
+- [Secrets Management](../admin/secrets-management.md) — where credentials live
 - [Storage Management](storage-management.md) — where playbooks and
   assets live
 
@@ -110,7 +110,7 @@ Behind the scenes (see [`services/ansible_local_service.py`](../../web_dashboard
   inventory directly from the dashboard host.
 
 Two limits of that path are worth knowing before you rely on it, and a
-[remote agent](../remote-agents/config-runs.md#agent-executed-config-management) is the answer
+[remote agent](../admin/remote-agents/config-runs.md#agent-executed-config-management) is the answer
 to both:
 
 - **It targets the hypervisor *hosts*, not their guests.** `build_inventory()`
@@ -150,7 +150,7 @@ the runner section below.
 
 Registered or provisioned **Kubernetes clusters** and **databases**
 appear in the same target dropdown, under their own groups. A database
-[imported from Password Safe](../databases.md#importing-from-password-safe)
+[imported from Password Safe](../cloud-services/databases.md#importing-from-password-safe)
 is an ordinary registered row and behaves identically as a target.
 These are *not* SSH targets — Ansible's `kubernetes.core` and
 `community.postgresql`/`mysql`/`general` modules run on the controller
@@ -356,7 +356,7 @@ Where the Ansible process actually runs. Picked in
 | **AWS ECS Fargate** | A Fargate task launched per run in your VPC. | EC2 targets in private subnets without a path back to the dashboard host. |
 | **Azure ACI** | An Azure Container Instance per run, in your VNet. | Azure VMs in private subnets. |
 | **GCP Cloud Run Jobs** | A Cloud Run Job per run, in your project. | GCE instances. |
-| **Remote agent** | A one-shot container on the *agent's* host, inside your network. Not selectable here — it is chosen automatically when the target is only reachable that way. **Which** agent defaults to the one that discovered the VM, and can be routed per address range on Remote Agents → Config Routes. | On-prem hypervisor guests and on-prem databases, especially from a cloud-hosted dashboard. See [remote agents](../remote-agents/config-runs.md#agent-executed-config-management) and [which agent executes a run](../remote-agents/config-runs.md#which-agent-executes-a-run). |
+| **Remote agent** | A one-shot container on the *agent's* host, inside your network. Not selectable here — it is chosen automatically when the target is only reachable that way. **Which** agent defaults to the one that discovered the VM, and can be routed per address range on Remote Agents → Config Routes. | On-prem hypervisor guests and on-prem databases, especially from a cloud-hosted dashboard. See [remote agents](../admin/remote-agents/config-runs.md#agent-executed-config-management) and [which agent executes a run](../admin/remote-agents/config-runs.md#which-agent-executes-a-run). |
 
 The cloud runners exist because connecting from a dashboard sitting on
 a corporate LAN to a deeply-private cloud subnet is often impossible
@@ -390,7 +390,7 @@ delivery paths, and the run is refused until one is on:
   Secrets Manager or GCP Secret Manager for the run and deletes it afterwards.
 
 Both are under **Settings → Ansible**; how each works, and what each one trusts, is in
-[Secrets management](../access/secrets-management.md#collect-from-the-dashboard-no-store-copy).
+[Secrets management](../admin/secrets-management.md#collect-from-the-dashboard-no-store-copy).
 ACI injects the credential inline and needs neither.
 
 ### Why one-shot runners (the security argument)
@@ -451,7 +451,7 @@ a fleet of long-lived runners to a security review.
 
 #### The one long-lived process, and why it doesn't contradict this
 
-[Remote agents](../remote-agents.md) run a persistent container inside a customer's
+[Remote agents](../admin/remote-agents.md) run a persistent container inside a customer's
 private network. That looks like the exact thing this section argues against, so it is
 worth being precise about why it isn't.
 
@@ -495,7 +495,7 @@ and shipped to a target.
   disable.
 
 The right fix when it fires: move the value into a vault reference (see
-[Secrets Management](../access/secrets-management.md)) or Ansible Vault, and reference it
+[Secrets Management](../admin/secrets-management.md)) or Ansible Vault, and reference it
 from the playbook rather than hard-coding it.
 
 ---
@@ -532,7 +532,7 @@ add a `test` group in your hypervisor hostvars module to make this
 trivial.
 
 **Keep secrets out of playbooks.** Anything sensitive belongs in
-[Secrets Management](../access/secrets-management.md), not embedded in YAML or
+[Secrets Management](../admin/secrets-management.md), not embedded in YAML or
 shell scripts. Reference secrets via Ansible's `lookup('env', ...)`,
 the `ansible-vault` integration, or fetched-at-runtime variables that
 the runner reads from the cloud secret store.
@@ -542,7 +542,7 @@ a Secrets-Management secret (as a named var, become password, or SSH key) — or
 **BeyondTrust Password Safe managed account** checked out just-in-time — straight
 into the run. The operator never sees the value; it's scrubbed from job output and
 the use is audited. Requires the `secrets:use` permission. See
-[Using a Secrets-Management secret in a run](../integrations/ansible/secrets.md#using-a-secrets-management-secret-in-a-run).
+[Using a Secrets-Management secret in a run](../platform/ansible/secrets.md#using-a-secrets-management-secret-in-a-run).
 
 **Escalate through a privilege broker, not just sudo.** The run form's **Become method**
 picker sets how a play escalates when it says `become: true`. Leave it on the default and
@@ -651,7 +651,7 @@ side-car runner. Check `docker-compose.yml` includes
 `/var/run/docker.sock:/var/run/docker.sock:ro`. The app runs as uid 10001 and the
 entrypoint gives it the socket's group automatically; if you start the container with
 `-u` / `runAsUser` yourself, add that group with `group_add`. See
-[Container User](container-user.md).
+[Container User](../platform/container-user.md).
 
 **Cloud runner says "AccessDenied" fetching the asset from S3.**
 The IAM role / service principal / GCP service account the dashboard

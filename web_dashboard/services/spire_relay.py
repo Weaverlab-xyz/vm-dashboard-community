@@ -86,7 +86,7 @@ def call(args: list, timeout: int, input: Optional[str] = None) -> subprocess.Co
                 "the SPIRE server relay is not running: this process has no local path to "
                 "the dashboard's SPIRE server (no SPIRE_SERVER_SOCKET, no Docker socket), "
                 "and no app process with SPIRE_SERVER_SOCKET has checked in. Start the "
-                "SPIRE sidecar beside the app (docs/spiffe.md), "
+                "SPIRE sidecar beside the app (docs/platform/spiffe.md), "
                 "or turn off the SPIRE features under Settings → Remote agents")
         row = SpireAdminCall(
             args_json=json.dumps([str(a) for a in args]),

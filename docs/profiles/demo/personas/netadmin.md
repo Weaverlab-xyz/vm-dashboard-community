@@ -60,7 +60,7 @@ The cell has no public address and no port open to anything. The Gateway dials *
 so the path in exists without an attack surface — the answer to "so we open 22 to your
 cloud?", which is the question that usually ends these conversations.
 
-**Guide:** [Gateways](../../../integrations/beyondtrust/gateways.md)
+**Guide:** [Gateways](../../../beyondtrust/gateways.md)
 
 ### The credential dies when the window closes
 
@@ -75,7 +75,7 @@ remember to revoke it, which is the step that never happens.
 Close the loop an auditor actually asks about: from a rule that exists today, back to
 the change that made it, the session it happened in, and the person who was there.
 
-**Guide:** [Audit log](../../../access/audit-log.md)
+**Guide:** [Audit log](../../../admin/audit-log.md)
 
 ## What to enable
 

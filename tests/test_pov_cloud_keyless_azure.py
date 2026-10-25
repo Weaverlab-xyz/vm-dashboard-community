@@ -95,7 +95,7 @@ def _verify(patch, *, source=cloud_federation.SOURCE, active=True, raises=None,
     patch.set(cloud_federation, "active", lambda cloud: active)
     patch.set(leases, "dynamic_enabled", lambda cloud: split)
     patch.set(leases, "everyday_from_federation", lambda cloud: split)
-    patch.set(leases, "secret_name_for", lambda cloud, purpose: "dashboard-azure-provision")
+    patch.set(leases, "dynamic_name_for", lambda cloud, purpose: "dashboard-azure-provision")
     minted = []
     patch.set(leases, "credentials", lambda *a, **kw: minted.append(a) or None)
     patch.set(leases, "azure_credentials", lambda *a, **kw: minted.append(a) or None)

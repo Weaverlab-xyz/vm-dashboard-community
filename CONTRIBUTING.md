@@ -109,7 +109,7 @@ every page under it. `tests/test_docs_moved_redirects.py` checks every target ex
 ### Faster lab infra for testing
 
 If your change touches AWS / Azure / GCP integration code, the
-[sandbox bootstrappers](docs/cloud/sandbox.md) can stand up isolated
+[sandbox bootstrappers](docs/clouds/sandbox.md) can stand up isolated
 lab infra in any cloud with one command and tear it down with another.
 Saves the manual VPC/IAM/SP setup you'd otherwise repeat per-PR. Both
 bash (`scripts/sandbox/Linux/`) and PowerShell
@@ -138,7 +138,7 @@ Adding a fourth target cloud (Oracle Cloud, on-prem KVM, …) means:
    and `api/storage.py`.
 
 [`runners/promote/README.md`](runners/promote/README.md) is the
-runner-internals reference; [`docs/cloud/image-management.md`](docs/cloud/image-management.md)
+runner-internals reference; [`docs/operations/image-management.md`](docs/operations/image-management.md)
 is the operator-facing flow. Update both when adding a target.
 
 ## What to avoid
@@ -278,7 +278,7 @@ need help from. Useful contributions include:
 
 To enable an integration, flip its flag in `Settings → Integrations`
 (or in the setup wizard on first run) and fill in the connection
-details. The matching page in [docs/integrations/](docs/integrations/README.md)
+details. The matching page in [docs/integrations/](docs/README.md)
 has the field-by-field walkthrough for each hypervisor.
 
 When you report a finding, please mention:

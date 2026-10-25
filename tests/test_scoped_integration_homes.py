@@ -247,7 +247,7 @@ def test_containers_page_reads_both_node_firewalls():
 # ── the permissions doc ──────────────────────────────────────────────────────
 
 def test_the_doc_no_longer_calls_them_admin_only():
-    doc = _read("docs", "access", "permissions.md")
+    doc = _read("docs", "admin", "permissions.md")
     menu = doc[doc.index("## What the menu shows"):]
     menu = menu[:menu.index("\n## ", 5)]
     assert "can still only be reached by administrators" not in menu

@@ -127,7 +127,7 @@ def create_agent(
     if payload.trust_source == "dashboard":
         try:
             # Federated from the start with every lab the dashboard's server already
-            # federates with (docs/workload-lab/spiffe.md, "Federating with the dashboard").
+            # federates with (docs/preview/workload-lab/spiffe.md, "Federating with the dashboard").
             join_token = dashboard_spire.register_workload(
                 node_id, spiffe_id, payload.worker_uid,
                 federates_with=spire_lab_service.federated_lab_tds(db))

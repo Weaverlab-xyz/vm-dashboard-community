@@ -48,7 +48,7 @@ may be mid-deployment with — the module's own docstring warns that a cleared o
 indistinguishable from a deployment that was never on the dynamic tier — and would bill for
 doing so. A test pins that this module never imports it.
 
-See docs/workload-lab/cloud.md.
+See docs/preview/workload-lab/cloud.md.
 """
 import json
 import logging

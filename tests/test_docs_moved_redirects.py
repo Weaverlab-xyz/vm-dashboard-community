@@ -87,14 +87,23 @@ def test_folder_keys_carry_the_rest_of_the_path():
     # Moved twice: each old address points straight at where the page lives now, never
     # at an intermediate one that is itself a redirect.
     assert (_moved_to("integrations/databases/password-safe-gcp")
-            == "integrations/beyondtrust/password-safe/databases-gcp")
+            == "beyondtrust/password-safe/databases-gcp")
     assert (_moved_to("integrations/beyondtrust/databases")
-            == "integrations/beyondtrust/password-safe/databases")
+            == "beyondtrust/password-safe/databases")
     # A prefix only counts at a path boundary: entitle must not swallow
     # entitle-dashboard-permissions, which has its own entry.
     assert (_moved_to("integrations/entitle-dashboard-permissions")
-            == "integrations/beyondtrust/entitle-dashboard-permissions")
+            == "beyondtrust/entitle-dashboard-permissions")
     assert _moved_to("integrations/entitlement") is None
+    # A key whose target is a page, not a folder, carries nothing: integrations/ was
+    # dissolved into the sections, and its index now lands on the docs index. A page
+    # under it with no entry of its own must 404, not redirect to README/<page>.
+    assert _moved_to("integrations") == "README"
+    assert _moved_to("integrations/no-such-page") is None
+    # A folder that moved whole carries its pages into the new folder.
+    assert _moved_to("kubernetes/k3s") == "cloud-services/kubernetes/k3s"
+    assert _moved_to("integrations/beyondtrust/password-safe/vm-onboarding") == (
+        "beyondtrust/password-safe/vm-onboarding")
 
 
 def test_an_old_url_redirects():
@@ -103,12 +112,12 @@ def test_an_old_url_redirects():
     c = _client()
     for old, new in (("/docs/change-windows", "/docs/operations/scheduling/change-windows"),
                      ("/docs/integrations/password-safe",
-                      "/docs/integrations/beyondtrust/password-safe"),
+                      "/docs/beyondtrust/password-safe"),
                      ("/docs/integrations/databases/password-safe-gcp",
-                      "/docs/integrations/beyondtrust/password-safe/databases-gcp"),
+                      "/docs/beyondtrust/password-safe/databases-gcp"),
                      ("/docs/integrations/beyondtrust/databases/password-safe",
-                      "/docs/integrations/beyondtrust/password-safe/databases"),
-                     ("/docs/integrations/spiffe", "/docs/workload-lab/spiffe")):
+                      "/docs/beyondtrust/password-safe/databases"),
+                     ("/docs/integrations/spiffe", "/docs/preview/workload-lab/spiffe")):
         r = c.get(old, follow_redirects=False)
         assert r.status_code == 301, f"{old}: {r.status_code}"
         assert r.headers["location"] == new, f"{old} -> {r.headers['location']}"
@@ -119,8 +128,8 @@ def test_live_pages_and_misses_are_unchanged():
     if _skip():
         return
     c = _client()
-    for live in ("/docs/integrations/beyondtrust", "/docs/operations/scheduling",
-                 "/docs/integrations/beyondtrust/password-safe/databases"):
+    for live in ("/docs/beyondtrust", "/docs/operations/scheduling",
+                 "/docs/beyondtrust/password-safe/databases"):
         assert c.get(live, follow_redirects=False).status_code == 200, live
     assert c.get("/docs/no-such-page", follow_redirects=False).status_code == 404
 

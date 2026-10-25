@@ -71,6 +71,18 @@ def configured() -> bool:
     return all(_cfg(k) for k in ("pscli_api_url", "pscli_client_id", "pscli_client_secret"))
 
 
+#: The config key holding the workgroup Password Safe reads are scoped to. Read through
+#: this constant, not as a literal at each call: CodeQL takes ``.get("password...")`` for a
+#: password, so every log line the workgroup NAME reached was flagged as leaking one.
+WORKGROUP_KEY = "passwordsafe_workgroup"
+
+
+def configured_workgroup() -> str:
+    """The workgroup filter Password Safe reads are scoped to, or "" for all."""
+    from . import config_service
+    return (config_service.get(WORKGROUP_KEY) or "").strip()
+
+
 # A per-call override of the Password Safe credentials, for callers that must not use the
 # install's singletons. Keyed by the CONFIG names so a caller building one reads the same
 # words it would have set in Settings — the same shape
@@ -445,7 +457,7 @@ async def _object_attributes(client, sem, kind_path: str, object_id: str) -> dic
     """One object's attributes, through ``_probe`` so a 404 is a state and not a failure.
 
     The per-object attribute path is NOT in any table in the researched API docs
-    (``docs/integrations/beyondtrust/password-safe.md``), so whether this Password Safe version serves
+    (``docs/beyondtrust/password-safe.md``), so whether this Password Safe version serves
     it is genuinely unknown until it is called. ``_probe`` is what makes that safe to find
     out from a page load.
     """
@@ -545,7 +557,7 @@ async def read_attribute_inventory(*, workgroup: str = "", wanted=None,
             # Assets are read PER WORKGROUP. Verified against a live tenant 2026-09-23:
             # `GET Assets` answers **404** — there is no flat collection — while
             # `GET Workgroups/{id}/Assets` answers 200. The researched capability table in
-            # docs/integrations/beyondtrust/password-safe.md only ever listed the workgroup-scoped
+            # docs/beyondtrust/password-safe.md only ever listed the workgroup-scoped
             # POST, and the GET turns out to match it.
             out["assets"] = await _assets_by_workgroup(client, workgroup_id)
             out["managed_systems"] = await _probe(
@@ -747,7 +759,7 @@ async def ensure_managed_system_attribute(system_id, type_name: str, value: str,
 
     Four of these calls have never been exercised against a tenant from here
     (``POST AttributeTypes``, ``POST AttributeTypes/{id}/Attributes``, and ``POST`` on
-    ``ManagedSystems/{id}/Attributes/{id}``; see docs/integrations/beyondtrust/
+    ``ManagedSystems/{id}/Attributes/{id}``; see docs/beyondtrust/
     password-safe.md). So every call's method, path and status is returned in ``calls`` —
     and carried on :class:`AttributeProbeError` when one is refused — which is what turns
     the first live run into the evidence that settles them. A POST answering 200 is not
@@ -1348,7 +1360,7 @@ async def _checkout(client: httpx.AsyncClient, account_id: int, *,
             f"cause it is. 4031: the API identity needs the Requestor role and an access "
             f"policy granting View on a Smart Rule containing this account (there is no "
             f"Smart Rule API — an out-of-band prerequisite, see "
-            f"docs/integrations/beyondtrust/password-safe.md), OR the account is not API-enabled, OR it "
+            f"docs/beyondtrust/password-safe.md), OR the account is not API-enabled, OR it "
             f"is not requestable on that system. 4034: awaiting approval. 4035: the "
             f"account's concurrent-request cap.")
     body = resp.json()

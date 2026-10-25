@@ -18,7 +18,7 @@ so nothing is copied by hand.
 ## The problem
 
 The SPIRE lab mints **audience-scoped JWT-SVIDs** and nothing in this dashboard ever
-presents one to anything. [`docs/workload-lab/spiffe.md`](../workload-lab/spiffe.md) proves issuance and proves
+presents one to anything. [`docs/preview/workload-lab/spiffe.md`](../preview/workload-lab/spiffe.md) proves issuance and proves
 governance — discovery returns 8 of 11 entries, attestation-policy findings fire — but the
 credential's whole point is that some relying party accepts it, and no page demonstrates a
 relying party at all. A reviewer can reasonably ask whether the SVID works, and the honest
@@ -30,7 +30,7 @@ clusters and already has a competing answer to compare against.
 ## 1. There is already a short-lived token path here, and it is the baseline
 
 [`k8s-sa-token-rotation.md`](k8s-sa-token-rotation.md) and
-[`docs/kubernetes.md`](../kubernetes.md) describe `POST /clusters/{id}/ps-token`: a
+[`docs/cloud-services/kubernetes.md`](../cloud-services/kubernetes.md) describe `POST /clusters/{id}/ps-token`: a
 ServiceAccount token onboarded as a Password Safe managed account on the *Kubernetes Service
 Account Token* plugin, with **Bound mode** issuing TokenRequest-API bound tokens.
 
@@ -48,7 +48,7 @@ pattern here has to be better than, on one axis:
 | Works on EKS / AKS / GKE | **yes** | **no** — see §3 |
 | Governed as an inventory row | yes | no |
 
-The row that matters is the second one. `docs/workload-lab/spiffe.md` already argues this in the other
+The row that matters is the second one. `docs/preview/workload-lab/spiffe.md` already argues this in the other
 direction — minting into a vault is "a strict downgrade… if a workload can reach the Workload
 API, it should use the Workload API" — and then the lab never shows the un-downgraded path.
 Putting both on one page, with this table, is a stronger demonstration than either alone,
@@ -79,7 +79,7 @@ Two projects in the **SPIFFE GitHub org**, both Apache-2.0, do exactly this:
 
   It also takes `SPIFFE_JWT_SOURCE=server-admin-api` to mint from the SPIRE Server admin
   API instead of the Workload API. **Do not use that mode in this lab.** It is the same
-  attestation bypass `docs/workload-lab/spiffe.md` spends a section refusing to make the default, and
+  attestation bypass `docs/preview/workload-lab/spiffe.md` spends a section refusing to make the default, and
   choosing it here would demonstrate the downgrade while claiming to demonstrate the
   upgrade.
 
@@ -122,7 +122,7 @@ maps claims to username and groups through CEL, and reloads on file change.
 
 It is also a **kube-apiserver flag**, which is the constraint that decides everything else:
 
-- **EKS, AKS and GKE do not expose it.** The `docs/kubernetes.md` clusters are therefore all
+- **EKS, AKS and GKE do not expose it.** The `docs/cloud-services/kubernetes.md` clusters are therefore all
   ineligible. EKS has its own OIDC identity-provider association and AKS has a preview of
   structured auth, but neither is this file, and building against either would be a different
   feature. That different feature exists for *people*: each managed cloud can trust one
@@ -134,7 +134,7 @@ It is also a **kube-apiserver flag**, which is the constraint that decides every
   (`k3s-open-ports.yml`) and emits a registration-ready kubeconfig (`k3s-kubeconfig.yml`)
   that registers as a `cloud=local` cluster.
 - **KubeSolo** is on the 1.34 line as of v1.1.0, and its single-process control plane would
-  otherwise suit the edge story in [`docs/kubernetes/kubesolo.md`](../kubernetes/kubesolo.md). It documents no way
+  otherwise suit the edge story in [`docs/cloud-services/kubernetes/kubesolo.md`](../cloud-services/kubernetes/kubesolo.md). It documents no way
   to pass API server arguments. Until that is established by experiment rather than hope, it
   is the riskier host.
 
@@ -145,7 +145,7 @@ EKS cannot adopt it.
 ## 4. The demo must not touch the seed playbook's entry count
 
 `spire-seed-entries.yml` writes 11 registration entries and
-[`docs/workload-lab/spiffe.md`](../workload-lab/spiffe.md) asserts discovery returns exactly **8** of them. That number
+[`docs/preview/workload-lab/spiffe.md`](../preview/workload-lab/spiffe.md) asserts discovery returns exactly **8** of them. That number
 is load-bearing — it is the assertion that caught the plugin defaulting its discovery path
 filter to the mintable prefix, and a test reads it.
 
@@ -185,7 +185,7 @@ the code alone:
   decides, and a test pins that its k3s branch reads no `ansible_*` column.
 - **Two hosts, both ATTACHED, never created.** The lab provisions no compute and this does
   not change that: both VMs come from the dashboard's own deploy rows through the existing
-  `resolve_host`, for the reason `docs/workload-lab/spiffe.md` already gives — accepting an address the
+  `resolve_host`, for the reason `docs/preview/workload-lab/spiffe.md` already gives — accepting an address the
   request supplies would be accepting a request to run privileged playbooks against a host
   of the caller's choosing. `start_k8s_link` refuses the SPIRE host as the k3s node, because
   an agent attesting over loopback proves the mechanism but not that it crosses a network.
@@ -238,7 +238,7 @@ And two that are still open:
 - **What the username should be.** The `sub` of a JWT-SVID is the SPIFFE ID
   (`spiffe://<trust-domain>/<path>`), so the RBAC subject is a URI. A `claimMappings.username`
   prefix is mandatory unless the claim is `email`, and whatever is chosen becomes the string
-  every binding names — the same trap `docs/kubernetes.md` documents for Entitle's sanitized
+  every binding names — the same trap `docs/cloud-services/kubernetes.md` documents for Entitle's sanitized
   `entitle:karen.walker-weaverlab.xyz` subject, where nothing in this repo does the rewrite
   and the binding has to be read rather than assumed. `k3s-spiffe-auth.yml` defaults
   `username_prefix` to `spiffe:`, so the subject reads `spiffe:spiffe://<td>/<path>`. It looks
@@ -252,7 +252,7 @@ And two that are still open:
 ## What this still does not demonstrate
 
 - **No revocation story.** Deleting the entry stops renewal; an SVID already issued stays
-  valid for its TTL. Same boundary `docs/workload-lab/spiffe.md` already records, and short TTLs are the
+  valid for its TTL. Same boundary `docs/preview/workload-lab/spiffe.md` already records, and short TTLs are the
   only mitigation.
 - **No governance.** The whole point is that no credential is stored, which also means there
   is no managed account, no inventory row and nothing for Password Safe to rotate. That is

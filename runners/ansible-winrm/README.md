@@ -56,6 +56,6 @@ override without pywinrm breaks Windows targets):
   rules; GCP Cloud Run needs the VPC connector), and the admin credential must be
   supplied — via the **Use a secret** panel (a cloud-store secret / managed account
   on ECS/GCP, inline on ACI). See
-  [docs/integrations/ansible.md](../../docs/integrations/ansible.md).
+  [docs/platform/ansible.md](../../docs/platform/ansible.md).
 - **Base pin.** The Dockerfile tracks `willhallonline/ansible:latest`; pin a specific
   upstream tag if you want reproducible rebuilds.

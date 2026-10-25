@@ -45,7 +45,7 @@ CA_KEY=$(read_var SPIRE_UPSTREAM_CA_KEY)
 # Refuse to start without the upstream CA rather than fall back to keys that die with the
 # container: that would re-key the trust domain on every restart and strand every agent
 # that attested, with nothing in the logs saying why.
-case "$CA_CERT" in *"BEGIN CERTIFICATE"*) ;; *) die "SPIRE_UPSTREAM_CA_CERT is not a PEM certificate (docs/spiffe.md#the-upstream-ca)";; esac
+case "$CA_CERT" in *"BEGIN CERTIFICATE"*) ;; *) die "SPIRE_UPSTREAM_CA_CERT is not a PEM certificate (docs/platform/spiffe.md#the-upstream-ca)";; esac
 case "$CA_KEY" in *"PRIVATE KEY"*) ;; *) die "SPIRE_UPSTREAM_CA_KEY is not a PEM private key";; esac
 
 RUN_UID=${SPIRE_RUN_UID:-10001}

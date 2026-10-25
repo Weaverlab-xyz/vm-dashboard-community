@@ -149,10 +149,10 @@ async def _bt_provisioner_env(req) -> dict:
 async def _provisioner_env(req) -> tuple[dict, dict, dict]:
     """Resolve the full provisioner environment for a build request.
 
-    Returns ``(plain_env, secret_vars, pkr_env)``:
+    Returns ``(plain_env, sensitive_var_names, pkr_env)``:
       * ``plain_env``   — name→literal value, inlined into the template's
         ``environment_vars`` (includes the BT_* convenience knobs).
-      * ``secret_vars`` — name→Packer sensitive-variable name; declared in the
+      * ``sensitive_var_names`` — name→Packer sensitive-variable name; declared in the
         template, value NOT written to it.
       * ``pkr_env``     — ``PKR_VAR_<var>``→resolved secret value, injected into
         the packer build subprocess so the sensitive variables get their values
@@ -163,7 +163,7 @@ async def _provisioner_env(req) -> tuple[dict, dict, dict]:
     from ..services import config_service
 
     plain = await _bt_provisioner_env(req)
-    secret_vars: dict = {}
+    sensitive_var_names: dict = {}
     pkr_env: dict = {}
     idx = 0
     for ev in (getattr(req, "provisioner_env_vars", None) or []):
@@ -180,11 +180,11 @@ async def _provisioner_env(req) -> tuple[dict, dict, dict]:
                 )
             var = f"penv_{idx}"
             idx += 1
-            secret_vars[name] = var
+            sensitive_var_names[name] = var
             pkr_env[f"PKR_VAR_{var}"] = value
         else:
             plain[name] = raw
-    return plain, secret_vars, pkr_env
+    return plain, sensitive_var_names, pkr_env
 
 
 # ── Background task runners ───────────────────────────────────────────────────
@@ -238,9 +238,9 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
         # Generate template
         job_service.update_progress(db, job_id, 5, "Generating Packer template…")
         if req.provisioner_script.strip():
-            plain_env, secret_vars, pkr_env = await _provisioner_env(req)
+            plain_env, sensitive_var_names, pkr_env = await _provisioner_env(req)
         else:
-            plain_env, secret_vars, pkr_env = {}, {}, {}
+            plain_env, sensitive_var_names, pkr_env = {}, {}, {}
         env.update(pkr_env)
         template = packer_service.generate_aws_template(
             source_ami=source_ami,
@@ -249,7 +249,7 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
             image_name=req.image_name,
             has_provisioner=bool(req.provisioner_script.strip()),
             provisioner_env=plain_env,
-            provisioner_secret_vars=secret_vars,
+            provisioner_sensitive_var_names=sensitive_var_names,
         )
         (build_dir / "build.pkr.hcl").write_text(template)
         _write_provisioner(build_dir, req.provisioner_script)
@@ -437,10 +437,10 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
         # provisioner only — Windows uses a PowerShell provisioner, which the
         # shell environment_vars mechanism doesn't target.
         if not is_windows and req.provisioner_script.strip():
-            plain_env, secret_vars, pkr_env = await _provisioner_env(req)
+            plain_env, sensitive_var_names, pkr_env = await _provisioner_env(req)
             env.update(pkr_env)
             gen_kwargs["provisioner_env"] = plain_env
-            gen_kwargs["provisioner_secret_vars"] = secret_vars
+            gen_kwargs["provisioner_sensitive_var_names"] = sensitive_var_names
         template = generate(**gen_kwargs)
         (build_dir / "build.pkr.hcl").write_text(template)
         if is_windows:
@@ -564,9 +564,9 @@ async def _run_gcp_build(job_id: str, req: GCPPackerBuildRequest, created_by: st
         job_service.update_progress(
             db, job_id, 5, f"Generating Packer template — source {src_desc}…")
         if req.provisioner_script.strip():
-            plain_env, secret_vars, pkr_env = await _provisioner_env(req)
+            plain_env, sensitive_var_names, pkr_env = await _provisioner_env(req)
         else:
-            plain_env, secret_vars, pkr_env = {}, {}, {}
+            plain_env, sensitive_var_names, pkr_env = {}, {}, {}
         env.update(pkr_env)
         template = packer_service.generate_gcp_template(
             source_image=req.source_image,
@@ -579,7 +579,7 @@ async def _run_gcp_build(job_id: str, req: GCPPackerBuildRequest, created_by: st
             zone=zone,
             has_provisioner=bool(req.provisioner_script.strip()),
             provisioner_env=plain_env,
-            provisioner_secret_vars=secret_vars,
+            provisioner_sensitive_var_names=sensitive_var_names,
             disk_type=req.disk_type,
             disk_size=req.disk_size_gb,
         )

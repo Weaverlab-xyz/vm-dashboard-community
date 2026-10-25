@@ -60,7 +60,7 @@ if (( CORP_CA )); then
     _corp_bundle="${CORP_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}"
     if [[ ! -f "$_corp_bundle" ]]; then
         echo "error: --corp-ca: CA bundle not found at $_corp_bundle." >&2
-        echo "Install your corp CA into the host trust store first (docs/ONBOARDING.md:" >&2
+        echo "Install your corp CA into the host trust store first (docs/getting-started.md:" >&2
         echo "'WSL: docker pull fails with a certificate error'), or set CORP_CA_BUNDLE." >&2
         exit 2
     fi
@@ -261,7 +261,7 @@ if (( HUB )); then
     if ! $_compose_cmd "${COMPOSE_FILE_ARGS[@]}" pull; then
         fail "$_compose_cmd pull failed — could not fetch the prebuilt image."
         fail "Behind a TLS-inspecting proxy, ensure Docker trusts your corp CA for Docker Hub"
-        fail "(see docs/onboarding/troubleshooting.md: 'WSL: docker pull fails with a certificate error')."
+        fail "(see docs/getting-started/troubleshooting.md: 'WSL: docker pull fails with a certificate error')."
         exit 1
     fi
 fi
@@ -327,5 +327,5 @@ printf "%sNext steps:%s\n" "$C_STEP" "$C_RESET"
 echo "  - The browser setup wizard will open automatically on first launch."
 echo "    Complete it to create your admin account and enter cloud credentials."
 echo "    It asks for the setup token: $(read_env SETUP_TOKEN)  (SETUP_TOKEN in .env)"
-echo "  - See docs/onboarding/feature-test.md for the full feature-test checklist."
+echo "  - See docs/getting-started/feature-test.md for the full feature-test checklist."
 echo "  - Stop the stack with:  $_compose_cmd -f $(basename "$COMPOSE_FILE") down"

@@ -5,7 +5,7 @@ granted through, the environment access policies that make those teams mean some
 the stacks on your Docker hosts, and registering a new host as an environment.
 
 The operator-facing write-up is
-[docs/integrations/portainer.md](../../../docs/integrations/portainer.md). This file is
+[docs/cloud-services/portainer.md](../../../docs/cloud-services/portainer.md). This file is
 the quick reference.
 
 ## Two kinds of play in one directory
@@ -24,7 +24,7 @@ is in the job's scrub set.
 Which runner a Portainer run lands on is `ansible_runner_portainer`, falling back to
 `ansible_runner`. It matters for a **managed** node: that node's firewall is fail-closed
 and admits the dashboard's own egress, not a transient in-cloud runner's — see
-[Portainer targets](../../../docs/integrations/ansible/kubernetes-runner.md#portainer-targets).
+[Portainer targets](../../../docs/platform/ansible/kubernetes-runner.md#portainer-targets).
 
 ## The files
 

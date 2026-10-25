@@ -83,7 +83,7 @@
     restart it by hand (`Stop-Process -Name vmrest`) and the next check starts a fresh
     one within -CheckIntervalMinutes.
 
-    See docs/integrations/vmware.md for the connection side of this.
+    See docs/hypervisors/vmware.md for the connection side of this.
 #>
 #Requires -Version 5.1
 [CmdletBinding(DefaultParameterSetName = 'Register')]

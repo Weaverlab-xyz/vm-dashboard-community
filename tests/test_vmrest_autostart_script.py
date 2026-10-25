@@ -21,7 +21,7 @@ import sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SCRIPT = os.path.join(_ROOT, "scripts", "Enable-VmrestAutostart.ps1")
-_DOC = os.path.join(_ROOT, "docs", "integrations", "vmware.md")
+_DOC = os.path.join(_ROOT, "docs", "hypervisors", "vmware.md")
 
 # The heading the agent's own refusal message points an operator at. Named here as well
 # as there so that renaming it fails a test rather than only a doc-anchor sweep.

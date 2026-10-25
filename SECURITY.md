@@ -202,7 +202,7 @@ mismatch is rejected by the identity provider with no useful diagnostic.
 Everything above assumes one trust domain: you run the dashboard, it holds your
 credentials, and an administrator abusing it is abusing resources they already own.
 
-[Remote agents](docs/remote-agents.md) break that assumption, so they get their own
+[Remote agents](docs/admin/remote-agents.md) break that assumption, so they get their own
 rule. An agent is a container running inside a private network — possibly one whose
 owner is not the dashboard's operator — and it is, structurally, a
 dashboard-controlled execution endpoint on that network. **Across this boundary the
@@ -229,7 +229,7 @@ Reports in these categories are wanted **even though they require a compromised 
 malicious dashboard**, which is exactly the exemption that does not apply here.
 
 For background on how the dashboard handles credentials and secrets, see
-[docs/access/secrets-management.md](docs/access/secrets-management.md).
+[docs/admin/secrets-management.md](docs/admin/secrets-management.md).
 
 ## Safe harbor
 

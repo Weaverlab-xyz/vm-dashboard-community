@@ -21,7 +21,7 @@ from ....utils.clock import utcnow
 
 # The anchor is the "### Remote agents" heading. Linked only once the page is in this
 # build's docs/, so the note never points at a 404.
-DOCS_HREF = "/docs/access/workload-identity#remote-agents"
+DOCS_HREF = "/docs/platform/workload-identity#remote-agents"
 _DOCS_PAGE = Path(__file__).resolve().parents[4] / "docs" / "access" / "workload-identity.md"
 
 

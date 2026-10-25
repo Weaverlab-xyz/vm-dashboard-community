@@ -141,7 +141,7 @@ def test_the_page_carries_a_preview_blockquote():
     doc = _read("docs", "profiles", "demo", "net-demo-cell.md")
     assert "> **Preview.**" in doc, (
         "net-demo-cell.md has no preview blockquote — the convention "
-        "docs/cloud/virtual-desktops.md and docs/workload-lab.md both follow")
+        "docs/preview/virtual-desktops.md and docs/preview/workload-lab.md both follow")
     assert "preview toggle in Settings" in doc, \
         "the preview blockquote never says how to turn the feature on"
 

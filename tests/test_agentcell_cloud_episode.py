@@ -23,7 +23,7 @@ leaving the demo *looking* right, which is what these tests are for:
   * **The credential values must never reach a printed string.** An AWS secret access key
     is forty unmarked characters, so `scrub` cannot catch one — the defence is structural
     and a test on captured stdout is what makes it real.
-  * **The closing beat is a real wait, never a faked clock.** `docs/workload-lab/cloud.md`
+  * **The closing beat is a real wait, never a faked clock.** `docs/preview/workload-lab/cloud.md`
     says a play that faked it "would prove it can print a failure message, not that the
     credential died"; the same rule applies one level over.
   * **The worker's WC client must not drift from the dashboard's.** It restates

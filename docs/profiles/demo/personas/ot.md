@@ -69,7 +69,7 @@ The agent half of that story runs next door, on the cell's DMZ broker — same k
 same chart, inside the plant. See
 [Who brokers identity in the plant](../ot-demo-cell/identity.md#who-brokers-identity-in-the-plant).
 
-**Guide:** [The cell runs on k3s](../ot-demo-cell.md#the-cell-runs-on-k3s) · [KubeSolo, for edge hosts](../../../kubernetes/kubesolo.md)
+**Guide:** [The cell runs on k3s](../ot-demo-cell.md#the-cell-runs-on-k3s) · [KubeSolo, for edge hosts](../../../cloud-services/kubernetes/kubesolo.md)
 
 ### Time-bound vendor access to one cell
 
@@ -90,15 +90,15 @@ open in my plant?", that list is the answer.
 The cell's account is onboarded in Password Safe, mirrored onto the PRA vault and rotated
 once, so the credential a rep injects is real and current from the first session.
 
-**Guide:** [OT Demo Cell](../ot-demo-cell.md) · [Password Safe](../../../integrations/beyondtrust/password-safe.md)
+**Guide:** [OT Demo Cell](../ot-demo-cell.md) · [Password Safe](../../../beyondtrust/password-safe.md)
 
 ### Where the Gateway sits, and why that is the whole story
 
 The architecture slide, told against a live gateway instead of a diagram: the broker inside
 the plant segment dials *outward*, so there is nothing to open on the perimeter.
 
-**Guide:** [Gateways](../../../integrations/beyondtrust/gateways.md) ·
-[Privileged Remote Access](../../../integrations/beyondtrust/privileged-remote-access.md)
+**Guide:** [Gateways](../../../beyondtrust/gateways.md) ·
+[Privileged Remote Access](../../../beyondtrust/privileged-remote-access.md)
 
 ## What to enable
 

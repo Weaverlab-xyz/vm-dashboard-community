@@ -9,7 +9,7 @@ This bit `tests/test_install_profile.py` (fixed in #823). It built its list with
 run reported:
 
     FAIL test_the_page_header_still_names_the_stored_profile_value:
-         docs/kubernetes.md no longer names its profile
+         docs/cloud-services/kubernetes.md no longer names its profile
 
 while every page still carried its `**Profile:**` header. The sibling
 `len(carriers) >= 20` assertion passed throughout -- a count does not care about
@@ -241,7 +241,7 @@ def test_the_sweep_catches_the_original_bug():
     offenders, _ = _check_source(
         "def test_x():\n"
         "    carriers = [os.path.relpath(p, _ROOT) for p in _doc_files() if h in p]\n"
-        "    for expected in ('docs/kubernetes.md', 'docs/databases.md'):\n"
+        "    for expected in ('docs/cloud-services/kubernetes.md', 'docs/cloud-services/databases.md'):\n"
         "        assert expected in carriers\n")
     assert offenders, "the sweep no longer catches the bug it was written for"
     assert "carriers" in offenders[0], offenders
@@ -250,7 +250,7 @@ def test_the_sweep_catches_the_original_bug():
     direct, _ = _check_source(
         "def test_y():\n"
         "    rel = os.path.relpath(p, _ROOT)\n"
-        "    assert rel == 'docs/kubernetes.md'\n")
+        "    assert rel == 'docs/cloud-services/kubernetes.md'\n")
     assert direct, "an `==` against a slash literal is not caught"
 
 
@@ -279,7 +279,7 @@ def test_the_sweep_stays_quiet_on_the_four_safe_forms():
         "normalised at the binding":
             "def t():\n"
             "    rel = os.path.relpath(p, _ROOT).replace(os.sep, '/')\n"
-            "    assert rel == 'docs/kubernetes.md'\n",
+            "    assert rel == 'docs/cloud-services/kubernetes.md'\n",
         "normalised with as_posix":
             "def t():\n"
             "    rel = p.relative_to(_ROOT).as_posix()\n"
@@ -300,8 +300,8 @@ def test_the_scope_is_per_function_not_per_module():
         "    return rel\n"
         "\n"
         "def b():\n"
-        "    rel = 'docs/kubernetes.md'\n"
-        "    assert rel == 'docs/kubernetes.md'\n")
+        "    rel = 'docs/cloud-services/kubernetes.md'\n"
+        "    assert rel == 'docs/cloud-services/kubernetes.md'\n")
     assert not offenders, f"scopes leaked across functions: {offenders}"
 
 

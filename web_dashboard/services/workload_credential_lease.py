@@ -175,7 +175,7 @@ def dynamic_enabled(cloud: str) -> bool:
     return _cfg_bool("workload_credentials_enabled") and _cfg_bool(f"wlc_{cloud}_enabled")
 
 
-def secret_name_for(cloud: str, purpose: str) -> str:
+def dynamic_name_for(cloud: str, purpose: str) -> str:
     """The configured dynamic-secret name, or "" when none is set.
 
     A blank readonly name falls back to the provisioning secret rather than failing: the
@@ -609,7 +609,7 @@ def credentials(cloud: str, purpose: str = "", *,
     if hit is not None:
         return hit
 
-    name = secret_name_for(cloud, purpose)
+    name = dynamic_name_for(cloud, purpose)
     if not name:
         raise LeaseUnavailable(
             f"{cloud} is set to use Workload Credentials but no dynamic secret name is "
@@ -681,7 +681,7 @@ def refresh(cloud: str, purpose: str = PURPOSE_PROVISION, *, force: bool = False
     if not dynamic_enabled(cloud):
         return False
     purpose = _effective_purpose(cloud, purpose)
-    name = secret_name_for(cloud, purpose)
+    name = dynamic_name_for(cloud, purpose)
     if not name:
         return False
 
@@ -1044,5 +1044,5 @@ def status(cloud: str, purpose: str = PURPOSE_PROVISION) -> dict:
         "last_error": snap["last_error"] if snap else None,
         "consecutive_failures": snap["consecutive_failures"] if snap else 0,
         "cooldown_until": snap["cooldown_until"].isoformat() + "Z" if snap and snap["cooldown_until"] else None,
-        "secret_name": secret_name_for(cloud, purpose),
+        "secret_name": dynamic_name_for(cloud, purpose),
     }

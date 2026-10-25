@@ -233,18 +233,26 @@ def test_the_docs_shell_stays_persona_blind():
 
 
 def test_the_docs_index_is_not_reordered_by_anything():
-    """The index sorts by section then title, for everybody, always. A persona-ranked index
+    """The index lists its sections in one fixed order, for everybody, always: the order of
+    the _SECTION_LABELS literal, which is the app's menu order. A persona-ranked index
     would be the leak above wearing a different hat."""
     src = _read(_DOCS_PAGES)
-    idx = src.split("def docs_index", 1)[1] if "def docs_index" in src else src
-    assert "sorted(groups)" in idx, "the /docs index no longer sorts its sections plainly"
+    idx = src.split("async def doc_index", 1)[1].split("\n@router", 1)[0]
+    assert "order = list(_SECTION_LABELS)" in idx and "sorted(groups, key=" in idx, (
+        "the /docs index no longer orders its sections by the _SECTION_LABELS literal")
 
 
 def test_the_readme_documents_the_personas_pages():
-    """README.md's table is the entry point for someone who has not opened the app yet."""
+    """README.md's table is the entry point for someone who has not opened the app yet.
+
+    It links one level into the docs (tests/test_docs_index_depth.py), so it names the
+    personas and links the profiles index, and that index links the personas pages."""
     text = _read(_README)
-    assert "docs/profiles/demo/personas" in text, "README does not link the personas docs"
-    assert "Personas" in text
+    assert "Personas" in text, "README does not name the personas"
+    assert "](docs/profiles/README.md)" in text, "README does not link the profiles index"
+    profiles = _read(os.path.join(os.path.dirname(_README), "docs", "profiles", "README.md"))
+    assert "](demo/personas/README.md)" in profiles, (
+        "docs/profiles/README.md does not link the personas pages")
 
 
 if __name__ == "__main__":

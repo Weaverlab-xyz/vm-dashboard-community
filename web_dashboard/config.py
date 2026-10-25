@@ -784,7 +784,7 @@ class Settings(BaseSettings):
     # port and requestable accounts authoritatively; these four tune what the import
     # list shows. All optional: the feature is already gated on cloud_database_enabled
     # + password_safe_enabled, so a third on/off switch would only be a third thing to
-    # forget. See docs/databases.md "Importing from Password Safe".
+    # forget. See docs/cloud-services/databases.md "Importing from Password Safe".
     clouddb_ps_import_workgroup: str = ""          # blank → everything the API identity can see
     clouddb_ps_import_default_cloud: str = "local"  # Location preselected in the modal
     clouddb_ps_import_max_systems: int = 500       # cap on candidates returned
@@ -1026,7 +1026,7 @@ class Settings(BaseSettings):
     clouddb_ps_gcp_dbops_invokers: str = ""   # serviceAccount:broker@proj.iam.gserviceaccount.com,...
     # Ingress. "all" because an ON-PREMISES Resource Broker cannot reach an
     # internal-only Cloud Run service, and on-prem brokers are the common case. The
-    # trade-off is real and is stated in docs/databases.md: a credential-changing API
+    # trade-off is real and is stated in docs/cloud-services/databases.md: a credential-changing API
     # on a globally resolvable endpoint, protected by IAM rather than by network
     # position. Compensate with constraints/iam.allowedPolicyMemberDomains at the org.
     # "internal" is correct when every broker runs on Compute Engine.
@@ -1800,7 +1800,7 @@ class Settings(BaseSettings):
     # Automate Workflows URL, or a signed generic envelope you point at whatever you
     # like — that last one is how email is delivered; there is no SMTP client here).
     # Endpoints themselves are rows in `notification_endpoints`, not keys, because
-    # their URLs are credentials and there can be several. See docs/operations/notifications.md.
+    # their URLs are credentials and there can be several. See docs/admin/notifications.md.
     #
     # Two brakes, because this sends messages to people:
     #   * notifications_enabled off means nothing is emitted, drained or scanned;
@@ -1840,7 +1840,7 @@ class Settings(BaseSettings):
     # provider's secret channel, then force-deleted after the run. Enabling this
     # copies a PAM-vaulted credential into the cloud store for the task's lifetime —
     # pair it with "Change Password After Release" on the managed account so a
-    # missed cleanup leaves only a rotated, dead credential. See docs/access/secrets-management.md.
+    # missed cleanup leaves only a rotated, dead credential. See docs/admin/secrets-management.md.
     ansible_cloud_ephemeral_secrets_enabled: bool = False
     ansible_ephemeral_secret_ttl_min: int = 30       # GC safety-net age (>= max task runtime)
     # The alternative to the store copy above (services/runner_credential): the ECS /
@@ -2344,7 +2344,7 @@ class Settings(BaseSettings):
     # create the Secrets Safe folder's parent safe. The functional account is NOT one of
     # them any more — the dashboard mints it from the CA build's own terraform outputs,
     # which is the only moment the enrollment credential exists in this process.
-    # See docs/workload-lab/certificates.md.
+    # See docs/preview/workload-lab/certificates.md.
     # PREVIEW flag, alongside vdesktops_enabled in
     # setup._PREVIEW_FLAGS: none of the plugin's four
     # submission paths has been proven against a live CA yet. Off means the dashboard
@@ -2457,7 +2457,7 @@ class Settings(BaseSettings):
     # PREVIEW flag, alongside cert_lab_enabled in setup._PREVIEW_FLAGS, and DEMO-ONLY for
     # the same tenancy reason: the credential is written through the global pscli_*
     # singletons, so on a POV instance it would land in the wrong customer's tenant.
-    # See docs/workload-lab/spiffe.md and docs/runbooks/spire-lab-standup.md.
+    # See docs/preview/workload-lab/spiffe.md and docs/runbooks/spire-lab-standup.md.
     spire_lab_enabled: bool = False                  # master gate: page, nav, router
     # WHO MAY REACH tcp/8081. Blank means no cloud ACL change is made at all — NOT open
     # to the world: 8081 is an API that mints identities, so "I did not say who" can only
@@ -2478,7 +2478,7 @@ class Settings(BaseSettings):
     spire_lab_ps_safe: str = "Automation"
     spire_lab_secret_root: str = "spire"
     spire_lab_asset_backend: str = ""                # blank → the active storage backend
-    # Deployment modes and supply chain (docs/workload-lab/spiffe.md). Blank chart versions
+    # Deployment modes and supply chain (docs/preview/workload-lab/spiffe.md). Blank chart versions
     # fall back to the pins in spire_lab_service (SPIRE_CHART_VERSION, 0.30.2 / 0.6.1),
     # never to "latest"; blank k3s version is whatever get.k3s.io serves (>= 1.34 enforced).
     spire_lab_k3s_version: str = ""
@@ -2516,7 +2516,7 @@ class Settings(BaseSettings):
     # a community install with no BeyondTrust products is untouched and keeps
     # using the static keys in app_config. Turning this on is what UNLOCKS
     # retiring an install's own static credentials — it never retires them for
-    # anyone else. See docs/workload-lab/workload-credentials.md.
+    # anyone else. See docs/beyondtrust/workload-credentials.md.
     workload_credentials_enabled: bool = False
     wlc_api_base_url: str = "https://api.beyondtrust.io"
     wlc_site_id: str = ""                           # site (tenant) GUID — the `tenant_id` claim in your access JWT
@@ -2536,7 +2536,7 @@ class Settings(BaseSettings):
     # unrecognised value reads as "pat" too, so an install that never sets this is
     # untouched. The older spelling "entra" still reads as "workload", so installs
     # configured before the mode covered more than Azure keep working.
-    # See docs/operations/cloud-hosting.md → "No PAT".
+    # See docs/platform/cloud-hosting.md → "No PAT".
     wlc_auth_mode: str = "pat"
     # Which platform vouches for this container: "azure" | "gcp" | "aws" | "file" | "spire".
     # Blank reads as "azure", because every install that predates this setting is

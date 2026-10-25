@@ -33,7 +33,7 @@ on and then be unfindable.
 
 - **Provisioning** *(stand it up)* — **nothing is created.** The worker attaches to a VM
   this dashboard already deployed, resolved from completed deploy-job rows rather than an
-  address anyone supplied. The same call the [SPIRE lab](../../workload-lab/spiffe.md)
+  address anyone supplied. The same call the [SPIRE lab](../../preview/workload-lab/spiffe.md)
   made, for the same reason, with the same payoff: the host keeps its auto-delete timer,
   its Password Safe onboarding and its Destroy button.
 - **Layer 1 — PRA** *(reach it)* — **not part of this cell**, and that is worth saying out
@@ -80,7 +80,7 @@ Every loop leaves one line carrying both:
 Who it is, what it spent, what it saw.
 
 **Pick a service account as the token user.** A service account can never be an
-administrator and can never hold a PAT ([Service accounts](../../access/service-accounts.md)),
+administrator and can never hold a PAT ([Service accounts](../../admin/service-accounts.md)),
 what reaches `/mcp` expires on its own, and revoking the cell still refuses the very next
 call — the next `/mcp` request, or the next exchange at `/api/oauth/token`, whichever
 comes first. It is the recommended token user, and against a registered trust domain it
@@ -98,7 +98,7 @@ error from the MCP client is scrubbed of anything token-shaped on its way to one
 > dashboard (automatic for a Workload Lab SPIRE lab), the cell binds an OAuth client to
 > the agent's SPIFFE ID. The worker runs with `--token-source spiffe`: it presents a fresh
 > JWT-SVID at `/api/oauth/token` and gets a minutes-long access token, holding nothing on
-> the host. See [Service accounts → SPIFFE workloads](../../access/service-accounts.md#spiffe-workloads-authenticate-with-the-svid-hold-nothing).
+> the host. See [Service accounts → SPIFFE workloads](../../admin/service-accounts.md#spiffe-workloads-authenticate-with-the-svid-hold-nothing).
 >
 > What stays unbuilt is the *other* bridge — the SVID minting a credential **inside
 > Password Safe** via the SPIFFE SVID plugin. Whether that plugin can be configured the
@@ -201,7 +201,7 @@ Name the platform — it is one word and never wrong.
 > nothing else) — the worker has all five platforms, the app has one. The `ps` source
 > additionally needs an API-enabled managed account with the Requestor role and an access
 > policy that auto-releases, the usual out-of-band prerequisites in
-> [password-safe.md](../../integrations/beyondtrust/password-safe.md). The worker names its token
+> [password-safe.md](../../beyondtrust/password-safe.md). The worker names its token
 > source on every line it logs, so which mode is in play is never in doubt.
 
 Re-running the install play with `agent_token_source: wlc` or `ps` **removes** any token a
@@ -279,7 +279,7 @@ cluster and being unable to proceed until they say yes.
 
 Then the two reads. The success proves the token works; **the 403 proves it is scoped**,
 which is the half worth showing — the same two beats the shipped consumer plays assert,
-and for the same reason `docs/workload-lab/kubernetes.md` gives: *"a step in a
+and for the same reason `docs/preview/workload-lab/kubernetes.md` gives: *"a step in a
 runbook gets skipped, and an assertion does not."*
 
 | Profile | Succeeds | Must be refused |
@@ -318,7 +318,7 @@ does:
 | cluster access | a Workload Lab **token** | **gated at retrieval** — a person decides; once released it lives out its TTL |
 | this one | a **certificate** | **neither** |
 
-`docs/workload-lab/certificates.md` states the third position rather than hiding it:
+`docs/preview/workload-lab/certificates.md` states the third position rather than hiding it:
 
 > **No revocation checking.** The plugin consults neither CRLs nor OCSP. Short lifetimes
 > are the mitigation, and that is a deliberate design position.
@@ -344,7 +344,7 @@ session that released the passphrase reaches the bundle unchanged. No second sig
 second credential, and nothing on this host that was not there a moment ago.
 
 **Not through `ps-cli`, though it is what the dashboard uses.** It cannot carry these
-bytes. [password-safe.md](../../integrations/beyondtrust/password-safe.md) establishes it and
+bytes. [password-safe.md](../../beyondtrust/password-safe.md) establishes it and
 `secrets_backend_service` refuses on it: the endpoint returns `application/octet-stream`
 faithfully, but every route ps-cli offers decodes the body to text first, so a PEM bundle
 survives and **a `.pfx` is corrupted rather than refused**. That is the worst of the three
@@ -409,7 +409,7 @@ what it means that this one does not.
   through the API came back larger than the original, so this episode would retrieve a
   corrupt bundle however careful it is — and the DER check does not catch it, because a
   too-large bundle still starts `0x30`. It is already a
-  [Certificate Lab prerequisite](../../workload-lab/certificate-lab.md#password-safe);
+  [Certificate Lab prerequisite](../../preview/workload-lab/certificate-lab.md#password-safe);
   it is named again here because this episode depends on it silently.
 - **Revocation on six of nine backends only.** EST, step-ca and `selfsigned` have no
   revocation operation at all, so on those the certificate stays valid until it expires
@@ -620,13 +620,13 @@ card.
 
 ## Related
 
-* [Workload Lab](../../workload-lab.md) — the four credential mechanisms this cell was
+* [Workload Lab](../../preview/workload-lab.md) — the four credential mechanisms this cell was
   aligned to. It can now spend three of them, and attests against the fourth.
-* [What consumes these credentials](../../workload-lab/consumers.md) — the register of
+* [What consumes these credentials](../../preview/workload-lab/consumers.md) — the register of
   what spends each one, and where this cell sits in it.
-* [Workload access to Kubernetes](../../workload-lab/kubernetes.md) — the tab whose token
+* [Workload access to Kubernetes](../../preview/workload-lab/kubernetes.md) — the tab whose token
   this cell can genuinely request, holding nothing.
-* [Short-lived cloud credentials](../../workload-lab/cloud.md) — the tab whose credential
+* [Short-lived cloud credentials](../../preview/workload-lab/cloud.md) — the tab whose credential
   this cell **mints** for itself, and the only one that bills when it does.
-* [SPIFFE and SPIRE](../../workload-lab/spiffe.md) — the trust domain this worker attests
+* [SPIFFE and SPIRE](../../preview/workload-lab/spiffe.md) — the trust domain this worker attests
   itself against every loop.

@@ -3,7 +3,7 @@
 Six localhost plays (`- hosts: localhost`, `connection: local`) using `kubernetes.core`,
 and they split into two groups that differ in **where the credential comes from**.
 
-Feature reference: [docs/workload-lab/kubernetes.md](../../../docs/workload-lab/kubernetes.md).
+Feature reference: [docs/preview/workload-lab/kubernetes.md](../../../docs/preview/workload-lab/kubernetes.md).
 
 | File | What it does | How it authenticates |
 |---|---|---|
@@ -68,5 +68,5 @@ its environment. The [Agent Demo Cell](../../../docs/profiles/demo/agent-demo-ce
 the consumer that holds **nothing**: it reaches Password Safe with a workload identity
 brokered by Workload Credentials, so the client pair is never on its host either, and its
 episode is approval-gated. See
-[docs/workload-lab/consumers.md](../../../docs/workload-lab/consumers.md) for the full
+[docs/preview/workload-lab/consumers.md](../../../docs/preview/workload-lab/consumers.md) for the full
 register of what spends each Workload Lab credential.

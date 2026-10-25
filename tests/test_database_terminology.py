@@ -119,8 +119,8 @@ def test_the_doc_was_renamed_and_retitled():
     assert not os.path.exists(os.path.join(docs, "cloud-databases.md")), (
         "docs/cloud-databases.md is back — the /docs index label and page title are "
         "derived from the filename, so the name lives in the filename")
-    body = _read(os.path.join(docs, "databases.md"))
-    assert body.startswith("# Databases\n"), "docs/databases.md is not titled 'Databases'"
+    body = _read(os.path.join(docs, "cloud-services", "databases.md"))
+    assert body.startswith("# Databases\n"), "docs/cloud-services/databases.md is not titled 'Databases'"
     assert "## Registering an existing database" in body, (
         "the doc doesn't document registration, which is why it was renamed")
 
@@ -134,12 +134,12 @@ def test_no_doc_links_to_the_old_filename():
 
 
 def test_the_oci_heading_anchor_is_intact():
-    """docs/kubernetes/k8s.md deep-links this heading; retitling it silently 404s the
+    """docs/cloud-services/kubernetes/k8s.md deep-links this heading; retitling it silently 404s the
     anchor, which nothing else would catch."""
     anchor = "#oci-autonomous-database--read-the-caveats"
     assert "### OCI (Autonomous Database) — read the caveats" in _read(
-        os.path.join(_ROOT, "docs", "databases.md"))
-    assert anchor in _read(os.path.join(_ROOT, "docs", "kubernetes", "k8s.md"))
+        os.path.join(_ROOT, "docs", "cloud-services", "databases.md"))
+    assert anchor in _read(os.path.join(_ROOT, "docs", "cloud-services", "kubernetes", "k8s.md"))
 
 
 # ── the identifier half must NOT be renamed ───────────────────────────────────

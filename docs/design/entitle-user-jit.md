@@ -13,14 +13,14 @@
 > any OIDC) immediately. Both can run at once.
 >
 > **Start here instead:**
-> [`integrations/beyondtrust/entitle-dashboard-permissions.md`](../integrations/beyondtrust/entitle-dashboard-permissions.md)
+> [`integrations/beyondtrust/entitle-dashboard-permissions.md`](../beyondtrust/entitle-dashboard-permissions.md)
 > — it compares the two, and covers migrating from this one.
 
 > **Status:** Design + execution plan, v1.
 > **Written for:** enterprise operators wiring the dashboard into an
 > existing Entra ID + Entitle deployment. Community/dev installs
 > that don't run Entra can skip it; the feature is purely additive.
-> **Companion to** [`integrations/beyondtrust/entitle.md`](../integrations/beyondtrust/entitle.md)
+> **Companion to** [`integrations/beyondtrust/entitle.md`](../beyondtrust/entitle.md)
 > (the human-approval-gate feature already shipping) and
 > [`design/cloud-identity-jit.md`](cloud-identity-jit.md) (the
 > machine-identity story). This doc is the third leg: user-level
@@ -35,7 +35,7 @@
 
 The dashboard already has two pieces of Entitle integration:
 
-1. **Approval gate** ([integrations/beyondtrust/entitle.md](../integrations/beyondtrust/entitle.md))
+1. **Approval gate** ([integrations/beyondtrust/entitle.md](../beyondtrust/entitle.md))
    — a human operator hits a privileged endpoint, the dashboard
    opens an Entitle request, and the endpoint executes once
    approved. Per-action.
@@ -553,7 +553,7 @@ real Entitle tenant.
 ## Appendix — Why this complements (doesn't replace) the
 approval gate
 
-Today's [approval gate](../integrations/beyondtrust/entitle.md) makes the
+Today's [approval gate](../beyondtrust/entitle.md) makes the
 dashboard ask Entitle for permission on each privileged
 *action*: "Operator A is trying to delete secret X — is this
 approved?" Entitle says yes / no, the action proceeds or 403s.
@@ -572,7 +572,7 @@ in the first place." Both layers can be active simultaneously:
 > **Note, 2026-09.** The example is the design intent, not what shipped: the Secrets
 > endpoints were always administrator-only, so `secrets:write` never reached them, and it
 > has since been retired as a level nothing enforced (see
-> [Permissions → The sections](../access/permissions.md#the-sections)). The layering argument
+> [Permissions → The sections](../admin/permissions.md#the-sections)). The layering argument
 > holds for any scope that does gate a route, `aws:delete` for instance.
 
 Defence in depth: authorization is gated; action is gated.

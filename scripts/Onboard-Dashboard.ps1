@@ -32,7 +32,7 @@
     .\scripts\Onboard-Dashboard.ps1 -Build
 
 .NOTES
-    Prerequisites (one-time, document these in docs/ONBOARDING.md):
+    Prerequisites (one-time, document these in docs/getting-started.md):
       - Docker Desktop installed and running
       - PowerShell 7+ (pwsh)
       - git
@@ -263,7 +263,7 @@ if ($placeholders.Count -gt 0) {
         Write-Host "      - $k" -ForegroundColor Red
     }
     Write-Host ""
-    Write-Warn "See docs/ONBOARDING.md for instructions on obtaining AWS and"
+    Write-Warn "See docs/getting-started.md for instructions on obtaining AWS and"
     Write-Warn "Azure credentials. Opening .env in Notepad..."
     Start-Process -FilePath notepad.exe -ArgumentList $envFile -Wait:$false
     exit 1
@@ -279,7 +279,7 @@ if ($Hub) {
     if ($LASTEXITCODE -ne 0) {
         Write-Fail "docker compose pull failed - could not fetch the prebuilt image."
         Write-Fail "Behind a TLS-inspecting proxy, ensure Docker trusts your corp CA for Docker Hub"
-        Write-Fail "(see docs/onboarding/troubleshooting.md: 'docker pull fails with a certificate error')."
+        Write-Fail "(see docs/getting-started/troubleshooting.md: 'docker pull fails with a certificate error')."
         exit $LASTEXITCODE
     }
 } else {
@@ -341,5 +341,5 @@ if (-not $adminUser) { $adminUser = "admin" }
 Write-Host "  - Log in with username '$adminUser' — password is in .env as FIRST_RUN_ADMIN_PASSWORD"
 Write-Host "    (Change it via Settings after first login; the env var is ignored once users exist.)"
 Write-Host "  - The setup wizard asks for the setup token: $($envVars.SETUP_TOKEN)  (SETUP_TOKEN in .env)"
-Write-Host "  - See docs/onboarding/feature-test.md for the feature-test checklist"
+Write-Host "  - See docs/getting-started/feature-test.md for the feature-test checklist"
 Write-Host "  - Stop the stack with:  docker compose -f $(Split-Path -Leaf $composeFile) down"

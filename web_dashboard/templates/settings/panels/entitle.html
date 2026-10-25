@@ -91,8 +91,8 @@
           <p class="text-xs text-gray-500 pt-2 font-medium">Virtual applications &amp; persona bundles</p>
           <p class="text-xs text-gray-400 -mt-2">Each approval tier routes through its own workflow — the ones
             <code>terraform/entitle_user_jit</code> creates. A blank tier falls back to the Workflow ID above.
-            See <a href="/docs/integrations/beyondtrust/entitle-virtual-apps" class="text-blue-600 hover:underline">virtual applications</a>
-            and <a href="/docs/integrations/beyondtrust/entitle-persona-bundles" class="text-blue-600 hover:underline">persona bundles</a>.</p>
+            See <a href="/docs/beyondtrust/entitle-virtual-apps" class="text-blue-600 hover:underline">virtual applications</a>
+            and <a href="/docs/beyondtrust/entitle-persona-bundles" class="text-blue-600 hover:underline">persona bundles</a>.</p>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Auto-approve tier workflow
               <span class="text-xs text-gray-400">(entitle_workflow_auto_approve_id)</span></label>
@@ -203,7 +203,7 @@
               One Entitle bundle per job function and cloud — or on-prem AD for the IT, OT and hypervisor
               roles: the virtual-app role over the <code>ent-&lt;target&gt;-&lt;persona&gt;</code> group, the
               target's own roles or delegated AD groups, and the matching dashboard-* groups. Preview reads Entitle and shows what each one resolves to; only bundles with
-              nothing missing are created. <a href="/docs/integrations/beyondtrust/entitle-persona-bundles"
+              nothing missing are created. <a href="/docs/beyondtrust/entitle-persona-bundles"
               class="text-blue-600 hover:underline">How bundles are built</a>.
             </p>
             <div x-show="error" class="text-sm text-red-600 mb-2" x-text="error"></div>

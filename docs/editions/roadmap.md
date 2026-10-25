@@ -29,7 +29,7 @@ solution), see [the edition comparison](comparison.md).
 > the staleness-alerting + artefact secret-scanning half of **secret
 > lifecycle** — see [policy-guardrails.md](../operations/scheduling/policy-guardrails.md),
 > [config-management.md](../operations/config-management.md),
-> [secrets-management.md](../access/secrets-management.md). **(2)** The **per-tenant
+> [secrets-management.md](../admin/secrets-management.md). **(2)** The **per-tenant
 > isolation primitive is now Built (prod)** — the hosted deployment is
 > multi-tenant today; only the root-key *store* is still shared (per-tenant
 > store scoping via federated workload identity remains). **(3)** This doc
@@ -154,11 +154,11 @@ the next things queued for QA.
 > Needs-attention rollup — vault refs use the backend's own last-changed
 > date) and **artefact secret-scanning** (uploaded playbooks / scripts are
 > scanned on upload, `secret_scan_enabled`) both run in the community
-> edition — see [secrets-management.md](../access/secrets-management.md) and
+> edition — see [secrets-management.md](../admin/secrets-management.md) and
 > [config-management.md](../operations/config-management.md#secret-scanning-advisory).
 > A rotation *primitive* also shipped: a Password Safe managed-account
 > checkout used on a cloud run can be flagged **rotate-on-check-in**
-> ([Ansible → Managed-account checkout](../integrations/ansible/secrets.md#managed-account-checkout-beyondtrust-password-safe)).
+> ([Ansible → Managed-account checkout](../platform/ansible/secrets.md#managed-account-checkout-beyondtrust-password-safe)).
 
 - **What community does:** stores + resolves secrets, **alerts on
   staleness**, and **scans executed artefacts** for embedded secrets;
@@ -177,7 +177,7 @@ the next things queued for QA.
 
 > **Shipped in community (was on this list):** one-click cross-cloud
 > promote and live cloud-side checks. The runner-driven flow
-> documented in [Image Management](../cloud/image-management.md) runs entirely
+> documented in [Image Management](../operations/image-management.md) runs entirely
 > in the community edition for AWS/Azure/GCP targets. SaaS now layers
 > only the durable-replay guarantee on top — a 45-minute import that
 > survives a dashboard restart mid-poll without orphan cloud-side
@@ -236,7 +236,7 @@ the next things queued for QA.
   the single OIDC issuer for people: the only way people reach on-prem (k3s) clusters. Dex
   for managed clusters is paused. The Ed25519 path and direct OIDC remain the defaults,
   for compatibility; SPIRE attestation and the dashboard's own identity are the
-  [recommended](../access/workload-identity.md) setup.
+  [recommended](../platform/workload-identity.md) setup.
 - **Status:** In progress.
   - **Proven live:** agent attestation (`/api/agent/attest`) and **Migrate to SPIRE**
     (2026-10-13), POV control nodes attesting (2026-10-14), and the dashboard's SPIFFE
@@ -259,7 +259,7 @@ the next things queued for QA.
   remote runners** (ECS / ACI / Cloud Run) for Ansible, Kubernetes, and
   image-promote runs — those run **cloud-side** and are torn down after
   each job. Community now *also* owns the hub-and-spoke primitive itself:
-  [remote agents](../remote-agents.md) are containerised, customer-hosted spokes
+  [remote agents](../admin/remote-agents.md) are containerised, customer-hosted spokes
   that poll out to the dashboard, enrol with a short-lived code, and
   authenticate with an Ed25519 key they generate themselves. Community
   scopes them to **discovery** of on-prem Kubernetes clusters and databases,
@@ -436,7 +436,7 @@ the next things queued for QA.
 > **locked** (S3 native `use_lockfile`, Terraform ≥ 1.10 — no DynamoDB
 > table), so concurrent `apply`s can't corrupt state. It falls back to the
 > local filesystem only when no storage backend is configured. See
-> [infrastructure-as-code.md → State](../cloud/infrastructure-as-code.md#state-the-thing-that-makes-iac-work).
+> [infrastructure-as-code.md → State](../clouds/infrastructure-as-code.md#state-the-thing-that-makes-iac-work).
 
 - **What community does:** remote, per-deploy, locked Terraform state in
   the configured storage backend (state-driven destroy survives a
@@ -633,5 +633,5 @@ scope but not yet specified.
 
 When a feature flips status, this doc updates. When it flips into the
 community open-source surface, the relevant lifecycle doc gets the
-inline tease the way [image-management.md](../cloud/image-management.md) already
+inline tease the way [image-management.md](../operations/image-management.md) already
 teases SaaS cross-cloud promote.

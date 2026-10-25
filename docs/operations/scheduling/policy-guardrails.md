@@ -106,7 +106,7 @@ A denied deploy returns **HTTP 403** with the reasons:
 ```
 
 and writes an `<action>:denied` entry to the **tamper-evident audit log**
-(see [`/api/audit/verify`](../../access/secrets-management.md)). No job is created and no cloud
+(see [`/api/audit/verify`](../../admin/secrets-management.md)). No job is created and no cloud
 resource is touched.
 
 ## `needs_approval` can be enforced

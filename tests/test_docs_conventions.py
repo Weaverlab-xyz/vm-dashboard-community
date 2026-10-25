@@ -193,8 +193,8 @@ def _index_of(folder):
     Either the folder's own README.md, or -- for a hub-and-spoke split -- the sibling
     ``<folder>.md`` the spokes were cut out of. The sibling case is not a shortcut: a
     folder cannot have BOTH, because ``doc_page`` resolves ``<page>.md`` before falling
-    back to ``<page>/README.md``, so docs/remote-agents.md and docs/remote-agents/README.md
-    would both answer /docs/remote-agents and the README would be the one you could
+    back to ``<page>/README.md``, so docs/admin/remote-agents.md and docs/remote-agents/README.md
+    would both answer /docs/admin/remote-agents and the README would be the one you could
     never reach.
     The hub keeps the filename because operator-facing strings name it -- eight scripts
     and six agent error messages name ONBOARDING.md and remote-agents.md."""
@@ -342,6 +342,19 @@ def test_every_indexed_section_has_a_heading_label():
     assert not missing, f"_SECTION_LABELS has no entry for: {missing}"
 
 
+def test_every_title_override_names_a_real_page():
+    """A key left behind by a move overrides nothing: the page lists under its filename
+    ("Azure Container Apps" becomes "Azure-Container-Apps" title-cased) and nothing fails.
+    Every key must name a doc that exists, as ``<key>.md`` or ``<key>/README.md``."""
+    src = _read(_DOCS_PAGES)
+    keys = re.findall(r'^\s*"([^"]+)":',
+                      src.split("_TITLE_OVERRIDES = {", 1)[1].split("\n}", 1)[0], re.M)
+    stale = [k for k in keys
+             if not os.path.isfile(os.path.join(_DOCS, k + ".md"))
+             and not os.path.isfile(os.path.join(_DOCS, k, "README.md"))]
+    assert keys and not stale, f"_TITLE_OVERRIDES keys that name no doc: {stale}"
+
+
 def test_every_indexed_section_is_a_real_folder():
     """A stale member is a section that silently never renders, which looks exactly like
     the folder being deliberately hidden."""
@@ -359,7 +372,7 @@ _UNINDEXED = {"design", "notes", "runbooks", "profiles/pov/design"}
 
 
 def test_every_operator_folder_is_an_indexed_section():
-    """The reverse of the check above, and the one that was missing: docs/oidc/ shipped
+    """The reverse of the check above, and the one that was missing: docs/platform/oidc/ shipped
     without a _INDEX_SECTIONS entry, so its four pages rendered by path and never appeared
     on /docs. A new folder has to be either indexed or deliberately listed above."""
     src = _read(_DOCS_PAGES)

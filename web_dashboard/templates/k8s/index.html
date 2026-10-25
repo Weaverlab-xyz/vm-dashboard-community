@@ -2,7 +2,7 @@
 {% from "partials/secret_picker.html" import secret_picker %}
 {% block title %}Kubernetes{% endblock %}
 
-{# Kubernetes management (docs/kubernetes.md). Provision/register clusters, launch
+{# Kubernetes management (docs/cloud-services/kubernetes.md). Provision/register clusters, launch
    the Rancher management plane (central server + imported clusters), and open the
    brokered console, the PRA tunnel and Entitle-Rancher JIT. #}
 
@@ -899,7 +899,7 @@ gcloud auth login --login-config=login.json</pre>
           <span class="font-mono">PRA Vault Token</span> plugin and <em>synced</em> to it in Password Safe, so every
           rotation reaches PRA and the k8s tunnel keeps working. The functional
           account must already exist in Password Safe — see the
-          <a href="/docs/integrations/beyondtrust/password-safe/kubernetes-tokens#kubernetes-serviceaccount-token-rotation" class="underline" target="_blank">token rotation guide</a>
+          <a href="/docs/beyondtrust/password-safe/kubernetes-tokens#kubernetes-serviceaccount-token-rotation" class="underline" target="_blank">token rotation guide</a>
           for the plugin import, functional accounts and access policy.
         </p>
         <template x-if="psTokenTarget && psTokenTarget.ps_token_managed">
@@ -1133,7 +1133,7 @@ function k8sPage() {
     //
     // Agent discovery no longer produces Kubernetes findings — it scans for hypervisor
     // management endpoints now, and Password Safe is the source for databases. See
-    // docs/remote-agents.md. This handler stays because the link still works if someone
+    // docs/admin/remote-agents.md. This handler stays because the link still works if someone
     // has one bookmarked or builds it by hand, and it costs ten lines.
     openFromQuery() {
       const q = new URLSearchParams(window.location.search);
