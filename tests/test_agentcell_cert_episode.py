@@ -55,6 +55,8 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-agentcell-cert")
 _WORKER = os.path.join(_ROOT, "examples", "playbooks", "agent", "files", "mcp_agent.py")
 _API = os.path.join(_ROOT, "web_dashboard", "api", "agentcell.py")
 _DOC = os.path.join(_ROOT, "docs", "profiles", "demo", "agent-demo-cell.md")
+# The cell's docs are a hub and a page per demo beside it (agent-demo-cell/).
+_DOC_DIR = os.path.join(_ROOT, "docs", "profiles", "demo", "agent-demo-cell")
 
 from web_dashboard.services import agentcell_service as A  # noqa: E402,F401
 
@@ -65,6 +67,13 @@ _PASS = "s3cret"
 def _read(path):
     with open(path, encoding="utf-8") as fh:
         return fh.read()
+
+
+def _cell_docs():
+    """The agent demo cell's docs as one text: the hub, then each page in its folder."""
+    pages = [_DOC] + [os.path.join(_DOC_DIR, f) for f in sorted(os.listdir(_DOC_DIR))
+                      if f.endswith(".md")]
+    return "\n".join(_read(p) for p in pages)
 
 
 def _code(path):
@@ -680,7 +689,7 @@ def test_the_episode_says_that_revocation_will_not_stop_it():
 
 
 def test_the_page_carries_the_three_shapes():
-    doc = _read(_DOC)
+    doc = _cell_docs()
     assert "revocable" in doc.lower() and "expires" in doc
     assert "CRL" in doc and "OCSP" in doc, \
         "the page does not state that nothing on this path checks revocation"
@@ -689,7 +698,7 @@ def test_the_page_carries_the_three_shapes():
 def test_the_page_says_where_the_bundle_lands():
     """The bundle is a file secret, so it reaches disk. Saying so on the page is the
     difference between a bounded exception and something somebody discovers."""
-    doc = _read(_DOC)
+    doc = _cell_docs()
     assert "0700" in doc and re.search(r"touch(es)? disk", doc), \
         "the page does not say that the bundle and key land in one guarded directory"
 

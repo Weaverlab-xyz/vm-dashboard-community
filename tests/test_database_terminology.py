@@ -121,7 +121,10 @@ def test_the_doc_was_renamed_and_retitled():
         "derived from the filename, so the name lives in the filename")
     body = _read(os.path.join(docs, "cloud-services", "databases.md"))
     assert body.startswith("# Databases\n"), "docs/cloud-services/databases.md is not titled 'Databases'"
-    assert "## Registering an existing database" in body, (
+    # Registration is its own page in the section, linked from the hub.
+    assert "](databases/register.md)" in body and _read(os.path.join(
+        docs, "cloud-services", "databases", "register.md")).startswith(
+        "# Registering an existing database\n"), (
         "the doc doesn't document registration, which is why it was renamed")
 
 
@@ -135,10 +138,10 @@ def test_no_doc_links_to_the_old_filename():
 
 def test_the_oci_heading_anchor_is_intact():
     """docs/cloud-services/kubernetes/k8s.md deep-links this heading; retitling it silently 404s the
-    anchor, which nothing else would catch."""
-    anchor = "#oci-autonomous-database--read-the-caveats"
-    assert "### OCI (Autonomous Database) — read the caveats" in _read(
-        os.path.join(_ROOT, "docs", "cloud-services", "databases.md"))
+    anchor, which nothing else would catch. It lives on the databases provisioning page."""
+    anchor = "databases/provisioning.md#oci-autonomous-database--read-the-caveats"
+    assert "## OCI (Autonomous Database) — read the caveats" in _read(
+        os.path.join(_ROOT, "docs", "cloud-services", "databases", "provisioning.md"))
     assert anchor in _read(os.path.join(_ROOT, "docs", "cloud-services", "kubernetes", "k8s.md"))
 
 
