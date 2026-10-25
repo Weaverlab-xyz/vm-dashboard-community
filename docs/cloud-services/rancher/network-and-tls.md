@@ -34,7 +34,7 @@ and-egg problem. The dashboard now manages the allow-list for you:
   "cannot reach it" seconds apart. On Azure Container Apps the dashboard now reads
   the environment's published outbound pool and admits all of it, given one Reader
   grant. See
-  [Outbound addresses](../../platform/cloud-hosting/azure-container-apps.md#outbound-addresses-and-the-managed-node-firewalls).
+  [Outbound addresses](../../platform/cloud-hosting/azure-container-apps/outbound-addresses.md).
   Elsewhere, the durable fix is a stable egress (a NAT Gateway) or a manual pool CIDR.
 - **API runner** — when `rancher_api_transport=runner` (see
   [Corp TLS inspection](#corp-tls-inspection-api-transport)), the runner's own source
@@ -252,7 +252,7 @@ Three ways out:
    long. The deploy reports which of the four first-run steps it is on, and the
    worker log has a `Rancher API (runner): <METHOD> <path>` line on each side of
    every call with its elapsed time — check those before concluding a deploy is
-   hung — see [Troubleshooting](../rancher.md#troubleshooting).
+   hung — see [Troubleshooting](troubleshooting.md).
 
 **Downstream clusters are unaffected** either way — cattle-cluster-agents dial out
 from their cloud NAT, not through your corp proxy. The Rancher **UI** in your

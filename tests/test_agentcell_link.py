@@ -35,6 +35,8 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-agentcell-link")
 _API = os.path.join(_ROOT, "web_dashboard", "api", "agentcell.py")
 _DB = os.path.join(_ROOT, "web_dashboard", "database.py")
 _DOC = os.path.join(_ROOT, "docs", "profiles", "demo", "agent-demo-cell.md")
+# The cell's docs are a hub and a page per demo beside it (agent-demo-cell/).
+_DOC_DIR = os.path.join(_ROOT, "docs", "profiles", "demo", "agent-demo-cell")
 _SVC = os.path.join(_ROOT, "web_dashboard", "services", "agentcell_service.py")
 _TAB = os.path.join(_ROOT, "web_dashboard", "templates", "workload_lab",
                     "_agent.html")
@@ -45,6 +47,13 @@ from web_dashboard.services import agentcell_service as A  # noqa: E402
 def _read(path):
     with open(path, encoding="utf-8") as fh:
         return fh.read()
+
+
+def _cell_docs():
+    """The agent demo cell's docs as one text: the hub, then each page in its folder."""
+    pages = [_DOC] + [os.path.join(_DOC_DIR, f) for f in sorted(os.listdir(_DOC_DIR))
+                      if f.endswith(".md")]
+    return "\n".join(_read(p) for p in pages)
 
 
 def _code(path):
@@ -292,7 +301,7 @@ def test_the_page_says_which_authority_each_link_reaches():
     other would be describing the wrong mechanism, which is the same failure in a new
     place.
     """
-    doc = _read(_DOC)
+    doc = _cell_docs()
     assert "Workload Credentials directly" in doc, \
         "the page does not say the cloud link reaches WC rather than the vault"
     assert "reaches Password Safe holding nothing" in doc, \
@@ -312,7 +321,7 @@ def test_the_page_says_which_authority_each_link_reaches():
 def test_the_page_states_what_the_approval_does_not_gate():
     """The limit somebody will assume away. The approval gates RETRIEVAL; a token already
     released lives out its TTL, because rotation does not revoke."""
-    doc = _read(_DOC)
+    doc = _cell_docs()
     assert "gates retrieval, not use" in doc
     assert "rotation does not revoke" in doc.lower()
     assert "ServiceAccount" in doc, \

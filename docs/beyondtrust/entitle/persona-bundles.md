@@ -9,7 +9,7 @@ OT and hypervisor roles work. Each bundle combines three components:
 
 | Component | What it is | Where it is found |
 |---|---|---|
-| **group** | the [virtual-application](entitle-virtual-apps.md) role over the directory group `ent-<target>-<persona>`. For a cloud, this is the group your cloud's SSO maps to a permission set, role or binding. For AD, it is the group that holds the delegated rights | active virtual applications, by the persona and target the role is tagged with |
+| **group** | the [virtual-application](virtual-apps.md) role over the directory group `ent-<target>-<persona>`. For a cloud, this is the group your cloud's SSO maps to a permission set, role or binding. For AD, it is the group that holds the delegated rights | active virtual applications, by the persona and target the role is tagged with |
 | **cloud** | for a cloud: roles in that cloud's own Entitle integration. For AD: membership of the persona's own delegated AD groups | the AWS, Azure or GCP integration you pin for that cloud, or the Entitle integration pinned on your AD directory |
 | **dashboard** | the dashboard's own `dashboard-<scope>-<level>` groups | the directory integration those groups were synced from |
 
@@ -43,7 +43,7 @@ includes `dashboard-aws-write` and `dashboard-images-write`, and DBA includes
 
 ### On-prem, through Active Directory
 
-The IT, OT and hypervisor [personas](../profiles/demo/personas/README.md) work
+The IT, OT and hypervisor [personas](../../profiles/demo/personas/README.md) work
 on-premises, so their bundles target **on-prem AD** instead of a cloud:
 
 | Persona | AD group | Where its rights are delegated | Dashboard groups | Tier · durations |
@@ -83,7 +83,7 @@ which is the group component. The policy column is what the `ent-oci-<persona>` 
 OCI policy should allow, scoped to your compartment.
 
 The DBA bundle is in addition to, not instead of, the per-database ephemeral accounts the
-dashboard registers when it builds a database. See [Entitle](entitle.md).
+dashboard registers when it builds a database. See [Entitle](../entitle.md).
 
 ## Setting it up
 
@@ -93,7 +93,7 @@ dashboard registers when it builds a database. See [Entitle](entitle.md).
    or directory. Then give each group its rights — see
    [Delegating rights](#delegating-rights). A group with no delegation grants nothing.
 2. **Create a virtual application** over those groups (see
-   [Entitle virtual applications](entitle-virtual-apps.md)). Groups that follow the
+   [Entitle virtual applications](virtual-apps.md)). Groups that follow the
    naming convention are tagged with their persona and cloud automatically, and that tag
    is how a bundle finds its group role.
 3. **Pin each cloud's Entitle integration** in the bundle card. The candidates are listed
@@ -106,7 +106,7 @@ dashboard registers when it builds a database. See [Entitle](entitle.md).
    `dashboard-*` groups came from. Without it, each group is searched for by name across
    the tenant.
 5. Set the three **tier workflows**, as described in
-   [virtual applications](entitle-virtual-apps.md#tiers).
+   [virtual applications](virtual-apps.md#tiers).
 6. **For the on-prem AD bundles:** register the AD on **Directories** and pin its
    Entitle integration. If exactly one AD directory has an integration pinned, the AD
    target uses it automatically. If several do, pick one in the **On-prem AD** box of the
@@ -152,8 +152,8 @@ What it never does:
   the service's delegated admin account.
 
 The dashboard does not create groups in Entra ID, Okta or PingOne (see
-[identity providers](../preview/directories/identity-providers.md)), nor the `dashboard-*`
-groups, which come from the [user-JIT bootstrap](entitle-dashboard-permissions.md).
+[identity providers](../../preview/directories/identity-providers.md)), nor the `dashboard-*`
+groups, which come from the [user-JIT bootstrap](dashboard-permissions.md).
 
 The run is audited as `entitle_groups_create`, with the directory, OU, job and group
 names. After it finishes, wait for Entitle's next sync of the AD integration (or trigger

@@ -85,7 +85,7 @@ Config-Management targets too, but they don't SSH anywhere — Ansible's
     in-cloud task has **no route at all**: a Kubernetes cluster registered from a
     kubeconfig — see [`examples/playbooks/k3s/`](../../../examples/playbooks/k3s) for
     building one — or a database registered against a Password Safe managed account, see
-    [Databases → Registering an existing database](../../cloud-services/databases.md#registering-an-existing-database).
+    [Databases → Registering an existing database](../../cloud-services/databases/register.md).
     Those runs execute in a sibling container **on the dashboard host**, which is the only
     thing that can reach them: same `ansible_cloud_image`, same localhost play, same
     scrubbing. Two consequences — the dashboard host needs a working `docker` CLI and

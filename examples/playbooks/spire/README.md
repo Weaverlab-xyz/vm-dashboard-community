@@ -43,7 +43,7 @@ version and architecture) and `spire_image_digests`; a version with no pin is re
 
 > The dashboard's **SPIRE** page (preview: `spire_lab_enabled`) does all five steps below
 > as one job, on Azure, GCP or AWS, and opens the cloud ACL first — see
-> [docs/preview/workload-lab/spiffe.md](../../../docs/preview/workload-lab/spiffe.md#building-it-from-the-dashboard). It runs these
+> [docs/preview/workload-lab/spiffe.md](../../../docs/preview/workload-lab/spiffe/building.md). It runs these
 > same files, fetched **by filename from the storage backend**, so upload them on the
 > **Storage** page first (Config Management only *runs* them); the build form names the
 > ones it cannot find. The steps
@@ -65,7 +65,7 @@ Three of these plays, plus `k3s/k3s-spiffe-auth.yml`, attest a **second VM** int
 domain and make its Kubernetes API server accept the tokens. **The dashboard drives them
 from a button** — the *Kubernetes* action on a lab's row, which runs all five stages
 alternating hosts and passes the join token and trust bundle between them so nothing is
-copied by hand. See [docs/preview/workload-lab/spiffe.md](../../../docs/preview/workload-lab/spiffe.md#reaching-a-kubernetes-cluster-with-a-jwt-svid).
+copied by hand. See [docs/preview/workload-lab/spiffe.md](../../../docs/preview/workload-lab/spiffe/kubernetes.md).
 
 They exist because the four plays above prove *issuance* and *governance* and never prove
 that a relying party accepts the result. Here it does, and unlike every identity the plugin

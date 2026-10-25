@@ -866,7 +866,7 @@ async def get_environment(env_id: str) -> dict:
 #
 # The write half of the catalogue. Until this landed the dashboard could only *read*
 # `/v2/templates`, which made the whole POV feature downstream of a catalogue nobody could
-# author from here — see docs/profiles/pov/skytap.md#building-a-template.
+# author from here — see docs/profiles/pov/skytap/building-a-template.md.
 #
 # Skytap has no "edit a template" call, and that is not an omission this module should try
 # to paper over. A template is immutable; the way you change one is to instantiate it, change

@@ -56,7 +56,7 @@ items are still in the tenant's appliance-wide Asset Group. Those POVs were wire
 each POV got its own `pov-<name>` group, and they still work. But a vendor cannot be
 scoped to a group every POV on the appliance shares, so their Access tab offers **Move to
 its own Asset Group** instead of a vendor login; see
-[A POV wired before this will say so](../profiles/pov/customer-access.md#a-pov-wired-before-this-will-say-so).
+[A POV wired before this will say so](../profiles/pov/customer-access/vendor-access.md#a-pov-wired-before-this-will-say-so).
 A POV being destroyed is still listed until it is gone, because its teardown finds its
 jump items through the same group; a destroyed one is not.
 

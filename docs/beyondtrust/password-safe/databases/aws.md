@@ -2,7 +2,7 @@
 
 > **Audience:** operator · **Profile:** `demo` · **Read this when:** you are handing rotation of an RDS database credential to Password Safe, through AWS Systems Manager on the ECS gateway host.
 
-Part of [Password Safe: databases](databases.md), which has the shared model: the two ways to onboard, and where the functional account comes from.
+Part of [Password Safe: databases](../databases.md), which has the shared model: the two ways to onboard, and where the functional account comes from.
 
 The dashboard creates the managed user by running the DB client on the shared **ECS
 gateway host over AWS SSM `SendCommand`** — the only dashboard component with

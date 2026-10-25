@@ -112,7 +112,7 @@ throttle-safety knobs, not features:
 
 ## Related
 
-- [Cloud VMs → Spend caps](../clouds/vms.md#spend-caps), which stop a VM rather than report it.
-- [Tags and labels](../clouds/vms.md#tags-and-labels): `managed-by` is how spend is attributed,
+- [Cloud VMs → Spend caps](../clouds/vms/power.md#spend-caps), which stop a VM rather than report it.
+- [Tags and labels](../clouds/vms/tags.md): `managed-by` is how spend is attributed,
   which is why it cannot be edited.
 - [Notifications](../admin/notifications.md), for budget alerts.

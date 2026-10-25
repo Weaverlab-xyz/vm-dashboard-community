@@ -22,7 +22,7 @@ uses.
 | run **one** change later — at a time, or in the next approved window | a **booking** | **When to run** on the form, or **Schedule** on a selection toolbar | [Change Windows — Scheduling one job](scheduling/change-windows.md#scheduling-one-job) |
 | run the **same** change on every occurrence of a window | a **recurring schedule** (Repeat) | **Repeat in a change window** on a finished job's page; listed at **Schedules** (`/schedules`) | [Change Windows — Repeating a change](scheduling/change-windows.md#repeating-a-change) |
 | block a disallowed change before it starts — wrong region, oversized, a change freeze | an **Action Guardrail** | Settings → Action Guardrails | [Action Guardrails](scheduling/policy-guardrails.md) |
-| stop cloud VMs out of business hours to save money | a **suspend schedule** | Settings, per cloud | [Cloud VMs — Suspend schedules](../clouds/vms.md#suspend-schedules-all-four-clouds) |
+| stop cloud VMs out of business hours to save money | a **suspend schedule** | Settings, per cloud | [Cloud VMs — Suspend schedules](../clouds/vms/power.md#suspend-schedules-all-four-clouds) |
 
 The first two share one engine — the job queue holds a booked job `pending` until its
 time — and both depend on **change windows**, the named recurring periods defined in

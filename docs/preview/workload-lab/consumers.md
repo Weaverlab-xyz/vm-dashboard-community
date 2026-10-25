@@ -104,7 +104,7 @@ all refused; the full loop on a host has not.
 
 There is one more path where the SVID is an authenticator: `--identity-platform spire`
 mints a JWT-SVID and presents it to Workload Credentials, because
-[the lab already publishes the trust domain as an OIDC issuer](spiffe.md#reaching-a-kubernetes-cluster-with-a-jwt-svid).
+[the lab already publishes the trust domain as an OIDC issuer](spiffe/kubernetes.md).
 That is the row that covers a bare-metal host with no cloud underneath it. It has never
 been run against a Workload Credentials tenant.
 

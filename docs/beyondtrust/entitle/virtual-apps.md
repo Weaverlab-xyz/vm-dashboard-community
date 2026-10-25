@@ -27,10 +27,10 @@ confirm it belongs to this directory's integration.
 
 1. Register the directory on **Directories**. Every kind works except the two site links
    (`dns_link`, `gcp_vyos_link`): Active Directory (on-premises or managed in AWS, GCP or
-   Azure), LDAP, Entra ID, Okta or PingOne. See [Directories](../preview/directories.md).
+   Azure), LDAP, Entra ID, Okta or PingOne. See [Directories](../../preview/directories.md).
 2. In Entitle, connect the directory as an integration and let it sync.
 3. On the directory's row, click **Entitle** and pin that integration. See
-   [identity providers](../preview/directories/identity-providers.md).
+   [identity providers](../../preview/directories/identity-providers.md).
 4. In **Settings → Integrations → Entitle**:
    - turn on **resource registration** (`entitle_registration_enabled`);
    - set the **Owner ID** (`entitle_owner_id`);
@@ -39,7 +39,7 @@ confirm it belongs to this directory's integration.
 ## Tiers
 
 Every role goes through one of the three tiers that
-[`terraform/entitle_user_jit`](../../terraform/entitle_user_jit/README.md) creates.
+[`terraform/entitle_user_jit`](../../../terraform/entitle_user_jit/README.md) creates.
 This keeps a group requested here consistent with the dashboard's own `dashboard-*` groups.
 
 | Tier | Workflow setting | Durations offered |
@@ -64,7 +64,7 @@ through a one-step workflow without you seeing it.
    listed first.
 4. For each group, set the role name, the grouping (the resource inside the application)
    and the tier. Groups named `ent-<cloud>-<persona>` come pre-filled to match the
-   [persona bundles](entitle-persona-bundles.md), for example `ent-gcp-sre` →
+   [persona bundles](persona-bundles.md), for example `ent-gcp-sre` →
    **SRE — GCP**, grouping **GCP**, tier auto-approve. On an AD directory,
    `ent-ad-itops` → **IT engineer — On-prem AD**.
 5. Click **Create in Entitle**. This queues an `entitle_virtual_app` job. When the job
@@ -104,7 +104,7 @@ than removed.
 ## What to confirm on a new tenant
 
 The Terraform this runs was validated against the
-[provider's own schema](../../tests/fixtures/entitle_provider_schema.json), and CI
+[provider's own schema](../../../tests/fixtures/entitle_provider_schema.json), and CI
 validates it again on every change. Two values come from Entitle's catalog rather than
 the schema, so check them the first time you use a tenant:
 

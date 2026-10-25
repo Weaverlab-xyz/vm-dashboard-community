@@ -52,7 +52,7 @@ The default `admin` account has full access. Suitable for lab environments.
 or **Reboot** to the whole selection — one job per VM, sharing a batch you watch on one
 page. VMs already in the target state are skipped and the confirmation says how many;
 fifty per operation is the cap. See
-[Powering a selection](../admin/remote-agents/hypervisors.md#powering-a-selection).
+[Powering a selection](../admin/remote-agents/hypervisors/power.md).
 
 Those four only. The rest of the table above stays per-VM: each of them depends on the
 state the VM is in right now — a Resume needs a paused VM, and a Reset is a power cut you
@@ -66,7 +66,7 @@ will return an error from Prism if the VM does not respond to the ACPI signal.
 **Tags.** Nutanix categories are not read yet, so VMs here show no tag chips and do not
 appear under [Inventory](../operations/inventory.md)'s **Tag** filter. Proxmox is the only hypervisor
 that reports tags today; see
-[Cloud VMs — Tags and labels](../clouds/vms.md#tags-and-labels).
+[Cloud VMs — Tags and labels](../clouds/vms/tags.md).
 
 **Scheduling power is not available on Nutanix.** A Nutanix power change is a full VM spec
 write carrying a version number, so there is no agent power path, and every target runs

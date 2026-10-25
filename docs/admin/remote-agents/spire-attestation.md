@@ -39,7 +39,7 @@ image first" for an older one.
 The server's admin API is a unix socket on a volume mounted only into the dashboard's own
 containers. Nothing administrative listens on the network. tcp/8082
 (`SPIRE_FEDERATION_PORT`) is the bundle endpoint for
-[federation with a Workload Lab](../../preview/workload-lab/spiffe.md#federating-with-the-dashboard);
+[federation with a Workload Lab](../../preview/workload-lab/spiffe/federation.md);
 attestation does not use it.
 
 ## Setting it up

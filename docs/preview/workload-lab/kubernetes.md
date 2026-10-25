@@ -179,7 +179,7 @@ leave the cluster running.
 
 ## Compared against the SPIFFE path
 
-The full table is in [SPIFFE and SPIRE](spiffe.md#what-it-is-being-compared-against). The
+The full table is in [SPIFFE and SPIRE](spiffe/kubernetes.md#what-it-is-being-compared-against). The
 short version:
 
 | | This (Bound SA token via Password Safe) | JWT-SVID over the Workload API |

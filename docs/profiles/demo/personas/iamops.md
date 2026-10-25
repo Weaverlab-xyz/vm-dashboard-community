@@ -89,7 +89,7 @@ Map the dashboard's `directories` write scope to an Entitle resource, request it
 and show the grant end on its own. The people who change the directory follow the same rule
 they enforce on everyone else.
 
-**Guide:** [Entitle dashboard permissions](../../../beyondtrust/entitle-dashboard-permissions.md)
+**Guide:** [Entitle dashboard permissions](../../../beyondtrust/entitle/dashboard-permissions.md)
 
 ## What to enable
 

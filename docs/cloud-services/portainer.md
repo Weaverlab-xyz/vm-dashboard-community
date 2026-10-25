@@ -247,7 +247,7 @@ stable outbound address, set `portainer_dashboard_egress_cidr` to the whole rang
 rather than a single address (a corporate proxy pool). On Container Apps the dashboard
 reads its own pool instead, so check *Hosting platform outbound pool* in **Settings →
 Containers**: an error there names the missing grant
-([Outbound addresses](../platform/cloud-hosting/azure-container-apps.md#outbound-addresses-and-the-managed-node-firewalls)).
+([Outbound addresses](../platform/cloud-hosting/azure-container-apps/outbound-addresses.md)).
 If the message says the URL is **not a node this dashboard deployed**, the firewall
 in front of that Portainer is yours to open.
 

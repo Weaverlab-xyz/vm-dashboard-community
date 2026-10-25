@@ -457,7 +457,7 @@ the policy genuinely ports. The cost is everywhere else.
 > all, so the console was still the only way to stop one instance now. Each of the
 > four pages now has per-row Start / Suspend and a bulk toolbar over a selection,
 > queueing one `*_power` job per instance behind a shared `batch_id`. See
-> [Powering a selection](../clouds/vms.md#powering-a-selection).
+> [Powering a selection](../clouds/vms/power.md#powering-a-selection).
 
 **Phase 0 — the primitive.** `/power/start` and `/power/stop` on the four cloud routers using
 the `_power_endpoint` shape, backed by new `*_power` job types, with the workgroup check

@@ -48,7 +48,7 @@ the **XCP-ng** page appears under **Hypervisors** in the navigation, at `/xcpng`
 or **Reboot** to the whole selection — one job per VM, sharing a batch you watch on one
 page. VMs already in the target state are skipped and the confirmation says how many;
 fifty per operation is the cap. See
-[Powering a selection](../admin/remote-agents/hypervisors.md#powering-a-selection).
+[Powering a selection](../admin/remote-agents/hypervisors/power.md).
 
 Those four only. The rest of the table above stays per-VM: each of them depends on the
 state the VM is in right now — Resume needs a suspended VM, Unpause a paused one — which
@@ -56,7 +56,7 @@ is a judgement to make one machine at a time rather than across a selection.
 
 **Tags.** XCP-ng tags are not read yet, so VMs here show no tag chips and do not appear
 under [Inventory](../operations/inventory.md)'s **Tag** filter. Proxmox is the only hypervisor that
-reports tags today; see [Cloud VMs — Tags and labels](../clouds/vms.md#tags-and-labels).
+reports tags today; see [Cloud VMs — Tags and labels](../clouds/vms/tags.md).
 
 **Scheduling power.** On a connection bound to a
 [remote agent](../admin/remote-agents/hypervisors.md), the bulk power toolbar's **Schedule**

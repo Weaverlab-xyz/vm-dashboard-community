@@ -49,7 +49,7 @@ accounts are minted as **standard** users in **no team** (an actor whose grant n
 arrives can reach nothing), and the adapter only ever lists or deletes accounts it
 minted itself (the `jit-` prefix). Your real Portainer users are never shown to Entitle,
 and a request to delete one is refused. See
-[cloud-functions.md](../functions.md#portainer_access).
+[cloud-functions.md](../functions/portainer-access.md).
 
 Needs Cloud Functions enabled, a stored `portainer_pat`, and a configured secret store
 for the node's cloud. The card names whichever of those is missing instead of offering

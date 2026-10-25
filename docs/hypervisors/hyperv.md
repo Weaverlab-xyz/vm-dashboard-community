@@ -132,10 +132,10 @@ your VMs listed within a few seconds.
 | **Resume** | Resume a paused or saved VM |
 | **Save** | Save VM state to disk (`Save-VM`) |
 | **VM detail modal** | vCPUs, memory, CPU usage, uptime, IP addresses, IS state, VM ID, path |
-| **Bulk power** | Tick several rows and send Start, Shutdown, Force Off or Restart to the whole selection from the toolbar — one job per VM, sharing a batch you watch on one page. VMs already in the target state are skipped and the dialog says how many; fifty per operation is the cap. See [Powering a selection](../admin/remote-agents/hypervisors.md#powering-a-selection) |
+| **Bulk power** | Tick several rows and send Start, Shutdown, Force Off or Restart to the whole selection from the toolbar — one job per VM, sharing a batch you watch on one page. VMs already in the target state are skipped and the dialog says how many; fifty per operation is the cap. See [Powering a selection](../admin/remote-agents/hypervisors/power.md) |
 
 **Tags.** Hyper-V has no native tag concept, so VMs here show no tag chips. See
-[Cloud VMs — Tags and labels](../clouds/vms.md#tags-and-labels).
+[Cloud VMs — Tags and labels](../clouds/vms/tags.md).
 
 **Scheduling power.** On a connection bound to a
 [remote agent](../admin/remote-agents/hypervisors.md), the bulk power toolbar's **Schedule**

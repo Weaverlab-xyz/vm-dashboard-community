@@ -205,7 +205,7 @@ included, registers as a Custom IDP.
 
 Full walkthrough, including the v1-versus-v2 issuer trap that makes a perfectly
 valid token silently fail to match:
-[Cloud hosting → No PAT](../platform/cloud-hosting/azure-container-apps.md#no-pat-authenticate-to-pathfinder-with-a-workload-identity).
+[Cloud hosting → No PAT](../platform/cloud-hosting/azure-container-apps/workload-identity.md).
 
 **Assign the identity to the worker too.** `dash-worker` is where credentials are
 minted, so an identity on the web app alone yields a panel that tests green and
@@ -247,7 +247,7 @@ Two things to know before you do it:
   back.
 - **The JWT root key is not part of this** and never can be — it derives the key
   that encrypts the very rows a vault credential lives in. See
-  [why the JWT root key cannot be migrated](../admin/secrets-management.md#why-the-jwt-root-key-cannot-be-migrated).
+  [why the JWT root key cannot be migrated](../admin/secrets-management/external-vault.md#why-the-jwt-root-key-cannot-be-migrated).
 
 Secrets already living in another external vault are left untouched; the
 migration only moves database-stored values.

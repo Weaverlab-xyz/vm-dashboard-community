@@ -5,7 +5,7 @@
 > **Legacy mechanism.** This runbook covers Entitle granting dashboard
 > permissions through **Entra groups**. The current mechanism is a REST
 > integration that works for any user and takes effect immediately — see
-> [`../integrations/beyondtrust/entitle-dashboard-permissions.md`](../beyondtrust/entitle-dashboard-permissions.md).
+> [`../integrations/beyondtrust/entitle-dashboard-permissions.md`](../beyondtrust/entitle/dashboard-permissions.md).
 
 Operator walk-through for `web_dashboard/scripts/bootstrap_entitle_groups.py`.
 Validates Phase 1 of the [Entitle user-JIT design](../design/entitle-user-jit.md).
@@ -67,7 +67,7 @@ group per level it declares on the next bootstrap run.
 Adding a scope also **revokes** its feature from every user who has
 an explicit permission map, silently, unless the change shipped a
 backfill alongside it. See
-[Permissions](../admin/permissions.md#adding-a-scope-for-contributors).
+[Permissions](../admin/permissions/adding-a-scope.md).
 
 If Graph rejects authentication, fix the app registration before
 proceeding — there is no "skip Graph" mode.

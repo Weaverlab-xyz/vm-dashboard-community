@@ -72,7 +72,7 @@ It is free and calls no BeyondTrust endpoint, so a pass proves that this contain
 identity, not that Pathfinder accepts it.
 
 The per-platform setup is the same as for Workload Credentials:
-[Azure Container Apps](../platform/cloud-hosting/azure-container-apps.md#no-pat-authenticate-to-pathfinder-with-a-workload-identity)
+[Azure Container Apps](../platform/cloud-hosting/azure-container-apps/workload-identity.md)
 covers the managed identity and the Custom IDP registration in detail, and
 [the dashboard's own identity](../platform/oidc/dashboard-identity.md#beyondtrust-workload-credentials)
 covers the SPIFFE route.

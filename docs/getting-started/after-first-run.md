@@ -76,7 +76,7 @@ and mounts it into the container as a Docker secret.
 the bootstrap key that decrypts the encrypted database — *including* the
 credentials the dashboard would need to reach any vault — so there's no startup
 ordering that lets it live in a vault (see
-[Why the JWT root key cannot be migrated](../admin/secrets-management.md#why-the-jwt-root-key-cannot-be-migrated)).
+[Why the JWT root key cannot be migrated](../admin/secrets-management/external-vault.md#why-the-jwt-root-key-cannot-be-migrated)).
 At startup the dashboard reads it from `JWT_SECRET_KEY_FILE` → the
 `/run/secrets/jwt_key` Docker secret → the `JWT_SECRET_KEY` env var, in that order.
 

@@ -29,7 +29,7 @@ satisfy.
 created, plus any added to their POV access picker. A **POV Manager** sees and manages every
 POV. A **POV Template Builder** builds the templates and saves the blueprints presenters
 build from, and creates no POV itself; a presenter picks a blueprint and chooses the
-tenants when they press Build. See [Permissions → Roles](../../admin/permissions.md#roles) and [who a presenter sees](../../admin/permissions.md#a-named-person-who-should-also-be-a-real-user).
+tenants when they press Build. See [Permissions → Roles](../../admin/permissions/roles.md) and [who a presenter sees](../../admin/permissions/customer-read-access.md#a-named-person-who-should-also-be-a-real-user).
 
 **Handing a POV to another SE.** The **Created by** column on the POV list has a
 `hand off` control. Type the new owner's dashboard username and they become the owner,

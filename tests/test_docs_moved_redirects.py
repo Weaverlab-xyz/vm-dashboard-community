@@ -87,13 +87,13 @@ def test_folder_keys_carry_the_rest_of_the_path():
     # Moved twice: each old address points straight at where the page lives now, never
     # at an intermediate one that is itself a redirect.
     assert (_moved_to("integrations/databases/password-safe-gcp")
-            == "beyondtrust/password-safe/databases-gcp")
+            == "beyondtrust/password-safe/databases/gcp")
     assert (_moved_to("integrations/beyondtrust/databases")
             == "beyondtrust/password-safe/databases")
     # A prefix only counts at a path boundary: entitle must not swallow
     # entitle-dashboard-permissions, which has its own entry.
     assert (_moved_to("integrations/entitle-dashboard-permissions")
-            == "beyondtrust/entitle-dashboard-permissions")
+            == "beyondtrust/entitle/dashboard-permissions")
     assert _moved_to("integrations/entitlement") is None
     # A key whose target is a page, not a folder, carries nothing: integrations/ was
     # dissolved into the sections, and its index now lands on the docs index. A page
@@ -114,7 +114,7 @@ def test_an_old_url_redirects():
                      ("/docs/integrations/password-safe",
                       "/docs/beyondtrust/password-safe"),
                      ("/docs/integrations/databases/password-safe-gcp",
-                      "/docs/beyondtrust/password-safe/databases-gcp"),
+                      "/docs/beyondtrust/password-safe/databases/gcp"),
                      ("/docs/integrations/beyondtrust/databases/password-safe",
                       "/docs/beyondtrust/password-safe/databases"),
                      ("/docs/integrations/spiffe", "/docs/preview/workload-lab/spiffe")):

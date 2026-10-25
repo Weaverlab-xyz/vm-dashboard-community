@@ -13,7 +13,7 @@
 > any OIDC) immediately. Both can run at once.
 >
 > **Start here instead:**
-> [`integrations/beyondtrust/entitle-dashboard-permissions.md`](../beyondtrust/entitle-dashboard-permissions.md)
+> [`integrations/beyondtrust/entitle-dashboard-permissions.md`](../beyondtrust/entitle/dashboard-permissions.md)
 > — it compares the two, and covers migrating from this one.
 
 > **Status:** Design + execution plan, v1.
@@ -572,7 +572,7 @@ in the first place." Both layers can be active simultaneously:
 > **Note, 2026-09.** The example is the design intent, not what shipped: the Secrets
 > endpoints were always administrator-only, so `secrets:write` never reached them, and it
 > has since been retired as a level nothing enforced (see
-> [Permissions → The sections](../admin/permissions.md#the-sections)). The layering argument
+> [Permissions → The sections](../admin/permissions/sections.md)). The layering argument
 > holds for any scope that does gate a route, `aws:delete` for instance.
 
 Defence in depth: authorization is gated; action is gated.

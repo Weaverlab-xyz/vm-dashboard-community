@@ -59,7 +59,7 @@ None of them can take anything away from it.
 
 ## Every person and every group mapping has a role
 
-A person's account and a group mapping must each name a [role](#roles). The grid next to it
+A person's account and a group mapping must each name a [role](permissions/roles.md). The grid next to it
 is an addition **on top of** that role, never a substitute for one. Access that lived only
 in a grid was a second, unnamed permission set that no role edit could reach.
 
@@ -161,106 +161,18 @@ level a scope does not offer through the API you get a `422` naming the levels i
 offer. The one exception is a *retired* level (see the next section), which is dropped
 silently, because it never granted anything.
 
-## The sections
+## Pages
 
-The fourteen original scopes:
+The larger parts have a page each:
 
-| Scope | Levels | Notes |
-|---|---|---|
-| `vms` | read, write | |
-| `aws`, `azure`, `gcp`, `oci` | read, write, delete | |
-| `images`, `containers`, `cloud_database`, `k8s`, `cloud_function` | read, write, delete | |
-| `config_mgmt` | read, write | |
-| `jobs` | read | read sees every job; cancelling and rescheduling are decided by ownership (the job's creator, or an administrator) |
-| `workgroups` | read, write | `write` covers only workstreams you belong to or created; changing one's change window also needs `change_windows:write`; deleting one needs an administrator |
-| `secrets` | use | the Secrets page itself is administrator-only |
-
-**Retired levels.** Until September 2026 these fourteen offered all four levels whether or
-not anything checked them, so the grid showed about thirty checkboxes that saved and
-granted nothing, for example `vms:delete`, `jobs:write` and `secrets:read`. Those levels
-are retired:
-- A one-time migration removed them from every stored permission map, role and group
-  mapping. Nobody's access changed, because they never granted anything.
-- A grid or script that still sends one has it dropped instead of refused.
-- An Entitle revoke of one succeeds.
-
-If you ran `bootstrap_entitle_groups.py` before then, its Entra groups for those levels
-(for example `dashboard-vms-delete`) are orphaned and can be deleted.
-
-The rest are one per navigation section:
-
-| Scope | Levels | Covers |
-|---|---|---|
-| `pov` | read, write, delete, use | POV environments, their use cases, wiring, sharing and accessors. `delete` destroys any POV the user's POV access picker allows, and every POV when the picker is empty |
-| `pov_own` | read, write, delete | your **own** POVs: ones **you created**, or ones **assigned to you** in your POV access picker. `read` without the general `pov:read` means you **see only your own** POVs, on the POV page, the home page and Inventory alike; `write` lets you create a POV and set up, run, power and share your own; `delete` lets you destroy your own. Nothing on anyone else's POV, and nothing platform-wide (re-checking the platform, listing every environment on it). What the POV Presenter role carries |
-| `pov_templates` | read, write, delete | template builds, blueprints, and the BeyondTrust tenant registry |
-| `proxmox` | read, write, delete | Proxmox: browse, deploy, import an image, delete a VM |
-| `nutanix` | read, write, delete | Nutanix: the same |
-| `vsphere` | read, write | vSphere: browse and power. No delete — nothing here destroys |
-| `hyperv` | read, write | Hyper-V: the same |
-| `xcpng` | read, write | XCP-ng: the same |
-| `connections` | read, write, delete | hypervisor connection records |
-| `storage` | read, write, delete | the object store's data plane. Its *configuration* stays admin-only |
-| `costs` | read, write | Cloud Costs, budgets and spend caps |
-| `inventory` | read | the cross-cloud inventory. Read-only: acting on a resource is the owning cloud's scope |
-| `agents` | read, write, delete | the remote-agent operator API. The agent-facing protocol authenticates by signature and is unaffected |
-| `audit` | read | the audit log, so it can be handed to whoever reads it without making them an admin |
-| `gateways` | read, write, delete | PRA Gateways — deploy, list and tear down |
-| `notifications` | read, write | outbound webhook endpoints, on the **Notifications** page. The delivery log is administrators only |
-| `epml` | read, write | EPM for Linux package builds |
-| `ot` | read, write, delete | the OT demo cell and its protocol tunnels. Building a cell also needs the cloud's own `write` |
-| `change_windows` | write, use | `write` defines change windows and recurring schedules; `use` approves a booked change. No `read`: every run form reads windows. Both levels need an **explicit** grant — see [If a user reports a 403](#if-a-user-reports-a-403) |
-
-Preview features are turned on and off in Settings → Preview features. All but one have
-no scope of their own; each is gated like this:
-
-| Preview feature | Gate |
+| Page | Read it when |
 |---|---|
-| Virtual Desktops | administrator |
-| Certificate Lab, SPIRE Lab | `cloud_function:read` to see, `cloud_function:write` to change |
-| Agent Cell | `config_mgmt:write` |
-| Directories | its own `directories` scope (read, write, delete), which must be granted explicitly. See [Directories → Permissions](../preview/directories.md#permissions) |
-
-## Giving a customer read access to their own POV
-
-This is the case the model previously could not express, and there are two ways to do it.
-They are for different people.
-
-### A named person who should also be a real user
-
-Give them a normal login with:
-
-- **Permissions:** `POV` → `read` and `use`. Nothing else.
-- **POV access:** their environment, chosen in the picker under the grid.
-
-They can then open the POV page, see exactly one POV — theirs — and check off use cases
-against it. Any other POV answers *"No such POV environment"*, the same as an id that does
-not exist, because confirming that somebody else's POV exists is itself a leak.
-
-Leave the POV access picker **empty** and they see every POV. That is the default, and it
-is what every pre-existing user has.
-
-The picker also decides what a POV Presenter **owns**, along with the POVs they create
-themselves, and a presenter sees only what they own. An empty picker therefore shows a
-presenter only the POVs they created. Add a colleague's POV to their picker to let them
-co-present it. When a presenter whose picker names some POVs creates a new one, it is
-added to their picker automatically.
-
-To let someone see and manage **every** POV, give them the **POV Manager** role, or the
-general `pov` levels.
-
-`use` is the important half. With `read` alone they can look but not tick, and a use-case
-checklist nobody can tick is a screenshot. With `write` they could provision and destroy.
-
-### An anonymous prospect who should not have a dashboard login at all
-
-Use a **POV accessor** instead — see [Customer access to a POV](../profiles/pov/customer-access.md).
-An accessor is an ephemeral credential bound to one environment, able to reach five
-endpoints and nothing else in the product, and deleted when the POV is reaped. It is not a
-restricted user; it is a different kind of principal.
-
-Rule of thumb: if you would put their name in an org chart, give them a user with a POV
-grant. If you are emailing a link to an evaluation, mint an accessor.
+| [The permission sections](permissions/sections.md) | you are deciding which sections of the dashboard a user may read or change, and what each one covers |
+| [Giving a customer read access to their POV](permissions/customer-read-access.md) | a customer stakeholder needs to see their own POV and nothing else |
+| [Permission groups](permissions/groups.md) | you are mapping identity-provider groups to dashboard access |
+| [Roles](permissions/roles.md) | you are giving people access through a role rather than one permission at a time |
+| [Permissions on objects, not just areas](permissions/objects.md) | you need access to one VM, database or POV rather than a whole area of the dashboard |
+| [Adding a permission scope](permissions/adding-a-scope.md) | you are adding a new area to the dashboard and it needs its own permission scope |
 
 ## Where a user's permissions actually come from
 
@@ -278,68 +190,6 @@ outright. That is how losing a group membership actually reduces access — but 
 anything written there by hand disappears at the user's next login. Per-POV grants are
 stored separately for exactly this reason, so they survive.
 
-## Groups
-
-A group mapping turns a group from your identity provider into a workstream, a role
-(required), and a default permission set added on top of it. **Not Entra-only** — any OIDC provider works, and the
-"Group Object ID" field takes whatever identifier that provider's groups claim emits. The
-stored column is still called `entra_group_id`, which is why you will see that name in the
-API and in the database.
-
-Things to know:
-
-- **If any mappings exist, signing in requires a match.** An OIDC user in none of the
-  mapped groups is refused at sign-in (`not_authorized`). With no mappings configured,
-  only users who already have an account can sign in.
-- **A login also rewrites the user's workstreams** to the matched mappings' workstreams.
-  Workstreams set by hand on an OIDC user do not survive their next sign-in.
-- The grid is labelled "Default Permissions for new users", but it is not only for new
-  users. Its permissions are re-applied to every member **at each login**, so a mistake in a
-  mapping keeps reasserting itself until the mapping is fixed — and a change you make
-  reaches existing members at their *next sign-in*, not immediately.
-- That includes the role. Editing a role changes it immediately for users who hold it
-  directly, and at next sign-in for everyone who gets it through a group.
-
-## Roles
-
-A role is a named set of permissions you assign to a person or to a group, instead of
-ticking boxes for each of them. Editing the role changes it for everyone who holds it.
-
-Ten roles ship with the dashboard:
-
-| Role | For |
-|---|---|
-| **Administrator** | Everything, including the admin-only pages. The grid is not consulted. |
-| **Operator** | Day-to-day work: deploy, run and use, but delete nothing. It does not include the audit log or change windows. |
-| **Read-Only** | Every section at its read level, and nothing else. `secrets` and `change_windows` offer no read level, so neither is included. |
-| **POV Presenter** | Run a proof of value end to end: **create POVs**, then see, set up, run, power, share and destroy **their own**, meaning ones they created or ones assigned to them in the POV access picker, and tick use cases. **Other people's POVs are not visible**, and neither are the platform-wide controls. It holds `pov:use` and `pov_own:read`/`write`/`delete`, but none of the general `pov:read`, `pov:write` or `pov:delete`. |
-| **POV Manager** | Oversee every proof of value: see, set up, run, power, share and destroy **any** POV, and curate the POV templates. It holds every `pov` level plus `pov_templates:read`/`write`. |
-| **POV Template Builder** | Author what presenters build from: build and delete POV templates, save and delete blueprints, and maintain the BeyondTrust tenant registry. It **cannot create POVs**. It holds `pov_templates:read`/`write`/`delete` and `pov_own:read`, which opens the POV page (and its Tenants tab) without showing anyone else's POVs. Give it alongside **POV Presenter** to someone who does both. |
-| **Auditor** | The audit trail, job history and inventory. No writes. |
-| **Cloud Admin** | Full control of the cloud accounts and what runs in them. |
-| **DBA** | Cloud databases end to end, plus the secrets a database run needs. |
-| **Platform / K8s** | Clusters, containers, functions, and the images and configuration behind them. |
-
-**Built-in roles cannot be edited or deleted.** Use **Clone** and change the copy — that
-keeps what the shipped roles mean stable, so a support conversation about "the Auditor
-role" is about the same thing on every install. A custom role can be edited and deleted
-freely; deleting one that is still assigned asks first, and the people who held it keep
-only whatever their own permission grid grants. They then show **No role**, and the next
-edit to each of them has to choose one.
-
-**A role and the grid add up.** The grid on a user or a group mapping is an *override*
-layered on top of their role, not a replacement for it — so the usual shape is "give them
-Operator, plus `storage:delete` because they look after the share". If you want someone to
-have exactly their role and nothing more, leave the grid untouched.
-
-**There is no "Full access" role**, and that is deliberate. A role holding every section
-would hand everyone assigned to it every permission in the dashboard, and that is hard to
-see from the role's name. Use the Administrator role, or the Admin flag on the user, both of
-which are visible for what they are.
-
-**Who holds this role?** Click the count in the *Assigned to* column. That question used to
-mean opening every user in turn, and it is most of the reason roles exist.
-
 ## Scopes that are deliberately not grantable
 
 Some things answer only to the **Admin** flag, because a grantable version of them would be
@@ -352,7 +202,7 @@ a way to become an administrator:
   so older bookmarks and runbook links keep working.
 - **Settings / first-run setup**, and **Secrets Management** — the whole page, including
   the vault registry. The `secrets` scope's `read`, `write` and `delete` levels do not open
-  it (see [The sections](#the-sections)).
+  it (see [The sections](permissions/sections.md)).
 - **Virtual Desktops**, while it is a preview.
 - **Worker concurrency and preflight**, which are instance-wide plumbing.
 - **[Health](health.md)**, one view over every tenant, onboarded account
@@ -408,67 +258,6 @@ drawer keeps only the instance settings:
 | Password Safe DB-Ops services | **Databases** page, *Password Safe DB-Ops services* | `cloud_database` read to see them; Deploy and Sync invokers need `cloud_database` write **and** `cloud_function` write, because they deploy a function. The invoker list stays in Settings. |
 | Rancher and Portainer node firewalls | **Containers** page, *Show firewall sources* | `containers` read |
 
-## Objects, not just areas
-
-A scope says *what*, not *which*. Two mechanisms narrow the *which*:
-
-- **Workstreams** tag resources and users; the cloud, container, Databases and Kubernetes
-  lists show you the rows whose workstream you are in. Untagged resources are visible to
-  whoever deployed them. They live on the **RBAC &rarr; Workstreams** tab, beside the
-  permission tabs, because the two answer the two halves of the same question.
-
-  Unlike the other RBAC tabs, Workstreams is **not admin-only**: it has a real `workgroups`
-  scope, so a user granted `workgroups:read` sees that tab and nothing else on the page.
-  Deleting a workstream still needs an administrator.
-
-  `workgroups:write` reaches only the workstreams you are a **member of or created**:
-  editing one, or adding and removing its members. Otherwise a holder could add
-  themselves to any workstream and act on everything tagged there. Its **change window**
-  fields (*Change window*, *Require it*) also need `change_windows:write`, because
-  clearing that gate allows changes outside the window. Creating a workstream, updating
-  one and every membership change are written to the audit log.
-
-  Its **deploy defaults** take the same authority as editing it, and are audited too. They
-  are a fixed list holding no secrets — see
-  [Workstream deploy defaults](../clouds/vms.md#workstream-deploy-defaults). Its **network
-  defaults** take the same authority — see
-  [Workstream network defaults](../clouds/vms.md#workstream-network-defaults).
-  Its **bound secrets** (an SSH key secret per cloud and a PRA credential) are
-  **administrator-only** to change; members can see which are bound. See
-  [Workstream secret bindings](../clouds/vms.md#workstream-secret-bindings). A registered vault can be
-  limited to a workstream by an administrator, so only that workstream's deploys read it —
-  see [Vaults](secrets-management.md#vaults-and-a-workstreams-own-vault).
-  Its **post-deploy runs** (assets run on every VM deployed into it) are administrator-only
-  to change too — see [Workstream post-deploy runs](../clouds/vms.md#workstream-post-deploy-runs).
-  **Stored assets** can be limited to one workstream by an administrator; only its
-  members then see, run or replace them — see
-  [Scoping an asset to a workstream](../operations/storage-management.md#scoping-an-asset-to-a-workstream).
-
-  **Workstreams were called workgroups** until this release. The new name avoids a clash
-  with Password Safe, whose own *workgroups* (the container for managed systems) appear in
-  the same Settings forms; a field labelled "Workgroup" in Settings now always means the
-  Password Safe one. Only the name a person reads changed. These keep the old spelling
-  so scripts, policies and live resources need no change: the `/api/workgroups` routes and
-  every `workgroup` field in the API, the `workgroups` permission scope, the `Workgroup`
-  tag written on cloud resources, and `/workgroups`, which still opens the tab
-  (`/workstreams` is its name now).
-- **POV access** narrows the POV pages to named environments, as described above.
-
-"Untagged resources are visible to whoever deployed them" is the whole rule, and it is
-worth reading twice: a workstream is a property of the **row**, not of the page. A cloud
-database or Kubernetes cluster carries one only once somebody assigns it — at creation, or
-later with the admin-only **Workstream** button on [Databases](../cloud-services/databases.md) /
-[Kubernetes](../cloud-services/kubernetes.md). Until then the row is creator-scoped, which is why adding the
-field granted and revoked nothing on upgrade.
-
-Tagging a row widens what its workstream can **do** to it, not only what they can see: the
-list, every by-id action, a Configuration Management run against it, and its auto-delete
-timer all answer to the same rule. Sharing a database with your team means the team can run
-plays against it and extend its timer.
-
-Functions, Certificates and SPIRE remain creator-scoped for non-admins — they show you what
-you created, and that is not configurable.
-
 ## If a user reports a 403
 
 1. Does the user hold **anything**? An empty map grants nothing (see
@@ -484,44 +273,3 @@ you created, and that is not configurable.
 4. For an OIDC user whose permissions keep reverting: the group mapping is overwriting them
    at each login. Fix the mapping, not the user.
 
-## Adding a scope (for contributors)
-
-Adding an entry to `PERMISSION_SCOPE_LEVELS` and gating a route on it **revokes that route
-from every user who has an explicit permission map**, silently — no error, no log line, and
-the administrator who set those permissions never saw a row for the new scope. So a new
-scope needs, in the same change:
-
-1. an entry in `PERMISSION_SCOPE_LEVELS` (`web_dashboard/api/auth.py`) listing only the
-   levels something actually enforces;
-2. a display label in `permissionScopeLabel` (`web_dashboard/static/js/app.js`), and a
-   place in `PERMISSION_SCOPE_GROUPS` (`web_dashboard/api/auth.py`), which lays out the
-   grid (`tests/test_permission_catalog.py` asserts every scope is in exactly one group);
-3. a **backfill** in `web_dashboard/database.py` granting exactly the levels a non-admin
-   with an explicit map could already reach. It must widen three places:
-   `users.permissions`, `oauth_group_mappings.default_permissions`, and the **built-in
-   roles** in `web_dashboard/services/role_service.py`. Built-in roles are seeded once and
-   never updated, so a new scope is missing from every existing install's copy until the
-   backfill adds it and `role_service.reconcile` runs;
-4. the right *form* of the check — see the table below;
-5. an entry in `_NAV_SCOPE` or `_NAV_EXEMPT` in `tests/test_permission_catalog.py`, which fails if a nav
-   section has no scope or a route enforces a scope the catalog does not contain.
-
-What the route was before decides both 3 and 4 together, and there are three cases:
-
-| The route was | Use | Backfill it? |
-|---|---|---|
-| ungated (`get_current_user` only) | `require_permission` | **yes** — its full level set |
-| `require_admin` | `require_explicit_permission` | **no** |
-| on the old phantom `"admin"` scope | `require_permission` | **no** |
-
-The first two are the obvious pair. The third existed because
-`require_permission("admin", …)` named a scope that was not in the catalog, so it refused
-every user with an explicit map and allowed every legacy one — meaning it needs the
-permissive form *and* no backfill, a combination that looks like an oversight and is not.
-`test_the_form_of_every_gate_agrees_with_the_backfill` checks all three against each
-other, so a mismatch fails the build rather than silently revoking or silently granting.
-
-Scope **keys** are persisted in every user's and group's permissions JSON and are turned
-into Entra group names by `web_dashboard/scripts/bootstrap_entitle_groups.py`. Renaming one un-grants
-everyone who had it, and the symptom is a locked-out user rather than an error — so if a
-display name needs to change, change the label map, not the key.

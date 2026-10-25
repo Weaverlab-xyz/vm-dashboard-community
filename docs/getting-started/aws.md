@@ -68,7 +68,7 @@ Everything past that is per-feature. Each row below names the `Sid` in
 | Cloud Functions (Lambda) | `lambda:*`, plus Secrets Manager on `secret:*-fn-secret-*` | `DashboardLambda`, `DashboardSecretsManager` |
 | POV idle suspend (CloudWatch metrics) | `cloudwatch:GetMetricData` | `DashboardCloudWatchMetrics` |
 | Cloud Costs | `ce:GetCostAndUsage`, `ce:GetCostForecast`, `ce:GetDimensionValues`, `ce:GetTags` | `DashboardCostExplorer` |
-| External secrets backend | Secrets Manager CRUD on `secret:dashboard/*` — see [secrets-management.md](../admin/secrets-management.md#iam-permissions-required-per-backend) | `DashboardSecretsManager` |
+| External secrets backend | Secrets Manager CRUD on `secret:dashboard/*` — see [secrets-management.md](../admin/secrets-management/external-vault.md#iam-permissions-required-per-backend) | `DashboardSecretsManager` |
 | Password Safe VM onboarding | `ssm:SendCommand`, `ssm:GetCommandInvocation`, `ssm:ListCommandInvocations` | `DashboardSSMRunCommand` |
 | Job log streaming | `logs:*` | `DashboardLogs` |
 

@@ -116,7 +116,7 @@ your nodes as tabs and all VMs and containers listed within a few seconds.
 | **Reboot** | Graceful reboot for QEMU VMs |
 | **Status and resource usage** | CPU %, memory, running/stopped state |
 | **VM detail** | IP addresses (via QEMU guest agent), OS type, tags, description |
-| **Bulk power** | Tick several rows and send Start, Shutdown, Force Off or Reboot to the whole selection from the toolbar — one job per VM, sharing a batch you watch on one page. VMs already in the target state are skipped and the dialog says how many; fifty per operation is the cap. See [Powering a selection](../admin/remote-agents/hypervisors.md#powering-a-selection) |
+| **Bulk power** | Tick several rows and send Start, Shutdown, Force Off or Reboot to the whole selection from the toolbar — one job per VM, sharing a batch you watch on one page. VMs already in the target state are skipped and the dialog says how many; fifty per operation is the cap. See [Powering a selection](../admin/remote-agents/hypervisors/power.md) |
 
 Templates are automatically hidden from the resource list.
 
@@ -130,7 +130,7 @@ list, select-all and bulk power with it. The same tags appear on
 dialled connection is written immediately. An agent-bound one is queued as a job for the
 agent. Proxmox tags are bare labels with no values. Chip colours, the refused
 dashboard-owned keys, and the audit entry are all in
-[Cloud VMs — Editing tags](../clouds/vms.md#editing-tags). The agent path is described in
+[Cloud VMs — Editing tags](../clouds/vms/tags.md#editing-tags). The agent path is described in
 [Agent-brokered hypervisors](../admin/remote-agents/hypervisors.md#the-verbs).
 
 **Scheduling power.** On a connection bound to a

@@ -66,7 +66,7 @@ The booking shows as `warm-up Thu 22 Oct 13:40` in the same column and on the PO
 **change warm-up** moves it, and a blank time cancels it.
 
 It is a booking, not a schedule. That makes a few things different from the
-[recurring suspend schedule](public-cloud.md#the-suspend-schedule):
+[recurring suspend schedule](public-cloud/suspend-schedule.md):
 
 - **It only ever starts a lab.** That is why it also works on Skytap, which refuses a
   recurring schedule because of its own idle timer: a single start has nothing to fight
