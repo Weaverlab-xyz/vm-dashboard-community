@@ -266,6 +266,13 @@
                           x-text="a.auth_mode === 'spiffe' ? 'SPIRE (key in memory)' : 'Ed25519 (key on disk)'"></dd>
                       <dd x-show="a.spiffe_id" class="font-mono text-gray-500 break-all" x-text="a.spiffe_id"></dd>
                     </div>
+                    <div>
+                      <dt class="text-gray-400 uppercase tracking-wide">Config Management</dt>
+                      <dd class="text-gray-700"
+                          x-text="(a.ansible_slots || 1) === 1 ? 'one run at a time' : a.ansible_slots + ' runs at once'"></dd>
+                      <dd x-show="(a.ansible_slots || 1) === 1 && !versionAtLeast(a.agent_version, '2.9.0')"
+                          class="text-gray-400">2.9+ can run several: ansible.max_concurrent</dd>
+                    </div>
                     <div x-show="a.status === 'enrolling'" class="col-span-2">
                       <dt class="text-gray-400 uppercase tracking-wide">Enrolment code expires</dt>
                       <dd class="text-gray-700"

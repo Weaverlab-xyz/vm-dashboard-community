@@ -151,7 +151,8 @@ def test_unreachable_port_is_none():
 def test_all_sweep_stays_hypervisor_only():
     assert "directory" in agent._PORT_DEFAULTS
     assert "directory" not in agent._HYPERVISOR_FAMILIES
-    assert agent.AGENT_VERSION.startswith("2.8")
+    # Directories shipped in 2.8; any later build still carries them.
+    assert tuple(int(p) for p in agent.AGENT_VERSION.split(".")[:2]) >= (2, 8)
 
 
 def test_dashboard_meta_and_annotation():

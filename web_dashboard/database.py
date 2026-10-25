@@ -815,6 +815,11 @@ class RemoteAgent(Base):
     # what the DASHBOARD permits — one is capability, the other is trust, and the UI
     # needs both to say "granted, but this agent's policy refuses it".
     reported_job_types = Column(Text)              # JSON list
+    # How many Config-Management runs the agent says it executes at once
+    # (`ansible.max_concurrent` in its policy.yaml), from its lease self-report. Advisory,
+    # like the two above: it sizes the per-agent request throttle and the Agents page's
+    # "N at once", and grants nothing. NULL — every agent before 2.9 — reads as one.
+    reported_ansible_slots = Column(Integer, nullable=True)
     enrolled_at = Column(DateTime, nullable=True)
     last_seen_at = Column(DateTime, nullable=True, index=True)
     last_seen_ip = Column(String(45))              # 45 = max INET6_ADDRSTRLEN

@@ -467,6 +467,12 @@ class LeaseRequest(BaseModel):
     """
     agent_version: str = ""
     job_types: list = []
+    # How many Config-Management runs it executes at once (agent 2.9+). Advisory.
+    ansible_slots: int = 0
+    # The job types it has a FREE slot for right now (agent 2.9+, only when it runs several
+    # at once). Narrows the claim and can only narrow it: the grant still decides. Absent —
+    # every older agent — means anything it is granted, exactly as before.
+    want_job_types: Optional[list] = None
 
 
 @router.post("/lease")
@@ -492,11 +498,12 @@ def lease_job(request: Request, body: LeaseRequest = LeaseRequest(),
     # an agent that never gets given work.
     try:
         agent_service.record_self_report(
-            db, agent, agent_version=body.agent_version, job_types=body.job_types)
+            db, agent, agent_version=body.agent_version, job_types=body.job_types,
+            ansible_slots=body.ansible_slots)
     except Exception:  # noqa: BLE001 — bookkeeping must never fail a lease
         logger.debug("agent: self-report update failed", exc_info=True)
 
-    claim = agent_service.lease_one(db, agent)
+    claim = agent_service.lease_one(db, agent, want_job_types=body.want_job_types)
     if claim is None:
         return {"job": None, "poll_interval_s": agent_service.DEFAULT_POLL_INTERVAL_S}
 
@@ -1173,6 +1180,8 @@ def _agent_row(agent: RemoteAgent, running: int = 0) -> dict:
         # in memory). spiffe_id is what the agent is bound to attest as, if anything.
         "auth_mode": agent.auth_mode or "ed25519",
         "spiffe_id": agent.spiffe_id or "",
+        # How many Config-Management runs it executes at once, as it last reported.
+        "ansible_slots": agent_service.ansible_slots(agent),
     }
 
 

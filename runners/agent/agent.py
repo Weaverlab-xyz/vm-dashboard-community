@@ -114,7 +114,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 # broker running the earlier one failed identically while reporting the same string as the
 # build that fixed it. A behaviour change the fleet cannot see is a behaviour change nobody
 # can confirm arrived, so bump this whenever the agent's behaviour moves.
-AGENT_VERSION = "2.8.0"
+AGENT_VERSION = "2.9.0"
 
 log = logging.getLogger("agent")
 
@@ -981,6 +981,15 @@ class _PolicyLoader(yaml.SafeLoader):
         return super().construct_mapping(node, deep=deep)
 
 
+# The most Config-Management runs one agent will hold at once, however policy.yaml is set.
+# Each is a sibling container capped at 1 GiB, and each sends Live Output and a heartbeat
+# every two seconds; past this, run a second agent rather than a bigger one.
+ANSIBLE_MAX_CONCURRENT_CEILING = 8
+
+# The job type that runs in the concurrent slots. Everything else runs one at a time.
+CONCURRENT_JOB_TYPE = "agent_ansible"
+
+
 class Policy:
     """The customer's allow-list. Fails closed, always.
 
@@ -1027,6 +1036,20 @@ class Policy:
             self.ansible_max_runtime_minutes = int(ansible.get("max_runtime_minutes") or 30)
         except (TypeError, ValueError):
             self.ansible_max_runtime_minutes = 30
+        # How many Config-Management runs this agent executes at once: one sibling
+        # container each, so size the host at about 1 GiB per slot. 1 — the default — is
+        # the serial agent every earlier build was. Only `agent_ansible` runs share these
+        # slots; every other job type keeps one slot of its own and stays in order, because
+        # discovery, hypervisor pages, the Gateway and storage touch shared host state.
+        # Fatal rather than clamped when it is not a whole number in range: a silently
+        # clamped 50 is a host the operator sized for fifty runs and got eight.
+        raw_slots = ansible.get("max_concurrent", 1)
+        if (isinstance(raw_slots, bool) or not isinstance(raw_slots, int)
+                or not 1 <= raw_slots <= ANSIBLE_MAX_CONCURRENT_CEILING):
+            raise AgentFatal(
+                f"policy.yaml: `ansible.max_concurrent` must be a whole number from 1 to "
+                f"{ANSIBLE_MAX_CONCURRENT_CEILING} (got {raw_slots!r}).")
+        self.ansible_max_concurrent = raw_slots
         # Empty means "nothing may be configured", which is the correct fail-closed reading
         # of an `ansible:` block with no targets — not "fall back to the discovery list".
         self.ansible_allow = ansible_allow or []
@@ -1577,6 +1600,13 @@ def _wait_for_new_token(path: str, used: str, deadline: float) -> None:
 
 # ── Dashboard client ──────────────────────────────────────────────────────────
 
+# Guards Dashboard._held across the job threads. Module-level, so the test doubles that bind
+# the real hold_secret/redact/release_secrets onto a plain object get it too.
+_HELD_LOCK = threading.Lock()
+# Which job the current thread is running, so hold_secret files a credential under it
+# without every call site having to pass the job id. Set by `execute`.
+_JOB_CONTEXT = threading.local()
+
 class Dashboard:
     def __init__(self, base_url: str):
         self.base = base_url
@@ -1590,9 +1620,16 @@ class Dashboard:
         elif INSECURE_TLS:
             self.session.verify = False
         self.identity: Optional[Identity] = None
-        # Credentials fetched for the job in flight, held only to scrub them out of
-        # anything sent back. Cleared by `execute` when the job ends.
+        # Credentials fetched for the jobs in flight, held only to scrub them out of
+        # anything sent back. `_held` is the union every outbound line is scrubbed against;
+        # `_held_by_job` records which job fetched what, so a job that ends releases ITS
+        # credentials only — with several runs at once, clearing everything when the first
+        # finished would leave the others' secrets unredacted for the rest of their run.
         self._held: set = set()
+        self._held_by_job: dict = {}
+        # One requests.Session per worker thread: Session is not documented as thread-safe,
+        # and concurrent runs each stream Live Output and heartbeats on their own thread.
+        self._tls = threading.local()
 
     def _url(self, path: str) -> str:
         url = f"{self.base}{path}"
@@ -1614,10 +1651,45 @@ class Dashboard:
         ships that verbatim into the job row where it renders as the failure reason.
         """
         if value and len(str(value)) >= 4:
-            self._held.add(str(value))
+            with _HELD_LOCK:
+                self._held.add(str(value))
+                job_id = getattr(_JOB_CONTEXT, "job_id", "")
+                by_job = getattr(self, "_held_by_job", None)
+                if job_id and by_job is not None:
+                    by_job.setdefault(job_id, set()).add(str(value))
 
-    def release_secrets(self) -> None:
-        self._held.clear()
+    def release_secrets(self, job_id: str = "") -> None:
+        """Forget the credentials ``job_id`` fetched, or every one when no job is named.
+
+        A value another job still holds stays: two runs against hosts sharing a key must
+        not unredact it for the one still running."""
+        with _HELD_LOCK:
+            by_job = getattr(self, "_held_by_job", None)
+            if not job_id or by_job is None:
+                self._held.clear()
+                if by_job is not None:
+                    by_job.clear()
+                return
+            mine = by_job.pop(job_id, set())
+            still_held = set().union(*by_job.values()) if by_job else set()
+            self._held -= (mine - still_held)
+
+    def _http(self):
+        """This thread's HTTP session: the shared one on the main thread, or when a test
+        has replaced it, and otherwise a per-thread copy with the same proxy and TLS
+        settings."""
+        base = self.session
+        tls = getattr(self, "_tls", None)
+        if (tls is None or threading.current_thread() is threading.main_thread()
+                or not isinstance(base, requests.Session)):
+            return base
+        own = getattr(tls, "session", None)
+        if own is None:
+            own = requests.Session()
+            own.trust_env = base.trust_env
+            own.verify = base.verify
+            tls.session = own
+        return own
 
     def redact(self, text: str) -> str:
         """``text`` with every credential this job fetched replaced.
@@ -1627,7 +1699,9 @@ class Dashboard:
         inside somebody else's error message.
         """
         out = str(text)
-        for secret in self._held:
+        with _HELD_LOCK:
+            held = list(self._held)
+        for secret in held:
             if secret in out:
                 out = out.replace(secret, "***redacted***")
         return out
@@ -1663,7 +1737,7 @@ class Dashboard:
             })
         # content=body, never json=payload: the signature covers these exact bytes, and
         # letting requests re-serialise would produce a signature over something else.
-        resp = self.session.request(
+        resp = self._http().request(
             method, self._url(path), data=body, headers=headers,
             timeout=_HTTP_TIMEOUT, allow_redirects=False)
         if len(resp.content) > _MAX_RESPONSE_BYTES:
@@ -1743,7 +1817,7 @@ class Dashboard:
             log.warning("attestation refused (%s); waiting for a fresh SVID", last_error)
             _wait_for_new_token(jwt_file, svid, deadline)
 
-    def lease(self) -> Optional[dict]:
+    def lease(self, want_job_types=None) -> Optional[dict]:
         # The lease body carries what this agent CURRENTLY is, not what it was when it
         # enrolled. agent_version was written once at enrolment, so an operator who
         # pulled a new image and restarted the container kept the old value forever —
@@ -1754,10 +1828,17 @@ class Dashboard:
         # of pretending a grant it cannot enforce.
         #
         # Free on the wire: _request already signs over the serialized body.
-        resp = self._request("POST", "/api/agent/lease", {
-            "agent_version": AGENT_VERSION,
-            "job_types": sorted(set(HANDLERS) & POLICY.job_types),
-        })
+        #
+        # `want_job_types` is narrower: what this agent has a FREE slot for right now. With
+        # every Config-Management slot busy it asks only for the serial types, and with the
+        # serial slot busy only for `agent_ansible`, so the dashboard never hands it a job it
+        # would have to sit on. None means "anything", which is the serial agent's answer.
+        body = {"agent_version": AGENT_VERSION,
+                "job_types": sorted(set(HANDLERS) & POLICY.job_types),
+                "ansible_slots": POLICY.ansible_max_concurrent}
+        if want_job_types is not None:
+            body["want_job_types"] = sorted(want_job_types)
+        resp = self._request("POST", "/api/agent/lease", body)
         if resp.status_code == 401:
             raise AgentFatal(
                 "the dashboard rejected this agent's signature — it was probably "
@@ -5395,6 +5476,9 @@ class Reporter:
 def execute(dashboard: Dashboard, policy: Policy, job: dict) -> None:
     job_id = job["job_id"]
     job_type = job.get("job_type") or ""
+    # Files every credential this thread fetches under this job, so the job releases its
+    # own when it ends and not another run's (Dashboard.release_secrets).
+    _JOB_CONTEXT.job_id = job_id
     reporter = Reporter(dashboard, job_id).start()
     try:
         # Two gates, both closed by default. The handler table is a dict lookup, not a
@@ -5449,7 +5533,8 @@ def execute(dashboard: Dashboard, policy: Policy, job: dict) -> None:
         # The credential is scoped to the job, so the scrub set is too. Nothing here
         # pretends to wipe it from memory — a Python str cannot be zeroed, and claiming
         # otherwise would be theatre; the bound is scope, not erasure.
-        dashboard.release_secrets()
+        dashboard.release_secrets(job_id)
+        _JOB_CONTEXT.job_id = ""
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
@@ -5647,12 +5732,22 @@ def main() -> int:
 
     poll = float(os.environ.get("AGENT_POLL_INTERVAL", "5"))
     backoff = poll
-    while True:
+    slots = JobSlots(POLICY.ansible_max_concurrent)
+    _install_drain(slots)
+    while not slots.draining:
         try:
-            job = dashboard.lease()
+            want = slots.wanted()
+            if not want:
+                # Every slot busy: nothing to ask for. Wait for one to free up rather than
+                # polling for work this agent could not start.
+                slots.wait_for_free(poll)
+                continue
+            # None for a serial agent, so its lease request is byte-for-byte what it was.
+            job = dashboard.lease(None if slots.serial else want)
             backoff = poll
             if job:
-                execute(dashboard, POLICY, job)
+                slots.run(lambda j=job: execute(dashboard, POLICY, j),
+                          job.get("job_type") or "")
                 continue
         except AgentFatal as exc:
             log.error("%s", exc)
@@ -5673,7 +5768,100 @@ def main() -> int:
             log.warning("dashboard unreachable (%s); retrying in %.0fs", exc, backoff)
             backoff = min(backoff * 2, 300)
         # Jittered so a fleet restarted together does not poll in lockstep.
-        time.sleep(backoff * (0.8 + random.random() * 0.4))
+        slots.wait_for_free(backoff * (0.8 + random.random() * 0.4), any_change=False)
+    slots.drain(float(os.environ.get("AGENT_DRAIN_SECONDS", "25")))
+    return 0
+
+
+class JobSlots:
+    """Where leased jobs run: ``ansible`` slots for Config Management, one for the rest.
+
+    With one ansible slot (the default) this is the serial agent every earlier build was:
+    each job runs to completion on the main thread before the next lease, so nothing about
+    a single-slot agent's behaviour moved. With more, ``agent_ansible`` jobs run on worker
+    threads, at most ``ansible`` at once, while every other job type keeps a single slot of
+    its own and runs in order.
+    """
+
+    def __init__(self, ansible: int):
+        self.ansible = max(1, int(ansible))
+        self.serial = self.ansible == 1
+        self.draining = False
+        self._lock = threading.Condition()
+        self._running = {"ansible": 0, "other": 0}
+        self._threads: list = []
+
+    def _kind(self, job_type: str) -> str:
+        return "ansible" if job_type == CONCURRENT_JOB_TYPE else "other"
+
+    def wanted(self) -> Optional[set]:
+        """The job types there is a free slot for, or an empty set when there is none."""
+        with self._lock:
+            free_ansible = self._running["ansible"] < self.ansible
+            free_other = self._running["other"] < 1
+        types = set(HANDLERS) & POLICY.job_types
+        return {t for t in types
+                if (free_ansible if self._kind(t) == "ansible" else free_other)}
+
+    def run(self, fn, job_type: str) -> None:
+        if self.serial:
+            fn()
+            return
+        kind = self._kind(job_type)
+
+        def _wrapped():
+            try:
+                fn()
+            finally:
+                with self._lock:
+                    self._running[kind] -= 1
+                    self._lock.notify_all()
+
+        with self._lock:
+            self._running[kind] += 1
+        thread = threading.Thread(target=_wrapped, name=f"job-{kind}", daemon=True)
+        self._threads = [t for t in self._threads if t.is_alive()] + [thread]
+        thread.start()
+
+    def wait_for_free(self, seconds: float, *, any_change: bool = True) -> None:
+        """Sleep up to ``seconds``; with ``any_change``, wake early when a slot frees."""
+        with self._lock:
+            if self.draining:
+                return
+            if any_change and not self.serial:
+                self._lock.wait(timeout=seconds)
+                return
+        time.sleep(seconds)
+
+    def drain(self, seconds: float) -> None:
+        """Stop leasing and give running jobs up to ``seconds`` to finish. A job still
+        running after that is abandoned; the dashboard fails it when its heartbeat goes
+        stale (job_service.reconcile_stale_jobs), as it always has for a killed agent."""
+        self.draining = True
+        deadline = time.time() + max(0.0, seconds)
+        for thread in list(self._threads):
+            thread.join(timeout=max(0.0, deadline - time.time()))
+
+
+def _install_drain(slots: "JobSlots") -> None:
+    """SIGTERM (``docker stop``) stops leasing and lets the running jobs finish, within
+    AGENT_DRAIN_SECONDS. Size ``docker stop -t`` (or the compose ``stop_grace_period``)
+    above that, or Docker kills the agent first. Only on the main thread, which is the only
+    place Python allows a handler."""
+    import signal
+    # A serial agent keeps the default — SIGTERM ends it at once, as every earlier build
+    # did — so only an agent running several jobs at once changes how it stops.
+    if slots.serial or threading.current_thread() is not threading.main_thread():
+        return
+
+    def _stop(signum, frame):
+        # A flag and nothing else: a handler runs between bytecodes on the main thread,
+        # which may be inside the slots' lock, so it must not take it. The loop sees the
+        # flag within one poll interval.
+        log.info("SIGTERM: no more leases; waiting for running jobs to finish")
+        slots.draining = True
+
+    signal.signal(signal.SIGTERM, _stop)
 
 
 if __name__ == "__main__":

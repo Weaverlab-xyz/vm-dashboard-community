@@ -191,6 +191,9 @@ MIGRATIONS: tuple = (
     # Bare BOOLEAN, no DEFAULT: NULL reads as off, so existing routes are unchanged.
     Migration("0001_config_route_cloud_vms",
               (add_column("config_mgmt_routes", "include_cloud_vms", "BOOLEAN"),)),
+    # How many Config-Management runs an agent says it runs at once (agent 2.9+).
+    Migration("0002_agent_reported_ansible_slots",
+              (add_column("remote_agents", "reported_ansible_slots", "INTEGER"),)),
 )
 
 
