@@ -126,6 +126,24 @@ def test_config_runs_share_the_slots_and_everything_else_queues_alone():
     assert all(not t.is_alive() for t in slots._threads), "drain returned with jobs running"
 
 
+def test_an_idle_agent_always_leases_so_it_stays_online():
+    """The lease is also the heartbeat. With no job types granted in policy.yaml, wanted()
+    is empty — and an agent that skipped its lease then would read as offline, with
+    nothing running to say otherwise. Only a BUSY agent may skip it."""
+    _with_policy(_policy("max_concurrent: 2\n"))
+    slots = agent.JobSlots(2)
+    agent.POLICY.job_types = set()
+    try:
+        assert slots.wanted() == set()
+        assert not slots.busy()
+    finally:
+        _with_policy(_policy("max_concurrent: 2\n"))
+    src = open(_AGENT_PATH, encoding="utf-8").read()
+    loop = src[src.index("slots = JobSlots(POLICY.ansible_max_concurrent)"):]
+    loop = loop[:loop.index("slots.drain(")]
+    assert "and slots.busy()" in loop, "the main loop skips its lease while idle"
+
+
 def test_a_freed_slot_is_offered_again():
     _with_policy(_policy("max_concurrent: 2\n"))
     slots = agent.JobSlots(2)

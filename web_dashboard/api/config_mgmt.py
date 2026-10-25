@@ -732,7 +732,7 @@ def _resolve_cloud_vm_target(payload: "RunRequest", db, agent, current_user) -> 
     executor resolved from that pinned address. A caller that names a different address
     gets the recorded one; a caller that names an agent the route does not get a 400.
     """
-    from ..services import agent_ansible_meta, agent_service
+    from ..services import agent_service
     from ..services.ansible_local_run_service import cloud_login_user, windows_target
     from .aws import _accessible_workgroups
 

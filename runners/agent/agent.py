@@ -5736,14 +5736,16 @@ def main() -> int:
     _install_drain(slots)
     while not slots.draining:
         try:
-            want = slots.wanted()
-            if not want:
-                # Every slot busy: nothing to ask for. Wait for one to free up rather than
-                # polling for work this agent could not start.
+            want = None if slots.serial else slots.wanted()
+            if want is not None and not want and slots.busy():
+                # Every slot busy: nothing to ask for, so wait for one to free up rather
+                # than polling for work this agent could not start. Skipping the lease is
+                # safe only while jobs run: the lease is also the heartbeat, and a running
+                # job's own heartbeats are what keep the agent online meanwhile.
                 slots.wait_for_free(poll)
                 continue
-            # None for a serial agent, so its lease request is byte-for-byte what it was.
-            job = dashboard.lease(None if slots.serial else want)
+            # None for a serial agent, which leases exactly as every earlier build did.
+            job = dashboard.lease(want)
             backoff = poll
             if job:
                 slots.run(lambda j=job: execute(dashboard, POLICY, j),
@@ -5822,6 +5824,11 @@ class JobSlots:
         thread = threading.Thread(target=_wrapped, name=f"job-{kind}", daemon=True)
         self._threads = [t for t in self._threads if t.is_alive()] + [thread]
         thread.start()
+
+    def busy(self) -> bool:
+        """Whether any job is running."""
+        with self._lock:
+            return any(self._running.values())
 
     def wait_for_free(self, seconds: float, *, any_change: bool = True) -> None:
         """Sleep up to ``seconds``; with ``any_change``, wake early when a slot frees."""
