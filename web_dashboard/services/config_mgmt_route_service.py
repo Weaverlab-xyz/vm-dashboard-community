@@ -30,8 +30,11 @@ one address can be an on-premises guest, an EC2 VM and an Azure VM at once. So a
   * ``onprem`` — hypervisor guests, optionally only those discovered through one
     connection (``connection_id``); or
   * ``aws`` / ``azure`` / ``gcp`` — that cloud's dashboard-deployed VMs, optionally in one
-    region (``region``) and/or one workstream (``workstream``), executed by an agent in
-    that VPC or VNet instead of the remote worker. The workstream stands for its network:
+    region (``region``), one workstream (``workstream``) and/or one network
+    (``network``: the VPC, VNet or GCP network, :func:`network_of`), executed by an agent
+    in that VPC or VNet instead of the remote worker. A VM whose deploy recorded no
+    network never matches a network-narrowed route — it falls back to a broader route or
+    the remote worker, the safe direction. The workstream stands for its network:
     two teams' VPCs in one region often share 10.0.0.0/16, every deploy job records its
     workstream (the VPC it is rarely does), and each workstream carries its own network
     defaults. It is also a tenancy line — one team's agent is never handed another team's
@@ -48,14 +51,15 @@ EXECUTES. ``agent_id`` is the executing agent, independent of the agent brokerin
 connection — that separation (vmrest, Hyper-V) is what this module exists for.
 
 Matching is longest-prefix-first, like a routing table, and at an equal prefix the route
-with more narrowers wins (region and workstream beat either, either beats none). The
+with more narrowers wins (network, region and workstream beat any two, and so on). The
 unique constraint on ``(cidr, scope, scope_region, scope_connection_id,
-scope_workstream)`` is what makes that order total: two agents claiming one range in one
+scope_workstream, scope_network)`` is what makes that order total: two agents claiming one range in one
 scope is the single ambiguity it cannot settle, so it is refused at write time instead.
 """
 import ipaddress
 import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -105,22 +109,75 @@ def scope_of_deploy(job_type: str, meta: dict) -> tuple:
     return scope, region
 
 
+_GCP_NETWORK_RE = re.compile(
+    r"^projects/[a-z][-a-z0-9]{4,28}[a-z0-9]/global/networks/[a-z]([-a-z0-9]{0,61}[a-z0-9])?$")
+_AWS_VPC_RE = re.compile(r"^vpc-[0-9a-f]{8,17}$")
+_AZURE_VNET_RE = re.compile(
+    r"^/subscriptions/[0-9a-f-]{36}/resourcegroups/[-\w.()]{1,90}/providers/"
+    r"microsoft\.network/virtualnetworks/[-\w.]{2,64}$")
+_NETWORK_RE = {"aws": _AWS_VPC_RE, "azure": _AZURE_VNET_RE, "gcp": _GCP_NETWORK_RE}
+
+
+def normalize_network(scope: str, raw: str) -> str:
+    """The stored form of a network id for ``scope``, or "" when ``raw`` is not one.
+
+    AWS ``vpc-…`` lower-cased; an Azure VNet ARM id lower-cased (ARM ids are
+    case-insensitive), cut down from a subnet id if given one; a GCP network as
+    ``projects/<p>/global/networks/<n>``, cut from a full self-link."""
+    text = (raw or "").strip()
+    if scope == "aws":
+        text = text.lower()
+    elif scope == "azure":
+        text = text.lower().rstrip("/")
+        cut = text.find("/subnets/")
+        if cut > 0:
+            text = text[:cut]
+    elif scope == "gcp":
+        cut = text.find("projects/")
+        text = text[cut:] if cut >= 0 else text
+    pattern = _NETWORK_RE.get(scope)
+    return text if pattern is not None and pattern.match(text) else ""
+
+
+def network_of(scope: str, meta: dict) -> str:
+    """The network a deploy job's VM landed in, normalised, or "" if none is recorded.
+
+    The one reader of the per-cloud keys the launchers record (``vpc_id``; ``vnet_id``,
+    else the deploy's ``subnet_id``; ``network``) and the backfill fills in."""
+    meta = meta or {}
+    if scope == "aws":
+        return normalize_network("aws", str(meta.get("vpc_id") or ""))
+    if scope == "azure":
+        return normalize_network("azure", str(meta.get("vnet_id")
+                                              or meta.get("subnet_id") or ""))
+    if scope == "gcp":
+        return normalize_network("gcp", str(meta.get("network") or ""))
+    return ""
+
+
+def network_label(network: str) -> str:
+    """The short name a person reads: ``vpc-0abc…``, the VNet name, the network name."""
+    return (network or "").rstrip("/").rsplit("/", 1)[-1]
+
+
 def scope_of_job(job) -> tuple:
-    """``(scope, region, workstream)`` of a deploy job's VM — what every cloud-VM lookup
-    passes. The workstream is the one it was deployed in: ``deploy_workgroup``, which the
-    reassign endpoints keep, else the job's (never reassigned, so still the deploy's)."""
+    """``(scope, region, workstream, network)`` of a deploy job's VM — what every
+    cloud-VM lookup passes. The workstream is the one it was deployed in:
+    ``deploy_workgroup``, which the reassign endpoints keep, else the job's (never
+    reassigned, so still the deploy's). The network is :func:`network_of`."""
     meta = job.metadata_dict if hasattr(job, "metadata_dict") else {}
     scope, region = scope_of_deploy(getattr(job, "job_type", ""), meta)
     workstream = str(meta.get("deploy_workgroup") or getattr(job, "workgroup", "")
                      or "").strip().lower()
-    return scope, region, workstream
+    return scope, region, workstream, network_of(scope, meta)
 
 
 def scope_text(scope: str, region: str = "", connection_name: str = "",
-               workstream: str = "") -> str:
-    """"AWS · us-east-2 · team-a", "On-premises · vmrest-lab" — for lists and refusals."""
-    parts = [SCOPE_LABELS.get(scope, scope)] + [p for p in (region, connection_name,
-                                                            workstream) if p]
+               workstream: str = "", network: str = "") -> str:
+    """"AWS · us-east-2 · team-a · vpc-0abc", "On-premises · vmrest-lab" — for lists and
+    refusals."""
+    parts = [SCOPE_LABELS.get(scope, scope)] + [p for p in (
+        region, connection_name, workstream, network_label(network)) if p]
     return " · ".join(parts)
 
 
@@ -213,18 +270,22 @@ class Route:
     region: str = ""         # cloud scopes: one region, or "" for every region
     connection_id: str = ""  # onprem: one connection's guests, or "" for every one
     workstream: str = ""     # cloud scopes: one workstream's VMs, or "" for every one
+    network_id: str = ""     # cloud scopes: one VPC / VNet / network, or "" for every one
 
     @property
     def narrowers(self) -> int:
-        return sum(1 for v in (self.region, self.connection_id, self.workstream) if v)
+        return sum(1 for v in (self.region, self.connection_id, self.workstream,
+                               self.network_id) if v)
 
     def covers(self, *, scope: str, region: str = "", connection_id: str = "",
-               workstream: str = "") -> bool:
-        """Whether a target in this scope is one this route may govern at all."""
+               workstream: str = "", network: str = "") -> bool:
+        """Whether a target in this scope is one this route may govern at all. A target
+        with no recorded network ("") never satisfies a network-narrowed route."""
         return (self.scope == scope
                 and self.region in ("", (region or "").lower())
                 and self.connection_id in ("", connection_id or "")
-                and self.workstream in ("", (workstream or "").lower()))
+                and self.workstream in ("", (workstream or "").lower())
+                and self.network_id in ("", network or ""))
 
 
 @dataclass(frozen=True)
@@ -241,7 +302,8 @@ class RouteTable:
         return bool(self.routes)
 
     def match_for(self, address: str, *, scope: str = "onprem", region: str = "",
-                  connection_id: str = "", workstream: str = "") -> Optional[Route]:
+                  connection_id: str = "", workstream: str = "",
+                  network: str = "") -> Optional[Route]:
         """The most specific route covering ``address`` in the target's scope, or None.
 
         ``scope`` is the TARGET's: ``onprem`` with the ``connection_id`` that discovered a
@@ -261,7 +323,7 @@ class RouteTable:
             return None
         for route in self.routes:
             if not route.covers(scope=scope, region=region, connection_id=connection_id,
-                                workstream=workstream):
+                                workstream=workstream, network=network):
                 continue
             # `in` returns False across address families rather than raising, so v4 and
             # v6 rows can share one flat list.
@@ -270,7 +332,8 @@ class RouteTable:
         return None
 
     def executor_for(self, address: str, *, fallback: str = "", scope: str = "onprem",
-                     region: str = "", connection_id: str = "", workstream: str = "") -> str:
+                     region: str = "", connection_id: str = "", workstream: str = "",
+                     network: str = "") -> str:
         """Which agent id executes a run against ``address``.
 
         ``fallback`` is the brokering agent for a guest, and "" (the remote worker) for a
@@ -279,7 +342,8 @@ class RouteTable:
         did before this module existed.
         """
         match = self.match_for(address, scope=scope, region=region,
-                               connection_id=connection_id, workstream=workstream)
+                               connection_id=connection_id, workstream=workstream,
+                               network=network)
         return match.agent_id if match else fallback
 
 
@@ -315,7 +379,8 @@ def load_table(db) -> RouteTable:
                             scope=row.scope or "onprem",
                             region=(row.scope_region or "").lower(),
                             connection_id=row.scope_connection_id or "",
-                            workstream=(row.scope_workstream or "").lower()))
+                            workstream=(row.scope_workstream or "").lower(),
+                            network_id=row.scope_network or ""))
     parsed.sort(key=_order)
     return RouteTable(tuple(parsed))
 
@@ -328,7 +393,8 @@ def _order(route: Route) -> tuple:
 
 
 def executor_for(db, address: str, *, fallback: str = "", scope: str = "onprem",
-                 region: str = "", connection_id: str = "", workstream: str = "") -> str:
+                 region: str = "", connection_id: str = "", workstream: str = "",
+                 network: str = "") -> str:
     """One-shot convenience for a single run. Same answer as :meth:`RouteTable.executor_for`.
 
     ``tests/test_config_mgmt_routes.py`` pins that those two agree — two entry points
@@ -336,14 +402,16 @@ def executor_for(db, address: str, *, fallback: str = "", scope: str = "onprem",
     """
     return load_table(db).executor_for(address, fallback=fallback, scope=scope,
                                        region=region, connection_id=connection_id,
-                                       workstream=workstream)
+                                       workstream=workstream, network=network)
 
 
 def match_for(db, address: str, *, scope: str = "onprem", region: str = "",
-              connection_id: str = "", workstream: str = "") -> Optional[Route]:
+              connection_id: str = "", workstream: str = "",
+              network: str = "") -> Optional[Route]:
     """The route covering ``address``, for a refusal that needs to name it."""
     return load_table(db).match_for(address, scope=scope, region=region,
-                                    connection_id=connection_id, workstream=workstream)
+                                    connection_id=connection_id, workstream=workstream,
+                                    network=network)
 
 
 # ── CRUD ──────────────────────────────────────────────────────────────────────
@@ -361,6 +429,7 @@ def serialize(row) -> dict:
         "region": row.scope_region or "",
         "connection_id": row.scope_connection_id or "",
         "workstream": row.scope_workstream or "",
+        "network": row.scope_network or "",
         # Derived, for readers written before scopes: a cloud-scoped route is the one that
         # sends cloud VMs to an agent. Never read back on a write.
         "include_cloud_vms": (row.scope or "onprem") != "onprem",
@@ -422,14 +491,15 @@ def cloud_match_counts(db, addresses) -> dict:
     """``{route_id: how many cloud VMs' private addresses it governs}``.
 
     The cloud half of :func:`match_counts`, for cloud-scoped routes. The caller supplies
-    ``(scope, region, workstream, address)`` tuples
+    ``(scope, region, workstream, network, address)`` tuples
     (``inventory_service.cloud_vm_private_ips``), so this module keeps no knowledge of
     deploy-job metadata.
     """
     table = load_table(db)
     counts = {r.id: 0 for r in table.routes if r.scope != "onprem"}
-    for scope, region, workstream, address in addresses:
-        route = table.match_for(address, scope=scope, region=region, workstream=workstream)
+    for scope, region, workstream, network, address in addresses:
+        route = table.match_for(address, scope=scope, region=region, workstream=workstream,
+                                network=network)
         if route is not None:
             counts[route.id] = counts.get(route.id, 0) + 1
     return counts
@@ -470,8 +540,8 @@ def _check_agent(db, agent_id: str):
 
 
 def _check_scope(db, scope: str, region: str, connection_id: str,
-                 workstream: str = "") -> tuple:
-    """The normalised ``(scope, region, connection_id, workstream)``, or raise."""
+                 workstream: str = "", network: str = "") -> tuple:
+    """The normalised ``(scope, region, connection_id, workstream, network)``, or raise."""
     scope = (scope or "onprem").strip().lower()
     if scope not in SCOPES:
         raise ConfigRouteError(
@@ -480,11 +550,12 @@ def _check_scope(db, scope: str, region: str, connection_id: str,
     region = (region or "").strip().lower()
     connection_id = (connection_id or "").strip()
     workstream = (workstream or "").strip().lower()
+    raw_network = (network or "").strip()
     if scope == "onprem":
-        if region or workstream:
+        if region or workstream or raw_network:
             raise ConfigRouteError(
-                "A region or workstream narrows a cloud route. For on-premises guests, "
-                "narrow by connection instead, or leave it blank.")
+                "A region, workstream or network narrows a cloud route. For on-premises "
+                "guests, narrow by connection instead, or leave it blank.")
         if connection_id:
             from ..database import HypervisorConnection
             if db.query(HypervisorConnection).filter(
@@ -505,19 +576,31 @@ def _check_scope(db, scope: str, region: str, connection_id: str,
             from . import workgroup_service
             if workgroup_service.get(db, workstream) is None:
                 raise ConfigRouteError(f"There is no workstream named {workstream!r}.")
-    return scope, region, connection_id, workstream
+        if raw_network:
+            network = normalize_network(scope, raw_network)
+            if not network:
+                example = {"aws": "vpc-0abc12345def67890",
+                           "azure": "/subscriptions/<id>/resourceGroups/<rg>/providers/"
+                                    "Microsoft.Network/virtualNetworks/<name>",
+                           "gcp": "projects/<project>/global/networks/<name>"}[scope]
+                raise ConfigRouteError(
+                    f"{raw_network!r} is not a {SCOPE_LABELS[scope]} network. Name it like "
+                    f"{example}.")
+            return scope, region, connection_id, workstream, network
+    return scope, region, connection_id, workstream, ""
 
 
 def _refuse_duplicate(db, cidr: str, scope: str = "onprem", region: str = "",
-                      connection_id: str = "", workstream: str = "", *,
-                      excluding: str = "") -> None:
+                      connection_id: str = "", workstream: str = "", network: str = "",
+                      *, excluding: str = "") -> None:
     from ..database import ConfigMgmtRoute, HypervisorConnection, RemoteAgent
 
     query = db.query(ConfigMgmtRoute).filter(
         ConfigMgmtRoute.cidr == cidr, ConfigMgmtRoute.scope == scope,
         ConfigMgmtRoute.scope_region == region,
         ConfigMgmtRoute.scope_connection_id == connection_id,
-        ConfigMgmtRoute.scope_workstream == workstream)
+        ConfigMgmtRoute.scope_workstream == workstream,
+        ConfigMgmtRoute.scope_network == network)
     if excluding:
         query = query.filter(ConfigMgmtRoute.id != excluding)
     clash = query.first()
@@ -533,29 +616,30 @@ def _refuse_duplicate(db, cidr: str, scope: str = "onprem", region: str = "",
         conn_name = conn.name if conn else connection_id
     raise ConfigRouteError(
         f"{cidr} is already routed to agent '{name}'{label} for "
-        f"{scope_text(scope, region, conn_name, workstream)}. One range can name only one "
+        f"{scope_text(scope, region, conn_name, workstream, network)}. One range can name "
+        f"only one "
         f"executing agent in one scope, or the dashboard would have to guess which. Edit "
         f"that route, add a narrower range — the most specific range wins — or narrow this "
-        f"one to a region, workstream or connection.")
+        f"one to a region, workstream, network or connection.")
 
 
 def create(db, *, agent_id: str, cidr: str, label: str = "", created_by: str = "",
            scope: str = "onprem", region: str = "", connection_id: str = "",
-           workstream: str = "") -> dict:
+           workstream: str = "", network: str = "") -> dict:
     from sqlalchemy.exc import IntegrityError
 
     from ..database import ConfigMgmtRoute
 
     _check_agent(db, agent_id)
     normalized = normalize_cidr(cidr)
-    scope, region, connection_id, workstream = _check_scope(db, scope, region,
-                                                            connection_id, workstream)
-    _refuse_duplicate(db, normalized, scope, region, connection_id, workstream)
+    scope, region, connection_id, workstream, network = _check_scope(
+        db, scope, region, connection_id, workstream, network)
+    _refuse_duplicate(db, normalized, scope, region, connection_id, workstream, network)
     row = ConfigMgmtRoute(
         id=str(uuid.uuid4()), agent_id=agent_id, cidr=normalized,
         label=(label or "").strip() or None, is_active=True,
         scope=scope, scope_region=region, scope_connection_id=connection_id,
-        scope_workstream=workstream, created_by=created_by or None)
+        scope_workstream=workstream, scope_network=network, created_by=created_by or None)
     db.add(row)
     try:
         db.commit()
@@ -563,7 +647,7 @@ def create(db, *, agent_id: str, cidr: str, label: str = "", created_by: str = "
         # The unique constraint, reached by two operators saving at once. Rolled back and
         # re-raised as the operator message so a race reads the same as a clash.
         db.rollback()
-        _refuse_duplicate(db, normalized, scope, region, connection_id, workstream)
+        _refuse_duplicate(db, normalized, scope, region, connection_id, workstream, network)
         raise
     db.refresh(row)
     return serialize(row)
@@ -582,14 +666,17 @@ def update(db, route_id: str, **fields) -> dict:
     moved = (new_scope or "onprem") != (row.scope or "onprem")
     def _kept(key, current):
         return fields[key] if fields.get(key) is not None else ("" if moved else current)
-    scope, region, connection_id, workstream = _check_scope(
+    scope, region, connection_id, workstream, network = _check_scope(
         db, new_scope, _kept("region", row.scope_region),
         _kept("connection_id", row.scope_connection_id),
-        _kept("workstream", row.scope_workstream))
-    _refuse_duplicate(db, cidr, scope, region, connection_id, workstream, excluding=row.id)
+        _kept("workstream", row.scope_workstream),
+        _kept("network", row.scope_network))
+    _refuse_duplicate(db, cidr, scope, region, connection_id, workstream, network,
+                      excluding=row.id)
     row.cidr = cidr
     row.scope, row.scope_region, row.scope_connection_id = scope, region, connection_id
     row.scope_workstream = workstream
+    row.scope_network = network
     if fields.get("label") is not None:
         row.label = str(fields["label"]).strip() or None
     if fields.get("is_active") is not None:

@@ -1126,6 +1126,10 @@ class ConfigMgmtRoute(Base):
     # workstream's network — two teams' VPCs in one region often share a range — and is a
     # tenancy line: one team's agent is never handed another team's VM or its key.
     scope_workstream = Column(String(100), nullable=False, default="", server_default="")
+    # Cloud scopes: one network — an AWS VPC id, an Azure VNet ARM id or a GCP network —
+    # read from the deploy job (config_mgmt_route_service.network_of). The exact answer
+    # that region and workstream approximate. Migration 0004.
+    scope_network = Column(String(200), nullable=False, default="", server_default="")
     created_at = Column(DateTime, default=utcnow, nullable=False)
     created_by = Column(String(100))
     updated_at = Column(DateTime, default=utcnow)
@@ -1136,8 +1140,8 @@ class ConfigMgmtRoute(Base):
     # by an invisible created_at comparison. Overlapping ranges of DIFFERENT prefix
     # length are legal and the longest wins, exactly like a routing table.
     __table_args__ = (UniqueConstraint("cidr", "scope", "scope_region", "scope_connection_id",
-                                       "scope_workstream",
-                                       name="uq_config_mgmt_route_scope"),)
+                                       "scope_workstream", "scope_network",
+                                       name="uq_config_mgmt_route_scope_net"),)
 
 
 class Job(Base):
@@ -3611,6 +3615,9 @@ class AgentHost(Base):
     cloud = Column(String(20), nullable=False, index=True)  # aws | azure | gcp
     region = Column(String(40), nullable=False)
     zone = Column(String(40), nullable=True)                # where it actually landed (GCP)
+    # The VPC / VNet / GCP network its host runs in (config_mgmt_route_service.network_of
+    # form): the agent can reach only that network, so its routes are narrowed to it.
+    network = Column(String(200), nullable=True)
     subnet = Column(String(400), nullable=True)             # blank = the cloud's VM subnet
     instance_size = Column(String(64), nullable=True)       # blank = the per-cloud default
 

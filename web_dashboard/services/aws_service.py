@@ -763,6 +763,10 @@ def _launch_instance_sync(
         "state": inst["State"]["Name"],
         "private_ip": inst.get("PrivateIpAddress"),
         "public_ip": inst.get("PublicIpAddress"),
+        # The network it landed in, recorded on the deploy job: a Config-Management route
+        # may be narrowed to one VPC (config_mgmt_route_service.network_of).
+        "vpc_id": inst.get("VpcId") or "",
+        "subnet_id": inst.get("SubnetId") or subnet_id or "",
     }
 
 
@@ -1521,7 +1525,8 @@ def _run_ec2_container_node_sync(
                               _volume_tag_spec(node_tags)],
     }
     inst = ec2.run_instances(**kwargs)["Instances"][0]
-    return {"instance_id": inst["InstanceId"], "state": inst["State"]["Name"]}
+    return {"instance_id": inst["InstanceId"], "state": inst["State"]["Name"],
+            "vpc_id": inst.get("VpcId") or ""}
 
 
 async def run_ec2_container_node(
@@ -4898,3 +4903,25 @@ async def ensure_instance_inbound_rule(region: str, instance_id: str, *, ports: 
             f"Failed to apply inbound rule for instance {instance_id}: {e}") from e
     except NoCredentialsError:
         raise AWSError("AWS credentials not configured.")
+
+
+async def instance_network(region: str, instance_id: str) -> Optional[dict]:
+    """``{"vpc_id", "subnet_id"}`` an instance runs in, or None if it no longer exists.
+
+    For the Config-Management route network backfill (route_network_backfill): deploys
+    from before the launcher recorded ``vpc_id`` are asked once."""
+    def _sync():
+        resp = _get_ec2(region).describe_instances(InstanceIds=[instance_id])
+        for res in resp.get("Reservations", []):
+            for inst in res.get("Instances", []):
+                return {"vpc_id": inst.get("VpcId") or "",
+                        "subnet_id": inst.get("SubnetId") or ""}
+        return None
+    try:
+        return await _to_thread(_sync)
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "InvalidInstanceID.NotFound":
+            return None
+        raise AWSError(f"Could not read the network of {instance_id}: {e}") from e
+    except (BotoCoreError, NoCredentialsError) as e:
+        raise AWSError(f"AWS error: {e}") from e
