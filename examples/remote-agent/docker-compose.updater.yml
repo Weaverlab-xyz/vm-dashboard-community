@@ -1,0 +1,63 @@
+# OPT-IN overlay: lets the dashboard upgrade and restart this agent (agent 2.10+).
+#
+# Apply it ON TOP of docker-compose.yml and docker-compose.spire.yml — the dashboard offers
+# upgrades only to agents that attest through SPIRE:
+#   docker compose -f docker-compose.yml -f docker-compose.spire.yml \
+#                  -f docker-compose.updater.yml up -d
+#
+# ─────────────────────────────────────────────────────────────────────────────
+#  WHAT THIS ADDS, AND WHY IT IS SAFE TO ADD
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# A second container, the UPDATER, which holds the Docker socket so the agent does not.
+# **The Docker socket is root on the host**, so read what the updater does with it:
+#
+#   * It replaces the agent container — with a newer image, or the same one restarted —
+#     and puts the old one back if the new one does not report ready in time.
+#   * Before it pulls anything it verifies the image's cosign signature against the
+#     identity YOU pin in policy.yaml (`upgrades.verify`). A compromised dashboard, or a
+#     compromised agent, can at most ask for a release the project itself signed.
+#   * It has no network listener and never talks to the dashboard. Its only input is a
+#     file the agent writes into the shared `agent_control` volume below.
+#   * Its Docker operations are a fixed allowlist, on the container labelled
+#     dashboard-agent.role=agent and images from `upgrades.repository` only.
+#
+# Nothing here works until policy.yaml also says `upgrades: {enabled: true, ...}` — see
+# policy.example.yaml. Three gates, and the dashboard holds none of them.
+#
+# The socket path is the rootless default, as in docker-compose.sibling.yml. With rootful
+# Docker use /var/run/docker.sock and set DOCKER_GID to its group (stat -c %g).
+services:
+  agent:
+    labels:
+      dashboard-agent.role: agent      # the one container the updater may replace
+    stop_grace_period: 45s             # above AGENT_DRAIN_SECONDS: running jobs finish
+    volumes:
+      - agent_control:/var/lib/dashboard-agent-control
+
+  updater:
+    image: chrweav/dashboard-agent-updater:latest
+    container_name: dashboard-agent-updater
+    restart: unless-stopped
+    user: "10001:10001"
+    group_add:
+      - ${DOCKER_GID:-1000}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    tmpfs:
+      - /tmp:noexec,nosuid,nodev,size=16m
+    environment:
+      UPDATER_STOP_TIMEOUT: "40"
+    volumes:
+      - agent_control:/var/lib/dashboard-agent-control
+      - ./policy.yaml:/etc/dashboard-agent/policy.yaml:ro,Z
+      - ${XDG_RUNTIME_DIR:-/run/user/1000}/docker.sock:/var/run/docker.sock
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+volumes:
+  agent_control:
