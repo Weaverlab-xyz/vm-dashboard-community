@@ -1012,8 +1012,11 @@ def _launch_instance_sync(
     info = client.get(project=project_id, zone=zone, instance=instance_name)
     public_ip = None
     private_ip = None
+    network = subnetwork_link = ""
     for nic_info in info.network_interfaces:
         private_ip = nic_info.network_i_p
+        network = network or (getattr(nic_info, "network", "") or "")
+        subnetwork_link = subnetwork_link or (getattr(nic_info, "subnetwork", "") or "")
         for ac in nic_info.access_configs:
             if ac.nat_i_p:
                 public_ip = ac.nat_i_p
@@ -1026,6 +1029,10 @@ def _launch_instance_sync(
         "public_ip":     public_ip,
         "private_ip":    private_ip,
         "self_link":     info.self_link,
+        # The VPC network it landed in: a Config-Management route may be narrowed to one
+        # network (config_mgmt_route_service.network_of).
+        "network":       network,
+        "subnetwork":    subnetwork_link,
     }
 
 
@@ -3779,7 +3786,9 @@ def _run_gce_startup_node_sync(project_id: str, region: str, zone: str, name: st
                 continue
             raise
         info = client.get(project=project_id, zone=cand, instance=name)
-        return {"name": name, "zone": cand, "internal_ip": _internal_ip_of(info)}
+        nics = list(getattr(info, "network_interfaces", []) or [])
+        return {"name": name, "zone": cand, "internal_ip": _internal_ip_of(info),
+                "network": (getattr(nics[0], "network", "") or "") if nics else ""}
     raise GCPError(f"Failed to launch node '{name}' in region '{region}': {last_err}")
 
 
@@ -5931,3 +5940,24 @@ async def ensure_instance_inbound_rule(project_id: str, zone: str, instance_name
     except Exception as e:
         raise GCPError(
             f"Failed to apply inbound rule for instance {instance_name}: {e}") from e
+
+
+async def instance_network(project_id: str, zone: str, instance_name: str) -> Optional[str]:
+    """The VPC network self-link an instance's first NIC is on; None if it no longer
+    exists. For the Config-Management route network backfill (route_network_backfill)."""
+    _require_compute()
+
+    def _sync():
+        from google.api_core.exceptions import NotFound
+        from google.cloud import compute_v1
+        client = compute_v1.InstancesClient(credentials=_gcp_creds())
+        try:
+            info = client.get(project=project_id, zone=zone, instance=instance_name)
+        except NotFound:
+            return None
+        nics = list(info.network_interfaces or [])
+        return (getattr(nics[0], "network", "") or "") if nics else ""
+    try:
+        return await _to_thread(_sync)
+    except Exception as e:  # noqa: BLE001 — named for the job's log
+        raise GCPError(f"Could not read the network of {instance_name}: {e}") from e

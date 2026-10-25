@@ -208,20 +208,30 @@ def _drop_cidr_only_unique(conn) -> None:
         conn.execute(text(f"ALTER TABLE {_ROUTES} "
                           f"DROP CONSTRAINT IF EXISTS uq_config_mgmt_route_cidr"))
         return
+    # Index names are global in SQLite, so the old table's go first or the new table's
+    # same-named ones cannot be created (done inside the rebuild).
+    _rebuild_routes_from_model(conn, "pre0003")
+
+
+def _rebuild_routes_from_model(conn, suffix: str) -> None:
+    """SQLite only: recreate the routes table from the CURRENT model and copy the rows.
+
+    The model may be newer than the table — a later migration's column already on it —
+    so only the columns both have are copied; the rest take the model's defaults, which
+    is exactly what that later migration's add_column would have given them."""
     from .database import ConfigMgmtRoute
     table = ConfigMgmtRoute.__table__
-    # Index names are global in SQLite, so the old table's go first or the new table's
-    # same-named ones cannot be created.
     for (name,) in conn.execute(text(
             "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=:t "
             "AND sql IS NOT NULL"), {"t": _ROUTES}).fetchall():
         conn.execute(text(f'DROP INDEX "{name}"'))
-    conn.execute(text(f"ALTER TABLE {_ROUTES} RENAME TO {_ROUTES}_pre0003"))
+    old = f"{_ROUTES}_{suffix}"
+    conn.execute(text(f"ALTER TABLE {_ROUTES} RENAME TO {old}"))
+    have = {c["name"] for c in inspect(conn).get_columns(old)}
     table.create(conn)
-    cols = ", ".join(c.name for c in table.columns)
-    conn.execute(text(f"INSERT INTO {_ROUTES} ({cols}) "
-                      f"SELECT {cols} FROM {_ROUTES}_pre0003"))
-    conn.execute(text(f"DROP TABLE {_ROUTES}_pre0003"))
+    cols = ", ".join(c.name for c in table.columns if c.name in have)
+    conn.execute(text(f"INSERT INTO {_ROUTES} ({cols}) SELECT {cols} FROM {old}"))
+    conn.execute(text(f"DROP TABLE {old}"))
 
 
 def _route_scope_unique(conn) -> None:
@@ -260,6 +270,39 @@ def _split_cloud_routes(conn) -> None:
 
 
 _split_cloud_routes.describe = "split cloud-flagged routes into one row per scope"
+
+
+# ── 0004: routes narrowed to one network ─────────────────────────────────────
+
+def _drop_route_unique(name: str):
+    """A step dropping the routes table's unique rule ``name``, whichever form it took.
+
+    It is a table CONSTRAINT where ``create_all`` built the table, and a unique INDEX where
+    0003 created it on an existing table. PostgreSQL drops either in place; SQLite drops
+    an index in place but can only lose a table constraint by a rebuild from the model
+    (which already carries the replacement)."""
+    def step(conn):
+        insp = inspect(conn)
+        constraints = {u["name"] for u in insp.get_unique_constraints(_ROUTES)}
+        indexes = {i["name"] for i in insp.get_indexes(_ROUTES)}
+        if conn.dialect.name == "postgresql":
+            conn.execute(text(f"ALTER TABLE {_ROUTES} DROP CONSTRAINT IF EXISTS {name}"))
+            conn.execute(text(f"DROP INDEX IF EXISTS {name}"))
+            return
+        if name in indexes and name not in constraints:
+            conn.execute(text(f'DROP INDEX "{name}"'))
+        elif name in constraints:
+            _rebuild_routes_from_model(conn, "pre0004")
+    step.describe = f"drop {name}"
+    return step
+
+
+def _ensure_route_unique(name: str, cols: tuple):
+    def step(conn):
+        if name not in _route_constraint_names(conn):
+            conn.execute(text(f"CREATE UNIQUE INDEX {name} ON {_ROUTES} ({', '.join(cols)})"))
+    step.describe = f"unique {name}"
+    return step
 _drop_cidr_only_unique.describe = "drop uq_config_mgmt_route_cidr"
 _route_scope_unique.describe = ("unique (cidr, scope, scope_region, scope_connection_id, "
                                "scope_workstream)")
@@ -286,6 +329,17 @@ MIGRATIONS: tuple = (
                _drop_cidr_only_unique,
                _route_scope_unique,
                _split_cloud_routes)),
+    # A cloud route may also name one network (VPC, VNet, GCP network): the exact answer
+    # region and workstream approximate. The CIDR-and-scope unique rule widens to it; no
+    # row changes, since no existing route names a network. Deployed agents record the
+    # network their host runs in.
+    Migration("0004_config_route_networks",
+              (add_column(_ROUTES, "scope_network", "VARCHAR(200) NOT NULL DEFAULT ''"),
+               _drop_route_unique("uq_config_mgmt_route_scope"),
+               _ensure_route_unique("uq_config_mgmt_route_scope_net",
+                                    ("cidr", "scope", "scope_region", "scope_connection_id",
+                                     "scope_workstream", "scope_network")),
+               add_column("agent_hosts", "network", "VARCHAR(200)"))),
 )
 
 

@@ -521,6 +521,8 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             "public_ip":     result.get("public_ip"),
             "private_ip":    result.get("private_ip"),
             "self_link":     result.get("self_link", ""),
+            "network":       result.get("network", ""),
+            "subnetwork":    result.get("subnetwork", ""),
             "image_self_link": payload.image_self_link,
             "image_name":    payload.image_name,
         }

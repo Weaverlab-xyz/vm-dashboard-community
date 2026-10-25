@@ -78,6 +78,18 @@ async def _to_thread(fn, /, *args, **kwargs):
         raise AzureError(str(exc)) from exc
 
 
+def vnet_of_subnet(subnet_id: str) -> str:
+    """The VNet ARM id a subnet ARM id belongs to, lower-cased, or "".
+
+    ``/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/v/
+    subnets/x`` → ``/subscriptions/s/resourcegroups/rg/providers/microsoft.network/
+    virtualnetworks/v``. ARM ids are case-insensitive, so the stored form is lower-case."""
+    sid = (subnet_id or "").strip().lower()
+    cut = sid.find("/subnets/")
+    head = sid[:cut] if cut > 0 else ""
+    return head if "/virtualnetworks/" in head else ""
+
+
 def _os_type_str(val) -> str:
     """Normalize Azure SDK os_type — newer SDK versions return plain strings, older return enums."""
     if val is None:
@@ -1624,8 +1636,11 @@ def _deploy_vm_sync(
         nic_detail = network.network_interfaces.get(rg, nic_name)
         private_ip = None
         public_ip_addr = None
+        vnet_id = ""
         if nic_detail.ip_configurations:
             private_ip = nic_detail.ip_configurations[0].private_ip_address
+            subnet_ref = getattr(nic_detail.ip_configurations[0], "subnet", None)
+            vnet_id = vnet_of_subnet(getattr(subnet_ref, "id", "") or subnet_id)
             pip_ref = nic_detail.ip_configurations[0].public_ip_address
             if pip_ref:
                 pip_detail = network.public_ip_addresses.get(rg, pip_name)
@@ -1641,6 +1656,9 @@ def _deploy_vm_sync(
         "vm_name": vm_name,
         "private_ip": private_ip,
         "public_ip": public_ip_addr,
+        # The VNet it landed in: a Config-Management route may be narrowed to one network
+        # (config_mgmt_route_service.network_of).
+        "vnet_id": vnet_id,
         # Read by `vm_suspend_policy`: an Azure VM may carry a suspend schedule only once
         # its private address survives a deallocate. `azure_vm_service` needs no code for
         # this — it merges this dict straight into the deploy job's metadata.
@@ -5093,3 +5111,24 @@ async def ensure_vm_inbound_rule(rg: str, vm_name: str, *, rule_name: str, ports
     except Exception as e:
         raise AzureError(
             f"Failed to apply inbound rule {rule_name!r} for VM {vm_name}: {e}") from e
+
+
+async def nic_vnet(resource_group: str, nic_name: str) -> Optional[str]:
+    """The VNet ARM id (lower-cased) a NIC's first IP configuration sits in; "" when it has
+    none; None when the NIC no longer exists. For the Config-Management route network
+    backfill (route_network_backfill)."""
+    cred, sub_id = await _ensure_creds()
+
+    def _sync():
+        from azure.core.exceptions import ResourceNotFoundError
+        try:
+            nic = _get_network(cred, sub_id).network_interfaces.get(resource_group, nic_name)
+        except ResourceNotFoundError:
+            return None
+        cfg = (nic.ip_configurations or [None])[0]
+        subnet = getattr(cfg, "subnet", None) if cfg is not None else None
+        return vnet_of_subnet(getattr(subnet, "id", "") or "")
+    try:
+        return await _to_thread(_sync)
+    except Exception as e:  # noqa: BLE001 — named for the job's log
+        raise AzureError(f"Could not read the network of NIC {nic_name}: {e}") from e

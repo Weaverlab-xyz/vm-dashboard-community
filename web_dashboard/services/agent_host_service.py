@@ -405,6 +405,7 @@ def serialize(host, agent=None, window=None) -> dict:
         "agent_name": agent.name if agent is not None else "",
         "name": host.name, "cloud": host.cloud, "region": host.region,
         "zone": host.zone or "", "subnet": host.subnet or "",
+        "network": host.network or "",
         "instance_size": host.instance_size or DEFAULT_SIZES.get(host.cloud, ""),
         "ansible_cidrs": cidrs_of(host), "max_concurrent": host.max_concurrent,
         "mode": host.mode,
@@ -604,7 +605,8 @@ async def _release_egress(db, host) -> None:
 
 
 async def launch(host, script: str) -> dict:
-    """Start the host. Returns ``{"host_id", "zone"}``. Overridable in tests and the
+    """Start the host. Returns ``{"host_id", "zone", "network"}`` — ``network`` in the raw
+    form its cloud reports it, normalised by the caller. Overridable in tests and the
     end-to-end harness, which is why the cloud SDKs are reached only through here."""
     p = _placement(host)
     size = host.instance_size or DEFAULT_SIZES[host.cloud]
@@ -615,7 +617,8 @@ async def launch(host, script: str) -> dict:
             host.region, ami_id=ami, instance_type=size, subnet_id=p["subnet"],
             security_group_ids=p["security_groups"], user_data=script, name_tag=host.name,
             purpose=PURPOSE, public_ip=False)
-        return {"host_id": inst["instance_id"], "zone": ""}
+        return {"host_id": inst["instance_id"], "zone": "",
+                "network": inst.get("vpc_id") or ""}
     if host.cloud == "azure":
         from . import azure_service
         res = await azure_service.run_vm_container_node(
@@ -623,13 +626,13 @@ async def launch(host, script: str) -> dict:
             vm_size=size, admin_password=azure_service._azure_compliant_password(),
             cloud_init_b64=_azure_cloud_init(script), purpose=PURPOSE,
             container_image=AGENT_IMAGE, public_ip=False)
-        return {"host_id": res["name"], "zone": ""}
+        return {"host_id": res["name"], "zone": "", "network": p["subnet"]}
     from . import gcp_service
     res = await gcp_service.run_gce_startup_node(
         p["project"], host.region, p["zone"], host.name, startup_script=script,
         subnetwork=p["subnetwork"], network=p["network"], machine_type=size,
         labels={"purpose": PURPOSE}, network_tag=p["tag"])
-    return {"host_id": res["name"], "zone": res["zone"]}
+    return {"host_id": res["name"], "zone": res["zone"], "network": res.get("network") or ""}
 
 
 async def destroy(host) -> None:
@@ -727,7 +730,10 @@ async def _start(db, host, job_id: str) -> None:
         raise
     host.host_id = res.get("host_id") or host.name
     host.zone = res.get("zone") or host.zone
+    from . import config_mgmt_route_service as cmr
+    host.network = cmr.normalize_network(host.cloud, res.get("network") or "") or host.network
     db.commit()
+    _narrow_routes_to_network(db, host)
 
     job_service.update_progress(db, job_id, 50, "Waiting for the agent to come online")
     loop = asyncio.get_running_loop()
@@ -755,6 +761,32 @@ async def _start(db, host, job_id: str) -> None:
     db.commit()
     job_service.update_progress(db, job_id, 100, f"Agent {agent.name} is online.")
     job_service.set_completed(db, job_id, {"host_id": host.host_id})
+
+
+def _narrow_routes_to_network(db, host) -> list:
+    """Narrow this agent's own deploy-created routes to the network its host runs in.
+
+    The agent can reach only that VPC or VNet, so a route of its for a range elsewhere in
+    the same region could only ever hand it VMs it cannot reach. Only routes the deploy
+    created (label ``"<name> (deployed)"``) with no network yet are touched; one the
+    operator narrowed or added by hand is theirs. A clash with an existing route for that
+    network is left as it is and logged. Returns the CIDRs narrowed."""
+    from . import config_mgmt_route_service as cmr
+    if not host.network:
+        return []
+    narrowed = []
+    for route in cmr.list_routes(db):
+        if (route["agent_id"] != host.agent_id or route["scope"] != host.cloud
+                or route["network"] or route["label"] != f"{host.name} (deployed)"):
+            continue
+        try:
+            cmr.update(db, route["id"], network=host.network)
+            narrowed.append(route["cidr"])
+        except cmr.ConfigRouteError as exc:
+            db.rollback()
+            logger.info("agent host %s: route %s left unnarrowed: %s",
+                        host.name, route["cidr"], exc)
+    return narrowed
 
 
 async def _drain(db, host, job_id: str) -> None:

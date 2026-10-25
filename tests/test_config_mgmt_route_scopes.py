@@ -333,10 +333,10 @@ def test_the_deploy_time_workstream_decides_after_a_reassignment():
     job = Job(id="j", job_type="ec2_deploy", workgroup="team-b",
               extra_data=json.dumps({"region": "us-east-2", "deploy_workgroup": "team-a",
                                      "workgroup": "team-b"}))
-    assert cmr.scope_of_job(job) == ("aws", "us-east-2", "team-a")
+    assert cmr.scope_of_job(job) == ("aws", "us-east-2", "team-a", "")
     never_moved = Job(id="k", job_type="gce_deploy", workgroup="Team-B",
                       extra_data=json.dumps({"zone": "us-central1-a"}))
-    assert cmr.scope_of_job(never_moved) == ("gcp", "us-central1", "team-b")
+    assert cmr.scope_of_job(never_moved) == ("gcp", "us-central1", "team-b", "")
 
 
 def test_every_reassign_endpoint_keeps_the_deploy_time_workstream():
@@ -443,18 +443,23 @@ def _old_database():
     return eng
 
 
+_ROUTE_MIGRATIONS = ("0003_config_route_scopes", "0004_config_route_networks")
+
+
 def _migrate(eng):
+    """What an upgrade runs: every route migration not yet recorded, in order."""
     from web_dashboard import schema_migrations as sm
     with eng.begin() as c:
-        return sm.apply_numbered(c, [m for m in sm.MIGRATIONS
-                                     if m.name == "0003_config_route_scopes"])
+        if "agent_hosts" not in __import__("sqlalchemy").inspect(c).get_table_names():
+            c.exec_driver_sql("CREATE TABLE agent_hosts (id VARCHAR(36) PRIMARY KEY)")
+        return sm.apply_numbered(c, [m for m in sm.MIGRATIONS if m.name in _ROUTE_MIGRATIONS])
 
 
 def test_the_upgrade_keeps_every_answer():
     from sqlalchemy import inspect
     from sqlalchemy.orm import sessionmaker
     eng = _old_database()
-    assert _migrate(eng) == ["0003_config_route_scopes"]
+    assert _migrate(eng) == list(_ROUTE_MIGRATIONS)
     s = sessionmaker(bind=eng)()
     rows = s.query(ConfigMgmtRoute).all()
     assert sorted((r.id if r.id in ("flagged", "plain") else "new", r.scope) for r in rows) == [
@@ -468,7 +473,7 @@ def test_the_upgrade_keeps_every_answer():
     assert table.executor_for("192.168.1.5") == "agent-lab"
     assert table.executor_for("192.168.1.5", scope="aws") == ""
     names = {u["name"] for u in inspect(eng).get_unique_constraints("config_mgmt_routes")}
-    assert names == {"uq_config_mgmt_route_scope"}
+    assert names == {"uq_config_mgmt_route_scope_net"}
     s.close()
 
 
@@ -479,7 +484,7 @@ def test_the_upgrade_runs_once_and_is_a_no_op_on_a_fresh_table():
     from sqlalchemy import create_engine
     fresh = create_engine("sqlite:///" + os.path.join(tempfile.mkdtemp(), "fresh.db"))
     Base.metadata.create_all(bind=fresh)
-    assert _migrate(fresh) == ["0003_config_route_scopes"]
+    assert _migrate(fresh) == list(_ROUTE_MIGRATIONS)
     from sqlalchemy.orm import sessionmaker
     assert sessionmaker(bind=fresh)().query(ConfigMgmtRoute).count() == 0
 
