@@ -143,7 +143,10 @@ def test_the_route_table_is_loaded_once_per_collect_not_per_vm():
 def test_only_the_resolver_module_knows_the_route_table():
     """The model may be referenced by its own definition and by the one module that owns
     it. Anywhere else is a second copy of the rule waiting to disagree."""
-    allowed = {os.path.join("web_dashboard", "database.py"), _SERVICE}
+    # schema_migrations rebuilds the table's SCHEMA (migration 0003, which SQLite can only
+    # do by recreating it from the model). It resolves no route, so it is no second rule.
+    allowed = {os.path.join("web_dashboard", "database.py"),
+               os.path.join("web_dashboard", "schema_migrations.py"), _SERVICE}
     offenders = [p for p in _py_files("web_dashboard")
                  if "ConfigMgmtRoute" in _read(p) and p not in allowed]
     assert not offenders, \

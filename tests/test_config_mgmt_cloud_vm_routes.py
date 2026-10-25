@@ -1,4 +1,4 @@
-"""Cloud VMs routed to a remote agent: a Config-Management route with ``include_cloud_vms``.
+"""Cloud VMs routed to a remote agent: a Config-Management route scoped to their cloud.
 
 A large cloud estate can run its Config Management on persistent agents inside its VPCs
 or VNets instead of the remote worker. Everything here is about keeping that opt-in and
@@ -108,7 +108,9 @@ def _deploy(db, job_id="deploy-1", *, job_type="ec2_deploy", workgroup="team-a",
 
 
 def _route(db, cidr="10.40.0.0/16", agent="agent-vpc", *, cloud=True):
-    return cmr.create(db, agent_id=agent, cidr=cidr, include_cloud_vms=cloud)
+    """``cloud=True`` is an AWS-scoped route (the deploys here are EC2); ``False`` an
+    on-premises one."""
+    return cmr.create(db, agent_id=agent, cidr=cidr, scope="aws" if cloud else "onprem")
 
 
 def _scene(db, **deploy_kw):
@@ -126,48 +128,53 @@ def _refusal(payload, db, user=None):
 
 # ── opt-in ────────────────────────────────────────────────────────────────────
 
-def test_a_route_without_the_flag_routes_no_cloud_vm():
+def test_an_on_premises_route_routes_no_cloud_vm():
     db = _fresh()
     _scene(db)
     _route(db, cloud=False)
     table = cmr.load_table(db)
     assert table.match_for(PRIVATE) is not None, "the route still governs hypervisor guests"
-    assert table.match_for(PRIVATE, cloud_vm=True) is None
+    assert table.match_for(PRIVATE, scope="aws", region="us-east-2") is None
     exc = _refusal(_Payload(), db)
     assert exc.status_code == 400 and "remote worker" in exc.detail
 
 
-def test_a_route_from_before_the_migration_routes_no_cloud_vm():
-    """schema_migrations 0001 adds the column with no DEFAULT, so every existing row reads
-    NULL. NULL must mean off, or an upgrade would move cloud VMs off the remote worker."""
+def test_a_route_from_before_the_flag_routes_no_cloud_vm():
+    """schema_migrations 0001 added the flag with no DEFAULT, so rows from before it read
+    NULL; 0003 turned every unflagged row into an on-premises route. Either way such a
+    row must not move cloud VMs off the remote worker."""
     db = _fresh()
     _scene(db)
     db.add(ConfigMgmtRoute(id="legacy", agent_id="agent-vpc", cidr="10.40.0.0/16",
                            is_active=True, include_cloud_vms=None, created_at=_utcnow()))
     db.commit()
-    assert cmr.load_table(db).match_for(PRIVATE, cloud_vm=True) is None
+    assert cmr.load_table(db).match_for(PRIVATE, scope="aws") is None
+    assert cmr.list_routes(db)[0]["scope"] == "onprem"
     assert cmr.list_routes(db)[0]["include_cloud_vms"] is False
     from web_dashboard import schema_migrations
-    assert any(m.name == "0001_config_route_cloud_vms" for m in schema_migrations.MIGRATIONS)
+    assert any(m.name == "0003_config_route_scopes" for m in schema_migrations.MIGRATIONS)
 
 
 def test_a_new_route_defaults_to_off():
     db = _fresh()
     _agent(db, "vpc")
     out = cmr.create(db, agent_id="agent-vpc", cidr="10.40.0.0/16")
-    assert out["include_cloud_vms"] is False
+    assert out["scope"] == "onprem" and out["include_cloud_vms"] is False
 
 
-def test_a_flagged_route_inside_an_unflagged_one_governs_its_cloud_vms():
+def test_a_cloud_route_inside_an_on_premises_one_governs_only_its_cloud_vms():
     db = _fresh()
     _agent(db, "vpc")
     _agent(db, "lab")
     _route(db, "10.40.0.0/16", "agent-lab", cloud=False)
     _route(db, "10.40.1.0/24", "agent-vpc", cloud=True)
     table = cmr.load_table(db)
-    assert table.executor_for(PRIVATE, cloud_vm=True) == "agent-vpc"
-    assert table.executor_for("10.40.9.9", cloud_vm=True) == ""
+    assert table.executor_for(PRIVATE, scope="aws") == "agent-vpc"
+    assert table.executor_for("10.40.9.9", scope="aws") == ""
     assert table.executor_for("10.40.9.9") == "agent-lab"
+    # The cloud /24 no longer captures on-premises guests inside it: they stay with the
+    # on-premises /16, whatever its prefix length.
+    assert table.executor_for(PRIVATE) == "agent-lab"
 
 
 # ── the gate ──────────────────────────────────────────────────────────────────
