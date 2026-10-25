@@ -136,10 +136,8 @@ def list_hosts(current_user: User = Depends(require_explicit_permission("agents"
 def options(current_user: User = Depends(require_explicit_permission("agents", "read")),
             db: Session = Depends(get_db)):
     from ..services import change_window_service, config_service, dashboard_spire
-    try:
-        url, url_error = ahs.dashboard_url(), ""
-    except AgentHostError as exc:
-        url, url_error = "", str(exc)
+    url_error = ahs.dashboard_url_problem()
+    url = "" if url_error else ahs.dashboard_url()
     windows = [{"id": w.id, "name": w.name}
                for w in change_window_service.list_windows(db) if w.enabled is not False]
     return {
@@ -176,14 +174,26 @@ def deploy(body: DeployRequest, request: Request,
 
     routes, route_errors = [], []
     if body.create_routes:
+        # A range that is already routed is the one refusal to expect, so it is found from
+        # the data and reported as such. Not caught and stringified: CodeQL
+        # py/stack-trace-exposure fires on an exception's text reaching the response.
+        taken = {r["cidr"]: r for r in cmr.list_routes(db)}
+        names = {a.id: a.name for a in db.query(RemoteAgent).all()}
         for cidr in ahs.cidrs_of(host):
+            clash = taken.get(cidr)
+            if clash is not None:
+                route_errors.append(
+                    f"{cidr} is already routed to agent "
+                    f"'{names.get(clash['agent_id'], clash['agent_id'])}'; left as it is.")
+                continue
             try:
                 cmr.create(db, agent_id=agent.id, cidr=cidr, label=f"{host.name} (deployed)",
                            created_by=current_user.username, include_cloud_vms=True)
                 routes.append(cidr)
             except cmr.ConfigRouteError as exc:
-                # Usually an existing route for the same range; the deploy stands.
-                route_errors.append(f"{cidr}: {exc}")
+                # A race with another operator saving the same range. The deploy stands.
+                logger.warning("agent host %s: route %s not added: %s", host.name, cidr, exc)
+                route_errors.append(f"{cidr} was not routed; see Config Routes.")
 
     job_id = ahs.enqueue(db, host, "start", created_by=current_user.username) \
         if host.mode in ("always", "until") else _schedule_now(db, host)

@@ -196,23 +196,34 @@ def policy_yaml(cidrs: list, max_concurrent: int) -> str:
     return yaml.safe_dump(doc, sort_keys=False)
 
 
+def dashboard_url_problem() -> str:
+    """Why a deployed agent could not dial this dashboard, or "" if it can.
+
+    A return value, not an exception, so the deploy form can show it: CodeQL
+    ``py/stack-trace-exposure`` fires on any caught exception stringified into a response
+    body (see skytap_service.verify)."""
+    from . import agent_service
+    url = _cfg(agent_service.AUDIENCE_CONFIG).rstrip("/")
+    if not url:
+        return ("This dashboard has no pinned agent address yet. Set Public base URL under "
+                "Settings → Integrations → Remote Agents and issue one enrolment code (or "
+                "press Reset there), then deploy.")
+    if not url.startswith("https://"):
+        return (f"The agent address is {url}, and a deployed agent will not send signed "
+                f"requests over plain HTTP. Put TLS in front of the dashboard first.")
+    return ""
+
+
 def dashboard_url() -> str:
     """Where the host's agent dials: the pinned agent audience, which must be HTTPS.
 
     Refused rather than guessed: an agent in a cloud subnet reaches the dashboard over the
     internet, and a deploy that bakes in the wrong URL boots an agent that can never enrol."""
     from . import agent_service
-    url = _cfg(agent_service.AUDIENCE_CONFIG).rstrip("/")
-    if not url:
-        raise AgentHostError(
-            "This dashboard has no pinned agent address yet. Set Public base URL under "
-            "Settings → Integrations → Remote Agents and issue one enrolment code (or "
-            "press Reset there), then deploy.")
-    if not url.startswith("https://"):
-        raise AgentHostError(
-            f"The agent address is {url}, and a deployed agent will not send signed "
-            f"requests over plain HTTP. Put TLS in front of the dashboard first.")
-    return url
+    problem = dashboard_url_problem()
+    if problem:
+        raise AgentHostError(problem)
+    return _cfg(agent_service.AUDIENCE_CONFIG).rstrip("/")
 
 
 def _b64(text: str) -> str:

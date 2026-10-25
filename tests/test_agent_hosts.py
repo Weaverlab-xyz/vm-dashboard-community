@@ -616,6 +616,29 @@ def test_deploy_routes_the_ranges_and_queues_the_start():
     assert c.get("/api/agent-hosts").json()["hosts"][0]["name"] == "vpc-b-agent"
 
 
+def test_a_range_already_routed_is_left_and_reported():
+    from web_dashboard.services import config_mgmt_route_service as cmr
+    db = _fresh()
+    _first, other = _deploy(db, name="first-agent")
+    cmr.create(db, agent_id=other.id, cidr="10.50.0.0/16", include_cloud_vms=True)
+    r = _client().post("/api/agent-hosts", json={"name": "second-agent", "cloud": "aws",
+                                                 "region": "us-east-2",
+                                                 "ranges": ["10.50.0.0/16", "10.51.0.0/16"]})
+    assert r.status_code == 201, r.text
+    assert r.json()["routes"] == ["10.51.0.0/16"]
+    assert r.json()["route_errors"] == [
+        "10.50.0.0/16 is already routed to agent 'first-agent'; left as it is."]
+
+
+def test_the_options_name_the_agent_address_problem():
+    _fresh()
+    assert _client().get("/api/agent-hosts/options").json()["dashboard_url"] == URL
+    config_service.set(agent_service.AUDIENCE_CONFIG, "")
+    body = _client().get("/api/agent-hosts/options").json()
+    assert body["dashboard_url"] == "" and "no pinned agent address" in body["dashboard_url_error"]
+    config_service.set(agent_service.AUDIENCE_CONFIG, URL)
+
+
 def test_a_window_deploy_waits_for_its_window():
     db = _fresh()
     w = _window(db, start=(_utcnow() + timedelta(hours=6)).strftime("%H:00"), minutes=60)
