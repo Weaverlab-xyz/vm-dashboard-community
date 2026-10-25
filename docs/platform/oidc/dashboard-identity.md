@@ -259,7 +259,7 @@ the agent hostname, and AWS then refuses every token with `InvalidIdentityToken`
 gateway image and roll the sidecar.
 
 On a POV instance the POV cloud provider panel can use this identity in place of an AWS key:
-see [Keyless AWS](../../profiles/pov/public-cloud.md#keyless-aws-the-dashboards-spiffe-identity).
+see [Keyless AWS](../../profiles/pov/public-cloud/keyless-aws.md).
 
 **Check before retiring a key.** On the panel, **Check the issuer is reachable** fetches both
 documents over the issuer's public URL with TLS verified, the way a cloud does. It reports

@@ -38,7 +38,7 @@ finish, then start the other.
 
 **Its agent endpoint must be reachable from inside your POV environments.** POV wiring works
 by running an agent on a control node VM *inside* the customer environment, which polls outward —
-see [the control node VM](skytap.md#the-control-node-vm) for what that VM must carry.
+see [the control node VM](skytap/control-node.md) for what that VM must carry.
 That means `/api/agent` on this instance has to be reachable over public HTTPS from there.
 The provision refuses the control node install outright when this instance does not know its own
 public URL, or when that URL is plaintext: the agent will not sign over `http://`, so a
@@ -67,7 +67,7 @@ it is the **Templates** tab, where a cloud template — a list of VMs and a netw
 defined, since no public cloud holds a template of its own.
 
 **The template builder** (**Build a template** and **Build history**) authors the templates a Skytap POV is built from — see
-[building a template](skytap.md#building-a-template). It exists because a POV
+[building a template](skytap/building-a-template.md). It exists because a POV
 *is* a template instantiated whole, so before it the whole feature was downstream of a
 catalogue nobody could author from here, and because the parts of the
 [template contract](skytap.md#the-template-contract) that have to live in your
@@ -99,7 +99,7 @@ after that is the same provision job that runs without one — a blueprint that 
 flow would be a second place for the rules about orphaned environments to drift. If you
 typed a control node VM name before picking a recipe, the recipe does not overwrite it — and a
 blank one is left blank rather than filled with a default, because blank now *means*
-auto-detect ([which VM runs the agent](skytap.md#the-control-node-vm)). A recipe that helpfully
+auto-detect ([which VM runs the agent](skytap/control-node.md)). A recipe that helpfully
 wrote `broker` into that field would switch auto-detection off for every POV made from
 it.
 

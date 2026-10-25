@@ -23,12 +23,12 @@ privileged-access problem (the same model used across the [Cloud VMs](../clouds/
   Entitle integration so users request just-in-time access; Entitle mints **ephemeral
   accounts** (or assigns persistent roles) per engine.
 
-The other path is [registration](#registering-an-existing-database): record a database
+The other path is [registration](databases/register.md): record a database
 the dashboard did **not** create — on-premises (`cloud = local`) or in a cloud — so it
 can be a [Configuration Management](../operations/config-management.md) target. Nothing is built and no
 credential is stored; the admin login is a Password Safe **managed account** checked out
 at run time. The fastest way to register is
-[**Import from Password Safe**](#importing-from-password-safe), which lists what Password
+[**Import from Password Safe**](databases/import.md), which lists what Password
 Safe already discovered instead of asking you to type it.
 
 The layers stack — stop after Provisioning + PRA, or add Password Safe and/or Entitle.
@@ -45,13 +45,13 @@ differs by cloud/engine:
 | **OCI** | ⚠️ **oracle only** (Autonomous DB) — read the caveats² | ✅ tunnel¹ | ❌ | ⚠️ register (Oracle connector, unverified live) |
 
 **MongoDB** is provisioned on **MongoDB Atlas**, on whichever of AWS / Azure / GCP the row
-names, and can also be [registered](#registering-an-existing-database) when self-hosted. See
-[MongoDB Atlas](#mongodb-atlas). Entitle covers Atlas clusters only — see
+names, and can also be [registered](databases/register.md) when self-hosted. See
+[MongoDB Atlas](databases/provisioning.md#mongodb-atlas). Entitle covers Atlas clusters only — see
 [Layer 3](#layer-3--entitle-just-in-time-access).
 
 ¹ OCI has no dashboard-provisioned gateway — you supply your own (see the OCI section).
 ² The OCI module only started shipping in the image recently and has **never completed a live
-run**; it also always provisions into `oci_region`. See [OCI](#oci-autonomous-database--read-the-caveats).
+run**; it also always provisions into `oci_region`. See [OCI](databases/provisioning.md#oci-autonomous-database--read-the-caveats).
 
 Everything is driven by Terraform from the job worker; deploy state is written to the
 active [storage backend](../operations/storage-management.md).
@@ -61,7 +61,7 @@ active [storage backend](../operations/storage-management.md).
 ## Architecture
 
 *This section describes a **provisioned** database. A registered one is reached however
-you already reach it — see [Registering an existing database](#registering-an-existing-database).*
+you already reach it — see [Registering an existing database](databases/register.md).*
 
 The database is **private** (`publicly_accessible = false`, or a public free-tier
 Autonomous DB on OCI). The dashboard's backend has **no direct network path to it** — the
@@ -129,7 +129,7 @@ something to scope its grants to (`FN_DB_NAME`).
 Two engines read differently:
 
 - **SQL Server** — you connect to the `master` system database. On RDS that is *all*
-  there is (the module omits `db_name`; see [AWS](#aws-rds) below), so the column shows
+  there is (the module omits `db_name`; see [AWS](databases/provisioning.md#aws-rds) below), so the column shows
   `master`. On Azure/GCP a real catalog is created as well, and the page shows both —
   the catalog, with `via master` beneath it.
 - **Registered** databases show whatever was recorded at registration, `(not set)` if
@@ -137,177 +137,16 @@ Two engines read differently:
 
 ---
 
-## Importing from Password Safe
+## Pages
 
-Password Safe already runs a discovery scanner, and it scans **with managed
-credentials** — so it knows a database's platform, port, instance and accounts, not just
-that something is listening. Importing reads that inventory and registers the rows you
-pick. It is the same outcome as registering by hand, with nothing to type.
+The tasks have a page each:
 
-**It only reads.** Nothing in Password Safe is created, changed or deleted.
-
-**How to import.** **Databases** page → **Import from Password Safe**, or
-`GET /api/databases/ps-candidates` + `POST /api/databases/ps-import`. Both need
-`cloud_database:read`/`write` **and** `secrets:use` — listing every managed system and
-account in the tenant is strictly more than the host-scoped lookup the run form uses, and
-importing pins a managed account for later checkout. The button renders only when
-`password_safe_enabled` is on.
-
-**What it reads.** Four collections over the Password Safe **public REST API** — no
-`ps-cli` binary needed, so it works in a container that doesn't ship one:
-
-| Collection | Used for |
+| Page | Read it when |
 |---|---|
-| `Platforms` | platform name → engine |
-| `ManagedSystems` | the candidate rows: name, host, port, workgroup |
-| `Databases` | port, instance name and version enrichment |
-| `ManagedAccounts` | the accounts this API identity can **request** |
-
-Reading accounts from the *requestable* list is the point: it is the same permission
-surface the run-time checkout uses, so a missing Requestor role shows up as a greyed-out
-row **now** rather than as a failed playbook run later. See the blockquote below.
-
-**Platform → engine.** Matched on substrings of the Password Safe platform name and short
-name, first hit wins: `sqlserver` (`ms sql`, `mssql`, `sql server`), `postgres`
-(`postgresql`, `postgres`, `psql`, `greenplum`), `mysql` (`mysql`, `mariadb` — MariaDB
-registers as mysql), `oracle` (`oracle`, `oradb`), `mongodb` (`mongo`). `mysql` is matched before `oracle` so
-"Oracle MySQL" resolves correctly. A platform that maps to nothing is **shown and greyed
-out**, never silently dropped — otherwise "my database isn't in the list" is
-undiagnosable. Add your own with `clouddb_ps_import_platform_map`.
-
-**Why a row is greyed out.** Eligibility is decided server-side and the reason travels
-with the row, so the list never offers something the import would refuse:
-
-| Reason | Fix |
-|---|---|
-| already registered in the dashboard | nothing to do — it's here already |
-| onboarded by this dashboard's own cloud-DB Password Safe integration | nothing to do — it's managed here |
-| the platform isn't a database engine the dashboard supports | add a `clouddb_ps_import_platform_map` entry, if it really is one |
-| no DNS name, host name or IP address | fix the managed system in Password Safe |
-| no requestable Password Safe account | grant the Requestor role — see below |
-
-**Location is yours to choose.** Password Safe records no cloud, so the dialog asks once
-per batch and defaults to `clouddb_ps_import_default_cloud`. It decides which Ansible
-runner reaches the database, so a wrong value fails the *run*, not the import.
-
-**Host spelling matters.** "Already imported" compares host and engine literally. Password
-Safe holding `db01` where an existing row says `db01.corp.internal` reads as a new
-database, and both can be registered. The dashboard cannot resolve your private DNS to
-tell them apart — it is not on that network. Prefer consistent naming; the import shows
-the exact host it will record.
-
-**Settings** → Integrations → Password Safe → *Databases* tab → *Database Import*:
-
-| Key | Default | Purpose |
-|---|---|---|
-| `clouddb_ps_import_workgroup` | *(blank)* | Restrict candidates to one Password Safe workgroup. Blank = everything the API identity can see. |
-| `clouddb_ps_import_default_cloud` | `local` | Location preselected in the dialog. |
-| `clouddb_ps_import_max_systems` | `500` | Cap on candidates. The dialog says so when it truncates — narrow with a workgroup rather than raising this. |
-| `clouddb_ps_import_platform_map` | *(blank)* | JSON platform→engine overrides, e.g. `{"Percona Server": "mysql"}`. Invalid JSON is ignored. |
-
-Two more settings that affect how the dashboard reaches a database:
-
-| Key | Default | |
-|---|---|---|
-| `clouddb_ansible_use_ps_account` | off | Config Management runs against a **provisioned** database connect as its Password Safe managed user instead of the admin credential. That user is created with no grants, so a playbook that needs more fails on permissions until you grant it out of band. Registered databases already connect as their own managed account. |
-| `clouddb_db_client_image_postgres` / `clouddb_db_client_image_mysql` / `clouddb_db_client_image_sqlserver` | `postgres:16` / `mysql:8.4` / blank | The DB-client container images run on the jump host; override for a mirrored registry. SQL Server is blank on purpose: no `sqlcmd` image exists, so the jump host's own `/opt/mssql-tools18/bin/sqlcmd` is used. Setting it forces the container path, and the image must carry `sqlcmd` 18 at that path. |
-
-The candidate list is cached for 5 minutes per workgroup; "already imported" is computed
-fresh on every request, so an import is reflected immediately.
-
-Imported rows are ordinary registered rows — everything under
-[Registering an existing database](#registering-an-existing-database) applies to them
-unchanged, including that no credential is stored.
-
----
-
-## Registering an existing database
-
-Registration records a database the dashboard **didn't create**, so it can be a
-[Configuration Management](../operations/config-management.md) target. It is the database sibling of
-registering a Kubernetes cluster from a kubeconfig ([Kubernetes](kubernetes.md)): the
-dashboard builds nothing, changes nothing, and stores no credential. `cloud = local` is
-the on-premises case.
-
-The registerable set is deliberately wider than the provisionable one — **provisioning
-needs a Terraform module, registering needs only somewhere to reach.** Any of `local`,
-`aws`, `azure`, `gcp` or `oci` may be registered, and engines are **postgres / mysql /
-sqlserver / oracle / mongodb**, and Configuration Management runs cover all five — the
-`ansible-cloud` runner image carries `python-oracledb` (thin mode) and `community.mongodb`
-over `pymongo`; see the [database samples](../../examples/playbooks/README.md#databases-database).
-No Ansible runner resolves for `oci` at all, so an OCI row registers and lists but can't be
-a run target.
-
-**How to register.** **Databases** page → **Register existing**, or
-`POST /api/databases/register` (permission `cloud_database:write`). To register several
-at once from what Password Safe already knows, use
-[Import from Password Safe](#importing-from-password-safe) instead. The button only
-renders when the Password Safe integration is on (`password_safe_enabled`), because the admin
-login *has* to be a Password Safe managed account. The `cloud_database_enabled` feature
-toggle gates registration and provisioning alike.
-
-| Field | Notes |
-|---|---|
-| **Engine** | postgres / mysql / sqlserver / oracle / mongodb |
-| **Location** | `local` (on-premises) / aws / azure / gcp / oci |
-| **Host** | Required — it is how the runner reaches the database. One row per engine + host; a duplicate is refused. |
-| **Port** | Optional; defaults per engine (5432 / 3306 / 1433 / 1521 / 27017). |
-| **Database name** | Optional. SQL Server falls back to `master`. |
-| **Admin account** | A Password Safe **managed system + account**, looked up live by host — the same lookup the Configuration Management run form uses. Onboard the database in Password Safe *first*; the list is empty until you do. |
-
-**The credential is never stored.** The row keeps the managed system id, account id and
-account name — nothing else. At run time the dashboard checks the credential out and lets
-the request **expire** on its duration rather than checking it back in, matching what the
-inline runners already do for VMs. Contrast the provisioned path, which reads its admin
-credential from the provisioning job's Terraform variables and the encrypted config store.
-
-> **The account must be *requestable* by the dashboard's Password Safe API identity** —
-> onboarding it is necessary but not sufficient. The checkout goes through a Password Safe
-> *request*, so that identity's group needs the **Requestor** role, with an access policy
-> granting **View** (API-only is fine), on a Smart Rule containing the account. Without it
-> the row registers and lists happily and the run fails in the worker with `Password Safe
-> checkout failed for database …: 4031, statuscode: 403`. Two things make this easy to
-> misdiagnose: a *database* Smart Rule needs its own grant — the ones covering
-> Linux/SSM/Waagent accounts do not extend to it, so the VM path working tells you nothing
-> — and Smart Rule membership is recomputed on a schedule, so a freshly created account is
-> not requestable the instant it exists. Check with
-> `ps-cli access-policies test -s-id <system> -a-id <account>`; an empty list means no
-> policy applies yet.
->
-> **The import catches this early.** Because
-> [Import from Password Safe](#importing-from-password-safe) sources its account list from
-> the *requestable* accounts, a managed system showing **no requestable account** there is
-> this same problem, surfaced before the row is ever created rather than hours later in a
-> worker log. If a database you know is onboarded shows that reason, it is the Requestor
-> role or the Smart Rule — not the onboarding.
-
-**Where the run executes** follows the database's location, exactly as it does for
-clusters — an on-premises database runs in a sibling container on the dashboard host,
-because nothing in a cloud has a route to your LAN; a cloud-hosted one runs on that
-cloud's transient in-subnet runner. See
-[Ansible → Kubernetes-cluster and database targets](../platform/ansible/kubernetes-runner.md#kubernetes-cluster-and-database-targets-localhost-runs).
-
-**Every runner takes the just-in-time credential, AWS and GCP included.** A database run is
-a localhost play, and its connection variables ride the runner's *inline* environment
-channel as `CONN_VARS_B64` — the ECS task override env, ACI `secure_value`, the Cloud Run
-env, or a `0600 --env-file` locally — decoded to a `0600` file and passed as `-e @…`.
-Nothing needs to pre-exist in a cloud secret store, so the ephemeral-store opt-in that
-governs a **VM SSH** managed-account run (`ansible_cloud_ephemeral_secrets_enabled`, see
-[Secrets Management](../admin/secrets-management.md#ephemeral-cloud-secrets)) does **not** apply
-here. That opt-in exists only because the SSH path injects named/become secrets by
-*reference* (`valueFrom`) on ECS and Cloud Run; the database path never does.
-
-**What registration does not give you.** A registered row has no Terraform state and no
-provisioning job, so none of the three layers apply: no PRA protocol tunnel, no Layer-2
-Password Safe onboarding of a rotated DB user, and no Layer-3 Entitle integration (Entitle
-onboarding reads the provisioning job's admin credential, which such a row doesn't have).
-Nothing is created in the cloud, and no gateway host is brokered on its behalf.
-
-**Delete deregisters.** Removing a registered row drops it from the inventory and leaves
-the database running — the dashboard holds no Terraform state for someone else's database,
-and destroying it would be the wrong verb. The row's action button says **Deregister**
-rather than Decommission, and the confirm dialog says the database itself is untouched.
-The reverse is refused too: a provisioned database is decommissioned, never deregistered.
+| [Provisioning a cloud database](databases/provisioning.md) | you are standing up a managed database on AWS, Azure, GCP, OCI or MongoDB Atlas, and want each engine's and each cloud's specifics |
+| [Registering an existing database](databases/register.md) | you already run a database, in a cloud or on-premises, and want the dashboard to manage access to it |
+| [Importing databases from Password Safe](databases/import.md) | the databases are already managed systems in Password Safe and you want them here without typing each one in |
+| [Troubleshooting cloud databases](databases/troubleshooting.md) | a database will not provision, register, onboard into Password Safe or open through PRA |
 
 ---
 
@@ -331,249 +170,6 @@ are for PRA *Shell Jumps*, not the DB tunnel.)
 
 Also enable the **Databases** feature toggle (`cloud_database_enabled`) — it gates
 registration as well as provisioning.
-
----
-
-## Provisioning — per cloud
-
-### AWS (RDS)
-
-Engines: postgres / mysql / sqlserver. Sandbox: [`scripts/sandbox/Linux/setup-aws.sh`](../../scripts/sandbox/Linux/setup-aws.sh).
-
-**What the sandbox creates for the DB feature:** two private DB subnets in distinct AZs
-(RDS needs ≥2) → the RDS **DB subnet group** `dashboard-sandbox-db`; a Postgres
-**parameter group** with `rds.force_ssl=0` (`clouddb-nossl-pg16`); a MySQL-8.4
-**parameter group** with `require_secure_transport=0` (`clouddb-nossl-mysql84`); a **DB
-security group** allowing 5432/3306/1433/1521 *from the gateway SG only*; the `bt-jumpoint`
-ECS cluster + `ecsInstanceRole` + `ecsTaskExecutionRole`; and RDS/ECS/PassRole
-permissions on the scoped dashboard IAM user.
-
-**Engine quirks:** MySQL is pinned to **8.4** (8.0's `mysql_native_password` admin is
-rejected by the PRA MySQL tunnel; 8.4 defaults to `caching_sha2_password`). SQL Server
-(`sqlserver-ex`) has **no `db_name`** — you connect to `master` and create databases
-afterward — and its instance class is bumped to `db.t3.small` (needs ≥2 GiB).
-
-**Oracle (RDS):** Standard Edition 2, **license-included** (the Oracle licence is in the
-hourly price — no BYOL). The default engine is `oracle-se2-cdb`, a single-tenant container
-database: RDS creates one PDB named after the row id (`ORA` + 5 hex characters — Oracle
-names are capped at 8) and a CDB it calls `RDSCDB`, and the PDB is the service name you and
-Entitle connect to. That matters because **Entitle's Oracle connector manages PDBs only**;
-`oracle_engine = "oracle-se2"` (non-CDB) is accepted but can't be registered in Entitle.
-`db.t3.small` minimum, 20 GiB storage minimum, port 1521, and creation takes **20–40
-minutes** (the module allows 90). There is no parameter group: the PRA tunnel is a raw TCP
-port forward, so nothing server-side needs relaxing. The DB security group must admit
-**1521** — `setup-aws.sh` / `Setup-AwsSandbox.ps1` add it, and re-running either against an
-existing sandbox adds the rule in place. Password Safe onboarding uses the native Oracle
-platform — see [Oracle on RDS: the native platform](#oracle-on-rds-the-native-platform).
-
-**Gateway host:** an **ECS-on-EC2** container instance the dashboard launches on demand
-(kicked early so its ~2-min boot overlaps the RDS apply) and terminates when the last
-DB/VM/cluster is gone.
-
-**Config keys:**
-
-| Key | Default | Notes |
-|---|---|---|
-| `aws_db_subnet_group_name` | — | RDS subnet group (import-only key) |
-| `aws_db_parameter_group_name` | — | `rds.force_ssl=0` Postgres group (Settings field) |
-| `aws_db_mysql_parameter_group_name` | — | `require_secure_transport=0` MySQL-8.4 group (import-only) |
-| `aws_db_security_group_id` | — | DB SG allowing tunnel ingress. Attached to the instance when the provision form selects no security group; unset → the VPC *default* SG, which has no ingress on the engine port |
-| `aws_ecs_docker_deploy_key` | — | Gateway Docker deploy key |
-| `bt_ecs_cluster` / `bt_ecs_launch_type` | `bt-jumpoint` / `EC2` | Gateway cluster (Fargate can't tunnel) |
-| `bt_ecs_host_instance_type` / `bt_ecs_host_instance_profile` | `t3.small` / `ecsInstanceRole` | Gateway EC2 host |
-| `bt_ecs_jumpoint_subnet_id` / `bt_ecs_jumpoint_security_group_id` | — | Gateway host placement (import-only) |
-
-**Checklist:** run `setup-aws.sh` → import the emitted config at `/setup` → set
-`aws_ecs_docker_deploy_key` + the PRA keys → provision from the Databases page.
-
-### Azure (Flexible Server / SQL Database)
-
-Engines: postgres / mysql (Flexible Server) + sqlserver (Azure SQL DB + Private
-Endpoint). Sandbox: [`scripts/sandbox/Linux/setup-azure.sh`](../../scripts/sandbox/Linux/setup-azure.sh).
-
-**What the sandbox creates:** **three separate DB subnets** — a Postgres-delegated
-subnet, a MySQL-delegated subnet (a delegated subnet can host only one flexible-server
-type), and a plain SQL Server **Private-Endpoint** subnet — plus **three private DNS
-zones** (`*.private.postgres.database.azure.com`, `*.private.mysql.database.azure.com`,
-and the fixed `privatelink.database.windows.net`); and a service principal with
-Contributor on the resource group.
-
-**Engine quirks:** MySQL pinned to **8.4** (needs `azurerm` ≥ 4.55; same tunnel reason as
-AWS). Postgres/MySQL Flexible Servers get `require_secure_transport=OFF`. SQL Server uses
-Azure SQL DB + a Private Endpoint (always TLS — fine, the mssql tunnel does backend TLS);
-any Flexible-Server SKU picked in the form is coerced to a valid SQL-DB SKU.
-
-**Gateway host:** a **real Azure VM** (`clouddb-jumpoint`) — ACI is serverless and can't
-protocol-tunnel — in `azure_jumpoint_subnet_id` (falls back to `azure_aci_subnet_id`).
-
-**Config keys:**
-
-| Key | Default | Notes |
-|---|---|---|
-| `azure_db_subnet_id` / `azure_db_private_dns_zone_id` | — | Postgres delegated subnet + DNS zone (import-only) |
-| `azure_db_mysql_subnet_id` / `azure_db_mysql_private_dns_zone_id` | — | MySQL delegated subnet + DNS zone (import-only) |
-| `azure_db_sqlserver_subnet_id` / `azure_db_sqlserver_private_dns_zone_id` | — | SQL Server PE subnet + `privatelink…` zone (import-only) |
-| `azure_resource_group` / `azure_location` | `vm-cli-rg` / `centralus` | RG + default region (Settings fields) |
-| `azure_jumpoint_subnet_id` | — | Gateway VM subnet; falls back to `azure_aci_subnet_id` |
-| `azure_aci_deploy_key` / `azure_aci_docker_deploy_key` | — | Gateway Docker deploy key |
-| `azure_jumpoint_vm_size` | `Standard_B1s` | Gateway VM size |
-
-All six are per-region: running the sandbox in a second location emits
-`azure_region.<location>.db_*` alongside the flat keys, and the provisioner resolves the
-database's own region before falling back to them. The flat keys stay the default
-region's copy, so a single-region install behaves exactly as before.
-
-> **That fallback is why the form only offers configured regions.** A region with no
-> config set — or one whose `db_*` field is blank — resolves the subnet back to the flat
-> key, i.e. the **default region's** subnet, while `location` is the region you picked.
-> Azure refuses that pairing ~90 seconds into the apply
-> (`VnetWithDifferentLocationNotSupported`), AWS a little sooner (`DBSubnetGroupNotFound`),
-> and neither error names the setting at fault. So the provision form's Region picker
-> lists `deployable_regions` — the configured default plus each region with a config set
-> — and `POST /api/databases` refuses an unconfigured region, or a resolved subnet the
-> cloud confirms is elsewhere, **before** it writes a row or creates a job. The
-> confirmation step fails **open**: if the dashboard's service principal lacks *Reader*
-> on the VNet's resource group the lookup returns nothing and the request proceeds, so
-> seeing the Terraform error instead of the 400 points at that grant. Add regions under
-> **Settings → Multi-region**, or re-run the sandbox script in the region. (OCI is
-> exempt — it has no per-region sets and a free-tier ADB uses no network of ours.)
-
-**Checklist:** run `setup-azure.sh` → import the six `azure_db_*` keys + RG/location +
-`azure_jumpoint_subnet_id` → set `azure_aci_docker_deploy_key` + PRA keys → provision.
-
-### GCP (Cloud SQL)
-
-Engines: postgres / mysql / sqlserver. Sandbox: [`scripts/sandbox/Linux/setup-gcp.sh`](../../scripts/sandbox/Linux/setup-gcp.sh).
-
-**What the sandbox creates:** **Private Services Access** (an allocated `/20` + a
-`servicenetworking` VPC peering) so Cloud SQL gets a private IP on the sandbox VPC; a
-Cloud Router + Cloud NAT for the jumpoint/k8s subnets; and the `cloudsql.admin` +
-`servicenetworking.networksAdmin` roles on the service account.
-
-**Engine quirks:** MySQL uses `MYSQL_8_4` **and** `edition=ENTERPRISE` (so a shared-core
-`db-f1-micro` stays valid on 8.4; needs `google` provider 6.x). SQL Server uses a
-`db-custom-*` tier (no shared-core) and the built-in **`sqlserver`** login (set via the
-instance root password — there's no separate `google_sql_user`); the service forces
-`master_username=sqlserver`. Postgres/MySQL use
-`ssl_mode=ALLOW_UNENCRYPTED_AND_ENCRYPTED` for the cleartext tunnel.
-
-**Gateway host:** a **privileged gateway container on a Container-Optimized-OS GCE VM**
-(`clouddb-shared-jumpoint`), in the gateway subnetwork (which has NAT egress).
-
-**Config keys:**
-
-| Key | Default | Notes |
-|---|---|---|
-| `gcp_db_network` | — | VPC self-link for Cloud SQL private IP (import-only; falls back to `gcp_network`) |
-| `gcp_project_id` / `gcp_region` / `gcp_zone` | — / `us-central1` / `us-central1-a` | project + default region/zone (Settings) |
-| `gcp_network` / `gcp_subnetwork` | `default` / — | VPC + VM subnet |
-| `gcp_jumpoint_subnetwork` | — | Gateway subnet (has NAT; preferred over the VM subnet) |
-| `gcp_jumpoint_name` / `gcp_jumpoint_machine_type` | `clouddb-shared-jumpoint` / `e2-micro` | Gateway VM |
-| `gcp_cloud_run_docker_deploy_key` | — | Gateway deploy key (→ `gcp_jumpoint_docker_deploy_key` → `gcp_jumpoint_deploy_key`) |
-
-**Checklist:** run `setup-gcp.sh` → import `gcp_project_id`/`gcp_region`/`gcp_network`/
-`gcp_subnetwork`/`gcp_jumpoint_subnetwork`/`gcp_db_network` → set
-`gcp_cloud_run_docker_deploy_key` + PRA keys → provision.
-
-### OCI (Autonomous Database) — read the caveats
-
-Engine: **`oracle` only** (Autonomous Database). Sandbox: [`scripts/sandbox/Linux/setup-oci.sh`](../../scripts/sandbox/Linux/setup-oci.sh).
-
-**What the sandbox creates:** a dedicated compartment, a VCN (`10.98.0.0/16`) with
-public / vm / db subnets, a scoped IAM user + group + policy + API keypair, and
-(best-effort) a KMS vault + SSH-keypair secret.
-
-**Autonomous DB specifics:** the admin login is always **`ADMIN`** (only the password
-varies); `is_free_tier=true` is the **default**; `is_mtls_connection_required=false` so
-the `tcp` tunnel can connect over TLS without a client wallet. It's reached over a generic
-`tcp` PRA tunnel to the ADB TLS listener (1521).
-
-> ⚠️ **OCI caveat 1 — no dashboard-provisioned gateway.** `ensure_jumpoint_host` has no
-> OCI branch; for `cloud=oci` it falls through to the AWS path and fails (non-fatal). **You
-> must pre-create a BeyondTrust Gateway in the OCI public subnet** that can reach the ADB
-> TLS endpoint, and point `bt_jumpoint_name` / `bt_jump_group_name` (or the per-DB
-> overrides) at it.
-
-> ⚠️ **OCI caveat 2 — region + subnet.** An OCI database is always created in
-> **`oci_region`**, regardless of the region chosen in the form. A **free-tier** ADB (the
-> default) is a **public** endpoint (Always-Free can't sit in a VCN) and needs no subnet. A
-> **paid/private** ADB must be given a subnet via the `oci_subnet_ocid` provision option —
-> do not rely on `oci_default_subnet_ocid`, which points at the VM subnet; the sandbox's
-> private db-subnet OCID is not emitted to any config key.
-
-> ⚠️ **OCI caveat 3 — never live-validated; needs a rebuilt image.** `terraform/db_oci_autonomous`
-> was absent from the Dockerfile `COPY` set (and excluded from the build context by
-> `.dockerignore`) until recently, so **no published image could provision an OCI database** —
-> `apply` failed in `terraform._materialize` with "Terraform module template not found", even
-> though `("oracle", "oci")` is listed in `_IMPLEMENTED`. The module now ships, but that means
-> this path has **never completed a live run**: treat the first provision as a bring-up, and make
-> sure you are on an image built after the fix. The OCI **OKE** module was missing the same way —
-> see [Kubernetes → OCI OKE](kubernetes/k8s.md#oci-oke--experimental).
-
-**Config keys** (all Settings fields): `oci_tenancy_ocid`, `oci_user_ocid`,
-`oci_fingerprint`, `oci_private_key` (+ `oci_private_key_passphrase`), `oci_region`
-(`us-ashburn-1`), `oci_compartment_ocid`, `oci_vcn_ocid`, `oci_default_subnet_ocid`,
-`oci_vault_ocid`. There are no dedicated `oci_db_*` networking keys (Autonomous DB is
-fully managed PaaS — no parameter groups, delegated subnets, or private DNS zones), and
-OCI has no per-region config sets.
-
-**Checklist:** run `setup-oci.sh` → import the `oci_*` credential + compartment/VCN keys →
-**stand up your own Gateway in the OCI public subnet** and point `bt_jumpoint_name` at it
-→ provision (default = free-tier public ADB).
-
-### MongoDB Atlas
-
-An Atlas row keeps `cloud` = the **backing provider** (AWS, Azure or GCP) and is marked by
-`provider = "atlas"`. The cluster runs in that cloud and region, beside the PRA gateway that
-reaches it, so it reuses the per-region config and the gateway host every other row uses.
-
-**One Atlas project per cluster.** Atlas IP access lists and database users are
-*project*-scoped. With two clusters in one project, both would share the gateway's access-list
-entry, and decommissioning either would cut the other off. A project of its own makes
-everything in it that cluster's alone: decommission removes it all, and Entitle's integration
-is scoped to it. Projects are free. This is why the dashboard needs an **organization**, not a
-project.
-
-**Reachability — read this.** Flex clusters have **no private endpoint**. The endpoint is
-public and the project access list admits only the **gateway's egress /32**, which the
-dashboard reads from the gateway it ensures *before* the apply (no gateway or no egress IP =
-the provision is refused before anything billable exists). TLS and the database user's
-password apply on top, and the PRA tunnel is still the only path users are given. This is the
-same exception free-tier OCI Autonomous DB has. PrivateLink on a dedicated tier is not built.
-
-**Tiers:** **Flex** (default; shared, roughly $8–30 a month) or a dedicated size — **M10**,
-M20, M30 from the form (M10 starts around $57 a month). Atlas is billed by MongoDB, outside the
-cloud cost tooling. Creation takes about 7–10 minutes.
-
-**Connecting.** The tunnel is a raw TCP forward to **one** replica-set member (the first host
-of the `mongodb://` seed list), so connect with `directConnection=true`, and
-`tlsAllowInvalidHostnames=true` because 127.0.0.1 is never the certificate's name. On a
-dedicated cluster that member can be a secondary: reads need
-`readPreference=secondaryPreferred`, and writes need the primary. PRA 26.3's MongoDB tunnel
-lifts this once the `beyondtrust/sra` provider exposes it.
-
-**Configuration Management:** a run connects from the runner, not the tunnel, so the
-runner's egress IP must be in `atlas_extra_access_cidrs`. The play gets `db_tls`,
-`db_auth_source` and the cluster's `db_replica_set`, so the driver finds the primary on a
-dedicated tier too. Atlas refuses `createUser` over the wire, so the user sample stops on an
-Atlas target; the database sample works there.
-
-**Admin user:** the form's admin username, created as an Atlas database user with
-`atlasAdmin` on `admin`, scoped to the cluster. Atlas manages database users only through its
-Admin API, so Password Safe onboarding is not offered.
-
-**Config keys** (Settings → Databases → MongoDB Atlas):
-
-| Key | Default | Notes |
-|---|---|---|
-| `atlas_org_id` | — | Organization the per-cluster projects are created in |
-| `atlas_client_id` / `atlas_client_secret` | — | Atlas **service account** (OAuth client credentials) with **Organization Project Creator**; passed to Terraform as `MONGODB_ATLAS_CLIENT_ID` / `_SECRET`, never as variables |
-| `atlas_default_tier` | `FLEX` | Used when the form sends no tier |
-| `atlas_extra_access_cidrs` | — | CSV added to every cluster's access list — e.g. Entitle's egress IPs |
-
-Azure and GCP region ids map to Atlas's own names (`eastus2` → `US_EAST_2`, `us-central1` →
-`CENTRAL_US`); a region with no known mapping is refused unless the API call passes
-`atlas_region`.
 
 ---
 
@@ -636,7 +232,7 @@ button (job `clouddb_entitle_register`) for a database provisioned earlier — p
 MySQL and SQL Server, a **Function (DB grant)** button that deploys the adapter those two
 engines need (see [below](#mysql-and-sql-server-the-db_grant-adapter)). This layer
 needs the provisioning job's admin credential, so a
-[registered](#registering-an-existing-database) database is not offerable — the button is
+[registered](databases/register.md) database is not offerable — the button is
 hidden and the API refuses it with a 400. Teardown
 deregisters on decommission. Full Entitle setup (owner, workflow,
 durations, the agent) lives in the [Entitle integration](../beyondtrust/entitle.md) doc.
@@ -721,7 +317,7 @@ decommission, Entitle and Password Safe registration), the ability to run
 
 > **Not the same as a Password Safe workgroup.** Password Safe has its own, unrelated
 > notion of a workgroup, which this page also mentions: `clouddb_ps_import_workgroup`
-> narrows the *import* candidate list (see [Importing from Password Safe](#importing-from-password-safe)).
+> narrows the *import* candidate list (see [Importing from Password Safe](databases/import.md)).
 > That one names a container in Password Safe. This one names a set of dashboard users.
 > They are never the same value and neither is derived from the other.
 
@@ -754,57 +350,3 @@ See [Permissions](../admin/permissions.md) for how workgroups sit alongside perm
 
 ---
 
-## Troubleshooting
-
-- **MySQL tunnel rejects the login (`mysql_native_password` unsupported).** The engine
-  must be **8.4** on every cloud (8.0's admin auth plugin is rejected by the PRA tunnel;
-  flipping the server parameter doesn't fix the existing admin). The modules default to
-  8.4 — don't override to 8.0.
-- **Tunnel shows *Unavailable* in PRA.** Usually the gateway host never started: set the
-  cloud's deploy key (`aws_ecs_docker_deploy_key` / `azure_aci_docker_deploy_key` /
-  `gcp_cloud_run_docker_deploy_key`). On **OCI** there is no auto-jumpoint — you must
-  pre-create one in the public subnet.
-- **Decommission fails on `Error deleting item with ID [n] … status: 404`.** The PRA jump
-  item or Vault account was already deleted out of band (in the PRA console, or by an
-  earlier half-finished teardown), and the SRA provider treats a 404 on delete as an error
-  instead of as "already gone". Teardown now drops those items from its state and destroys
-  the rest, so **Delete** completes on the next attempt; if it still fails, the error names
-  something other than a 404 and PRA really does still hold it.
-- **SQL Server: can't create a database at provision.** By design — RDS/Cloud SQL SQL
-  Server connect to `master`; create app databases afterward through the tunnel.
-- **Azure: `VnetWithDifferentLocationNotSupported` at apply** ("the virtual network …
-  coming from a different location *X* is not supported. Requested resource location is
-  *Y*"). The region was right and the **subnet** was the default region's: *Y* has no
-  per-region config set, or its set leaves `db_subnet_id` / `db_mysql_subnet_id` /
-  `db_sqlserver_subnet_id` blank, so it fell back to the flat key. Fill *Y*'s DB subnet
-  under **Settings → Multi-region** (or re-run `setup-azure.sh` in *Y*). The provision
-  route now rejects this up front — unless the dashboard's service principal lacks
-  *Reader* on the VNet's resource group, in which case the check fails open and you get
-  this apply error instead. The AWS twin is `DBSubnetGroupNotFoundFault`.
-- **Azure/GCP: provision fails at `terraform apply` for a region.** Region/engine/SKU
-  capability is **not** validated up front; a region that lacks Flexible Server / MySQL
-  8.4 / the SKU fails at apply. Pick a supported region (and matching `azure_db_*` /
-  `gcp_db_*` values for it).
-- **OCI DB landed in the wrong region.** OCI databases are always created in `oci_region`,
-  not the form's region field.
-- **Password Safe onboarding didn't happen (AWS/Azure).** It's gated by
-  `clouddb_ps_onboarding_enabled` **and** `pscli_*` being configured (and, for Azure,
-  `passwordsafe_azure_db_registration_method != off`) — **and** by the provision form's
-  **Onboard into Password Safe** checkbox, which is recorded per database. Failures are
-  non-fatal and fall back to the legacy admin-credential staging — check the job log for
-  the warning. Whatever the cause, the row's **Register in Password Safe** action retries
-  it without rebuilding the database.
-- **Registering: "no Password Safe managed accounts found for this host."** The lookup is by
-  the host string you typed and needs an already-onboarded managed system in Password Safe.
-  Onboard the database there first, and check `password_safe_enabled` plus the `pscli_*` OAuth
-  client — the dashboard deliberately has no "type a database password" path.
-- **A registered on-prem database run fails with `docker: command not found`.** A
-  `cloud = local` database runs in a sibling container on the dashboard host, because
-  nothing in a cloud has a route to your LAN. That host needs the Docker socket mounted and
-  network reach to the database.
-- **A registered OCI database can't be selected in Configuration Management.** Expected —
-  no Ansible runner resolves for `oci`. Registration still gives you the inventory row.
-
-For the base BeyondTrust/PRA setup (OAuth accounts, Asset Group/Gateway, deploy keys), see
-the [Privileged Remote Access](../beyondtrust/privileged-remote-access.md) doc. For the sandbox network
-topology, see [Cloud Sandbox](../clouds/sandbox.md).

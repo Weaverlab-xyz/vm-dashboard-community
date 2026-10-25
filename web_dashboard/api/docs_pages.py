@@ -307,7 +307,10 @@ _INDEX_SECTIONS = {
     "hypervisors",
     "clouds",
     "clouds/vms",
+    "clouds/sandbox",
     "cloud-services",
+    "cloud-services/databases",
+    "cloud-services/functions",
     "cloud-services/kubernetes",
     "cloud-services/portainer",
     "cloud-services/rancher",
@@ -315,6 +318,8 @@ _INDEX_SECTIONS = {
     "preview/directories",
     "preview/workload-lab",
     "operations",
+    "operations/config-management",
+    "operations/image-management",
     "operations/scheduling",
     "admin",
     "admin/remote-agents",
@@ -331,6 +336,8 @@ _INDEX_SECTIONS = {
     "profiles/demo/personas",
     "profiles/demo/ot-demo-cell",
     "profiles/pov",
+    "profiles/pov/public-cloud",
+    "profiles/pov/skytap",
 }
 
 
@@ -343,7 +350,10 @@ _SECTION_LABELS = {
     "hypervisors":                  "Hypervisors",
     "clouds":                       "Clouds",
     "clouds/vms":                   "Clouds · VMs",
+    "clouds/sandbox":               "Clouds · Cloud Sandbox",
     "cloud-services":               "Cloud services",
+    "cloud-services/databases":     "Cloud services · Databases",
+    "cloud-services/functions":     "Cloud services · Cloud Functions",
     "cloud-services/kubernetes":    "Cloud services · Kubernetes",
     "cloud-services/portainer":     "Cloud services · Portainer",
     "cloud-services/rancher":       "Cloud services · Rancher",
@@ -351,6 +361,8 @@ _SECTION_LABELS = {
     "preview/directories":          "Preview · Directories",
     "preview/workload-lab":         "Preview · Workload Lab",
     "operations":                   "Operations",
+    "operations/config-management": "Operations · Config Management",
+    "operations/image-management":  "Operations · Image Management",
     "operations/scheduling":        "Operations · scheduling",
     "admin":                        "Admin",
     "admin/remote-agents":          "Admin · remote agents",
@@ -367,6 +379,8 @@ _SECTION_LABELS = {
     "profiles/demo/personas":       "Demo profile · personas",
     "profiles/demo/ot-demo-cell":   "OT Demo Cell",
     "profiles/pov":                 "POV profile",
+    "profiles/pov/public-cloud":    "POV profile · public cloud",
+    "profiles/pov/skytap":          "POV profile · Skytap",
 }
 
 

@@ -216,7 +216,7 @@ over and applies the full run form to it — see [Managed-account
 checkout](secrets.md#managed-account-checkout-beyondtrust-password-safe) for how an account is
 matched across many hosts.
 
-Full treatment in [docs/operations/config-management.md](../../operations/config-management.md#bulk-runs-from-the-inventory).
+Full treatment in [docs/operations/config-management.md](../../operations/config-management/bulk-runs.md).
 
 ---
 

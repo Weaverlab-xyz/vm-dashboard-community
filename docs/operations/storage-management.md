@@ -429,7 +429,7 @@ The same export-and-land-on-hub path runs when an operator clicks
 (AWS Private AMIs / Azure Managed Images / GCP Custom Images). This
 is the recovery path for builds whose auto-export was skipped (e.g.
 the storage prerequisite was missing at build time). See
-[Image Management → Manual export](image-management.md#manual-export-recovery-path).
+[Image Management → Manual export](image-management/promotion.md#manual-export-recovery-path).
 
 **What it doesn't do.** The hub is not where the promote runner
 *uploads* to. Each target cloud has its own staging container the

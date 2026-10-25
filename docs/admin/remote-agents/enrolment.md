@@ -329,7 +329,7 @@ network — a probe for it would be code that never returns anything.
 Databases and Kubernetes clusters are **no longer discovered by an agent**. Password
 Safe already finds databases with managed credentials — it knows the platform, port and
 accounts, which a socket probe never could — so
-[Import from Password Safe](../../cloud-services/databases.md#importing-from-password-safe) replaced that
+[Import from Password Safe](../../cloud-services/databases/import.md) replaced that
 path. Kubernetes clusters are registered from a kubeconfig, which no credential-less
 probe could ever supply.
 

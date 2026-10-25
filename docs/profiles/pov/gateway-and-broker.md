@@ -10,7 +10,7 @@ The point at which a POV becomes *reachable*. **POV page → the Gateway column 
 
 A POV's VMs live on the lab platform's private network, and every PRA jump item a later
 release creates has to name a Gateway that can see them. This installs one: a BeyondTrust
-Gateway container, on the control node VM from [the control node section](skytap.md#the-control-node-vm),
+Gateway container, on the control node VM from [the control node section](skytap/control-node.md),
 registered into the PRA tenant [this POV is wired into](standing-one-up.md#the-tenant-registry).
 
 **The dashboard creates the Gateway in PRA for you.** It uses the tenant's API account
@@ -51,7 +51,7 @@ running, bound to a key that exists only for that fetch.
 
 It is deliberately *not* in the job's metadata, *not* in the signed job envelope, and
 above all **not in the lab platform's `user_data`**. That last one is the important
-distinction from [the enrolment code](skytap.md#the-control-node-vm), which does
+distinction from [the enrolment code](skytap/control-node.md), which does
 ride that channel: an enrolment code is single-use and lives fifteen minutes, whereas a
 PRA deploy key is neither. Every node registered with it joins the same Gateway — that is
 exactly what makes the cloud gateway hosts a cluster — so anyone with read access to the
@@ -121,7 +121,7 @@ install's own need for either `download.docker.com` or the guest's distro reposi
 ### The bootstrap installs a container runtime
 
 Since 2026-09-16 the injected payload installs one when the guest has none, using the same
-block a [template bake](skytap.md#what-the-build-does-about-the-runner-and-docker) runs —
+block a [template bake](skytap/building-a-template.md#what-the-build-does-about-the-runner-and-docker) runs —
 Docker CE first, `podman` + `podman-docker` from the guest's own repository as the
 fallback. A POV built from a template that baked without a runtime therefore repairs itself
 on the first **Install control node** press, instead of sitting at `enrolling` and saying nothing.
@@ -143,7 +143,7 @@ falls back to `podman.service`, the API service running persistently.
 ### Telling the dashboard what a guest runs
 
 The control node VM is found by its **OS**, not its name — the only Linux VM in the template,
-unless you name one ([the order it resolves in](skytap.md#the-control-node-vm)). That rests on
+unless you name one ([the order it resolves in](skytap/control-node.md)). That rests on
 the OS column being populated, and Skytap does not report a guest OS as a field: the
 dashboard infers it from whatever text comes back and answers "unknown" rather than guess
 wrong.
@@ -301,7 +301,7 @@ run, and a name you set survives a VM re-read.
 That column stores a **username and nothing else**. The password is still read live off the
 lab platform at the moment of every run and is still stored nowhere here.
 
-A [template build](skytap.md#building-a-template) is the one caller that does not need any
+A [template build](skytap/building-a-template.md) is the one caller that does not need any
 of this: it opens the SSH connection itself, so it takes the whole list — best first, by the
 same rule — and tries each until one is accepted. The build row records which one won. If
 the guest answers and refuses them all, that fails immediately rather than on the readiness

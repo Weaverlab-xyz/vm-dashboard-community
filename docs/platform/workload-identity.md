@@ -52,7 +52,7 @@ install of a "built" path as the test.
 The Agents page already shows a **Migrate to SPIRE** banner for every agent still on a key
 on disk. POV control-node agents attest the same way, falling back to their enrolment
 code only where the guest cannot reach the server: see
-[SPIRE on the control node](../profiles/pov/skytap.md#spire-on-the-control-node) (proven live, 2026-10-14).
+[SPIRE on the control node](../profiles/pov/skytap/control-node.md#spire-on-the-control-node) (proven live, 2026-10-14).
 
 ### The dashboard's cloud credentials
 
@@ -79,9 +79,9 @@ calls, Terraform and Packer included. Setup is
 | service-account JSON key | the SPIFFE identity through a workload identity pool, optionally impersonating a service account | that account holds read only, and each write runs inside an Entitle JIT grant (Workload Credentials does not mint GCP credentials) | built |
 
 On a POV instance, the **POV cloud provider** panel offers all three stages per cloud as
-radio buttons: see [Keyless AWS](../profiles/pov/public-cloud.md#keyless-aws-the-dashboards-spiffe-identity),
-[Keyless Azure](../profiles/pov/public-cloud.md#keyless-azure-the-dashboards-spiffe-identity) and
-[Keyless GCP](../profiles/pov/public-cloud.md#keyless-gcp-the-spiffe-identity-and-entitle-for-writes).
+radio buttons: see [Keyless AWS](../profiles/pov/public-cloud/keyless-aws.md),
+[Keyless Azure](../profiles/pov/public-cloud/keyless-azure.md) and
+[Keyless GCP](../profiles/pov/public-cloud/keyless-gcp.md).
 
 #### OCI
 

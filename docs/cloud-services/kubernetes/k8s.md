@@ -33,7 +33,7 @@ from its kubeconfig instead of provisioned.
 >   recently, so *no* published image could run it: `apply` failed in `_materialize` with
 >   "Terraform module template not found". It needs a **rebuilt image** plus a first live
 >   tenancy run. The same omission applied to the OCI *database* module — see
->   [Databases → OCI](../databases.md#oci-autonomous-database--read-the-caveats).
+>   [Databases → OCI](../databases/provisioning.md#oci-autonomous-database--read-the-caveats).
 >
 > Router/model docstrings that say "aws/azure/gcp only / 501" predate OKE.
 

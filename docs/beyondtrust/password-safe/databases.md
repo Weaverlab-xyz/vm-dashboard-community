@@ -170,6 +170,6 @@ Two things worth knowing here rather than in the feature doc:
 Configuration keys (Settings → Integrations → Password Safe → *Databases* tab → *Database Import*):
 `clouddb_ps_import_workgroup`, `clouddb_ps_import_default_cloud`,
 `clouddb_ps_import_max_systems`, `clouddb_ps_import_platform_map`. All optional and all
-documented in **[Databases → Importing from Password Safe](../../cloud-services/databases.md#importing-from-password-safe)**.
+documented in **[Databases → Importing from Password Safe](../../cloud-services/databases/import.md)**.
 
 ---
