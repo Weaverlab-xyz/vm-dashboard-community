@@ -848,6 +848,19 @@ class RemoteAgent(Base):
     paused = Column(Boolean, nullable=True)
     upgrade_ring = Column(String(16), nullable=True)
 
+    # Assurance (docs/platform/spiffe/remote-agents/spire-attestation.md, "Ongoing
+    # checks"): attestation is checked at every start, and these keep checking after it.
+    # `previous_public_key` is the key the last attestation replaced, kept for
+    # `previous_key_until`: a request still signed by it means a second copy of this agent
+    # is running. `attention` is a JSON list of {kind, detail, at} an operator acknowledges.
+    # `reported_reattest_hours` is the agent's own re-attest interval (2.11+), self-reported.
+    last_attest_at = Column(DateTime, nullable=True)
+    last_attest_ip = Column(String(45), nullable=True)
+    previous_public_key = Column(String(64), nullable=True)
+    previous_key_until = Column(DateTime, nullable=True)
+    attention = Column(Text, nullable=True)
+    reported_reattest_hours = Column(Integer, nullable=True)
+
     # No `status` column on purpose. Status is derived from is_active / public_key /
     # last_seen_at freshness, because a stored status is how you end up with a row
     # that still reads "online" three weeks after the container died.

@@ -1823,7 +1823,7 @@ class Settings(BaseSettings):
                                # A change that silently did not happen. Nothing else
                                # reports it — the job did not fail, it was never run.
                                "job.window_missed,job.awaiting_approval,"
-                               "pov.owner_changed")
+                               "pov.owner_changed,agent.attention")
     notify_min_severity: str = "warning"           # info | warning | critical
     notify_base_url: str = ""                      # absolute origin for deep links
     notify_http_timeout_s: int = 10

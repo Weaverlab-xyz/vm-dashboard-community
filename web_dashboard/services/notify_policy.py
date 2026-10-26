@@ -82,6 +82,9 @@ EVENT_SEVERITY = {
     # `job.awaiting_approval`: the person it now belongs to has to find out, and an
     # `info` event ships switched on and never delivers under the default floor.
     "pov.owner_changed":     "warning",
+    # A remote agent's ongoing checks found something after it attested: a second copy
+    # running, its policy.yaml changed, an unrecorded version, a key it stopped rotating.
+    "agent.attention":       "warning",
     "notification.test":     "info",
 }
 
@@ -92,7 +95,7 @@ DEFAULT_EVENT_TYPES = (
     "resource.expiring,resource.reaped,job.failed,"
     "cost.budget_exceeded,secret.stale,config.drift,audit.chain_broken,"
     "vm.spend_warn,vm.spend_capped,vm.spend_unpriced,job.dead_lettered,"
-    "job.window_missed,job.awaiting_approval,pov.owner_changed"
+    "job.window_missed,job.awaiting_approval,pov.owner_changed,agent.attention"
 )
 
 SEVERITY_ORDER = ("info", "warning", "critical")

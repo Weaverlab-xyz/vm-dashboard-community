@@ -67,7 +67,8 @@ from sqlalchemy.orm import Session
 from ..database import Job, RemoteAgent, User, get_db
 from ..services import (agent_ansible_bundle, agent_ansible_meta, agent_gateway_meta,
                         agent_guard, agent_hypervisor_meta, agent_job_meta,
-                        agent_lifecycle_service, agent_release_service,
+                        agent_assurance_service, agent_lifecycle_service,
+                        agent_release_service,
                         agent_ps_credential_service, agent_sealing, agent_service,
                         agent_signing, agent_storage_meta, config_service,
                         directory_health_service,
@@ -481,6 +482,10 @@ class LeaseRequest(BaseModel):
     # Agent 2.10+: {upgrades_enabled, updater_present}. Advisory: it decides what the
     # Agents page offers, and the host's own policy and updater still decide.
     control: Optional[dict] = None
+    # Agent 2.11+: its policy.yaml hash (so a change shows without a restart's attestation)
+    # and how often it re-attests while running. Advisory, like the rest.
+    policy_hash: str = ""
+    reattest_hours: Optional[int] = None
 
 
 @router.post("/lease")
@@ -507,7 +512,8 @@ def lease_job(request: Request, body: LeaseRequest = LeaseRequest(),
     try:
         agent_service.record_self_report(
             db, agent, agent_version=body.agent_version, job_types=body.job_types,
-            ansible_slots=body.ansible_slots, control=body.control)
+            ansible_slots=body.ansible_slots, control=body.control,
+            policy_hash=body.policy_hash, reattest_hours=body.reattest_hours)
     except Exception:  # noqa: BLE001 — bookkeeping must never fail a lease
         logger.debug("agent: self-report update failed", exc_info=True)
 
@@ -1200,6 +1206,12 @@ def _agent_row(agent: RemoteAgent, running: int = 0) -> dict:
         "paused": bool(agent.paused),
         "upgrade_ring": agent_lifecycle_service.ring(agent),
         "lifecycle_blocked": agent_lifecycle_service.host_gate(None, agent) or "",
+        # What changed since it attested that a person should look at; cleared by
+        # acknowledging (docs/platform/spiffe/remote-agents/spire-attestation.md).
+        "attention": agent_assurance_service.item_dicts(agent),
+        "last_attest_at": agent.last_attest_at,
+        "last_attest_ip": agent.last_attest_ip or "",
+        "reattest_hours": agent.reported_reattest_hours,
     }
 
 
@@ -1917,6 +1929,20 @@ def _set_paused(agent_id: str, paused: bool, request: Request, current_user: Use
     job_service.log_audit(db, current_user.username,
                           "agent.pause" if paused else "agent.resume",
                           ip_address=_client_ip(request), details={"agent": agent.name})
+    return _agent_row(agent)
+
+
+@admin_router.post("/{agent_id}/acknowledge")
+def acknowledge_agent(agent_id: str, request: Request,
+                      current_user: User = Depends(require_explicit_permission("agents", "write")),
+                      db: Session = Depends(get_db)):
+    """Clear this agent's attention items: someone looked. Audited with what was cleared."""
+    agent = _load(db, agent_id)
+    cleared = agent_assurance_service.acknowledge(db, agent)
+    job_service.log_audit(db, current_user.username, "agent.acknowledge",
+                          ip_address=_client_ip(request),
+                          details={"agent": agent.name,
+                                   "kinds": [i.get("kind") for i in cleared]})
     return _agent_row(agent)
 
 

@@ -173,7 +173,11 @@ def has_work(db: Session) -> bool:
     rolling = (db.query(AgentRollout.id)
                .filter(AgentRollout.status.in_(("canary", "default")))
                .first())
-    return bool(rolling)
+    if rolling:
+        return True
+    # Attested agents that re-attest while running: the pass checks they still do.
+    from . import agent_assurance_service
+    return agent_assurance_service.has_work(db)
 
 
 def enqueue_sweep_if_due(db: Session, *, min_gap_seconds: "int | None" = None) -> "str | None":
@@ -374,6 +378,17 @@ def _sweep_agent_hosts(db: Session, now: datetime) -> list:
         return []
 
 
+def _sweep_assurance(db: Session) -> int:
+    """Flag attested agents that stopped rotating their key. Isolated like the others."""
+    from . import agent_assurance_service
+    try:
+        return agent_assurance_service.sweep(db)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("schedule sweep: agent assurance pass failed: %s", exc)
+        db.rollback()
+        return 0
+
+
 def _sweep_rollouts(db: Session) -> int:
     """Move each agent rollout on: the default ring after the canary, or stop it.
 
@@ -398,6 +413,7 @@ async def run(db: Session, *, job_id: str, meta: dict) -> None:
         db.commit()
         hosts = _sweep_agent_hosts(db, now)
         rollouts = _sweep_rollouts(db)
+        stale_keys = _sweep_assurance(db)
         # This sweep writes a row per pass whether or not it found anything, so it prunes
         # its own history the way the auto-delete sweep does — otherwise it would push
         # real deploys off the first page of /jobs within days. Shares that feature's
@@ -412,6 +428,7 @@ async def run(db: Session, *, job_id: str, meta: dict) -> None:
             "pruned": pruned,
             "agent_hosts": hosts,
             "agent_rollouts": rollouts,
+            "agent_stale_keys": stale_keys,
         })
     except Exception as exc:
         logger.error("schedule sweep failed: %s", exc)

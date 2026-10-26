@@ -114,7 +114,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 # broker running the earlier one failed identically while reporting the same string as the
 # build that fixed it. A behaviour change the fleet cannot see is a behaviour change nobody
 # can confirm arrived, so bump this whenever the agent's behaviour moves.
-AGENT_VERSION = "2.10.0"
+AGENT_VERSION = "2.11.0"
 
 log = logging.getLogger("agent")
 
@@ -133,6 +133,16 @@ ENROLLMENT_CODE_FILE = os.environ.get("AGENT_ENROLLMENT_CODE_FILE", "").strip()
 # with a key that lives only in this process's memory, and never reads or writes
 # identity.json. Unset, nothing changes: enrolment code and identity.json, as always.
 SPIFFE_JWT_FILE = os.environ.get("AGENT_SPIFFE_JWT_FILE", "").strip()
+# SPIRE mode (2.11): attest again every this many hours while running, with a fresh key,
+# so a long-running agent does not keep one key for weeks. Only between jobs: new leases
+# wait for running jobs to finish first, up to REATTEST_MAX_WAIT_S. 0 turns it off (a
+# restart still attests). Reported on the lease, so the dashboard can flag an agent that
+# stopped rotating.
+try:
+    REATTEST_HOURS = max(0.0, float(os.environ.get("AGENT_REATTEST_HOURS", "24")))
+except ValueError:
+    REATTEST_HOURS = 24.0
+REATTEST_MAX_WAIT_S = 900
 STATE_DIR = os.environ.get("AGENT_STATE_DIR", "/var/lib/dashboard-agent")
 # Lifecycle control (agent 2.10). A volume shared with the updater container
 # (runners/agent-updater), the ONLY channel between the two: the agent writes a request,
@@ -1847,7 +1857,11 @@ class Dashboard:
                 # Whether this host can be upgraded or restarted from the dashboard:
                 # the operator's opt-in and a live updater beside it.
                 "control": {"upgrades_enabled": bool(getattr(POLICY, "upgrades", None)),
-                            "updater_present": updater_present()}}
+                            "updater_present": updater_present()},
+                # 2.11: the policy hash on every lease, so a changed file shows without
+                # waiting for the next attestation, and how often this agent re-attests.
+                "policy_hash": POLICY.digest,
+                "reattest_hours": int(REATTEST_HOURS) if SPIFFE_JWT_FILE else 0}
         if want_job_types is not None:
             body["want_job_types"] = sorted(want_job_types)
         resp = self._request("POST", "/api/agent/lease", body)
@@ -5997,11 +6011,18 @@ def main() -> int:
                 dashboard.heartbeat(pending, 90, "successor attested")
             except Exception:  # noqa: BLE001 — best effort; the lease below is what counts
                 pass
+    rotation = {"next": (time.time() + REATTEST_HOURS * 3600
+                         if SPIFFE_JWT_FILE and REATTEST_HOURS > 0 else None),
+                "waiting_since": None}
     while not slots.draining:
         try:
             if slots.hold:
                 # A control job is draining this agent for the updater: lease nothing new.
                 slots.wait_for_free(poll, any_change=False)
+                continue
+            if maybe_reattest(dashboard, slots, rotation):
+                # Due, and jobs are still running: lease nothing new until they finish.
+                slots.wait_for_free(poll)
                 continue
             want = None if slots.serial else slots.wanted()
             if want is not None and not want and slots.busy():
@@ -6046,6 +6067,39 @@ def main() -> int:
         slots.wait_for_free(backoff * (0.8 + random.random() * 0.4), any_change=False)
     slots.drain(float(os.environ.get("AGENT_DRAIN_SECONDS", "25")))
     return 0
+
+
+def maybe_reattest(dashboard, slots, state: dict, now=None) -> bool:
+    """Attest again with a fresh key when it is due. Returns True while it is due but
+    waiting for running jobs to finish (the caller leases nothing meanwhile).
+
+    Between jobs only: nothing is in flight while the key changes, so no request is ever
+    signed by a key the dashboard just replaced (that would read as a second copy). A
+    failure keeps the current key, which still works, and tries again in an hour; a
+    revoked agent learns it from its next lease's 401, as before.
+    """
+    now = time.time() if now is None else now
+    if state.get("next") is None or now < state["next"]:
+        return False
+    if slots.busy():
+        state["waiting_since"] = state.get("waiting_since") or now
+        if now - state["waiting_since"] < REATTEST_MAX_WAIT_S:
+            return True
+        log.warning("re-attestation is due but jobs are still running after %ds; "
+                    "trying again in an hour", REATTEST_MAX_WAIT_S)
+        state.update(next=now + 3600, waiting_since=None)
+        return False
+    state["waiting_since"] = None
+    try:
+        dashboard.identity = dashboard.attest(SPIFFE_JWT_FILE)
+    except (AgentFatal, requests.RequestException) as exc:
+        log.warning("re-attestation failed (%s); keeping the current key, retrying in an "
+                    "hour", exc)
+        state["next"] = now + 3600
+        return False
+    log.info("re-attested: new signing key in memory, next in %.0f h", REATTEST_HOURS)
+    state["next"] = now + REATTEST_HOURS * 3600
+    return False
 
 
 class JobSlots:
