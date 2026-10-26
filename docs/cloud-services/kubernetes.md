@@ -59,6 +59,11 @@ side-step a TLS-inspecting corporate proxy rejecting direct kubectl to a private
 Config: `k8s_runner` (`local|ecs|aci|gcp`), `k8s_runner_aws`/`_azure`/`_gcp`/`_oci`,
 `k8s_runner_image`.
 
+A cloud cluster can instead run these on **a deployed agent the dashboard owns**: choose it
+with **Runs on worker** on the cluster's row. That covers ESO, the Entitle agent, RBAC and
+the bindings, but not the token mints or the Rancher transport, which stay on the runner.
+See [Deploying an agent → Kubernetes work](../platform/spiffe/remote-agents/deploying.md#kubernetes-work).
+
 ### Secret delivery walkthrough (ESO)
 
 Installing ESO only stands up the *plumbing* — the operator plus the
@@ -334,7 +339,8 @@ See [Permissions](../admin/permissions.md) for how workstreams sit alongside per
 Registered/provisioned clusters appear in the [Config Management](../operations/config-management.md) target
 dropdown. They are **not SSH targets** — `kubernetes.core` plays run `hosts: localhost,
 connection: local` and reach the API via an injected token-prepped kubeconfig. These runs
-**always** use a remote in-cloud runner (never local Docker) with the `ansible-cloud` image.
+**always** use a remote in-cloud runner (never local Docker) with the `ansible-cloud` image,
+or the cluster's own deployed agent when it has chosen one.
 Starters live in `examples/playbooks/k8s/`. See [Config Management](../operations/config-management.md).
 
 ---

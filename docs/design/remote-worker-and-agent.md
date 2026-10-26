@@ -2,11 +2,10 @@
 
 > **Audience:** contributor · **Profile:** `both` · **Read this when:** you are deciding whether a piece of remote work should run on the one-shot remote worker or on a SPIFFE-attested remote agent, or you are about to move a workload from one to the other.
 
-**Phases 1 and 2 built; phase 3 part A built.** This note assesses the two execution paths as
+**Phases 1, 2 and 3 built.** This note assesses the two execution paths as
 they stand after agent 2.11 (lifecycle, ongoing checks and cloud node attestation). It
-recommends what to move, what to leave alone, and in what order. Of the
-[phases](#recommendation-agent-first-worker-kept), phases 1 and 2 are built, and phase 3's
-first part. The user-facing comparison is
+recommends what to move, what to leave alone, and in what order. All three
+[phases](#recommendation-agent-first-worker-kept) are built. The user-facing comparison is
 [Where work runs](../platform/where-work-runs.md); this page is the reasoning behind
 changing it.
 
@@ -259,10 +258,16 @@ Built.
 
 ### Phase 3: Kubernetes on dashboard-owned agents
 
-**Part A built:** the trust rules, the per-cluster executor, agent 2.12's `k8s:` block and
-`agent_k8s` handler, the sealed `/k8s-bundle` channel, the await bridge, and Kubernetes
-Config-Management plays (run kind `k8s`). **Part B, next:** routing the runner operations
-(ESO, Entitle agent, RBAC, bindings) through the bridge. The three operations that hand a
+**Built**, in two parts:
+
+- **Part A:** the trust rules, the per-cluster executor, agent 2.12's `k8s:` block and
+  `agent_k8s` handler, the sealed `/k8s-bundle` channel, the await bridge, and Kubernetes
+  Config-Management plays (run kind `k8s`).
+- **Part B:** the runner operations through the bridge. These are ESO, the Entitle agent,
+  the IdP group and impersonation bindings, the Password Safe rotator RBAC, the legacy PRA
+  token delete, and workload RBAC. The `k8s_service` wrappers build steps when the cluster
+  has an executor and run the worker command unchanged when it has none; a helm argv the
+  step set cannot carry stays on the worker. The three operations that hand a
 service-account token back to the dashboard (Entitle external, PRA vault, Password Safe
 read) stay on the worker, as does the Rancher transport, so no secret flows from an agent
 to the dashboard. How it is used: [Deploying an agent → Kubernetes

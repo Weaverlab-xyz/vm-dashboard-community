@@ -177,9 +177,17 @@ those ranges then go back to the remote worker.
 ## Kubernetes work
 
 An agent the dashboard deployed can also run a cluster's Kubernetes work, instead of the
-remote worker: no cold start and no dashboard worker slot. Today that means Config
-Management plays against the cluster. Each one hands the agent the cluster's
-**cluster-admin kubeconfig**, so only an agent the dashboard owns qualifies. A
+remote worker: no cold start and no dashboard worker slot. That covers:
+
+- Config Management plays against the cluster;
+- installing and removing the External Secrets Operator and its Password Safe store;
+- installing and removing the Entitle agent;
+- the IdP group binding and the impersonation binding;
+- the Password Safe rotator RBAC;
+- workload ServiceAccount RBAC.
+
+Each one hands the agent the cluster's **cluster-admin kubeconfig**, so only an agent the
+dashboard owns qualifies. A
 customer-hosted agent never does, whatever its policy says. All of these must hold:
 
 - **The dashboard deployed it.** Its `agent_hosts` row is the proof; nothing the agent
@@ -215,7 +223,17 @@ policy and adds `agent_k8s` to its job types:
 - **The steps** are a closed set: apply, delete, helm upgrade, helm uninstall. The agent
   builds every command itself; no step can name one.
 - **Fallback.** While the agent is offline, and its host is not about to be up, the work
-  runs on the remote worker, and the job's Live Output says so.
+  runs on the remote worker, and the job's Live Output says so. So does anything that
+  does not fit the step set, such as a Helm `--set` value with a newline: it stays on the
+  worker rather than failing on the agent.
+
+**What always stays on the remote worker:**
+
+- **Minting service-account tokens** for Entitle's external connector, the PRA vault and
+  Password Safe. Those hand a token back to the dashboard, and no secret flows from an
+  agent to the dashboard.
+- **The Rancher API transport and the Rancher import manifest.** They are chosen by the
+  Rancher node's network, not the cluster's.
 
 ## The API
 

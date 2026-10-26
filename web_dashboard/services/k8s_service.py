@@ -15,6 +15,7 @@ import base64
 import hashlib
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -1604,7 +1605,104 @@ def _helm_env(tmpdir: str) -> dict:
     return env
 
 
-async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str, target_cloud: str = "") -> str:
+# ── Kubernetes work on a cluster's owned agent (phase 3 of
+# docs/design/remote-worker-and-agent.md) ──────────────────────────────────────
+#
+# When a cluster names a deployed agent the dashboard owns (k8s_executor_service), the
+# wrappers below hand their work to it as `agent_k8s` steps instead of the remote worker.
+# The agent runs only a closed set — apply, delete, helm upgrade, helm uninstall — and
+# builds every command itself; a step describes, it never commands. Anything that does not
+# fit that set stays on the worker. So do the token mints (they hand a secret BACK) and
+# the Rancher transport.
+
+# The agent's own `--set` rule (runners/agent/agent.py _K8S_SET_RE), checked here first so
+# a value it would refuse stays on the worker instead of failing on the agent.
+_AGENT_SET_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\[\]\\-]{0,127}=[^\r\n]{0,1024}$")
+
+
+def _agent_for(db, cluster):
+    """The owned agent that runs ``cluster``'s Kubernetes work, or None for the worker."""
+    if db is None or not getattr(cluster, "executor_agent_id", None):
+        return None
+    from . import k8s_executor_service
+    return k8s_executor_service.executor_for(db, cluster)
+
+
+def _parent_job_id(db) -> str:
+    """The job this work is part of, so the agent's Live Output lands in it: the job worker
+    runs each job under its id as the correlation id."""
+    from ..logging_context import get_correlation_id
+    cid = get_correlation_id()
+    if cid and db.query(Job.id).filter(Job.id == cid).first() is not None:
+        return cid
+    return ""
+
+
+async def _on_agent(db, cluster, steps: list, legacy) -> str:
+    """Run ``steps`` on the cluster's owned agent and wait (k8s_agent_runner), or
+    ``legacy()`` when it has none or it is offline. Same return and raise shape as the
+    worker path, so no caller changes."""
+    if not getattr(cluster, "executor_agent_id", None):
+        return await legacy()
+    from . import k8s_agent_runner
+    return await k8s_agent_runner.run_steps(db, cluster, steps,
+                                            parent_job_id=_parent_job_id(db), legacy=legacy)
+
+
+def _helm_step(helm_args: list, values_stdin: Optional[str], add_eso_repo: bool) -> dict:
+    """The ``agent_k8s`` step for a ``helm`` argv, or ValueError when it uses anything the
+    agent's closed set has no field for — the call then stays on the worker."""
+    args = list(helm_args)
+    if args[:1] == ["uninstall"] and len(args) >= 2:
+        step = {"kind": "helm_uninstall", "release": args[1]}
+        rest = args[2:]
+    elif args[:2] == ["upgrade", "--install"] and len(args) >= 4:
+        step = {"kind": "helm_upgrade", "release": args[2], "chart": args[3], "set": []}
+        rest = args[4:]
+    else:
+        raise ValueError(f"helm {' '.join(args[:2])} is not a step the agent runs")
+    i = 0
+    while i < len(rest):
+        flag = rest[i]
+        value = rest[i + 1] if i + 1 < len(rest) else None
+        if flag in ("-n", "--namespace") and value:
+            step["namespace"], i = value, i + 2
+        elif step["kind"] == "helm_upgrade" and flag == "--repo" and value:
+            step["repo"], i = value, i + 2
+        elif step["kind"] == "helm_upgrade" and flag == "--version" and value:
+            step["version"], i = value, i + 2
+        elif step["kind"] == "helm_upgrade" and flag == "--timeout" and value:
+            step["timeout"], i = value, i + 2
+        elif step["kind"] == "helm_upgrade" and flag == "--set" and value:
+            if not _AGENT_SET_RE.match(value):
+                raise ValueError("a --set value the agent would refuse")
+            step["set"].append(value)
+            i += 2
+        elif step["kind"] == "helm_upgrade" and flag in ("-f", "--values") and value == "-":
+            if values_stdin is None:
+                raise ValueError("-f - with no values")
+            step["values"], i = values_stdin, i + 2
+        elif step["kind"] == "helm_upgrade" and flag == "--create-namespace":
+            step["create_namespace"], i = True, i + 1
+        elif step["kind"] == "helm_upgrade" and flag == "--wait":
+            step["wait"], i = True, i + 1
+        else:
+            raise ValueError(f"helm flag {flag!r} has no agent step field")
+    if not step.get("namespace"):
+        raise ValueError("helm with no namespace")
+    if step["kind"] == "helm_upgrade":
+        # The ESO chart is named through its repo alias; the agent adds no repos, so the
+        # step names the repo by URL and the chart by its own name.
+        prefix = _ESO_HELM_REPO_NAME + "/"
+        if add_eso_repo and step["chart"].startswith(prefix) and "repo" not in step:
+            step["chart"], step["repo"] = step["chart"][len(prefix):], _ESO_HELM_REPO_URL
+        if "/" in step["chart"] and "repo" not in step:
+            raise ValueError("a chart named through a repo alias the agent does not have")
+    return step
+
+
+async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str, target_cloud: str = "",
+                                     *, db=None, cluster=None) -> str:
     """Apply a manifest with ``kubectl``. ``manifest_ref`` is a URL
     (``kubectl apply -f <url>``) or inline YAML; the latter is streamed to
     ``kubectl apply -f -`` over stdin so secret-bearing manifests never touch disk.
@@ -1612,8 +1710,17 @@ async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str, target_
     Default (``k8s_runner=local``): the baked-in ``kubectl`` runs in-process
     (subprocess -- no Docker socket, so it works on managed/serverless runtimes).
     Otherwise the equivalent command runs as a one-shot cloud task with clean
-    egress to the cluster API (see ``k8s_runner_service``)."""
+    egress to the cluster API (see ``k8s_runner_service``).
+
+    With ``db`` and ``cluster``, an inline manifest runs on the cluster's owned agent when
+    it has one. A URL manifest (the Rancher import) stays here: the agent applies only
+    what it is handed."""
     from . import k8s_runner_service
+    if (not manifest_ref.startswith(("http://", "https://"))
+            and _agent_for(db, cluster) is not None):
+        return await _on_agent(db, cluster, [{"kind": "apply", "manifest": manifest_ref}],
+                               lambda: _apply_manifest_via_runner(kubeconfig, manifest_ref,
+                                                                  target_cloud))
     if k8s_runner_service.mode(target_cloud) == "local":
         tmpdir = _write_kubeconfig(kubeconfig)
         try:
@@ -1643,12 +1750,18 @@ async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str, target_
         target_cloud=target_cloud, stdin_text=stdin_text, job_id="")
 
 
-async def _delete_manifest_via_runner(kubeconfig: str, manifest: str, target_cloud: str = "") -> str:
+async def _delete_manifest_via_runner(kubeconfig: str, manifest: str, target_cloud: str = "",
+                                      *, db=None, cluster=None) -> str:
     """``kubectl delete -f -`` an inline manifest over stdin (best-effort teardown).
 
     Local (``k8s_runner=local``) runs the baked-in ``kubectl`` in-process;
-    otherwise it runs as a one-shot cloud task (see ``k8s_runner_service``)."""
+    otherwise it runs as a one-shot cloud task (see ``k8s_runner_service``). With
+    ``db`` and ``cluster``, on the cluster's owned agent when it has one."""
     from . import k8s_runner_service
+    if _agent_for(db, cluster) is not None:
+        return await _on_agent(db, cluster, [{"kind": "delete", "manifest": manifest}],
+                               lambda: _delete_manifest_via_runner(kubeconfig, manifest,
+                                                                   target_cloud))
     if k8s_runner_service.mode(target_cloud) == "local":
         tmpdir = _write_kubeconfig(kubeconfig)
         try:
@@ -1665,15 +1778,27 @@ async def _delete_manifest_via_runner(kubeconfig: str, manifest: str, target_clo
 
 
 async def _helm_via_runner(kubeconfig: str, helm_args: list, add_eso_repo: bool = True,
-                           values_stdin: Optional[str] = None, target_cloud: str = "") -> str:
+                           values_stdin: Optional[str] = None, target_cloud: str = "",
+                           *, db=None, cluster=None) -> str:
     """Run ``helm`` against the cluster. ``values_stdin`` is streamed to helm's
     stdin -- pass ``-f -`` in ``helm_args`` so secret values ride stdin instead of
     the process args.
 
     Local (``k8s_runner=local``) runs the baked-in ``helm`` in-process (no Docker
     socket); otherwise the equivalent ``helm`` command runs as a one-shot cloud
-    task with clean egress to the cluster API (see ``k8s_runner_service``)."""
+    task with clean egress to the cluster API (see ``k8s_runner_service``).
+
+    With ``db`` and ``cluster``, on the cluster's owned agent when it has one — unless the
+    argv uses something the agent's helm step has no field for, which stays here."""
     from . import k8s_runner_service
+    if _agent_for(db, cluster) is not None:
+        try:
+            step = _helm_step(helm_args, values_stdin, add_eso_repo)
+        except ValueError as exc:
+            logger.info("k8s helm stays on the runner for %s: %s", cluster.name, exc)
+        else:
+            return await _on_agent(db, cluster, [step], lambda: _helm_via_runner(
+                kubeconfig, helm_args, add_eso_repo, values_stdin, target_cloud))
     if k8s_runner_service.mode(target_cloud) == "local":
         tmpdir = _write_kubeconfig(kubeconfig)
         try:
@@ -1816,9 +1941,10 @@ async def setup_secret_delivery(cluster_id: str, kind: str) -> None:
             try:
                 await _delete_manifest_via_runner(kubeconfig, _eso_clustersecretstore_manifest(
                     css_name, _eso_bt_api_url() or "https://x/", _cfg("eso_bt_retrieval_type", "SECRET"),
-                    namespace, secret_name), target_cloud=row.cloud)
+                    namespace, secret_name), target_cloud=row.cloud, db=db, cluster=row)
                 await _helm_via_runner(kubeconfig, ["uninstall", "external-secrets", "-n", namespace],
-                                       add_eso_repo=False, target_cloud=row.cloud)
+                                       add_eso_repo=False, target_cloud=row.cloud,
+                                       db=db, cluster=row)
             except Exception as exc:
                 logger.warning("ESO teardown for %s partially failed: %s", cluster_id, exc)
             row.secrets_delivery_kind = None
@@ -1844,12 +1970,15 @@ async def setup_secret_delivery(cluster_id: str, kind: str) -> None:
                          "--set", "installCRDs=true"]
             if ver:
                 helm_args += ["--version", ver]
-            await _helm_via_runner(kubeconfig, helm_args, target_cloud=row.cloud)
+            await _helm_via_runner(kubeconfig, helm_args, target_cloud=row.cloud,
+                                   db=db, cluster=row)
             await _apply_manifest_via_runner(kubeconfig, _eso_credentials_secret_manifest(
-                namespace, secret_name, client_id, client_secret), target_cloud=row.cloud)
+                namespace, secret_name, client_id, client_secret), target_cloud=row.cloud,
+                db=db, cluster=row)
             await _apply_manifest_via_runner(kubeconfig, _eso_clustersecretstore_manifest(
                 css_name, api_url, _cfg("eso_bt_retrieval_type", "SECRET"),
-                namespace, secret_name, _cfg("eso_bt_api_version", "3.1")), target_cloud=row.cloud)
+                namespace, secret_name, _cfg("eso_bt_api_version", "3.1")), target_cloud=row.cloud,
+                db=db, cluster=row)
             row.secrets_delivery_kind = "eso"
             db.commit()
             logger.info("ESO + Password Safe secret delivery installed on cluster %s", row.name)
@@ -2137,6 +2266,31 @@ def _entitle_agent_install_oneshot_command(helm_args: list, *, secret_manifest_f
     return "{ " + " && ".join(steps) + "; }"
 
 
+#: What the agent prints for a best-effort step that failed (runners/agent/agent.py
+#: K8S_BEST_EFFORT_MARKER).
+_AGENT_BEST_EFFORT_FAILED = "K8S_STEP_BEST_EFFORT_FAILED"
+
+
+def _entitle_agent_install_steps(helm_args: list, values_stdin: Optional[str],
+                                 secret_manifest: Optional[str], crb_manifest: str,
+                                 ip_masq_manifest: Optional[str]) -> list:
+    """The Entitle agent install as ``agent_k8s`` steps — the one-shot command's sequence:
+    [the token Secret] → helm upgrade --install → the ClusterRoleBinding → [the GKE
+    ip-masq ConfigMap, best effort]. ``[]`` when the helm argv has something the agent's
+    helm step cannot carry (an operator's extra ``--set``, say); the install then stays on
+    the runner."""
+    try:
+        helm = _helm_step(helm_args, values_stdin, add_eso_repo=False)
+    except ValueError as exc:
+        logger.info("Entitle agent install stays on the runner: %s", exc)
+        return []
+    steps = [{"kind": "apply", "manifest": secret_manifest}] if secret_manifest else []
+    steps += [helm, {"kind": "apply", "manifest": crb_manifest}]
+    if ip_masq_manifest:
+        steps.append({"kind": "apply", "manifest": ip_masq_manifest, "best_effort": True})
+    return steps
+
+
 def _entitle_agent_remove_oneshot_command(helm_args: list, delete_before: list,
                                           delete_after: list) -> str:
     """The cloud-runner half of an Entitle agent remove as ONE shell command:
@@ -2194,7 +2348,19 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install",
                 helm_args = ["uninstall", "entitle-agent", "-n", namespace]
                 # Placeholder token: a delete matches by name, so no secret is involved.
                 secret_manifest = _entitle_agent_secret_manifest(namespace, secret_name, "x")
-                if k8s_runner_service.mode(row.cloud) == "local":
+                if _agent_for(db, row) is not None:
+                    # On the cluster's owned agent: the same three, as steps.
+                    await _on_agent(db, row, [
+                        {"kind": "delete", "manifest": crb_manifest},
+                        {"kind": "helm_uninstall", "release": "entitle-agent",
+                         "namespace": namespace},
+                        {"kind": "delete", "manifest": secret_manifest},
+                    ], lambda: k8s_runner_service.run(
+                        kubeconfig=_runner_kubeconfig(kubeconfig),
+                        command=_entitle_agent_remove_oneshot_command(
+                            helm_args, [crb_manifest], [secret_manifest]),
+                        target_cloud=row.cloud, job_id=""))
+                elif k8s_runner_service.mode(row.cloud) == "local":
                     await _delete_manifest_via_runner(kubeconfig, crb_manifest, target_cloud=row.cloud)
                     await _helm_via_runner(kubeconfig, helm_args, add_eso_repo=False,
                                            target_cloud=row.cloud)
@@ -2334,7 +2500,29 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install",
                 ip_masq_manifest = _gke_ip_masq_configmap(nonmasq)
 
         runner = k8s_runner_service.mode(row.cloud)
-        if runner == "local":
+        steps = (_entitle_agent_install_steps(
+            helm_args, helm_values_stdin, secret_manifest, crb_manifest, ip_masq_manifest)
+            if _agent_for(db, row) is not None else [])
+        if steps:
+            # On the cluster's owned agent: the one-shot's sequence as steps, in one job.
+            # Falls back to the cloud runner's one-shot when the agent is offline.
+            await _progress(35, "Installing the chart + RBAC on the cluster's agent…")
+            out = await _on_agent(db, row, steps, lambda: k8s_runner_service.run(
+                kubeconfig=_runner_kubeconfig(kubeconfig),
+                command=_entitle_agent_install_oneshot_command(
+                    helm_args, secret_manifest_from_stdin=bool(secret_manifest),
+                    manifests=[crb_manifest],
+                    best_effort_manifests=[ip_masq_manifest] if ip_masq_manifest else []),
+                target_cloud=row.cloud, stdin_text=secret_manifest or helm_values_stdin,
+                job_id=""))
+            if ip_masq_manifest:
+                if (_ENTITLE_AGENT_BEST_EFFORT_FAILED in (out or "")
+                        or _AGENT_BEST_EFFORT_FAILED in (out or "")):
+                    logger.warning("ip-masq-agent ConfigMap apply failed on %s "
+                                   "(pod→Cloud SQL reachability may need it)", row.name)
+                else:
+                    logger.info("Applied ip-masq-agent ConfigMap on co-located GKE cluster %s", row.name)
+        elif runner == "local":
             # In-process kubectl/helm: each call is seconds, so keep them separate
             # and report each step.
             if secret_manifest:
@@ -3080,7 +3268,8 @@ async def apply_ps_rotator_rbac(db: Session, cluster_id: str, *, mode: str,
             f"  name: {name}\n  namespace: {namespace}\n---\n" + manifest
         )
     await _apply_manifest_via_runner(
-        resolve_kubeconfig(db, cluster_id), manifest, target_cloud=row.cloud)
+        resolve_kubeconfig(db, cluster_id), manifest, target_cloud=row.cloud,
+        db=db, cluster=row)
     if not name:
         return ("rotator ClusterRole applied; no binding subject is configured for "
                 f"{row.cloud or 'this cloud'} — run Verify Functional Account in Password "
@@ -3097,7 +3286,8 @@ async def remove_ps_rotator_rbac(db: Session, cluster_id: str, *, mode: str) -> 
     manifest = _ps_rotator_rbac_manifest(
         mode=mode, subject_kind=kind, subject_name=name, subject_namespace=namespace)
     await _delete_manifest_via_runner(
-        resolve_kubeconfig(db, cluster_id), manifest, target_cloud=row.cloud)
+        resolve_kubeconfig(db, cluster_id), manifest, target_cloud=row.cloud,
+        db=db, cluster=row)
 
 
 async def delete_legacy_pra_token_secret(db: Session, cluster_id: str) -> None:
@@ -3116,8 +3306,13 @@ async def delete_legacy_pra_token_secret(db: Session, cluster_id: str) -> None:
     sa = _cfg("pra_k8s_sa_name", "pra-access")
     command = (f"kubectl -n {shlex.quote(ns)} delete secret {shlex.quote(f'{sa}-token')} "
                f"--ignore-not-found")
-    await _run_cluster_command(
-        resolve_kubeconfig(db, cluster_id), command, target_cloud=row.cloud)
+    kubeconfig = resolve_kubeconfig(db, cluster_id)
+    # On the cluster's owned agent the same delete is a Secret manifest: a step names an
+    # object, never a command.
+    secret = yaml.safe_dump({"apiVersion": "v1", "kind": "Secret",
+                             "metadata": {"name": f"{sa}-token", "namespace": ns}})
+    await _on_agent(db, row, [{"kind": "delete", "manifest": secret}],
+                    lambda: _run_cluster_command(kubeconfig, command, target_cloud=row.cloud))
 
 
 async def _resolve_pra_sa_token(db: Session, row: K8sCluster, kubeconfig: str) -> tuple:
@@ -3267,7 +3462,8 @@ async def deregister_pra_tunnel(db: Session, cluster_id: str) -> dict:
             ns = _cfg("pra_k8s_namespace", "pra-access")
             sa = _cfg("pra_k8s_sa_name", "pra-access")
             await _delete_manifest_via_runner(
-                resolve_kubeconfig(db, cluster_id), _entitle_k8s_rbac_manifest(ns, sa, f"{sa}-token"), target_cloud=row.cloud)
+                resolve_kubeconfig(db, cluster_id), _entitle_k8s_rbac_manifest(ns, sa, f"{sa}-token"),
+                target_cloud=row.cloud, db=db, cluster=row)
         except Exception as exc:
             logger.warning("k8s tunnel: PRA ServiceAccount revoke for %s failed (non-fatal): %s",
                            cluster_id, exc)
@@ -3823,6 +4019,19 @@ def _entra_group_bind_command(role: str, group_id: str) -> str:
     )
 
 
+def _entra_group_crb_manifest(role: str, subject: str) -> str:
+    """The ClusterRoleBinding ``_entra_group_bind_command`` creates, as a manifest — the
+    form a cluster's owned agent applies (it runs no command a step could name)."""
+    return yaml.safe_dump({
+        "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRoleBinding",
+        "metadata": {"name": _ENTRA_GROUP_BINDING_NAME},
+        "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole",
+                    "name": role},
+        "subjects": [{"apiGroup": "rbac.authorization.k8s.io", "kind": "Group",
+                      "name": subject}],
+    }, sort_keys=False)
+
+
 def _entra_group_unbind_command() -> str:
     """Shell command that removes the Entra-group ClusterRoleBinding (idempotent)."""
     q_name = shlex.quote(_ENTRA_GROUP_BINDING_NAME)
@@ -3860,8 +4069,18 @@ async def bind_entra_group(db: Session, cluster_id: str, *, group_id: str = None
     role = (role or "").strip() or _cfg("entra_rbac_group_role", "cluster-admin")
     subject = _rbac_group_subject(row, provider, gid)
     kubeconfig = resolve_kubeconfig(db, cluster_id)
-    out = await _run_cluster_command(
-        kubeconfig, _entra_group_bind_command(role, subject), target_cloud=row.cloud)
+    on_worker = []
+
+    async def _worker():
+        on_worker.append(1)
+        return await _run_cluster_command(
+            kubeconfig, _entra_group_bind_command(role, subject), target_cloud=row.cloud)
+    # Delete then apply on the cluster's owned agent (roleRef is immutable under apply).
+    crb = _entra_group_crb_manifest(role, subject)
+    out = await _on_agent(db, row, [{"kind": "delete", "manifest": crb},
+                                    {"kind": "apply", "manifest": crb}], _worker)
+    if not on_worker:
+        out = (out or "") + "\nENTRA_BOUND_OK"     # a completed agent job is the bind
     if "ENTRA_BOUND_OK" not in (out or ""):
         logger.error("Entra group bind: no success sentinel (len=%d): %r",
                      len(out or ""), (out or "")[-800:])
@@ -3882,9 +4101,12 @@ async def unbind_entra_group(db: Session, cluster_id: str) -> dict:
     if row is None or not config_service.get(f"k8s_entra_group_{cluster_id}"):
         return {"ok": True, "removed": False}
     try:
-        await _run_cluster_command(
-            resolve_kubeconfig(db, cluster_id), _entra_group_unbind_command(),
-            target_cloud=row.cloud)
+        kubeconfig = resolve_kubeconfig(db, cluster_id)
+        # Delete matches by kind and name, so the role here is irrelevant.
+        await _on_agent(db, row, [{"kind": "delete", "manifest": _entra_group_crb_manifest(
+                            "cluster-admin", "x")}],
+                        lambda: _run_cluster_command(kubeconfig, _entra_group_unbind_command(),
+                                                     target_cloud=row.cloud))
     except Exception as exc:
         logger.warning("Entra group unbind for %s failed (non-fatal): %s", cluster_id, exc)
     config_service.set(f"k8s_entra_group_{cluster_id}", "")
@@ -3977,7 +4199,8 @@ async def apply_impersonator_binding(db: Session, cluster_id: str, *,
     subject = _rbac_group_subject(row, provider, gid)
     kubeconfig = resolve_kubeconfig(db, cluster_id)
     await _apply_manifest_via_runner(
-        kubeconfig, _entitle_impersonator_manifest(subject), target_cloud=row.cloud)
+        kubeconfig, _entitle_impersonator_manifest(subject), target_cloud=row.cloud,
+        db=db, cluster=row)
     # Cloud IAM half (GKE only). Deliberately fatal: a half-applied grant is exactly
     # the silent-partial-success that produced the original bug, and both halves are
     # idempotent so a retry is safe.
@@ -4008,7 +4231,7 @@ async def remove_impersonator_binding(db: Session, cluster_id: str) -> dict:
         # pass the raw gid (skip _workforce_principalset's pool-config dependency).
         await _delete_manifest_via_runner(
             resolve_kubeconfig(db, cluster_id),
-            _entitle_impersonator_manifest(gid), target_cloud=row.cloud)
+            _entitle_impersonator_manifest(gid), target_cloud=row.cloud, db=db, cluster=row)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Entitle impersonator unbind for %s failed (non-fatal): %s", cluster_id, exc)
     # Cloud IAM half (GKE): the custom-role binding is PROJECT-level, so it is shared by
