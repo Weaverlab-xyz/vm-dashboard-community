@@ -88,7 +88,16 @@ async def run_steps(db, cluster, steps: list, *, parent_job_id: str = "",
             raise K8sRunnerError("This cluster has no agent to run its Kubernetes work.")
         return await legacy()
 
-    meta = agent_k8s_meta.run_meta(cluster=cluster, steps=steps, parent_job_id=parent_job_id)
+    try:
+        meta = agent_k8s_meta.run_meta(cluster=cluster, steps=steps,
+                                       parent_job_id=parent_job_id)
+    except agent_k8s_meta.K8sMetaError as exc:
+        # Refused before a job exists (an oversized manifest, no API endpoint): the work
+        # still has a home, so it goes where it always went.
+        if legacy is None:
+            raise K8sRunnerError(str(exc))
+        _note(f"This Kubernetes work runs on the remote worker: {exc}")
+        return await legacy()
     job = job_service.create_job(db, job_type=JOB_TYPE, created_by=created_by,
                                  workgroup="k8s", metadata=meta, agent_id=agent.id)
     _note(f"Running {len(steps)} Kubernetes step(s) on agent '{agent.name}' (job {job.id}).")

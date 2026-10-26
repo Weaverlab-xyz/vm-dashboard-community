@@ -484,7 +484,7 @@ async def _run_register(db: Session, row: WorkloadK8sToken, job_id: str) -> dict
         service_account=row.service_account)
     await k8s_service._apply_manifest_via_runner(       # noqa: SLF001 — the only applier
         k8s_service.resolve_kubeconfig(db, row.cluster_id), manifest,
-        target_cloud=cluster.cloud or "")
+        target_cloud=cluster.cloud or "", db=db, cluster=cluster)
     _mark(row, "workload_rbac")
     db.commit()
 
@@ -611,7 +611,8 @@ async def _run_deregister(db: Session, row: WorkloadK8sToken, job_id: str) -> di
             if "kind: Namespace" not in doc)
         await k8s_service._delete_manifest_via_runner(  # noqa: SLF001
             k8s_service.resolve_kubeconfig(db, row.cluster_id), manifest,
-            target_cloud=(cluster.cloud if cluster is not None else "") or "")
+            target_cloud=(cluster.cloud if cluster is not None else "") or "",
+            db=db, cluster=cluster)
         notes.append("ServiceAccount and binding deleted — every token issued to it dies "
                      "with the account's uid")
     except Exception as exc:                            # noqa: BLE001 — see docstring

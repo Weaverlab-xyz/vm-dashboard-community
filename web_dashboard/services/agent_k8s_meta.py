@@ -22,6 +22,8 @@ from urllib.parse import urlparse
 
 STEP_KINDS = ("apply", "delete", "helm_upgrade", "helm_uninstall")
 MAX_STEPS = 16
+# The agent's cap on one manifest or values file (runners/agent/agent.py K8S_MAX_DOC_BYTES).
+MAX_DOC_BYTES = 256 * 1024
 ENVELOPE_KEYS = ("cluster_host", "cluster_port", "step_kinds")
 
 
@@ -48,6 +50,9 @@ def check_steps(steps) -> list:
     for index, step in enumerate(steps, 1):
         if not isinstance(step, dict) or step.get("kind") not in STEP_KINDS:
             raise K8sMetaError(f"Step {index} is not one of {', '.join(STEP_KINDS)}.")
+        for key in ("manifest", "values"):
+            if len(str(step.get(key) or "").encode("utf-8")) > MAX_DOC_BYTES:
+                raise K8sMetaError(f"Step {index}'s {key} is over {MAX_DOC_BYTES} bytes.")
     return steps
 
 
