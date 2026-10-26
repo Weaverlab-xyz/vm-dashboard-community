@@ -185,6 +185,11 @@ LABEL org.opencontainers.image.revision=${GIT_SHA} \
 # in Settings). Markdown only; small.
 COPY docs/ ./docs/
 
+# Packer provisioner scripts. The POV standard images (services/pov_image_recipes)
+# run these straight from the image (packer_build_service.PROVISIONERS_DIR); without
+# this COPY every standard build fails naming the missing script. Small text files.
+COPY provisioners/ ./provisioners/
+
 # Cloud-database Terraform modules (driven by cloud_database_service). The rest
 # of terraform/ is generated at runtime / cached at build, so only the static
 # DB modules are copied in. One COPY per cloud — adding a cloud means adding its

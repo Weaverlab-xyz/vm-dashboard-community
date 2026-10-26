@@ -1197,7 +1197,9 @@ app.include_router(storage.router)
 #
 # `packer` and `images` are in for the same reason: they build and promote machine images
 # into those same clouds. A POV builds its VMs from the image CATALOG through the POV
-# template, which reads the table directly and needs none of these routes.
+# template, which reads the table directly and needs none of these routes. The images a
+# POV boots are built by /api/pov/images (api/pov_images): two standard recipes over the
+# same Packer engine, gated with the rest of the POV feature rather than by opening these.
 #
 # The POV's own read-only view of its selected cloud is /pov/cloud — a POV-owned page, so
 # it stays available while these do not.
@@ -1497,6 +1499,12 @@ try:
     # named after its first platform.
     from .api import pov_templates as pov_templates_api  # noqa: E402
     app.include_router(pov_templates_api.router,
+                       dependencies=[_feature_gate("pov_environments_enabled")])
+    # The POV image builder: the standard images a cloud template boots. Same gate and
+    # the same scope as the templates themselves. Deliberately NOT /api/packer or
+    # /api/images, which stay behind cloud_pages below — see the router's docstring.
+    from .api import pov_images as pov_images_api  # noqa: E402
+    app.include_router(pov_images_api.router,
                        dependencies=[_feature_gate("pov_environments_enabled")])
     # The POV's read-only view of its cloud provider. Same gate, and its own router
     # rather than more of api/pov: it answers about the CLOUD rather than about a POV,

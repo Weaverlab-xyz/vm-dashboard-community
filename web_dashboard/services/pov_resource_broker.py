@@ -172,11 +172,13 @@ def clear_login_passwords(db: Session, env: PovEnvironment) -> int:
 def platform_holds_login(env: PovEnvironment, vm: PovEnvironmentVM) -> bool:
     """Whether a manual-login platform can still answer for THIS VM itself.
 
-    AWS can for a Windows guest launched with the POV's own key (``pov_cloud_aws``), and
-    nothing else does yet. An adapter without ``holds_login`` answers no.
+    AWS can for a Windows guest launched with the POV's own key, and for a guest launched
+    from a Standard Linux image (``pov_cloud_aws``); nothing else does yet. An adapter
+    without ``holds_login`` answers no.
     """
     holds = getattr(lab_platforms.adapter(env.platform), "holds_login", None)
-    return bool(holds and holds(env.platform_environment_id or "", vm.guest_os or ""))
+    return bool(holds and holds(env.platform_environment_id or "", vm.guest_os or "",
+                                vm.platform_vm_id or ""))
 
 
 def login_problem(env: PovEnvironment, vm: PovEnvironmentVM) -> str:

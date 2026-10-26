@@ -152,11 +152,21 @@ def generate_aws_template(
     has_provisioner: bool,
     provisioner_env: dict = None,
     provisioner_sensitive_var_names: dict = None,
+    scripts: list = None,
+    extra_tags: dict = None,
 ) -> str:
+    """amazon-ebs over SSH. ``scripts`` names files in the build directory, run in
+    order by one shell provisioner; unset, it is ``provision.sh`` alone when
+    ``has_provisioner``, which is what the Build Image tab has always produced."""
     safe = _safe_ami_name(image_name)
     envb = _provisioner_env_block(provisioner_env, provisioner_sensitive_var_names)
     decls = _sensitive_var_decls(provisioner_sensitive_var_names)
-    prov = ('\n  provisioner "shell" {\n    script = "provision.sh"\n' + envb + '  }\n') if has_provisioner else ""
+    if scripts:
+        prov = ('\n  provisioner "shell" {\n    scripts = ['
+                + ", ".join('"%s"' % _hcl_escape(s) for s in scripts) + ']\n'
+                + envb + '  }\n')
+    else:
+        prov = ('\n  provisioner "shell" {\n    script = "provision.sh"\n' + envb + '  }\n') if has_provisioner else ""
     return (
         'packer {\n'
         '  required_plugins {\n'
@@ -174,15 +184,128 @@ def generate_aws_template(
         '  instance_type = "' + instance_type + '"\n'
         '  ssh_username  = "' + ssh_username + '"\n'
         '  ami_name      = "' + safe + '-{{timestamp}}"\n\n'
-        '  tags = {\n'
-        '    Name    = "' + image_name + '"\n'
-        '    BuiltBy = "vm-dashboard"\n'
-        '  }\n'
+        + _aws_tags_block(image_name, extra_tags) +
         '}\n\n'
         'build {\n'
         '  name    = "vm-dashboard"\n'
         '  sources = ["source.amazon-ebs.build"]\n'
         + prov +
+        '}\n'
+    )
+
+
+def _aws_tags_block(image_name: str, extra_tags: dict = None) -> str:
+    lines = ['    Name    = "' + image_name + '"', '    BuiltBy = "vm-dashboard"']
+    for k, v in (extra_tags or {}).items():
+        lines.append('    "%s" = "%s"' % (_hcl_escape(str(k)), _hcl_escape(str(v))))
+    return '  tags = {\n' + "\n".join(lines) + '\n  }\n'
+
+
+# The build's own WinRM, brought up by EC2 user-data before Packer connects. A
+# stock Windows AMI has a WinRM HTTP listener but nothing Packer can reach from
+# outside the subnet, so this adds an HTTPS one on a throwaway self-signed cert
+# and opens 5986. It exists only on the BUILD instance: the image's own WinRM is
+# provisioners/pov/pov-ready-windows.ps1's job, which also undoes what this sets.
+AWS_WINRM_BOOTSTRAP = r"""<powershell>
+$ErrorActionPreference = 'Stop'
+Set-ExecutionPolicy Unrestricted -Scope LocalMachine -Force -ErrorAction Ignore
+$cert = New-SelfSignedCertificate -CertStoreLocation Cert:\LocalMachine\My -DnsName 'packer'
+Get-ChildItem WSMan:\Localhost\Listener | Where-Object { $_.Keys -contains 'Transport=HTTPS' } | Remove-Item -Recurse -Force
+New-Item -Path WSMan:\LocalHost\Listener -Transport HTTPS -Address * -CertificateThumbPrint $cert.Thumbprint -Force | Out-Null
+Set-Item WSMan:\localhost\Service\Auth\Basic -Value $true
+Set-Item WSMan:\localhost\MaxTimeoutms -Value 1800000
+New-NetFirewallRule -Name 'packer-winrm-https' -DisplayName 'Packer WinRM HTTPS' -Direction Inbound -Protocol TCP -LocalPort 5986 -Action Allow | Out-Null
+Set-Service WinRM -StartupType Automatic
+Restart-Service WinRM
+</powershell>
+"""
+
+
+def generate_aws_windows_template(
+    source_ami: str,
+    instance_type: str,
+    image_name: str,
+    scripts: list = None,
+    provisioner_env: dict = None,
+    provisioner_sensitive_var_names: dict = None,
+    extra_tags: dict = None,
+    volume_size_gb: int = 0,
+) -> str:
+    """amazon-ebs over WinRM, for a Windows Server AMI.
+
+    No password is set or known: the builder imports a temporary key pair and reads
+    the generated Administrator password back with GetPasswordData, the way a POV
+    reads it later. The user-data file (``winrm_bootstrap.ps1``, written beside the
+    template) is what makes WinRM reachable for the build.
+
+    The finisher is EC2Launch v2's own ``sysprep``, not a bare Sysprep.exe: it
+    re-arms EC2Launch so the first boot of every instance launched from the AMI
+    generates a new random Administrator password, which is what
+    ``pov_cloud_aws.stored_credentials`` decrypts. A bare sysprep would ship an image
+    with no password generation — and so with a login nobody can recover.
+    """
+    safe = _safe_ami_name(image_name)
+    envb = _provisioner_env_block(provisioner_env, provisioner_sensitive_var_names)
+    decls = _sensitive_var_decls(provisioner_sensitive_var_names)
+    prov = ""
+    if scripts:
+        prov = ('\n  provisioner "powershell" {\n    scripts = ['
+                + ", ".join('"%s"' % _hcl_escape(s) for s in scripts) + ']\n'
+                + envb + '  }\n'
+                '\n  provisioner "windows-restart" {\n'
+                '    restart_timeout = "30m"\n'
+                '  }\n')
+    # Seal last, after the restart, so nothing a provisioner left pending runs after
+    # generalize. The marker is what tells the image's boot-time WinRM task that this is
+    # no longer the build instance (provisioners/pov/pov-ready-windows.ps1).
+    finisher = (
+        '\n  provisioner "powershell" {\n'
+        '    inline = [\n'
+        '      "New-Item -ItemType Directory -Force -Path C:/BT | Out-Null",\n'
+        '      "Set-Content -Path C:/BT/image-sealed -Value (Get-Date -Format o)",\n'
+        '      "& \'C:/Program Files/Amazon/EC2Launch/ec2launch.exe\' sysprep --clean"\n'
+        '    ]\n'
+        '  }\n'
+    )
+    volume = ""
+    if volume_size_gb:
+        volume = (
+            '\n  launch_block_device_mappings {\n'
+            '    device_name           = "/dev/sda1"\n'
+            '    volume_size           = %d\n'
+            '    volume_type           = "gp3"\n'
+            '    delete_on_termination = true\n'
+            '  }\n' % int(volume_size_gb))
+    return (
+        'packer {\n'
+        '  required_plugins {\n'
+        '    amazon = {\n'
+        '      version = ">= 1.2.0"\n'
+        '      source  = "github.com/hashicorp/amazon"\n'
+        '    }\n'
+        '  }\n'
+        '}\n\n'
+        'variable "region" { default = "us-east-2" }\n\n'
+        + decls +
+        'source "amazon-ebs" "build" {\n'
+        '  region        = var.region\n'
+        '  source_ami    = "' + _hcl_escape(source_ami) + '"\n'
+        '  instance_type = "' + _hcl_escape(instance_type) + '"\n'
+        '  ami_name      = "' + safe + '-{{timestamp}}"\n\n'
+        '  user_data_file           = "winrm_bootstrap.ps1"\n'
+        '  communicator             = "winrm"\n'
+        '  winrm_username           = "Administrator"\n'
+        '  winrm_use_ssl            = true\n'
+        '  winrm_insecure           = true\n'
+        '  winrm_timeout            = "30m"\n'
+        '  windows_password_timeout = "30m"\n'
+        + volume + '\n'
+        + _aws_tags_block(image_name, extra_tags) +
+        '}\n\n'
+        'build {\n'
+        '  name    = "vm-dashboard"\n'
+        '  sources = ["source.amazon-ebs.build"]\n'
+        + prov + finisher +
         '}\n'
     )
 

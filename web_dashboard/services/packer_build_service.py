@@ -143,7 +143,23 @@ async def _bt_provisioner_env(req) -> dict:
     if fam in ("deb", "rpm"):
         source = (getattr(req, "bt_epml_source", None) or "beyondtrust").strip().lower()
         env["BT_EPML_URL"] = await _epml_package_url(fam, source)
+    stage = (getattr(req, "bt_stage_asset", None) or "").strip()
+    if stage:
+        env["POV_STAGE_URL"] = await _storage_asset_url(stage)
+        env["POV_STAGE_NAME"] = stage.rsplit("/", 1)[-1]
     return env
+
+
+async def _storage_asset_url(name: str) -> str:
+    """A presigned URL for one asset on the active storage backend, minted now."""
+    backend = storage_service.active_backend()
+    if not backend:
+        raise PackerError("No active storage backend — pick one on the Storage page.")
+    assets = await storage_service.list_assets_in(backend)
+    if name not in {a.get("name") for a in assets}:
+        raise PackerError(f"'{name}' is not on the '{backend}' storage backend any more.")
+    key = storage_service.asset_key(backend, name)
+    return await storage_service.presigned_url(backend, key, expiry_seconds=3600)
 
 
 async def _provisioner_env(req) -> tuple[dict, dict, dict]:
@@ -196,8 +212,10 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
         job_service.set_running(db, job_id)
         build_dir.mkdir(parents=True, exist_ok=True)
 
-        # Build env
-        region = _cfg("aws_region") or "us-east-2"
+        # Build env. A POV build names its region (the POV's, since an AMI is
+        # region-scoped and pov_cloud_env.resolve_image refuses a mismatch).
+        region = req.region or _cfg("aws_region") or "us-east-2"
+        is_windows = req.os_type == "Windows"
         env = _base_env()
         from .workload_credential_lease import aws_subprocess_env as _wlc_aws_env
         _dynamic = _wlc_aws_env()
@@ -226,6 +244,12 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
             job_service.update_progress(
                 db, job_id, 3, f"Resolving the newest {req.source_ami_family} AMI in {region}…")
             fam = await aws_service.find_ami_by_family(region, req.source_ami_family)
+            if (fam.get("os_type") or "Linux") != req.os_type:
+                # A shell build waiting on SSH from a Windows AMI hangs for its whole
+                # timeout, and the reverse fails as obscurely. Say which is which now.
+                raise PackerError(
+                    f"source family {req.source_ami_family} is a {fam.get('os_type')} "
+                    f"image and this is a {req.os_type} build")
             source_ami = fam["ami_id"]
             # The family's canonical login user wins over an untouched default —
             # Debian images log in as `admin`, and ec2-user would hang the build
@@ -237,22 +261,47 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
 
         # Generate template
         job_service.update_progress(db, job_id, 5, "Generating Packer template…")
-        if req.provisioner_script.strip():
+        has_script = bool(req.provisioner_script.strip())
+        if has_script or req.provisioner_files:
             plain_env, sensitive_var_names, pkr_env = await _provisioner_env(req)
         else:
             plain_env, sensitive_var_names, pkr_env = {}, {}, {}
         env.update(pkr_env)
-        template = packer_service.generate_aws_template(
-            source_ami=source_ami,
-            instance_type=req.instance_type,
-            ssh_username=ssh_username,
-            image_name=req.image_name,
-            has_provisioner=bool(req.provisioner_script.strip()),
-            provisioner_env=plain_env,
-            provisioner_sensitive_var_names=sensitive_var_names,
-        )
+        scripts = _stage_bundled(build_dir, req.provisioner_files)
+        tags = {"pov-recipe": req.recipe} if req.recipe else None
+        if is_windows:
+            if has_script:
+                scripts.append("provision.ps1")
+            template = packer_service.generate_aws_windows_template(
+                source_ami=source_ami,
+                instance_type=req.instance_type,
+                image_name=req.image_name,
+                scripts=scripts,
+                provisioner_env=plain_env,
+                provisioner_sensitive_var_names=sensitive_var_names,
+                extra_tags=tags,
+            )
+            (build_dir / "winrm_bootstrap.ps1").write_text(packer_service.AWS_WINRM_BOOTSTRAP)
+            _write_ps_provisioner(build_dir, req.provisioner_script)
+        else:
+            if scripts and has_script:
+                # The operator's script goes before the last bundled one: that one
+                # seals the image (host keys, machine-id, cloud-init state), and
+                # anything run after it would undo the seal.
+                scripts.insert(len(scripts) - 1, "provision.sh")
+            template = packer_service.generate_aws_template(
+                source_ami=source_ami,
+                instance_type=req.instance_type,
+                ssh_username=ssh_username,
+                image_name=req.image_name,
+                has_provisioner=has_script,
+                provisioner_env=plain_env,
+                provisioner_sensitive_var_names=sensitive_var_names,
+                scripts=scripts or None,
+                extra_tags=tags,
+            )
+            _write_provisioner(build_dir, req.provisioner_script)
         (build_dir / "build.pkr.hcl").write_text(template)
-        _write_provisioner(build_dir, req.provisioner_script)
 
         def on_progress(pct, msg):
             job_service.update_progress(db, job_id, pct, msg)
@@ -279,11 +328,22 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
                 except Exception as e:
                     result["archive_error"] = str(e)
 
-        # Export to portable VHD + auto-register (Phase 2)
-        export_result = await export_and_register_aws(
-            db, job_id, req.image_name, result.get("artifact_id") or "", region, created_by,
-        )
-        result.update(export_result)
+        if req.register_mode == "ami_only":
+            result.update(register_aws_ami(
+                db, job_id, req.image_name, result.get("artifact_id") or "", region,
+                created_by, os_type=req.os_type, recipe=req.recipe))
+            if result.get("register_error"):
+                # The catalog row IS this build's deliverable: an AMI nobody can pick
+                # from the template editor is not a success, whatever Packer said.
+                raise PackerError(
+                    f"AMI {result.get('artifact_id') or '(unknown)'} was built but not "
+                    f"registered: {result['register_error']}")
+        else:
+            # Export to portable VHD + auto-register (Phase 2)
+            export_result = await export_and_register_aws(
+                db, job_id, req.image_name, result.get("artifact_id") or "", region, created_by,
+            )
+            result.update(export_result)
 
         job_service.set_completed(db, job_id, result)
 
@@ -810,6 +870,41 @@ def _write_ps_provisioner(build_dir: Path, script: str) -> None:
     (build_dir / "provision.ps1").write_text(content)
 
 
+# The scripts shipped in the image (the Dockerfile COPYs provisioners/). A standard
+# POV recipe names its scripts here rather than asking anyone to upload them first.
+PROVISIONERS_DIR = Path(__file__).parent.parent.parent / "provisioners"
+
+
+def _stage_bundled(build_dir: Path, files: list) -> list:
+    """Copy bundled provisioner scripts into the build directory; their names, in order.
+
+    Each name is checked to resolve INSIDE ``PROVISIONERS_DIR`` as well as matching the
+    request model's pattern, and a missing one fails the build here, naming it — an
+    image whose Dockerfile forgot the COPY would otherwise build a bare base AMI and
+    register it as the standard one.
+    """
+    staged = []
+    root = PROVISIONERS_DIR.resolve()
+    for rel in files or []:
+        src = (PROVISIONERS_DIR / rel).resolve()
+        if root not in src.parents:
+            raise PackerError(f"provisioner file {rel!r} is outside provisioners/")
+        if not src.is_file():
+            raise PackerError(
+                f"bundled provisioner {rel} is not in this image ({src}). The image was "
+                f"built without provisioners/ — rebuild it from a current Dockerfile.")
+        name = src.name
+        if name in staged:
+            raise PackerError(f"two bundled provisioners are both named {name}")
+        # Bytes, not text: a .ps1 keeps its CRLF and a .sh its LF exactly as shipped.
+        dest = build_dir / name
+        dest.write_bytes(src.read_bytes())
+        if name.endswith(".sh"):
+            dest.chmod(0o755)
+        staged.append(name)
+    return staged
+
+
 # ── Export + auto-register helpers (Phase 2/3 — build-once, promote-many) ────
 #
 # Each helper runs after the cloud-native Packer build succeeds. The flow:
@@ -1119,6 +1214,42 @@ async def export_and_register_aws(
         job_service.update_progress(db, job_id, 99, msg)
         result["export_error"] = str(e)
     return result
+
+
+def register_aws_ami(
+    db, job_id: str, image_name: str, ami_id: str, region: str, created_by: str,
+    os_type: str = "Linux", recipe: str = None,
+) -> dict:
+    """Register a freshly built AMI as itself: no VHD export, no S3 bucket.
+
+    The POV builder's path. A POV boots the AMI in the region it was built in and never
+    wants a portable copy, and ``export_and_register_aws`` registers nothing at all on an
+    install with no ``storage_s3_bucket`` — which would leave a finished build that the
+    template editor can never pick. Same shape as ``_register_gallery_image``.
+    """
+    if not ami_id:
+        msg = "Build finished but no AMI id was found in Packer's output; nothing registered."
+        job_service.update_progress(db, job_id, 99, msg)
+        return {"register_error": msg}
+    try:
+        registered = image_registry_service.register_image(
+            db,
+            name=image_name,
+            version=utcnow().strftime("%Y%m%d-%H%M%S"),
+            source_cloud="aws",
+            created_by=created_by,
+            description=f"Built by job {job_id}",
+            source_image_id=ami_id,
+            source_region=region,
+            os_type=os_type,
+            recipe=recipe,
+        )
+        job_service.update_progress(db, job_id, 99, f"Image registered: {registered['id']}")
+        return {"registered_image_id": registered["id"]}
+    except Exception as e:
+        logger.exception("AMI registration failed for job %s", job_id)
+        job_service.update_progress(db, job_id, 99, f"Image registration failed: {e}")
+        return {"register_error": str(e)}
 
 
 async def _register_gallery_image(

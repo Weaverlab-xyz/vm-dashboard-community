@@ -297,6 +297,10 @@ def vm_specs(template_row, vm_rows, cloud: str, region: str, *,
     That is also why a cloud broker cannot use ``inject_bootstrap``. Cloud-init runs
     user-data on FIRST boot; handing it to an instance that is already up does nothing at
     all, silently. The payload has to be there at ``RunInstances``.
+
+    Targets get no user-data from here. A target booting a Standard Linux catalog image is
+    marked with ``login``, and a driver that supports it (``pov_cloud_aws``) adds the
+    POV's own login as user-data of its own.
     """
     from . import pov_zones
     zoned = bool(getattr(template_row, "purdue_zones", False))
@@ -316,8 +320,32 @@ def vm_specs(template_row, vm_rows, cloud: str, region: str, *,
             "instance_type": row.instance_type,
             "disk_gb": int(row.disk_gb or DEFAULT_DISK_GB),
             "user_data": bootstrap if role == "broker" else "",
+            # A target booting a Standard Linux image is given this POV's own login at
+            # launch, by a driver that supports it (pov_cloud_aws); others ignore it.
+            "login": _login_kind(row) if role == "target" else "",
         })
     return specs
+
+
+def _login_kind(row) -> str:
+    """``"standard-linux"`` for a template VM booting a Standard Linux catalog image.
+
+    Only through ``image_ref``: a literal image id names an AMI this dashboard knows
+    nothing about, and setting a password on an account that image may not have would
+    claim a login that does not exist.
+    """
+    from ..database import RegisteredImage, SessionLocal
+    from .pov_image_recipes import STANDARD_LINUX
+
+    ref = (getattr(row, "image_ref", "") or "").strip()
+    if not ref or (getattr(row, "image_id", "") or "").strip():
+        return ""
+    db = SessionLocal()
+    try:
+        img = db.get(RegisteredImage, ref)
+        return STANDARD_LINUX if img is not None and img.recipe == STANDARD_LINUX else ""
+    finally:
+        db.close()
 
 
 def load_template(template_id: str, cloud: str):

@@ -22,7 +22,10 @@ Its own module rather than more of ``api/pov.py``, which is already long, but th
 prefix and the same gate**: these are POV routes, and on a demo instance they 404 with the
 rest of the feature.
 
-**Reads authenticate; writes require an admin** — the split ``api/bt_tenants`` already uses.
+**Reads need ``pov_templates:read``; writes need ``pov_templates`` write or delete granted
+explicitly** (``require_explicit_permission``: an empty permission map grants neither) —
+the split ``api/bt_tenants`` already uses. The standard images a cloud template boots are
+built by ``api/pov_images``, on the same scope.
 It is worth more here than there: a build creates a real environment in the customer's lab
 account and bakes a real template into their catalogue, so every mutation below spends their
 money or changes what other people will build POVs from.

@@ -1271,6 +1271,11 @@ AMI_FAMILIES = {
                      "ssh_username": "ubuntu"},
     "al2023":       {"owners": ["amazon"], "name": "al2023-ami-2023.*-kernel-*-x86_64",
                      "ssh_username": "ec2-user"},
+    # Windows: no SSH user. The build connects over WinRM as Administrator, with the
+    # password Packer reads back from GetPasswordData (generate_aws_windows_template).
+    "windows-server-2022": {"owners": ["amazon"],
+                            "name": "Windows_Server-2022-English-Full-Base-*",
+                            "ssh_username": "", "os_type": "Windows"},
 }
 
 
@@ -1292,7 +1297,8 @@ def _find_ami_by_family_sync(region: str, family: str) -> dict:
     if not imgs:
         raise AWSError(f"no available {family} AMI found in {region}")
     return {"ami_id": imgs[0]["ImageId"], "name": imgs[0].get("Name", ""),
-            "ssh_username": spec["ssh_username"]}
+            "ssh_username": spec["ssh_username"],
+            "os_type": spec.get("os_type", "Linux")}
 
 
 async def find_ami_by_family(region: str, family: str) -> dict:
