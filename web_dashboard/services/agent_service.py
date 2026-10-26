@@ -170,6 +170,7 @@ def reissue_enroll_code(db: Session, agent: RemoteAgent) -> str:
     Also the ROLLBACK from SPIRE: the SPIFFE binding is cleared with the key, so the row
     is back to plain Ed25519 enrolment and an SVID for the old identity attests nothing.
     """
+    _forget_spire(agent)
     code = new_enroll_code()
     agent.enroll_code_hash = hash_code(code)
     agent.enroll_expires_at = utcnow() + timedelta(minutes=ENROLL_TTL_MINUTES)
@@ -207,6 +208,9 @@ def bind_spiffe_id(db: Session, agent: RemoteAgent, spiffe_id: str) -> RemoteAge
     """
     from . import spiffe_assertion
     spiffe_id = (spiffe_id or "").strip()
+    if agent.spiffe_id and spiffe_id != agent.spiffe_id:
+        # The old identity's registration goes with the binding.
+        _forget_spire(agent)
     if not spiffe_id:
         if agent.auth_mode == "spiffe":
             agent.public_key = None
@@ -291,6 +295,23 @@ def _attest(db: Session, *, svid: str, public_key: str, proof: str, audiences,
     return agent
 
 
+def _forget_spire(agent: RemoteAgent) -> list:
+    """Remove the SPIRE registration the dashboard made for ``agent``, best-effort.
+
+    What could not be removed is kept on the instance as ``spire_left_behind`` for the
+    route to report; the revoke or unbind itself has already happened either way."""
+    problems = []
+    if agent.spiffe_id:
+        try:
+            from . import dashboard_spire
+            problems = dashboard_spire.forget_agent(agent.id, agent.spiffe_id)
+        except Exception as exc:  # noqa: BLE001 - must never fail the revoke
+            logger.warning("SPIRE cleanup for agent %s failed: %s", agent.id, exc)
+            problems = [str(exc)]
+    agent.spire_left_behind = problems
+    return problems
+
+
 def revoke_agent(db: Session, agent: RemoteAgent) -> int:
     """Deactivate an agent and fail every job it currently holds.
 
@@ -303,6 +324,9 @@ def revoke_agent(db: Session, agent: RemoteAgent) -> int:
     agent.public_key = None
     agent.enroll_code_hash = None
     db.commit()
+    # And SPIRE stops issuing SVIDs for it. The binding stays on the row, as the record of
+    # what it was; nothing can attest to a revoked row anyway.
+    _forget_spire(agent)
 
     held = db.query(Job).filter(Job.agent_id == agent.id,
                                 Job.status.in_(("queued", "running"))).all()

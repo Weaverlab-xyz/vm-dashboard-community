@@ -334,7 +334,10 @@ def bootstrap_script(*, url: str, policy: str, material: dict,
             "}",
             "plugins {",
             '    NodeAttestor "join_token" { plugin_data {} }',
-            '    KeyManager "memory" { plugin_data {} }',
+            # "disk", not "memory": a join token is single-use and deleted below, so
+            # the node key must survive a reboot or a SPIRE agent restart, or the host
+            # can never attest again (agent-and-human-identity.md, "Node attestation").
+            '    KeyManager "disk" { plugin_data { directory = "/opt/spire/data" } }',
             '    WorkloadAttestor "unix" { plugin_data {} }',
             "}", ""])
         helper_conf = "\n".join([

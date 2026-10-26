@@ -1956,8 +1956,11 @@ def revoke(agent_id: str, request: Request,
                           ip_address=_client_ip(request),
                           details={"agent": agent.name, "jobs_cleared": affected,
                                    **({"host_stop_job": stop_job} if stop_job else {})})
+    left = getattr(agent, "spire_left_behind", None) or []
     return {"detail": f"Agent '{agent.name}' revoked.", "jobs_cleared": affected,
-            "host_stop_job": stop_job}
+            "host_stop_job": stop_job,
+            # SPIRE registration that could not be removed (server down): remove by hand.
+            "spire_left_behind": left}
 
 
 @admin_router.delete("/{agent_id}/record")
