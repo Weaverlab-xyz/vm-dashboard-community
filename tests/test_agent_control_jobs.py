@@ -347,8 +347,9 @@ def test_the_lease_reports_whether_this_host_can_be_managed():
     assert sent[1]["control"]["updater_present"] is True
 
 
-def test_the_agent_version_is_2_10():
-    assert agent.AGENT_VERSION == "2.10.0"
+def test_the_agent_version_is_at_least_2_10():
+    # 2.10 introduced the control handlers; later builds keep them.
+    assert agent._version_tuple(agent.AGENT_VERSION) >= (2, 10, 0)
     src = open(os.path.join(_ROOT, "runners", "agent", "Dockerfile"), encoding="utf-8").read()
     assert "LABEL dashboard-agent.version=$AGENT_VERSION" in src
 

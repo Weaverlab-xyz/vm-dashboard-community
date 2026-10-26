@@ -111,13 +111,56 @@ and tick **Release dashboard-held credentials only to SPIRE-attested agents**
 
 An attested agent is also the one the dashboard can upgrade and restart, because its
 identity survives a new container. Add the updater and opt in through `policy.yaml`; see
-[Upgrading and restarting agents centrally](lifecycle.md). A restart is also how an
-attested agent's key is rotated.
+[Upgrading and restarting agents centrally](lifecycle.md). A restart also rotates an
+attested agent's key, and from agent 2.11 so does the agent itself while it runs (below).
+
+## Ongoing checks
+
+Attestation proves who the agent is at each start. After that, the dashboard keeps
+checking what it can see:
+
+- **Every attestation:** what it replaced, and the policy hash.
+- **Every signed request:** which key signed it.
+- **Every lease:** the version, policy hash and re-attest interval the agent reports.
+
+When something moves that a person should look at, the agent's row gets an amber
+**attention** badge. The details panel says what happened, and an `agent.attention`
+notification goes to whatever endpoints you route it to. Nothing here refuses work by
+itself; revoking stays your call.
+
+| Item | What it means | What to do |
+|---|---|---|
+| **Two copies are running** | A request was signed with the key this agent's last attestation replaced. Another process attested as the agent, and the older one is still polling. The request was refused. | If you did not start a second copy (for example, a cloned VM or a duplicated compose project), revoke the agent and find the other one. The item names the address it last attested from. |
+| **policy.yaml changed** | The policy hash the agent reports moved. | Confirm that whoever owns the host meant to change the file. |
+| **Not a recorded release** | The agent reports a version, 2.10 or later, that is not a release recorded under **Lifecycle**. Builds from a release are signed. | Record the release, or find out who built the image. |
+| **Key not rotated** | An attested 2.11+ agent that re-attests every N hours has not done so in twice that, while online. | Check its log for re-attestation errors, then restart it. |
+
+Each item is raised once until someone presses **Acknowledge**, which is audited along with
+what it cleared.
+
+**Re-attesting while running (agent 2.11).**
+- **How often.** An attested agent attests again every `AGENT_REATTEST_HOURS`, default 24,
+  with a fresh in-memory key.
+- **Only between jobs.** When it is due, the agent takes no new jobs until the running ones
+  finish, waiting up to 15 minutes. That way no request is ever signed by a key the
+  dashboard just replaced.
+- **On failure** it keeps its current key and tries again in an hour.
+- **Turning it off.** `0` turns it off; a restart still attests.
+
+**Revoking removes the SPIRE registration.**
+- **What is removed.** Revoking an agent, unbinding its SPIFFE ID, or re-issuing its
+  enrolment code deletes the workload entry the dashboard created and evicts its node. SPIRE
+  then stops issuing SVIDs for an identity the dashboard no longer trusts.
+- **What is left alone.** A SPIFFE ID you bound by hand lives in a SPIRE server you manage,
+  so it is left to you.
+- **When the server is down.** The revoke still happens, and the response lists what was
+  left behind (`spire_left_behind`) so you can remove it with `spire-server entry delete`
+  and `spire-server agent evict`.
 
 ## Rolling back
 
 Drop the overlay on the agent host, and **re-issue an enrolment code** for the agent. That
-also clears its SPIFFE binding and puts it back on Ed25519.
+also clears its SPIFFE binding, removes its SPIRE registration, and puts it back on Ed25519.
 
 ## Settings
 

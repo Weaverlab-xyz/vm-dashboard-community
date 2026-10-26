@@ -278,11 +278,16 @@ def _attest(db: Session, *, svid: str, public_key: str, proof: str, audiences,
         logger.warning("agent attest refused for %s: %s", sub, exc)
         raise refused
 
+    from . import agent_assurance_service
+    # Before the key is replaced: remembers the old one (a copy still signing with it is
+    # a clone) and compares the policy hash with the one on record.
+    agent_assurance_service.note_attest(db, agent, new_key=public_key,
+                                        policy_hash=policy_hash, ip=ip)
     now = utcnow()
     agent.public_key = public_key          # replaces any Ed25519 key: one key per agent
     agent.auth_mode = "spiffe"
     agent.agent_version = (agent_version or "")[:32]
-    agent.policy_hash = (policy_hash or "")[:64]
+    agent.policy_hash = (policy_hash or "")[:64] or agent.policy_hash
     agent.enrolled_at = agent.enrolled_at or now
     agent.last_seen_at = now
     agent.last_seen_ip = (ip or "")[:45]
@@ -292,6 +297,7 @@ def _attest(db: Session, *, svid: str, public_key: str, proof: str, audiences,
     agent.enroll_expires_at = None
     db.commit()
     db.refresh(agent)
+    agent_assurance_service.check_version(db, agent)
     return agent
 
 
@@ -467,10 +473,16 @@ def authenticate(db: Session, *, agent_id: str, timestamp: str, nonce: str,
     if not agent or not agent.is_active or not agent.public_key:
         raise AgentError("Unknown or inactive agent.")
 
-    if not agent_signing.verify_request(
-        agent.public_key, agent_id=agent_id, timestamp=timestamp, nonce=nonce,
-        signature=signature, audience=audience, method=method, path=path, body=body,
-    ):
+    def _verifies(key):
+        return agent_signing.verify_request(
+            key, agent_id=agent_id, timestamp=timestamp, nonce=nonce,
+            signature=signature, audience=audience, method=method, path=path, body=body)
+
+    if not _verifies(agent.public_key):
+        # Signed by the key the last attestation replaced: a second copy is still running.
+        # Refused all the same; the check only decides whether a person is told.
+        from . import agent_assurance_service
+        agent_assurance_service.caught_previous_key(db, agent, _verifies)
         raise AgentError("Signature verification failed.")
 
     # Between the signature and the nonce, deliberately. After the signature so an
@@ -849,7 +861,8 @@ def set_allowed_job_types(db: Session, agent: RemoteAgent, types) -> RemoteAgent
 
 def record_self_report(db: Session, agent: RemoteAgent, *,
                        agent_version: str = "", job_types=None,
-                       ansible_slots: int = 0, control=None) -> None:
+                       ansible_slots: int = 0, control=None, policy_hash: str = "",
+                       reattest_hours=None) -> None:
     """Store what the agent reported about itself on this lease.
 
     ``agent_version`` was previously written only at enrolment, so an operator who
@@ -862,7 +875,8 @@ def record_self_report(db: Session, agent: RemoteAgent, *,
     """
     changed = False
     version = (agent_version or "").strip()[:32]
-    if version and version != (agent.agent_version or ""):
+    version_moved = bool(version and version != (agent.agent_version or ""))
+    if version_moved:
         agent.agent_version = version
         changed = True
 
@@ -894,8 +908,24 @@ def record_self_report(db: Session, agent: RemoteAgent, *,
                 setattr(agent, column, value)
                 changed = True
 
+    # Agent 2.11+: how often it re-attests (0 = never). Absent leaves it alone.
+    if reattest_hours is not None:
+        try:
+            hours = max(0, min(int(reattest_hours), 24 * 30))
+        except (TypeError, ValueError):
+            hours = None
+        if hours is not None and hours != agent.reported_reattest_hours:
+            agent.reported_reattest_hours = hours
+            changed = True
+
     if changed:
         db.commit()
+
+    from . import agent_assurance_service
+    if policy_hash:
+        agent_assurance_service.check_policy(db, agent, policy_hash)
+    if version_moved:
+        agent_assurance_service.check_version(db, agent)
 
 
 def ansible_slots(agent: RemoteAgent) -> int:

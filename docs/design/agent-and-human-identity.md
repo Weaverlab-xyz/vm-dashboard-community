@@ -65,15 +65,15 @@ The SPIRE agent has to prove which node it is on before it gets an SVID. How it 
 
 | Where the agent runs | Node attestor | Agent KeyManager | Private key at rest? | Restart behavior |
 |---|---|---|---|---|
-| Bare Docker host, no platform identity | `join_token` | `disk` | **Yes.** The SPIRE agent's own SVID key, rotated hourly and revocable with `spire-server agent ban` | Resumes from disk; the token is already spent |
+| Bare Docker host, no platform identity | `join_token` | `disk` | **Yes.** The SPIRE agent's own node key, rotated with each node SVID (`agent_ttl`, 168h in the shipped server config) and revocable with `spire-server agent ban` | Resumes from disk; the token is already spent |
 | AWS EC2 | `aws_iid` | `memory` | **No** | Re-attests from the instance identity document |
 | Azure VM | `azure_imds` (`azure_msi` on older SPIRE) | `memory` | **No** | Re-attests from IMDS |
 | GCP VM | `gcp_iit` | `memory` | **No** | Re-attests from the instance identity token |
 | Pod on a cluster the SPIRE server can reach | `k8s_psat` | `memory` | **No** | Re-attests from a projected SA token |
 | Host with a TPM | `tpm_devid` (or a TPM plugin) | `memory` | **No**; the key is in the TPM | Re-attests from the TPM |
 
-- With `join_token` the SPIRE agent still stores a key. That is better than today: the key lasts an hour instead of indefinitely, rotates, and can be revoked centrally. But it is not zero, and the docs must not say it is.
-- `join_token` + `memory` is not an option. The token is single-use, so the first restart would leave the agent unable to attest.
+- With `join_token` the SPIRE agent still stores a key. That is better than an Ed25519 `identity.json`: the key rotates with every node SVID (a week at most, with the shipped `agent_ttl`) instead of living indefinitely, and can be revoked centrally. But it is not zero, and the docs must not say it is.
+- `join_token` + `memory` is not an option. The token is single-use, so the first restart would leave the agent unable to attest. (Dashboard-deployed cloud hosts shipped this pairing for a while; they now use `disk`.)
 - `k8s_psat` needs the SPIRE server to call that cluster's TokenReview API. That works for a cluster the dashboard already manages. It does not work for an on-prem cluster behind a firewall, which is exactly where remote agents live. For those, the agent is a `join_token` host, or a TPM host.
 
 **2. SPIRE agent ↔ server traffic is mTLS gRPC. TLS-inspecting proxies break it.**
@@ -117,6 +117,9 @@ node attestation ──── mTLS gRPC :8081 ───────────�
   - Request signing is not what puts a key on disk. Persisting the key across restarts is. Keeping signing means the proxy-safety argument in `agent_signing.py` still holds without change.
 - **Signing in the other direction is unchanged too.** Job envelopes are still signed with the dashboard's own key, and the agent learns that public key from the attest response, as it does at enrolment today.
 - **On restart the agent attests again.** It writes nothing to `identity.json`.
+- **And every `AGENT_REATTEST_HOURS` while running (agent 2.11, default 24).** Between jobs only, so no request is ever signed by a key the dashboard just replaced. A failure keeps the current key and retries in an hour.
+- **After attest, the dashboard keeps checking** (`services/agent_assurance_service.py`). A request signed by the key the last attestation replaced means a second copy is still running (`clone`). The other checks are a policy hash that moved, a signed-era version that is not a recorded release, and an attested agent that stopped re-attesting. Each raises an attention item on the agent and an `agent.attention` notification; none refuses work by itself.
+- **Revoking or unbinding removes the SPIRE registration** the dashboard made (`dashboard_spire.forget_agent`): the workload entry is deleted and the node evicted, so SPIRE stops issuing SVIDs for an identity the dashboard no longer trusts. A SPIFFE ID bound by hand is left alone.
 - **Workload attestor: `unix`, selector `uid:10001`.** The two containers share a PID namespace (`pid: "service:spire-agent"`), so the SPIRE agent can see the caller's uid.
   - The alternative, the `docker` workload attestor, needs `/var/run/docker.sock` mounted into the sidecar. That is root on the host, and the agent's whole hardening story (`docs/platform/spiffe/remote-agents/agent-host.md`) is that nothing on this host has it.
 
@@ -285,6 +288,7 @@ k3s takes one `--authentication-config` file. That file holds a list of JWT auth
   - Dex's RFC 8693 token exchange only *moves* the problem to whatever upstream token the agent presents. SPIRE is that upstream, minus the extra hop.
 - **X509-SVID mTLS from the agent to the dashboard.** Same proxy problem as any mTLS. The SVID is used as a JWT to bind a key, never as a client certificate on the dashboard connection.
 - **The `docker` workload attestor.** It needs the Docker socket, which is root on the host. A shared PID namespace plus `unix:uid` gets the same answer without it.
+- **Binding the agent's identity to its signed image** (docker selectors on the image digest and the `dashboard-agent.role` label), considered again once releases were signed. It needs that same `docker` attestor, so it would put the Docker socket into the SPIRE agent. And it buys little. The unix attestor only sees processes in the SPIRE agent's PID namespace, and the socket lives in a volume. A process that could reach both is one with Docker or root on the host, which owns the host already. The other attested process is the spiffe-helper, not the agent, so pinning a binary hash would pin the helper. The clone check (above) covers the failure this was meant to catch: a second process holding the identity.
 - **Forced migration with a deadline.** Agents behind inspecting proxies could never meet it. A deadline would turn a security improvement into an outage for exactly the customers the agent exists for.
 - **Running SPIRE behind Caddy.** See [The dashboard-hosted SPIRE server](#the-dashboard-hosted-spire-server).
 

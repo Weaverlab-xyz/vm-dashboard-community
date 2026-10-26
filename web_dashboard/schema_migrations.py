@@ -349,6 +349,16 @@ MIGRATIONS: tuple = (
                add_column("remote_agents", "control_updater", "BOOLEAN"),
                add_column("remote_agents", "paused", "BOOLEAN"),
                add_column("remote_agents", "upgrade_ring", "VARCHAR(16)"))),
+    # Agent assurance: what the last attestation was, the key it replaced (to catch a second
+    # copy still using it), what needs an operator's attention, and the agent's re-attest
+    # interval. All NULL-able: NULL is "nothing recorded" and "nothing to report".
+    Migration("0006_agent_assurance",
+              (add_column("remote_agents", "last_attest_at", "TIMESTAMP"),
+               add_column("remote_agents", "last_attest_ip", "VARCHAR(45)"),
+               add_column("remote_agents", "previous_public_key", "VARCHAR(64)"),
+               add_column("remote_agents", "previous_key_until", "TIMESTAMP"),
+               add_column("remote_agents", "attention", "TEXT"),
+               add_column("remote_agents", "reported_reattest_hours", "INTEGER"))),
 )
 
 

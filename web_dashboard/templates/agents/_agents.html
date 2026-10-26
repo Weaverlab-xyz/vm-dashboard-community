@@ -185,6 +185,11 @@
                   <span :class="statusClass(a.status)"
                         class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
                         x-text="a.status"></span>
+                  <!-- Something moved after it attested (Ongoing checks in the SPIRE doc). -->
+                  <button x-show="(a.attention || []).length > 0" x-cloak @click="expanded = a.id"
+                          :title="(a.attention || []).map(i => i.title).join(', ')"
+                          class="ml-1 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800 hover:bg-amber-200"
+                          x-text="'attention' + ((a.attention || []).length > 1 ? ' (' + a.attention.length + ')' : '')"></button>
                 </td>
                 <!-- The direct answer to "did I register this?". Highlighted when it was
                      somebody else, which is the whole reason the column exists. -->
@@ -271,6 +276,24 @@
               <tr x-show="expanded === a.id" x-cloak class="border-b border-gray-50 bg-gray-50/60">
                 <td></td>
                 <td colspan="9" class="py-3 pr-4">
+                  <div x-show="(a.attention || []).length > 0" x-cloak
+                       class="mb-3 border border-amber-200 bg-amber-50 rounded-lg px-3 py-2 text-xs">
+                    <div class="flex items-start justify-between gap-4">
+                      <ul class="space-y-1.5">
+                        <template x-for="i in (a.attention || [])" :key="i.kind">
+                          <li>
+                            <span class="font-semibold text-amber-900" x-text="i.title"></span>
+                            <span class="text-amber-700" x-text="'· ' + fmt(i.at)"></span>
+                            <div class="text-amber-800" x-text="i.detail"></div>
+                          </li>
+                        </template>
+                      </ul>
+                      <button @click="acknowledge(a)"
+                              class="shrink-0 text-xs font-medium border border-amber-300 text-amber-800 hover:bg-amber-100 px-2 py-1 rounded">
+                        Acknowledge
+                      </button>
+                    </div>
+                  </div>
                   <dl class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-2 text-xs">
                     <div>
                       <dt class="text-gray-400 uppercase tracking-wide">Agent id</dt>
@@ -299,6 +322,9 @@
                       <dd class="text-gray-700"
                           x-text="a.auth_mode === 'spiffe' ? 'SPIRE (key in memory)' : 'Ed25519 (key on disk)'"></dd>
                       <dd x-show="a.spiffe_id" class="font-mono text-gray-500 break-all" x-text="a.spiffe_id"></dd>
+                      <dd x-show="a.last_attest_at" class="text-gray-500"
+                          x-text="'attested ' + fmt(a.last_attest_at) + (a.last_attest_ip ? ' from ' + a.last_attest_ip : '')
+                                  + (a.reattest_hours ? ', re-attests every ' + a.reattest_hours + ' h' : '')"></dd>
                     </div>
                     <div>
                       <dt class="text-gray-400 uppercase tracking-wide">Config Management</dt>
@@ -987,6 +1013,15 @@ function agentsPage() {
         await this.load(true);
       } catch (e) {
         this.flash((paused ? 'Pause' : 'Resume') + ' failed: ' + (e.message || e), 'error');
+      }
+    },
+
+    async acknowledge(a) {
+      try {
+        await API.post(`/api/agents/${encodeURIComponent(a.id)}/acknowledge`, {});
+        await this.load(true);
+      } catch (e) {
+        this.flash('Could not acknowledge: ' + (e.message || e), 'error');
       }
     },
 
