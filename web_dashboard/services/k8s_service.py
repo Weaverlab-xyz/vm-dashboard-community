@@ -191,6 +191,9 @@ def _serialize(r: K8sCluster) -> dict:
         # getattr for the same reason cloud_database_service._serialize uses it -- the
         # test stand-ins for this row declare their attributes explicitly.
         "workgroup":             getattr(r, "workgroup", None) or "",
+        # The deployed agent its Kubernetes work runs on, or "" for the remote worker
+        # (k8s_executor_service). As set — whether it still qualifies is read per use.
+        "executor_agent_id":     getattr(r, "executor_agent_id", None) or "",
         "created_by":            r.created_by,
         "created_at":            r.created_at.isoformat() if r.created_at else "",
     }

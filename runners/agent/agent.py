@@ -107,6 +107,14 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 # (agent_service.supports_share_secret) whenever it holds that password, because an older
 # agent ignores the key and offers the file server whatever password is left in
 # shares.yaml — or none.
+# 2.12 added Kubernetes work for an agent the dashboard deployed and OWNS: the `agent_k8s`
+# handler (a closed set of kubectl/helm steps — apply, delete, helm upgrade, helm
+# uninstall — whose argv this agent builds; no step names a command) and the `k8s` run kind
+# of Config Management. Both need a `k8s:` policy block whose image is pinned BY DIGEST, and
+# both receive a cluster-admin kubeconfig, sealed to this agent, this job and the cluster's
+# API endpoint. The dashboard sends either only to an agent it deployed, SPIRE-attested,
+# with Kubernetes work allowed on its host (k8s_executor_service); a customer-hosted agent
+# never gets one, whatever its policy says.
 # The PATCH digit exists so a host can be told apart from itself. Every gate here and in
 # agent_service compares (major, minor) only, so bumping it changes no behaviour anywhere —
 # what it changes is that the Agents page can answer "did this host actually pick up the
@@ -114,7 +122,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 # broker running the earlier one failed identically while reporting the same string as the
 # build that fixed it. A behaviour change the fleet cannot see is a behaviour change nobody
 # can confirm arrived, so bump this whenever the agent's behaviour moves.
-AGENT_VERSION = "2.11.0"
+AGENT_VERSION = "2.12.0"
 
 log = logging.getLogger("agent")
 
@@ -551,6 +559,39 @@ def bundle_ref(*, run_kind: str, transport: str, host: str, port) -> str:
     except (TypeError, ValueError):
         port = 0
     return f"ansible:{run_kind}:{transport}:{seal_host_key(host)}:{port}"
+
+
+def k8s_ref(*, host: str, port) -> str:
+    """The AAD ``ref`` for an ``agent_k8s`` bundle, bound to the cluster's API endpoint.
+    Mirrors ``web_dashboard/services/agent_sealing.py::k8s_ref``; a parity test pins them."""
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        port = 0
+    return f"k8s:{seal_host_key(host)}:{port}"
+
+
+# The kubeconfig user fields that are credentials. Everything else — server URLs, names,
+# the CA — is what a kubectl error message prints, and redacting it would hide the cause.
+_KUBECONFIG_SECRET_FIELDS = ("token", "password", "client-key-data",
+                             "client-certificate-data")
+
+
+def kubeconfig_secrets(text: str) -> list:
+    """The credential values in a kubeconfig, for redaction. Tolerant: an unparseable one
+    yields nothing here, and kubectl reports it."""
+    try:
+        doc = yaml.safe_load(text) if text else None
+    except yaml.YAMLError:
+        return []
+    out = []
+    for entry in (doc or {}).get("users") or [] if isinstance(doc, dict) else []:
+        user = (entry or {}).get("user") if isinstance(entry, dict) else None
+        for key in _KUBECONFIG_SECRET_FIELDS:
+            value = (user or {}).get(key) if isinstance(user, dict) else None
+            if isinstance(value, str) and len(value) >= 8:
+                out.append(value)
+    return out
 
 
 def local_seal_aad(*, host: str, purpose: str) -> bytes:
@@ -1014,6 +1055,14 @@ class Policy:
     resolves inside the allowed range when validated and somewhere else when connected.
     """
 
+    # Kubernetes work (2.12), off unless a `k8s:` block turns it on — see parse_k8s. Class
+    # defaults so a Policy built without one (every test fixture before 2.12) has it off.
+    k8s_enabled = False
+    k8s_image_name = ""
+    k8s_allow: list = []
+    k8s_network = "bridge"
+    k8s_max_runtime_minutes = 20
+
     def __init__(self, allow: list, deny: list, job_types: set, limits: dict,
                  digest: str, connection_verbs: dict = None, sibling: dict = None,
                  loopback_connections: set = None, ansible: dict = None,
@@ -1212,6 +1261,38 @@ class Policy:
                 f"agent will not pull an image for you.")
         return image
 
+    def k8s_image(self) -> str:
+        """The Kubernetes image (by digest), or raise :class:`PolicyRefusal`."""
+        if not self.k8s_enabled:
+            raise PolicyRefusal(
+                "this agent's policy.yaml does not enable Kubernetes work. Only an agent the "
+                "dashboard deployed gets a `k8s:` block, written by the dashboard at start; "
+                "turn on Allow Kubernetes work for its host and restart it.")
+        if not self.k8s_image_name:
+            raise PolicyRefusal("policy.yaml enables Kubernetes work but names no "
+                                "`k8s.image`.")
+        return self.k8s_image_name
+
+    def check_k8s(self, ip: str, port: int) -> None:
+        """Raise :class:`PolicyRefusal` unless a cluster API at this endpoint may be used.
+
+        Its own allow list, `k8s.targets`, with the shared deny list in front: loopback and
+        cloud metadata stay unreachable however the block is written."""
+        if not self.k8s_enabled:
+            raise PolicyRefusal("this agent's policy.yaml does not enable Kubernetes work.")
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            raise PolicyRefusal(f"{ip} is not an IP address")
+        for net in self.deny:
+            if addr in net:
+                raise PolicyRefusal(f"{ip} is in a denied range ({net})")
+        for net, ports in self.k8s_allow:
+            if addr in net and (ports is None or port in ports):
+                return
+        raise PolicyRefusal(f"policy.yaml does not allow a Kubernetes API at {ip}:{port} "
+                            f"(`k8s.targets`).")
+
     def gateway_image(self) -> str:
         """The Gateway image, or raise :class:`PolicyRefusal` naming what is missing.
 
@@ -1399,6 +1480,7 @@ class Policy:
                   hashlib.sha256(raw).hexdigest(), verbs, sibling, loopback,
                   ansible, ansible_allow, gateway, storage)
         pol.upgrades = parse_upgrades(doc.get("upgrades"))
+        parse_k8s(pol, doc.get("k8s"), cls._parse_targets)
         return pol
 
     @staticmethod
@@ -1993,6 +2075,45 @@ class Dashboard:
         self.hold_secret(secret)
         return secret
 
+    def k8s_bundle(self, job_id: str, *, host: str, port) -> dict:
+        """Fetch an ``agent_k8s`` job's kubeconfig and steps, sealed to this agent, this job
+        and the cluster endpoint the verified envelope named (:func:`k8s_ref`). The
+        kubeconfig's credentials are held for redaction before anything can emit."""
+        bundle, _scrub = self._sealed_bundle(
+            f"/api/agent/jobs/{job_id}/k8s-bundle", job_id, k8s_ref(host=host, port=port))
+        return bundle
+
+    def _sealed_bundle(self, path: str, job_id: str, ref: str) -> tuple:
+        private_b64, public_b64 = generate_reply_keypair()
+        resp = self._request("POST", path, {"reply_key": public_b64})
+        if resp.status_code != 200:
+            detail = ""
+            try:
+                detail = str((resp.json() or {}).get("detail") or "")
+            except Exception:  # noqa: BLE001
+                detail = (resp.text or "")[:400]
+            raise PolicyRefusal(
+                f"the dashboard refused to release this job's bundle ({resp.status_code}): "
+                f"{detail} — this is a dashboard-side authorization or configuration "
+                f"refusal, not a policy.yaml problem.")
+        try:
+            envelope = (resp.json() or {}).get("sealed") or {}
+            plain = open_sealed(
+                private_b64, envelope, agent_id=self.identity.agent_id,
+                audience=self.identity.audience, job_id=job_id, ref=ref)
+            payload = json.loads(plain)
+            bundle, scrub = payload["bundle"], payload.get("scrub") or []
+        except SealError as exc:
+            raise PolicyRefusal(f"bundle: {exc}") from exc
+        except (ValueError, KeyError, TypeError) as exc:
+            raise PolicyRefusal("the dashboard's bundle did not decode to the expected "
+                                "shape") from exc
+        for value in scrub:
+            self.hold_secret(str(value))
+        for value in kubeconfig_secrets(bundle.get("kubeconfig") or ""):
+            self.hold_secret(value)
+        return bundle, scrub
+
     def ansible_bundle(self, job_id: str, *, run_kind: str, transport: str,
                        host: str, port) -> tuple:
         """Fetch this job's Config-Management run bundle, sealed. Returns ``(bundle, scrub)``.
@@ -2067,6 +2188,8 @@ class Dashboard:
         # domain and base DN out of every line an LDAP play prints, which is the output.
         if (bundle.get("directory") or {}).get("dir_bind_password"):
             self.hold_secret(str(bundle["directory"]["dir_bind_password"]))
+        for value in kubeconfig_secrets(bundle.get("kubeconfig") or ""):
+            self.hold_secret(value)
         return bundle, scrub
 
 
@@ -4464,18 +4587,27 @@ def _stream_logs(container: str, on_line, deadline: float) -> None:
 
 
 def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict,
-                         command: str, emit, cancelled) -> int:
+                         command: str, emit, cancelled, kind: str = "ansible") -> int:
     """Run one playbook in a throwaway container, streaming its output. Returns the exit code.
 
     Same guarantees as :func:`_run_sibling` — the image comes from policy, every HostConfig
     field is a constant, nothing is bind-mounted — with three additions a long run needs:
     output as it happens, a working Cancel, and a wall-clock ceiling.
+
+    ``kind="k8s"`` is Kubernetes work (2.12): the same container shape, gated on the
+    ``k8s:`` block instead, with its network and runtime ceiling.
     """
-    if not policy.ansible_enabled:
-        raise PolicyRefusal(
-            "this agent's policy.yaml does not enable Config Management "
-            "(`ansible: {enabled: true}`).")
-    if policy.ansible_network == "none":
+    if kind == "k8s":
+        if not policy.k8s_enabled:
+            raise PolicyRefusal("this agent's policy.yaml does not enable Kubernetes work.")
+        network, runtime = policy.k8s_network, policy.k8s_max_runtime_minutes
+    else:
+        if not policy.ansible_enabled:
+            raise PolicyRefusal(
+                "this agent's policy.yaml does not enable Config Management "
+                "(`ansible: {enabled: true}`).")
+        network, runtime = policy.ansible_network, policy.ansible_max_runtime_minutes
+    if network == "none":
         # Worth refusing rather than running: with no network every task fails as
         # "unreachable", which reads as a firewall or credential problem on the target.
         raise PolicyRefusal(
@@ -4500,7 +4632,7 @@ def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict
         "WorkingDir": _JOB_DIR,
         "Tty": False,              # the deframer's precondition, stated rather than assumed
         "Labels": {SIBLING_LABEL: "1"},
-        "HostConfig": {**_ANSIBLE_HOSTCONFIG, "NetworkMode": policy.ansible_network,
+        "HostConfig": {**_ANSIBLE_HOSTCONFIG, "NetworkMode": network,
                        "NanoCpus": _ansible_nano_cpus()},
     }
     status, body = _engine("POST", "/containers/create", spec)
@@ -4515,7 +4647,7 @@ def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict
                             f"{str(body)[:300]}")
     container = body.get("Id")
 
-    timeout = max(60.0, policy.ansible_max_runtime_minutes * 60.0)
+    timeout = max(60.0, runtime * 60.0)
     deadline = time.monotonic() + timeout
     done = threading.Event()
     killed = threading.Event()
@@ -4867,7 +4999,7 @@ def _ansible_argv(*, run_kind: str, transport: str, has_key: bool,
     """
     # A directory run over LDAP is the same localhost play as a database run; over WinRM
     # it is the VM shape against the domain controller, below.
-    if run_kind == "database" or (run_kind == "directory" and transport == "local"):
+    if run_kind in ("database", "k8s") or (run_kind == "directory" and transport == "local"):
         argv = ["ansible-playbook", "-i", "localhost,", "-c", "local",
                 f"{_JOB_DIR}/playbook.yml"]
         if has_vars:
@@ -4918,7 +5050,7 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
 
     # (3) before (2)'s fetch, and before the network: an agent whose policy has no image for
     # this kind should say so rather than resolving a customer's DNS first.
-    image = policy.ansible_image(run_kind)
+    image = policy.k8s_image() if run_kind == "k8s" else policy.ansible_image(run_kind)
 
     # (2) The resolved address is what gets checked AND what gets used, so the name cannot
     # resolve to one thing here and another at connect time.
@@ -4926,7 +5058,11 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
     if not addresses:
         raise PolicyRefusal(f"{host!r} does not resolve to any address from this agent.")
     ip = addresses[0]
-    policy.check_ansible(ip, port)
+    if run_kind == "k8s":
+        # A cluster's API server, checked against `k8s.targets`, not `ansible.targets`.
+        policy.check_k8s(ip, port)
+    else:
+        policy.check_ansible(ip, port)
     emit(f"target {host} resolved to {ip}:{port} and is allowed by policy.yaml")
 
     if MODE == "audit":
@@ -4966,6 +5102,16 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
         # is the dashboard's word, and an ssh "directory" run would be a VM run in disguise.
         raise PolicyRefusal(f"a directory run uses transport local or winrm, not "
                             f"{transport!r}.")
+
+    run_env = dict(bundle.get("env") or {})
+    if run_kind == "k8s":
+        kubeconfig = str(bundle.get("kubeconfig") or "")
+        if not kubeconfig.strip():
+            raise PolicyRefusal("the dashboard sent no kubeconfig for this cluster run.")
+        files[f"{_JOB_DIR.strip('/')}/kubeconfig"] = kubeconfig.encode("utf-8")
+        # Set by the AGENT, after the env the dashboard sent: kubernetes.core reads
+        # K8S_AUTH_KUBECONFIG, kubectl and helm read KUBECONFIG.
+        run_env.update(_k8s_env())
 
     has_key = False
     if run_kind == "vm" or (run_kind == "directory" and transport == "winrm"):
@@ -5020,8 +5166,9 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
 
     emit(f"running {run_kind} Config Management against {ip}:{port}")
     code = _run_ansible_sibling(
-        policy, image=image, files=files, env=bundle.get("env") or {},
-        command=command, emit=emit, cancelled=cancelled)
+        policy, image=image, files=files, env=run_env,
+        command=command, emit=emit, cancelled=cancelled,
+        **({"kind": "k8s"} if run_kind == "k8s" else {}))
 
     meaning = _ANSIBLE_EXIT.get(code, "")
     if code == 0:
@@ -5039,6 +5186,197 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
             f"ansible-playbook exited {code}" + (f" — {meaning}" if meaning else "")
             + ". The failing task is in this job's output.")
     return {"exit_code": code}
+
+
+def _k8s_env() -> dict:
+    """Where kubectl, helm and kubernetes.core find the kubeconfig and keep their caches:
+    the job volume and /tmp, since the root filesystem is read-only."""
+    return {"KUBECONFIG": f"{_JOB_DIR}/kubeconfig",
+            "K8S_AUTH_KUBECONFIG": f"{_JOB_DIR}/kubeconfig",
+            "HOME": "/tmp", "HELM_CACHE_HOME": "/tmp/helm/cache",
+            "HELM_CONFIG_HOME": "/tmp/helm/config", "HELM_DATA_HOME": "/tmp/helm/data"}
+
+
+# ── Kubernetes work (2.12) ─────────────────────────────────────────────────────
+#
+# A closed set of steps. A step names a KIND and typed fields; this agent builds the argv.
+# No field reaches a shell unquoted, no field names a binary, and a manifest or a Helm
+# values file is a file in the job volume, never a command-line argument. That is what
+# "the handler set stays closed" means (docs/design/remote-worker-and-agent.md, phase 3):
+# the dashboard can ask for the operations it already performs, and for nothing else.
+
+K8S_STEP_KINDS = ("apply", "delete", "helm_upgrade", "helm_uninstall")
+K8S_MAX_STEPS = 16
+K8S_MAX_DOC_BYTES = 256 * 1024
+K8S_BEST_EFFORT_MARKER = "K8S_STEP_BEST_EFFORT_FAILED"
+_K8S_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]{0,51}[a-z0-9])?$")
+_K8S_NAMESPACE_RE = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+_K8S_CHART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+_K8S_REPO_RE = re.compile(r"^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$")
+_K8S_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$")
+_K8S_SET_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\[\]\\-]{0,127}=[^\r\n]{0,1024}$")
+_K8S_TIMEOUT_RE = re.compile(r"^[0-9]{1,4}[sm]$")
+
+
+def parse_k8s(policy: "Policy", value, parse_targets) -> None:
+    """The ``k8s:`` policy block. Absent leaves Kubernetes work off. Any bad shape is fatal:
+    a silently ignored key is how an operator believes a grant is narrower than it is."""
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise AgentFatal("policy.yaml: `k8s:` must be a mapping.")
+    enabled = bool(value.get("enabled"))
+    image = str(value.get("image") or "")
+    if enabled and not re.match(r"^[a-z0-9./_-]+@sha256:[0-9a-f]{64}$", image):
+        raise AgentFatal(
+            "policy.yaml: `k8s.image` must be pinned by digest (repo@sha256:…). This image "
+            "runs with a cluster-admin kubeconfig; a tag would let a registry change it.")
+    try:
+        runtime = int(value.get("max_runtime_minutes") or 20)
+    except (TypeError, ValueError):
+        raise AgentFatal("policy.yaml: `k8s.max_runtime_minutes` must be a whole number.")
+    policy.k8s_enabled = enabled
+    policy.k8s_image_name = image
+    policy.k8s_allow = parse_targets(value.get("targets"), "k8s.targets")
+    policy.k8s_network = str(value.get("network") or policy.ansible_network or "bridge")
+    policy.k8s_max_runtime_minutes = max(1, runtime)
+
+
+def _k8s_step_argv(index: int, step: dict, files: dict) -> list:
+    """One step's argv, validated field by field. Writes its manifest or values file into
+    ``files``. Raises PolicyRefusal naming the step and the field."""
+    if not isinstance(step, dict):
+        raise PolicyRefusal(f"step {index} is not a mapping.")
+    kind = step.get("kind")
+    where = f"step {index} ({kind})"
+
+    def _doc(key: str, name: str) -> str:
+        text = step.get(key)
+        if not isinstance(text, str) or not text.strip():
+            raise PolicyRefusal(f"{where} carries no {key}.")
+        if len(text.encode("utf-8")) > K8S_MAX_DOC_BYTES:
+            raise PolicyRefusal(f"{where}: {key} is over {K8S_MAX_DOC_BYTES} bytes.")
+        path = f"{_JOB_DIR}/{name}"
+        files[path.lstrip("/")] = text.encode("utf-8")
+        return path
+
+    def _field(key: str, pattern, required: bool = True) -> str:
+        value = step.get(key)
+        if value in (None, "") and not required:
+            return ""
+        if not isinstance(value, str) or not pattern.match(value):
+            raise PolicyRefusal(f"{where}: {key} {value!r} is not allowed.")
+        return value
+
+    if kind == "apply":
+        return ["kubectl", "apply", "-f", _doc("manifest", f"step{index}.yaml")]
+    if kind == "delete":
+        return ["kubectl", "delete", "--ignore-not-found", "-f",
+                _doc("manifest", f"step{index}.yaml")]
+    if kind == "helm_uninstall":
+        return ["helm", "uninstall", _field("release", _K8S_NAME_RE),
+                "--namespace", _field("namespace", _K8S_NAMESPACE_RE)]
+    if kind == "helm_upgrade":
+        argv = ["helm", "upgrade", "--install", _field("release", _K8S_NAME_RE),
+                _field("chart", _K8S_CHART_RE),
+                "--namespace", _field("namespace", _K8S_NAMESPACE_RE)]
+        repo = _field("repo", _K8S_REPO_RE, required=False)
+        if repo:
+            argv += ["--repo", repo]
+        version = _field("version", _K8S_VERSION_RE, required=False)
+        if version:
+            argv += ["--version", version]
+        if step.get("create_namespace") is True:
+            argv.append("--create-namespace")
+        if step.get("wait") is True:
+            argv.append("--wait")
+        timeout = _field("timeout", _K8S_TIMEOUT_RE, required=False)
+        if timeout:
+            argv += ["--timeout", timeout]
+        sets = step.get("set") or []
+        if not isinstance(sets, list) or len(sets) > 64:
+            raise PolicyRefusal(f"{where}: set must be a list of at most 64 key=value.")
+        for item in sets:
+            if not isinstance(item, str) or not _K8S_SET_RE.match(item):
+                raise PolicyRefusal(f"{where}: set entry {item!r} is not allowed.")
+            argv += ["--set", item]
+        if step.get("values"):
+            argv += ["--values", _doc("values", f"step{index}.values.yaml")]
+        return argv
+    raise PolicyRefusal(f"step {index}: {kind!r} is not a Kubernetes step this agent runs "
+                        f"(known: {', '.join(K8S_STEP_KINDS)}).")
+
+
+def k8s_command(steps: list, files: dict) -> str:
+    """The one shell line that runs every step in order. A required step that fails stops
+    the run (``&&``); a ``best_effort`` one prints the marker and carries on — the shape the
+    dashboard's Entitle install already reads."""
+    if not isinstance(steps, list) or not steps:
+        raise PolicyRefusal("the dashboard sent no Kubernetes steps.")
+    if len(steps) > K8S_MAX_STEPS:
+        raise PolicyRefusal(f"at most {K8S_MAX_STEPS} Kubernetes steps run in one job.")
+    parts = []
+    for index, step in enumerate(steps, 1):
+        cmd = " ".join(_shell_quote(a) for a in _k8s_step_argv(index, step, files))
+        if step.get("best_effort") is True:
+            cmd = f"{{ {cmd} || echo {K8S_BEST_EFFORT_MARKER} step={index}; }}"
+        parts.append(f"echo {_shell_quote('--- step %d: %s' % (index, step['kind']))} && {cmd}")
+    return " && ".join(parts)
+
+
+def run_k8s(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
+            dashboard) -> dict:
+    """Run one ``agent_k8s`` job: a list of kubectl/helm steps against one cluster, in a
+    one-shot container, with a cluster-admin kubeconfig that exists only inside it.
+
+    The order is :func:`run_ansible`'s, for the same reasons: the envelope's scalars, the
+    image from policy, the endpoint resolved and checked against ``k8s.targets``, audit mode
+    returning before anything is fetched, and only then the sealed bundle, bound to that
+    endpoint. The bundle's step kinds must be exactly the ones the signed envelope listed.
+    """
+    host = str(payload.get("cluster_host") or "")
+    try:
+        port = int(payload.get("cluster_port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    kinds = payload.get("step_kinds")
+    if not host or not port:
+        raise PolicyRefusal("this job names no cluster endpoint.")
+    if (not isinstance(kinds, list) or not kinds or len(kinds) > K8S_MAX_STEPS
+            or any(k not in K8S_STEP_KINDS for k in kinds)):
+        raise PolicyRefusal("this job's step list is not one this agent runs.")
+    image = policy.k8s_image()
+    addresses = _resolve_all(host)
+    if not addresses:
+        raise PolicyRefusal(f"{host!r} does not resolve to any address from this agent.")
+    ip = addresses[0]
+    policy.check_k8s(ip, port)
+    emit(f"cluster {host} resolved to {ip}:{port} and is allowed by policy.yaml")
+    if MODE == "audit":
+        emit(f"AUDIT MODE — would run {len(kinds)} Kubernetes step(s) ({', '.join(kinds)}) "
+             f"against {ip}:{port} using {image}; nothing was fetched or executed")
+        return {"exit_code": 0, "audit": True}
+
+    bundle = dashboard.k8s_bundle(job_id, host=host, port=port)
+    steps = bundle.get("steps")
+    if [s.get("kind") if isinstance(s, dict) else None for s in steps or []] != kinds:
+        raise PolicyRefusal("the sealed steps are not the ones the signed job listed.")
+    kubeconfig = str(bundle.get("kubeconfig") or "")
+    if not kubeconfig.strip():
+        raise PolicyRefusal("the dashboard sent no kubeconfig for this cluster.")
+    files = {f"{_JOB_DIR.strip('/')}/kubeconfig": kubeconfig.encode("utf-8")}
+    command = k8s_command(steps, files)
+
+    emit(f"running {len(steps)} Kubernetes step(s) against {ip}:{port}")
+    code = _run_ansible_sibling(policy, image=image, files=files, env=_k8s_env(),
+                                command=command, emit=emit, cancelled=cancelled, kind="k8s")
+    if code < 0:
+        return {"exit_code": code, "cancelled": True}
+    if code != 0:
+        raise RunFailure(f"a Kubernetes step exited {code}. The failing step is in this "
+                         f"job's output.")
+    emit("Kubernetes steps completed")
+    return {"exit_code": 0, "steps": len(steps)}
 
 
 def _shell_quote(value: str) -> str:
@@ -5447,7 +5785,8 @@ HANDLERS = {"agent_discover": run_discovery,
             "agent_hypervisor": run_hypervisor,
             "agent_ansible": run_ansible,
             "agent_gateway": run_gateway,
-            "agent_storage": run_storage}
+            "agent_storage": run_storage,
+            "agent_k8s": run_k8s}
 
 
 # ── Lifecycle control: upgrade and restart (agent 2.10) ──────────────────────

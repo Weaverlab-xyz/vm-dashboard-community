@@ -56,7 +56,7 @@
               <div class="font-medium text-gray-800" x-text="h.name"></div>
               <div class="text-xs text-gray-500">
                 agent <span x-text="h.agent_status"></span> ·
-                <span x-text="h.max_concurrent"></span> at once
+                <span x-text="h.max_concurrent"></span> at once<span x-show="h.k8s_enabled"> · Kubernetes</span>
               </div>
             </td>
             <td class="px-4 py-3 text-gray-700">
@@ -165,6 +165,13 @@
             Route cloud VMs in these ranges to it
           </label>
         </div>
+        <div class="sm:col-span-2">
+          <label class="inline-flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" x-model="form.k8s_enabled"/>
+            Allow Kubernetes work
+          </label>
+          <p class="text-xs text-gray-500 mt-1">Clusters in its cloud can then choose to run their Kubernetes work on it, which hands it their cluster-admin kubeconfig for each job. Needs SPIRE attestation.</p>
+        </div>
       </div>
 
       <fieldset class="mt-5 border-t border-gray-100 pt-4">
@@ -234,7 +241,7 @@ function deployedAgentsPanel() {
 
     blankForm() {
       return {name: '', cloud: 'aws', region: '', instance_size: '', subnet: '', ranges: '',
-              max_concurrent: 2, create_routes: true, mode: 'always', until_local: '',
+              max_concurrent: 2, create_routes: true, k8s_enabled: false, mode: 'always', until_local: '',
               change_window_id: '', lead_minutes: 20, grace_minutes: 15};
     },
 
@@ -291,6 +298,7 @@ function deployedAgentsPanel() {
         name: f.name, cloud: f.cloud, region: f.region, instance_size: f.instance_size,
         subnet: f.subnet, ranges: f.ranges.split(/[\s,]+/).filter(Boolean),
         max_concurrent: f.max_concurrent, create_routes: f.create_routes, mode: f.mode,
+        k8s_enabled: !!f.k8s_enabled,
         // datetime-local is the browser's local time with no offset; send it as UTC.
         until_at: f.mode === 'until' && f.until_local ? new Date(f.until_local).toISOString() : '',
         change_window_id: f.mode === 'window' ? f.change_window_id : '',

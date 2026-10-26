@@ -50,6 +50,9 @@ class DeployRequest(LifecycleFields):
     subnet: str = ""
     instance_size: str = ""
     create_routes: bool = True
+    # Kubernetes work for clusters that name this agent (SPIRE hosts only; see
+    # k8s_executor_service). It receives cluster-admin kubeconfigs.
+    k8s_enabled: bool = False
 
 
 class PatchRequest(BaseModel):
@@ -61,6 +64,7 @@ class PatchRequest(BaseModel):
     ranges: Optional[list[str]] = None
     max_concurrent: Optional[int] = None
     instance_size: Optional[str] = None
+    k8s_enabled: Optional[bool] = None
 
 
 def _client_ip(request: Request) -> str:
@@ -168,7 +172,7 @@ def deploy(body: DeployRequest, request: Request,
             db, name=body.name, cloud=cloud, region=region, cidrs=body.ranges,
             max_concurrent=body.max_concurrent, subnet=body.subnet,
             instance_size=body.instance_size, lifecycle=lifecycle,
-            created_by=current_user.username)
+            created_by=current_user.username, k8s_enabled=body.k8s_enabled)
     except AgentHostError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
@@ -245,6 +249,10 @@ def update(host_id: str, body: PatchRequest, request: Request,
             host.max_concurrent = body.max_concurrent
         if body.instance_size is not None:
             host.instance_size = ahs.validate_size(host.cloud, body.instance_size)
+        if body.k8s_enabled is not None:
+            # Off takes effect at once (k8s_executor_service reads it per use); on, at the
+            # next start, which writes the policy.
+            host.k8s_enabled = bool(body.k8s_enabled) or None
     except AgentHostError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from None
@@ -254,7 +262,8 @@ def update(host_id: str, body: PatchRequest, request: Request,
                           ip_address=_client_ip(request),
                           details={"agent": host.name, "changed": sorted(changes)})
     return {**_row(db, host), "job_id": job_id or "",
-            "applies_at_next_start": bool({"ranges", "max_concurrent", "instance_size"}
+            "applies_at_next_start": bool({"ranges", "max_concurrent", "instance_size",
+                                           "k8s_enabled"}
                                           & changes.keys()) and bool(host.host_id)}
 
 

@@ -930,6 +930,49 @@ class _WorkgroupReassignRequest(BaseModel):
     workgroup: str = ""
 
 
+class _ExecutorRequest(BaseModel):
+    agent_id: str = ""      # "" = the remote worker
+
+
+@router.get("/clusters/{cluster_id}/executor")
+def get_cluster_executor(
+    cluster_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("k8s", "read")),
+):
+    """Which agent runs this cluster's Kubernetes work, and every deployed agent in its
+    cloud with the reason one cannot be chosen."""
+    from ..services import k8s_executor_service as kex
+    _visible_or_404(db, cluster_id, current_user)
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    active = kex.executor_for(db, row)
+    return {"agent_id": row.executor_agent_id or "",
+            "active_agent_id": active.id if active is not None else "",
+            "candidates": kex.candidates(db, row)}
+
+
+@router.put("/clusters/{cluster_id}/executor")
+def set_cluster_executor(
+    cluster_id: str,
+    req: _ExecutorRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("k8s", "write")),
+):
+    """Run this cluster's Kubernetes work on a deployed agent, or back on the remote
+    worker. Refused, naming the rule, for an agent that may not hold its cluster-admin
+    kubeconfig (k8s_executor_service)."""
+    from ..services import k8s_executor_service as kex
+    _visible_or_404(db, cluster_id, current_user)
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    try:
+        kex.set_executor(db, row, req.agent_id)
+    except kex.ExecutorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    job_service.log_audit(db, current_user.username, "k8s.executor",
+                          details={"cluster_id": cluster_id, "agent_id": req.agent_id or ""})
+    return {"cluster_id": cluster_id, "agent_id": row.executor_agent_id or ""}
+
+
 @router.patch("/clusters/{cluster_id}/workgroup")
 def reassign_cluster_workgroup(
     cluster_id: str,

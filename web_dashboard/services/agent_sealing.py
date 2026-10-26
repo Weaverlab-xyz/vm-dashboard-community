@@ -187,6 +187,17 @@ def bundle_ref(*, run_kind: str, transport: str, host: str, port) -> str:
     return f"ansible:{run_kind}:{transport}:{seal_host_key(host)}:{port}"
 
 
+def k8s_ref(*, host: str, port) -> str:
+    """The AAD ``ref`` for an ``agent_k8s`` bundle — a cluster-admin kubeconfig — bound to
+    the cluster's API endpoint, as :func:`bundle_ref` binds a run bundle to its target.
+    Mirrored in runners/agent/agent.py::k8s_ref; a parity test pins the two."""
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        port = 0
+    return f"k8s:{seal_host_key(host)}:{port}"
+
+
 # ── Keys ──────────────────────────────────────────────────────────────────────
 
 def generate_reply_keypair() -> tuple[str, str]:

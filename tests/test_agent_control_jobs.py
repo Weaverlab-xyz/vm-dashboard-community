@@ -128,12 +128,12 @@ def test_the_agent_accepts_only_its_repository_by_digest_and_no_downgrade():
     up = agent.parse_upgrades({"enabled": True, "repository": "chrweav/dashboard-agent",
                                "verify": KEYLESS})
     ok = agent.check_control_request("agent_upgrade", {"repository": "chrweav/dashboard-agent",
-                                                       "digest": DIGEST, "version": "2.11.0"}, up)
+                                                       "digest": DIGEST, "version": "2.12.0"}, up)
     assert ok == {"op": "upgrade", "repository": "chrweav/dashboard-agent", "digest": DIGEST,
-                  "version": "2.11.0"}
-    for payload in ({"repository": "evil/agent", "digest": DIGEST, "version": "2.11.0"},
+                  "version": "2.12.0"}
+    for payload in ({"repository": "evil/agent", "digest": DIGEST, "version": "2.12.0"},
                     {"repository": "chrweav/dashboard-agent", "digest": "latest",
-                     "version": "2.11.0"},
+                     "version": "2.12.0"},
                     {"repository": "chrweav/dashboard-agent", "digest": DIGEST,
                      "version": "2.9.0"},
                     {"repository": "chrweav/dashboard-agent", "digest": DIGEST,
@@ -195,7 +195,7 @@ def test_a_refusal_from_the_updater_fails_the_job():
     agent.time.sleep = lambda s: saved(0.05)
     try:
         agent.run_control("agent_upgrade", {"repository": "chrweav/dashboard-agent",
-                                            "digest": DIGEST, "version": "2.11.0"},
+                                            "digest": DIGEST, "version": "2.12.0"},
                           pol, lambda m: None, lambda: False, "j2", _Dash())
     except agent.RunFailure as exc:
         assert "signature did not verify" in str(exc)
@@ -222,7 +222,7 @@ def test_a_docker_stop_hands_the_job_off_without_completing_it():
     try:
         agent.execute(dash, pol, {"job_id": "j3", "job_type": "agent_upgrade",
                                   "payload": {"repository": "chrweav/dashboard-agent",
-                                              "digest": DIGEST, "version": "2.11.0"}})
+                                              "digest": DIGEST, "version": "2.12.0"}})
     finally:
         agent.time.sleep = saved
         agent.SLOTS = None
@@ -255,7 +255,7 @@ def test_the_successor_completes_the_job_and_reports_ready():
 
 def test_a_rolled_back_predecessor_fails_the_job_with_the_reason():
     _control_dir()
-    _pending(version="2.11.0")
+    _pending(version="2.12.0")
     agent._write_control("status.json", {"job_id": "j4", "state": "rolled_back",
                                          "reason": "the new agent exited (code 1)"})
     dash = _Dash()

@@ -432,6 +432,24 @@ async def build(db, *, job, agent) -> tuple:
         if conn.get("db_login_password"):
             scrub.append(conn["db_login_password"])
 
+    if run_kind == "k8s":
+        # A cluster-admin kubeconfig, so the agent must STILL qualify and still be the
+        # cluster's executor (k8s_executor_service) — the bundle is built at lease time,
+        # and that is when it counts. Minted now, so a 15-minute EKS token is fresh.
+        from ..database import K8sCluster
+        from . import ansible_cloud_run_service, k8s_executor_service, k8s_service
+        cluster = db.query(K8sCluster).filter(K8sCluster.id == meta["target_id"]).first()
+        if cluster is None:
+            raise BundleError("That cluster no longer exists.")
+        why = k8s_executor_service.agent_refusal(db, agent, cluster)
+        if why or (cluster.executor_agent_id or "") != agent.id:
+            raise BundleError(why or "This cluster's Kubernetes work no longer runs on "
+                                     "this agent.")
+        kubeconfig = k8s_service._runner_kubeconfig(
+            k8s_service.resolve_kubeconfig(db, cluster.id))
+        bundle["kubeconfig"] = kubeconfig
+        scrub.extend(ansible_cloud_run_service._kubeconfig_tokens(kubeconfig))
+
     if run_kind == "directory":
         from ..database import ManagedDirectory
         from . import directory_service

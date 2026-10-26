@@ -174,6 +174,49 @@ reach. Routes you narrowed or added yourself are left as they are.
 **Delete** takes the host down, then revokes and deletes the agent and its routes. Runs for
 those ranges then go back to the remote worker.
 
+## Kubernetes work
+
+An agent the dashboard deployed can also run a cluster's Kubernetes work, instead of the
+remote worker: no cold start and no dashboard worker slot. Today that means Config
+Management plays against the cluster. Each one hands the agent the cluster's
+**cluster-admin kubeconfig**, so only an agent the dashboard owns qualifies. A
+customer-hosted agent never does, whatever its policy says. All of these must hold:
+
+- **The dashboard deployed it.** Its `agent_hosts` row is the proof; nothing the agent
+  reports counts.
+- **It attests through SPIRE**, whatever **Release dashboard-held credentials only to
+  SPIRE-attested agents** is set to.
+- **Allow Kubernetes work** is ticked for its host (in the deploy dialog, or later; turning it
+  on takes effect at the next start, turning it off at once).
+- **It runs agent 2.12 or later**, and is in the cluster's cloud.
+
+**Then, on the Kubernetes page,** choose **Runs on worker** on a cluster and pick the agent.
+The list shows every deployed agent in the cluster's cloud, with the reason any of them
+cannot be chosen. An on-premises cluster keeps the dashboard's own runner.
+
+**What the host gets.** At start, the dashboard writes a `k8s:` block into the agent's
+policy and adds `agent_k8s` to its job types:
+
+- **The image is pinned by digest.** It is `ansible_cloud_image` (kubectl, helm and
+  `kubernetes.core`), resolved to a digest on Docker Hub when the host starts, and
+  pre-pulled. If it cannot be resolved, Kubernetes work stays off for that start and the
+  start job says so. The agent itself refuses a `k8s:` image that is not a digest.
+- **Endpoints.** The block allows HTTPS and port 6443 to any address, because a cluster's
+  API endpoint is public and specific to it. The agent's deny list (cloud metadata,
+  loopback, link-local) still applies. Since the dashboard writes this policy, it is not an
+  independent gate the way a customer's own `policy.yaml` is: that is exactly what makes
+  this agent *owned*.
+
+**How the work runs.**
+
+- **The kubeconfig.** It is minted when the agent asks for it (a fresh short-lived cloud
+  token), sealed to that agent, that job and the cluster's API endpoint, and lives only in
+  the one-shot container.
+- **The steps** are a closed set: apply, delete, helm upgrade, helm uninstall. The agent
+  builds every command itself; no step can name one.
+- **Fallback.** While the agent is offline, and its host is not about to be up, the work
+  runs on the remote worker, and the job's Live Output says so.
+
 ## The API
 
 All on `/api/agent-hosts`, behind the remote agents feature flag. Reading needs

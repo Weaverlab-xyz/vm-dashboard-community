@@ -72,7 +72,10 @@ DEPLOYED_AGENT_VERSION = "2.9.0"
 # SSH and WinRM for VMs; the engines' ports for databases (SQL Server, Oracle, MySQL,
 # PostgreSQL, MongoDB).
 ANSIBLE_PORTS = (22, 1433, 1521, 3306, 5432, 5985, 5986, 27017)
-MAX_CONCURRENT_CEILING = 8          # the agent's own ANSIBLE_MAX_CONCURRENT_CEILING
+MAX_CONCURRENT_CEILING = 8
+# Kubernetes API servers: HTTPS, and the self-managed default.
+K8S_PORTS = (443, 6443)
+_DIGEST_REF_RE = re.compile(r"^[a-z0-9./_-]+@sha256:[0-9a-f]{64}$")          # the agent's own ANSIBLE_MAX_CONCURRENT_CEILING
 MAX_CIDRS = 16
 # About 1 GiB per run, plus the agent: 4 GiB covers the default of 2 runs with headroom.
 DEFAULT_SIZES = {"aws": "t3.medium", "azure": "Standard_B2s", "gcp": "e2-medium"}
@@ -179,11 +182,19 @@ def validate_lifecycle(db, *, mode: str, until_at=None, change_window_id: str = 
 
 # ── what the host is told ─────────────────────────────────────────────────────
 
-def policy_yaml(cidrs: list, max_concurrent: int, *, upgrades: bool = False) -> str:
-    """The agent's policy.yaml: Config Management only, for these ranges.
+def policy_yaml(cidrs: list, max_concurrent: int, *, upgrades: bool = False,
+                k8s_image: str = "") -> str:
+    """The agent's policy.yaml: Config Management for these ranges, and Kubernetes work
+    when ``k8s_image`` is given.
 
     ``upgrades`` (SPIRE hosts, which get the updater) opts the host into central upgrades,
     accepting only images the project's release workflow signed (keyless).
+
+    ``k8s_image`` (an image BY DIGEST) adds ``agent_k8s`` and a ``k8s:`` block. A cluster's
+    API endpoint is public and specific to it, so the block allows HTTPS and the API port
+    anywhere: the agent's own deny list (metadata, loopback, link-local) still applies, but
+    this policy is the dashboard's, not an independent gate. That is what makes the host
+    OWNED (k8s_executor_service), and why only such a host is ever written one.
 
     Built as data and dumped by yaml.safe_dump, never formatted as text, so no value can
     add a key. Every range was normalised by :func:`normalize_cidrs` already; this re-checks
@@ -206,6 +217,16 @@ def policy_yaml(cidrs: list, max_concurrent: int, *, upgrades: bool = False) -> 
             "targets": [{"cidr": c, "ports": list(ANSIBLE_PORTS)} for c in ranges],
         },
     }
+    if k8s_image:
+        if not _DIGEST_REF_RE.match(k8s_image):
+            raise AgentHostError("The Kubernetes image must be pinned by digest.")
+        doc["job_types"].append("agent_k8s")
+        doc["k8s"] = {
+            "enabled": True,
+            "image": k8s_image,
+            "targets": [{"cidr": "0.0.0.0/0", "ports": list(K8S_PORTS)},
+                        {"cidr": "::/0", "ports": list(K8S_PORTS)}],
+        }
     if upgrades:
         from .agent_lifecycle_service import (DEFAULT_REPOSITORY, SIGNING_IDENTITY,
                                               SIGNING_ISSUER)
@@ -215,6 +236,27 @@ def policy_yaml(cidrs: list, max_concurrent: int, *, upgrades: bool = False) -> 
             "verify": {"keyless": {"identity": SIGNING_IDENTITY, "issuer": SIGNING_ISSUER}},
         }
     return yaml.safe_dump(doc, sort_keys=False)
+
+
+def k8s_image() -> str:
+    """The Kubernetes work image (``ansible_cloud_image``: kubectl, helm and
+    kubernetes.core) resolved to a digest on Docker Hub, or "" when it cannot be. Never a
+    tag: a tag would let a registry change what runs with a cluster-admin kubeconfig."""
+    from . import agent_release_service
+    ref = (_cfg("ansible_cloud_image") or DB_IMAGE).strip()
+    if _DIGEST_REF_RE.match(ref):
+        return ref
+    repo, _, tag = ref.partition(":")
+    if "/" not in repo or "." in repo.split("/", 1)[0]:
+        logger.warning("agent host: %s is not a Docker Hub image; Kubernetes work needs "
+                       "it pinned by digest in ansible_cloud_image", ref)
+        return ""
+    try:
+        digest = agent_release_service.read_registry(repo, tag or "latest")["digest"]
+    except Exception as exc:  # noqa: BLE001 — no digest means no Kubernetes work, not a failed start
+        logger.warning("agent host: could not resolve %s to a digest: %s", ref, exc)
+        return ""
+    return f"{repo}@{digest}" if re.match(r"^sha256:[0-9a-f]{64}$", digest or "") else ""
 
 
 def agent_image(db) -> str:
@@ -262,7 +304,7 @@ def _b64(text: str) -> str:
 
 
 def bootstrap_script(*, url: str, policy: str, material: dict,
-                     image: str = AGENT_IMAGE) -> str:
+                     image: str = AGENT_IMAGE, k8s_image: str = "") -> str:
     """The Bash every cloud runs at first boot to start the agent.
 
     One script for all three clouds — ECS-optimised Amazon Linux, Ubuntu with docker.io, and
@@ -302,6 +344,10 @@ def bootstrap_script(*, url: str, policy: str, material: dict,
         f"docker pull {ANSIBLE_IMAGE}",
         f"docker pull {DB_IMAGE}",
     ]
+    if k8s_image:
+        if not _DIGEST_REF_RE.match(k8s_image):
+            raise AgentHostError("The Kubernetes image must be pinned by digest.")
+        lines.append(f"docker pull {k8s_image}")
     agent_env = [
         f"-e DASHBOARD_URL={q(url)}",
         "-e AGENT_POLL_INTERVAL=5",
@@ -492,6 +538,7 @@ def serialize(host, agent=None, window=None) -> dict:
         "network": host.network or "",
         "instance_size": host.instance_size or DEFAULT_SIZES.get(host.cloud, ""),
         "ansible_cidrs": cidrs_of(host), "max_concurrent": host.max_concurrent,
+        "k8s_enabled": bool(host.k8s_enabled),
         "mode": host.mode,
         "until_at": host.until_at.isoformat() if host.until_at else None,
         "change_window_id": host.change_window_id or "",
@@ -520,7 +567,7 @@ def live_count(db, cloud: str, region: Optional[str] = None) -> int:
 
 def create(db, *, name: str, cloud: str, region: str, cidrs, max_concurrent=2,
            subnet: str = "", instance_size: str = "", lifecycle: dict,
-           created_by: str = ""):
+           created_by: str = "", k8s_enabled: bool = False):
     """Register the agent and its host record. Nothing is launched here — the caller
     queues ``agent_host_start`` (or leaves a window-mode agent for the sweep)."""
     from ..database import AgentHost
@@ -560,6 +607,7 @@ def create(db, *, name: str, cloud: str, region: str, cidrs, max_concurrent=2,
     host = AgentHost(agent_id=agent.id, name=name, cloud=cloud, region=region,
                      subnet=(subnet or "").strip() or None, instance_size=size,
                      ansible_cidrs=json.dumps(ranges), max_concurrent=slots,
+                     k8s_enabled=bool(k8s_enabled) or None,
                      status="parked", created_by=created_by or None, **lifecycle)
     db.add(host)
     db.commit()
@@ -849,10 +897,22 @@ async def _start(db, host, job_id: str) -> None:
     url = dashboard_url()
     material = identity_material(db, agent, host.cloud)
     spire = material.get("mode") == "spire"
+    # Kubernetes work only on a SPIRE host (k8s_executor_service), with its image by digest.
+    k8s = ""
+    if host.k8s_enabled:
+        k8s = k8s_image() if spire else ""
+        if not k8s:
+            job_service.append_job_log(
+                db, job_id,
+                "Kubernetes work stays off for this start: " + (
+                    "it needs SPIRE attestation." if not spire else
+                    "the Kubernetes image could not be pinned by digest."))
+    agent_service.set_allowed_job_types(
+        db, agent, ["agent_ansible"] + (["agent_k8s"] if k8s else []))
     script = bootstrap_script(url=url, policy=policy_yaml(cidrs_of(host),
                                                          host.max_concurrent,
-                                                         upgrades=spire),
-                              material=material, image=agent_image(db))
+                                                         upgrades=spire, k8s_image=k8s),
+                              material=material, image=agent_image(db), k8s_image=k8s)
 
     job_service.update_progress(db, job_id, 20, "Opening egress for the subnet")
     await _ensure_egress(host)

@@ -37,6 +37,15 @@ insufficient:
    container socket. `tests/test_agent_runner_contract.py` asserts that, so it stays
    true rather than being a claim in a README.
 
+**The one exception is an agent the dashboard deployed and owns.** From 2.12, a `k8s:`
+block (written by the dashboard into the policy of a host it deployed, never by you)
+enables Kubernetes work: the `agent_k8s` handler and the `k8s` Config-Management run kind.
+The block's image must be pinned by digest (`repo@sha256:…`) or the agent will not start.
+The work is a closed set of steps (apply, delete, helm upgrade, helm uninstall) whose
+commands the agent builds itself, with a cluster-admin kubeconfig sealed to the job. A
+customer-hosted agent is never sent this work, whatever its policy says: see
+[Deploying an agent → Kubernetes work](../../docs/platform/spiffe/remote-agents/deploying.md#kubernetes-work).
+
 Probes never authenticate. Discovery is a TCP connect plus a pre-auth protocol banner
 (Postgres SSLRequest, MySQL greeting, TDS PRELOGIN, Oracle TNS, Kubernetes
 `GET /version`). Authenticated probing of unknown hosts locks out service accounts and

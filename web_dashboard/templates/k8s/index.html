@@ -133,6 +133,13 @@
                       class="text-xs px-2 py-1 rounded font-medium"
                       :class="c.spiffe_trusted ? 'bg-emerald-600 hover:bg-emerald-700 text-white' : 'bg-white border border-emerald-300 text-emerald-700 hover:bg-emerald-50'"
                       x-text="c.spiffe_trusted ? 'Trusts dashboard identity ✓' : 'Trusts dashboard identity?'"></button>
+              <!-- Where its Kubernetes work runs: the remote worker, or a deployed agent the
+                   dashboard owns (k8s_executor_service). Cloud clusters only. -->
+              <button x-show="c.cloud !== 'local' && (c.status === 'registered' || c.status === 'managed')" @click="openExecutor(c)"
+                      title="Choose where this cluster's Kubernetes work runs: the remote worker, or a deployed agent in its cloud"
+                      class="text-xs px-2 py-1 rounded font-medium"
+                      :class="c.executor_agent_id ? 'bg-indigo-600 hover:bg-indigo-700 text-white' : 'bg-white border border-indigo-300 text-indigo-700 hover:bg-indigo-50'"
+                      x-text="c.executor_agent_id ? 'Runs on agent ✓' : 'Runs on worker'"></button>
               <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openApiTunnel(c)"
                       title="Direct kubectl-to-API TCP tunnel + downloadable cloud-login (token-free) kubeconfig; supports kubectl --as impersonation for Entitle grants"
                       class="text-xs px-2 py-1 bg-cyan-600 hover:bg-cyan-700 text-white rounded font-medium"
@@ -702,6 +709,45 @@
     </div>
   </div>
 
+  <!-- Where a cluster's Kubernetes work runs -->
+  <div x-show="showExecutor" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+       @click.self="showExecutor = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="font-semibold text-gray-800">Run Kubernetes work on<span x-show="executorTarget" class="text-gray-400 font-normal"> — <span x-text="executorTarget && executorTarget.name"></span></span></h3>
+        <button @click="showExecutor = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+      <div class="px-6 py-4 space-y-4">
+        <p class="text-xs text-gray-500">
+          Config Management plays against this cluster can run on a deployed agent in its cloud instead of
+          the remote worker: no cold start, and no dashboard worker slot. The agent receives this cluster's
+          <strong>cluster-admin kubeconfig</strong>, sealed to it for one job, so only an agent this dashboard
+          deployed qualifies — SPIRE-attested, agent 2.12 or later, with <em>Allow Kubernetes work</em> on its host.
+          While it is offline, work runs on the remote worker.
+        </p>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Runs on</label>
+          <select x-model="executorForm.agent_id" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+            <option value="">The remote worker</option>
+            <template x-for="a in executorCandidates" :key="a.id">
+              <option :value="a.id" :disabled="!!a.reason" :title="a.reason"
+                      x-text="a.name + (a.reason ? ' — not eligible' : '')"></option>
+            </template>
+          </select>
+          <template x-for="a in executorCandidates.filter(x => x.reason)" :key="'why-' + a.id">
+            <p class="text-xs text-gray-500 mt-1"><span class="font-medium" x-text="a.name"></span>: <span x-text="a.reason"></span></p>
+          </template>
+          <p x-show="!executorCandidates.length" class="text-xs text-gray-500 mt-1">No agent is deployed in this cluster's cloud. Deploy one from Remote Agents → Agents.</p>
+        </div>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
+        <button @click="showExecutor = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+        <button @click="submitExecutor()" :disabled="executorBusy"
+                class="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">Save</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Impersonation access modal (fine-grained per-cluster JIT) -->
   <div x-show="showImpersonator" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
        @click.self="showImpersonator = false">
@@ -1074,6 +1120,8 @@ function k8sPage() {
     showApiTunnel: false, apiTunneling: false, apiTunnelTarget: null,
     apiTunnelForm: { jump_group: '', jumpoint_name: '', apiTunnelCredBackend: '', pra_credential_ref: '' },
     showEntraGroup: false, entraBusy: false, entraTarget: null,
+    showExecutor: false, executorBusy: false, executorTarget: null,
+    executorCandidates: [], executorForm: {agent_id: ''},
     entraForm: { group_id: '', role: '' },
     showImpersonator: false, imperBusy: false, imperTarget: null,
     imperForm: { group_id: '' },
@@ -1569,6 +1617,35 @@ function k8sPage() {
         this.flash(e.message || 'API tunnel removal failed.', 'error');
       } finally {
         this.apiTunneling = false;
+      }
+    },
+
+    async openExecutor(c) {
+      this.executorTarget = c;
+      this.executorForm = {agent_id: c.executor_agent_id || ''};
+      this.executorCandidates = [];
+      this.showExecutor = true;
+      try {
+        const r = await API.get(`/api/k8s/clusters/${c.id}/executor`);
+        this.executorCandidates = (r && r.candidates) || [];
+      } catch (e) {
+        this.flash(e.message || 'Could not list deployed agents.', 'error');
+      }
+    },
+
+    async submitExecutor() {
+      this.executorBusy = true;
+      try {
+        await API.put(`/api/k8s/clusters/${this.executorTarget.id}/executor`,
+                          {agent_id: this.executorForm.agent_id || ''});
+        this.showExecutor = false;
+        await this.refresh();
+        this.flash(this.executorForm.agent_id ? 'Kubernetes work now runs on that agent.'
+                                              : 'Kubernetes work runs on the remote worker.');
+      } catch (e) {
+        this.flash(e.message || 'Could not change where this cluster runs.', 'error');
+      } finally {
+        this.executorBusy = false;
       }
     },
 

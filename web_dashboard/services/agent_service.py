@@ -66,7 +66,7 @@ AUDIENCE_CONFIG = "agent_base_url"
 # jobs_worker.HANDLED_TYPES; the static test enforces it. These run on a network the
 # local worker cannot reach, so a type in both would be raced between two executors.
 AGENT_JOB_TYPES = ("agent_discover", "agent_hypervisor", "agent_ansible",
-                   "agent_gateway", "agent_storage")
+                   "agent_gateway", "agent_storage", "agent_k8s")
 
 # An agent is "online" if it polled within this many seconds. Three times the default
 # poll interval, so one dropped request does not flap the badge.
@@ -370,6 +370,9 @@ def delete_agent(db: Session, agent: RemoteAgent) -> int:
         .update({Job.agent_id: None}, synchronize_session=False)
     )
     cmr.delete_for_agent(db, agent.id)
+    # A cluster naming it as its Kubernetes executor goes back to the remote worker.
+    from . import k8s_executor_service
+    k8s_executor_service.clear_for_agent(db, agent.id)
     db.delete(agent)
     db.commit()
     return orphaned
@@ -562,6 +565,12 @@ def lease_one(db: Session, agent: RemoteAgent, *,
     if getattr(agent, "paused", None):
         return None
     allowed = allowed_job_types(agent)
+    # Kubernetes work carries a cluster-admin kubeconfig: leasable only by an agent the
+    # dashboard owns (k8s_executor_service), whatever its grant says.
+    if "agent_k8s" in allowed:
+        from . import k8s_executor_service
+        if not k8s_executor_service.qualifies(db, agent):
+            allowed = tuple(t for t in allowed if t != "agent_k8s")
     # Upgrade and restart: gated when they are queued (agent_lifecycle_service.host_gate),
     # and claimable only by a SPIRE-attested agent, whose successor can finish the job.
     if (getattr(agent, "auth_mode", None) or "ed25519") == "spiffe":
@@ -647,6 +656,10 @@ MIN_DIRECTORY_VERSION = (2, 8)
 # needs nothing new and runs on any agent with the Ansible handler.
 MIN_CLOUD_WINDOWS_VERSION = (2, 9)
 
+# The agent build that first carried the `agent_k8s` handler, the `k8s:` policy block and
+# the `k8s` Config-Management run kind — Kubernetes work on a dashboard-owned agent.
+MIN_K8S_VERSION = (2, 12)
+
 # The agent's own ceiling on `ansible.max_concurrent` (ANSIBLE_MAX_CONCURRENT_CEILING in
 # runners/agent/agent.py). A report above it is clamped: the value sizes a throttle, and an
 # agent claiming a thousand slots must not buy itself a thousand times the request budget.
@@ -664,6 +677,18 @@ def _version_at_least(agent: RemoteAgent, minimum: tuple) -> bool:
         # Never reported one, so it has never leased under a build that reports one.
         return False
     return (int(match.group(1)), int(match.group(2))) >= minimum
+
+
+def supports_k8s(agent: RemoteAgent) -> bool:
+    """Whether this agent can run Kubernetes work (``agent_k8s`` and ``k8s`` plays)."""
+    return _version_at_least(agent, MIN_K8S_VERSION)
+
+
+def k8s_upgrade_hint(agent: RemoteAgent) -> str:
+    return (f"Agent '{agent.name}' reports version {agent.agent_version or 'unknown'}; "
+            f"Kubernetes work needs agent {MIN_K8S_VERSION[0]}.{MIN_K8S_VERSION[1]} or "
+            f"later. Upgrade it from the Agents page, then restart its host so the "
+            f"`k8s:` policy block is written. Nothing was queued.")
 
 
 def supports_ansible(agent: RemoteAgent) -> bool:
