@@ -1039,7 +1039,7 @@ def _resolve_agent_target(payload: "RunRequest", db, current_user=None) -> dict:
                    .filter(K8sCluster.id == (payload.target_id or "")).first())
         if cluster is None or not _row_visible(cluster, current_user):
             raise HTTPException(status_code=404, detail="No such cluster.")
-        why = k8s_executor_service.agent_refusal(db, agent, cluster)
+        why = k8s_executor_service.ready_refusal(db, agent, cluster)
         if why:
             raise HTTPException(status_code=400, detail=why)
         if (cluster.executor_agent_id or "") != agent.id:

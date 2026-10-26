@@ -40,7 +40,7 @@ def build_bundle(db, *, job, agent) -> tuple:
                .filter(K8sCluster.id == (meta.get("cluster_id") or "")).first())
     if cluster is None:
         raise agent_k8s_meta.K8sMetaError("That cluster no longer exists.")
-    why = k8s_executor_service.agent_refusal(db, agent, cluster)
+    why = k8s_executor_service.ready_refusal(db, agent, cluster)
     if why or (cluster.executor_agent_id or "") != agent.id:
         raise agent_k8s_meta.K8sMetaError(
             why or "This cluster's Kubernetes work no longer runs on this agent.")

@@ -89,6 +89,11 @@ _MIN_USEFUL_UP = timedelta(minutes=10)
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,40}[a-z0-9]$")
 _SIZE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _HOST_DIR = "/var/lib/dashboard-agent-host"
+# Where a host's updater finds the public key a custom Kubernetes image is signed with
+# (k8s_image_signer_public_key), and so where its policy says it is.
+K8S_SIGNER_KEY_PATH = "/etc/dashboard-agent/k8s-signer.pub"
+# The project's own Kubernetes image: signed by the release workflow (publish-images.yml).
+PROJECT_K8S_REPO = DB_IMAGE.partition(":")[0]
 
 
 class AgentHostError(Exception):
@@ -183,7 +188,7 @@ def validate_lifecycle(db, *, mode: str, until_at=None, change_window_id: str = 
 # ── what the host is told ─────────────────────────────────────────────────────
 
 def policy_yaml(cidrs: list, max_concurrent: int, *, upgrades: bool = False,
-                k8s_image: str = "") -> str:
+                k8s_image: str = "", k8s_verify: Optional[dict] = None) -> str:
     """The agent's policy.yaml: Config Management for these ranges, and Kubernetes work
     when ``k8s_image`` is given.
 
@@ -220,12 +225,16 @@ def policy_yaml(cidrs: list, max_concurrent: int, *, upgrades: bool = False,
     if k8s_image:
         if not _DIGEST_REF_RE.match(k8s_image):
             raise AgentHostError("The Kubernetes image must be pinned by digest.")
+        if not k8s_verify:
+            raise AgentHostError("The Kubernetes image has no signer to verify it against.")
         doc["job_types"].append("agent_k8s")
         doc["k8s"] = {
             "enabled": True,
             "image": k8s_image,
             "targets": [{"cidr": "0.0.0.0/0", "ports": list(K8S_PORTS)},
                         {"cidr": "::/0", "ports": list(K8S_PORTS)}],
+            # Whose signature the updater checks before the agent runs it (agent 2.13).
+            "verify": k8s_verify,
         }
     if upgrades:
         from .agent_lifecycle_service import (DEFAULT_REPOSITORY, SIGNING_IDENTITY,
@@ -257,6 +266,40 @@ def k8s_image() -> str:
         logger.warning("agent host: could not resolve %s to a digest: %s", ref, exc)
         return ""
     return f"{repo}@{digest}" if re.match(r"^sha256:[0-9a-f]{64}$", digest or "") else ""
+
+
+def k8s_signer(image: str) -> tuple:
+    """``(verify, public_key_pem)`` for the policy's ``k8s.verify``, or ``({}, why)`` when
+    the image has no signer, and so the host gets no Kubernetes work.
+
+    An admin-set signer (Settings → Ansible, for a custom ``ansible_cloud_image``) wins:
+    a keyless identity and issuer, or a cosign public key. With none, only the project's
+    own image has one, the release workflow's keyless identity."""
+    identity = _cfg("k8s_image_signer_identity")
+    issuer = _cfg("k8s_image_signer_issuer")
+    pem = _cfg("k8s_image_signer_public_key")
+    if pem and (identity or issuer):
+        return {}, ("Set either a signer identity and issuer or a public key for the "
+                    "Kubernetes image, not both.")
+    if pem:
+        if not re.match(r"^-----BEGIN PUBLIC KEY-----\s[A-Za-z0-9+/=\s]+"
+                        r"-----END PUBLIC KEY-----\s*$", pem):
+            return {}, "The Kubernetes image's signer public key is not a PEM public key."
+        return {"public_key": K8S_SIGNER_KEY_PATH}, pem + "\n"
+    if identity or issuer:
+        try:
+            re.compile(identity)
+        except re.error:
+            identity = ""
+        if not identity or not issuer.startswith("https://"):
+            return {}, ("The Kubernetes image's signer needs both an identity (a regular "
+                        "expression) and an https:// issuer.")
+        return {"keyless": {"identity": identity, "issuer": issuer}}, ""
+    if image.partition("@")[0] == PROJECT_K8S_REPO:
+        from .agent_lifecycle_service import SIGNING_IDENTITY, SIGNING_ISSUER
+        return {"keyless": {"identity": SIGNING_IDENTITY, "issuer": SIGNING_ISSUER}}, ""
+    return {}, (f"{image.partition('@')[0]} is not the project's image and no signer is "
+                f"set for it (Settings → Ansible → Kubernetes image signer).")
 
 
 def agent_image(db) -> str:
@@ -304,7 +347,8 @@ def _b64(text: str) -> str:
 
 
 def bootstrap_script(*, url: str, policy: str, material: dict,
-                     image: str = AGENT_IMAGE, k8s_image: str = "") -> str:
+                     image: str = AGENT_IMAGE, k8s_image: str = "",
+                     k8s_signer_pem: str = "") -> str:
     """The Bash every cloud runs at first boot to start the agent.
 
     One script for all three clouds — ECS-optimised Amazon Linux, Ubuntu with docker.io, and
@@ -466,6 +510,8 @@ def bootstrap_script(*, url: str, policy: str, material: dict,
         lines += [
             'mkdir -p "$D/control"',
             'chown 10001:10001 "$D/control" && chmod 0700 "$D/control"',
+            *([f'echo {_b64(k8s_signer_pem)} | base64 -d > "$D/etc/k8s-signer.pub"',
+               'chmod 0444 "$D/etc/k8s-signer.pub"'] if k8s_signer_pem else []),
             f"docker pull {UPDATER_IMAGE}",
             'docker run -d --name dashboard-agent-updater --restart unless-stopped '
             '--user 10001:10001 --group-add "$GID" --read-only --cap-drop ALL '
@@ -475,7 +521,9 @@ def bootstrap_script(*, url: str, policy: str, material: dict,
             '-e UPDATER_STOP_TIMEOUT=40 '
             '-v "$D/control:/var/lib/dashboard-agent-control" '
             '-v "$D/etc/policy.yaml:/etc/dashboard-agent/policy.yaml:ro" '
-            f'-v /var/run/docker.sock:/var/run/docker.sock {UPDATER_IMAGE}',
+            + (f'-v "$D/etc/k8s-signer.pub:{K8S_SIGNER_KEY_PATH}:ro" '
+               if k8s_signer_pem else '')
+            + f'-v /var/run/docker.sock:/var/run/docker.sock {UPDATER_IMAGE}',
         ]
         agent_vols.append('-v "$D/control:/var/lib/dashboard-agent-control"')
         agent_env.append("--label dashboard-agent.role=agent")
@@ -539,6 +587,10 @@ def serialize(host, agent=None, window=None) -> dict:
         "instance_size": host.instance_size or DEFAULT_SIZES.get(host.cloud, ""),
         "ansible_cidrs": cidrs_of(host), "max_concurrent": host.max_concurrent,
         "k8s_enabled": bool(host.k8s_enabled),
+        # The updater's cosign check of its Kubernetes image, as the agent last reported
+        # it (agent 2.13+): "verified", "pending", "failed: …", or "" for not reported.
+        "k8s_signature": (getattr(agent, "control_k8s_signature", None) or "")
+        if agent is not None else "",
         "mode": host.mode,
         "until_at": host.until_at.isoformat() if host.until_at else None,
         "change_window_id": host.change_window_id or "",
@@ -898,21 +950,29 @@ async def _start(db, host, job_id: str) -> None:
     material = identity_material(db, agent, host.cloud)
     spire = material.get("mode") == "spire"
     # Kubernetes work only on a SPIRE host (k8s_executor_service), with its image by digest.
-    k8s = ""
+    k8s, k8s_verify, k8s_pem = "", {}, ""
     if host.k8s_enabled:
         k8s = k8s_image() if spire else ""
+        why = ("it needs SPIRE attestation." if not spire else
+               "the Kubernetes image could not be pinned by digest.")
+        if k8s:
+            # Fail closed: an image nobody named a signer for runs no Kubernetes work.
+            k8s_verify, signer = k8s_signer(k8s)
+            if k8s_verify:
+                k8s_pem = signer
+            else:
+                k8s, why = "", signer
         if not k8s:
             job_service.append_job_log(
-                db, job_id,
-                "Kubernetes work stays off for this start: " + (
-                    "it needs SPIRE attestation." if not spire else
-                    "the Kubernetes image could not be pinned by digest."))
+                db, job_id, "Kubernetes work stays off for this start: " + why)
     agent_service.set_allowed_job_types(
         db, agent, ["agent_ansible"] + (["agent_k8s"] if k8s else []))
     script = bootstrap_script(url=url, policy=policy_yaml(cidrs_of(host),
                                                          host.max_concurrent,
-                                                         upgrades=spire, k8s_image=k8s),
-                              material=material, image=agent_image(db), k8s_image=k8s)
+                                                         upgrades=spire, k8s_image=k8s,
+                                                         k8s_verify=k8s_verify),
+                              material=material, image=agent_image(db), k8s_image=k8s,
+                              k8s_signer_pem=k8s_pem)
 
     job_service.update_progress(db, job_id, 20, "Opening egress for the subnet")
     await _ensure_egress(host)

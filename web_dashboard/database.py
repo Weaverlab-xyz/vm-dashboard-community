@@ -845,6 +845,10 @@ class RemoteAgent(Base):
     # "default", so no backfill.
     control_upgrades = Column(Boolean, nullable=True)
     control_updater = Column(Boolean, nullable=True)
+    # Agent 2.13+: the updater's cosign check of its policy's k8s.image ("verified",
+    # "pending", "unchecked", "failed: <reason>", "off"). Kubernetes work goes to an owned
+    # agent only while this reads "verified" (k8s_executor_service). NULL: not reported.
+    control_k8s_signature = Column(String(240), nullable=True)
     paused = Column(Boolean, nullable=True)
     upgrade_ring = Column(String(16), nullable=True)
 

@@ -1457,6 +1457,13 @@ class AnsibleFeatureConfig(BaseModel):
     # carries kubernetes.core + community.postgresql/mysql/general + client libs).
     # Used for ALL cloud runners on k8s/DB targets — never the winrm image.
     ansible_cloud_image: str = "chrweav/ansible-cloud:latest"
+    # Who signed a CUSTOM ansible_cloud_image, for a dashboard-owned agent's updater to
+    # verify before that agent runs Kubernetes work with it (agent_host_service.k8s_signer):
+    # a cosign keyless identity (regex) + issuer, or a cosign public key (PEM). Blank: only
+    # the project's own image, signed by its release workflow, runs on owned agents.
+    k8s_image_signer_identity: str = ""
+    k8s_image_signer_issuer: str = ""
+    k8s_image_signer_public_key: str = ""
     # Image-promote runner — always runs as a one-shot task in the target cloud
     # (ECS / ACI / Cloud Run / Container Instances); no per-cloud selector.
     # Blank → the public Docker Hub image; set a full registry path to use a

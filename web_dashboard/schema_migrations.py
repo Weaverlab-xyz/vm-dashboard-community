@@ -374,6 +374,10 @@ MIGRATIONS: tuple = (
     Migration("0009_k8s_on_owned_agents",
               (add_column("k8s_clusters", "executor_agent_id", "VARCHAR(36)"),
                add_column("agent_hosts", "k8s_enabled", "BOOLEAN"))),
+    # Agent 2.13: its updater's cosign check of the Kubernetes image, as it last reported
+    # it (verified | pending | unchecked | failed: ...). NULL is "not reported".
+    Migration("0010_k8s_image_signature",
+              (add_column("remote_agents", "control_k8s_signature", "VARCHAR(240)"),)),
 )
 
 

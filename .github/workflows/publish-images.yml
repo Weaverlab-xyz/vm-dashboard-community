@@ -30,10 +30,11 @@ name: Publish images
 #   chrweav/hypervisor-runner          (context: runners/hypervisor)
 #   chrweav/dashboard-agent-updater    (context: runners/agent-updater)
 #
-# chrweav/dashboard-agent and chrweav/dashboard-agent-updater are also SIGNED with cosign
-# keyless (id-token: write below), by digest: a remote agent host's updater refuses any
-# agent image whose signature does not name this workflow (docs/platform/spiffe/
-# remote-agents/lifecycle.md).
+# chrweav/dashboard-agent, chrweav/dashboard-agent-updater and chrweav/ansible-cloud are
+# also SIGNED with cosign keyless (id-token: write below), by digest: a remote agent host's
+# updater refuses any agent image whose signature does not name this workflow, and checks
+# chrweav/ansible-cloud the same way before its agent runs Kubernetes work with it
+# (docs/platform/spiffe/remote-agents/lifecycle.md).
 #
 # The published Hub overview for chrweav/infra-dashboard is generated from
 # DOCKERHUB.md in the repo root by the description-sync step at the end of this
@@ -49,8 +50,9 @@ on:
 
 permissions:
   contents: read
-  # Keyless cosign signing of the agent and its updater (below): the job's OIDC token is
-  # the signing identity remote agents pin in policy.yaml `upgrades.verify.keyless`.
+  # Keyless cosign signing of the agent, its updater and the Kubernetes image (below):
+  # the job's OIDC token is the signing identity remote agents pin in policy.yaml
+  # `upgrades.verify.keyless` and `k8s.verify.keyless`.
   id-token: write
 
 jobs:
@@ -75,6 +77,9 @@ jobs:
           - image: chrweav/ansible-cloud
             context: runners/ansible-cloud
             dockerfile: runners/ansible-cloud/Dockerfile
+            # Signed: an owned agent runs it with a cluster-admin kubeconfig, and the
+            # updater beside that agent verifies it first (policy `k8s.verify`).
+            sign: true
           # The remote on-prem agent. Unlike the runners above, this one is pulled by
           # an operator inside a private network rather than launched by the dashboard,
           # so the published tag IS the distribution channel — the install command the

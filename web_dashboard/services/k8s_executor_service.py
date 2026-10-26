@@ -12,9 +12,15 @@ own rows, never from anything the agent reports:
      dashboard hands out;
   3. its host has Kubernetes work allowed (``k8s_enabled``), so its policy carries the
      ``k8s:`` block and ``agent_k8s``;
-  4. it runs agent 2.12 or later;
+  4. it runs agent 2.13 or later;
   5. it is active and holds the ``agent_k8s`` grant;
   6. it runs in the cluster's cloud.
+
+Those decide whether an agent may be CHOSEN. Whether work goes to it NOW also needs the
+updater beside it to have verified the Kubernetes image's cosign signature against the
+policy's ``k8s.verify`` (:func:`signature_refusal`). That one is the agent's own report:
+the agent enforces the same check before it runs anything, and a host still verifying, or
+one whose image did not verify, sends the cluster's work to the remote worker meanwhile.
 
 A cluster names its executor explicitly (``k8s_clusters.executor_agent_id``): its API
 endpoint is public and EKS/AKS clusters sit in their own peered networks, so no route can
@@ -67,9 +73,36 @@ def agent_refusal(db, agent, cluster=None) -> str:
     return ""
 
 
+def signature_refusal(agent) -> str:
+    """Why ``agent``'s Kubernetes image is not known to be signed, or "" if its updater
+    verified it. As the agent last reported it (2.13+)."""
+    state = (getattr(agent, "control_k8s_signature", None) or "").strip()
+    if state == "verified":
+        return ""
+    name = getattr(agent, "name", "")
+    if state == "pending":
+        return (f"Agent '{name}' is still verifying its Kubernetes image's signature; its "
+                f"Kubernetes work runs on the remote worker until it has.")
+    if state.startswith("failed"):
+        return (f"Agent '{name}''s Kubernetes image did not verify "
+                f"({state.partition(':')[2].strip() or 'no reason given'}), so it runs no "
+                f"Kubernetes work.")
+    if state == "unchecked":
+        return (f"Agent '{name}''s policy names no signer for its Kubernetes image "
+                f"(`k8s.verify`). Restart its host so the dashboard writes one.")
+    return f"Agent '{name}' has not reported a check of its Kubernetes image's signature."
+
+
+def ready_refusal(db, agent, cluster=None) -> str:
+    """:func:`agent_refusal`, then :func:`signature_refusal`: whether work goes to
+    ``agent`` now, rather than whether it may be chosen."""
+    return agent_refusal(db, agent, cluster) or (
+        signature_refusal(agent) if agent is not None else "")
+
+
 def qualifies(db, agent) -> bool:
-    """Whether ``agent`` may lease Kubernetes work at all (no particular cluster)."""
-    return not agent_refusal(db, agent)
+    """Whether ``agent`` may lease Kubernetes work now (no particular cluster)."""
+    return not ready_refusal(db, agent)
 
 
 def executor_for(db, cluster) -> Optional[object]:
@@ -81,7 +114,7 @@ def executor_for(db, cluster) -> Optional[object]:
     if not agent_id:
         return None
     agent = db.query(RemoteAgent).filter(RemoteAgent.id == agent_id).first()
-    return agent if agent is not None and not agent_refusal(db, agent, cluster) else None
+    return agent if agent is not None and not ready_refusal(db, agent, cluster) else None
 
 
 def candidates(db, cluster) -> list:
@@ -96,7 +129,10 @@ def candidates(db, cluster) -> list:
         if agent is None:
             continue
         out.append({"id": agent.id, "name": agent.name,
-                    "reason": agent_refusal(db, agent, cluster)})
+                    "reason": agent_refusal(db, agent, cluster),
+                    # Choosable while still verifying; the work waits on the worker.
+                    "signature": agent.control_k8s_signature or "",
+                    "signature_note": signature_refusal(agent)})
     return sorted(out, key=lambda a: a["name"].lower())
 
 

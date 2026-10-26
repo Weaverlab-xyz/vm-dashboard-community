@@ -21,12 +21,16 @@ The handoff, all files in CONTROL_DIR, each written atomically:
   * ``status.json``  — written here: ``{job_id, state, reason, at}``, ``state`` one of
     verifying, pulling, swapping, waiting_ready, done, rolled_back, failed;
   * ``ready``        — written by the (new) agent after its first successful lease;
-  * ``updater.alive`` — touched here every loop, so the agent can say an updater is present.
+  * ``updater.alive`` — touched here every loop, so the agent can say an updater is present;
+  * ``k8s-image.json`` — written here: ``{key, image, ok, reason, at}``, this updater's
+    cosign check of the policy's ``k8s.image`` against ``k8s.verify``. The agent runs no
+    Kubernetes work until it reads ``ok: true`` under the key of its own image and signer.
 
 Stdlib only, plus PyYAML for the policy and the ``cosign`` binary for verification.
 """
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import logging
@@ -104,6 +108,52 @@ def load_upgrades(path: str = POLICY_FILE) -> dict:
         raise Refused("policy.yaml `upgrades.ready_timeout_s` is out of range")
     return {"repository": repo, "verify": verify, "ready_timeout_s": timeout,
             "allow_downgrade": value.get("allow_downgrade") is True}
+
+
+def _verify_block(verify, where: str) -> dict:
+    """A signer block validated the way the agent's ``parse_verify`` validates it."""
+    if not isinstance(verify, dict) or len(verify) != 1:
+        raise Refused(f"policy.yaml `{where}` is malformed; the agent refuses it too")
+    if "keyless" in verify:
+        kl = verify["keyless"] if isinstance(verify["keyless"], dict) else {}
+        identity = str(kl.get("identity") or "").strip()
+        issuer = str(kl.get("issuer") or "").strip()
+        if not (identity and issuer):
+            raise Refused(f"policy.yaml `{where}.keyless` needs identity and issuer")
+        return {"keyless": {"identity": identity, "issuer": issuer}}
+    if "public_key" in verify:
+        key = str(verify["public_key"] or "").strip()
+        if not key.startswith("/"):
+            raise Refused(f"policy.yaml `{where}.public_key` must be an absolute path")
+        return {"public_key": key}
+    raise Refused(f"policy.yaml `{where}` names no verification")
+
+
+_K8S_IMAGE_RE = re.compile(r"^[a-z0-9./_-]+@sha256:[0-9a-f]{64}$")
+
+
+def load_k8s(path: Optional[str] = None) -> dict:
+    """``{image, verify, key}`` when the host's ``k8s:`` block enables Kubernetes work and
+    names a signer, else ``{}`` (nothing for this updater to check)."""
+    try:
+        with open(path or POLICY_FILE, "rb") as fh:
+            doc = yaml.safe_load(fh) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise Refused(f"cannot read policy.yaml: {exc}")
+    value = doc.get("k8s") if isinstance(doc, dict) else None
+    if not isinstance(value, dict) or not value.get("enabled") or value.get("verify") is None:
+        return {}
+    image = str(value.get("image") or "")
+    if not _K8S_IMAGE_RE.match(image):
+        raise Refused("policy.yaml `k8s.image` is not pinned by digest")
+    verify = _verify_block(value["verify"], "k8s.verify")
+    return {"image": image, "verify": verify, "key": k8s_verify_key(image, verify)}
+
+
+def k8s_verify_key(image: str, verify: dict) -> str:
+    """The same key the agent computes (runners/agent/agent.py ``k8s_verify_key``)."""
+    canon = json.dumps(verify, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(f"{image}\n{canon}".encode("utf-8")).hexdigest()
 
 
 def cosign_args(upgrades: dict, ref: str) -> list:
@@ -295,6 +345,22 @@ def write_status(job_id: str, state: str, reason: str = "") -> None:
     log.info("job %s: %s%s", job_id[:8], state, f" — {reason}" if reason else "")
 
 
+def write_k8s_result(k8s: dict, ok: bool, reason: str = "") -> None:
+    tmp = _path(".k8s-image.json.tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"key": k8s["key"], "image": k8s["image"], "ok": ok, "reason": reason,
+                   "at": int(time.time()), "updater": UPDATER_VERSION}, fh)
+    os.replace(tmp, _path("k8s-image.json"))
+    log.info("k8s image %s: %s%s", k8s["image"], "verified" if ok else "NOT verified",
+             f" — {reason}" if reason else "")
+
+
+# A failed check is retried, so a sigstore outage at boot does not leave the host without
+# Kubernetes work for good; a pass is final for that key, because a digest never changes.
+K8S_RETRY_FIRST_S = 300
+K8S_RETRY_MAX_S = 3600
+
+
 def touch_alive() -> None:
     with open(_path("updater.alive"), "w", encoding="utf-8") as fh:
         fh.write(str(int(time.time())))
@@ -303,6 +369,8 @@ def touch_alive() -> None:
 class Updater:
     def __init__(self, docker: DockerAPI, *, sleep=time.sleep, clock=time.time):
         self.docker = docker
+        self._k8s_retry_at = 0.0
+        self._k8s_delay = K8S_RETRY_FIRST_S
         self.sleep = sleep
         self.clock = clock
 
@@ -428,9 +496,38 @@ class Updater:
         write_status(job_id, "done")
         return "done"
 
+    def check_k8s_image(self) -> Optional[bool]:
+        """Verify the policy's ``k8s.image`` once per image and signer, writing
+        ``k8s-image.json``. None when there is nothing to check or it is not time yet.
+        No Docker call: cosign reads the signature from the registry, by digest."""
+        try:
+            k8s = load_k8s()
+        except Refused as exc:
+            log.warning("k8s image: %s", exc)
+            return None
+        if not k8s:
+            return None
+        done = read_json("k8s-image.json") or {}
+        if done.get("key") == k8s["key"] and done.get("ok") is True:
+            return None
+        if done.get("key") == k8s["key"] and self.clock() < self._k8s_retry_at:
+            return None
+        try:
+            verify_signature({"verify": k8s["verify"]}, k8s["image"])
+        except Refused as exc:
+            write_k8s_result(k8s, False, str(exc))
+            self._k8s_retry_at = self.clock() + self._k8s_delay
+            self._k8s_delay = min(self._k8s_delay * 2, K8S_RETRY_MAX_S)
+            return False
+        write_k8s_result(k8s, True)
+        self._k8s_delay = K8S_RETRY_FIRST_S
+        return True
+
     def tick(self) -> Optional[str]:
-        """One loop: say we are alive, and act on a request not yet acted on."""
+        """One loop: say we are alive, check the Kubernetes image's signature when it is
+        due, and act on a request not yet acted on."""
         touch_alive()
+        self.check_k8s_image()
         request = read_json("request.json")
         if not request or not request.get("job_id"):
             return None

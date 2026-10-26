@@ -722,7 +722,7 @@
           Config Management plays against this cluster can run on a deployed agent in its cloud instead of
           the remote worker: no cold start, and no dashboard worker slot. The agent receives this cluster's
           <strong>cluster-admin kubeconfig</strong>, sealed to it for one job, so only an agent this dashboard
-          deployed qualifies — SPIRE-attested, agent 2.12 or later, with <em>Allow Kubernetes work</em> on its host.
+          deployed qualifies — SPIRE-attested, agent 2.13 or later, with <em>Allow Kubernetes work</em> on its host.
           While it is offline, work runs on the remote worker.
         </p>
         <div>
@@ -736,6 +736,9 @@
           </select>
           <template x-for="a in executorCandidates.filter(x => x.reason)" :key="'why-' + a.id">
             <p class="text-xs text-gray-500 mt-1"><span class="font-medium" x-text="a.name"></span>: <span x-text="a.reason"></span></p>
+          </template>
+          <template x-for="a in executorCandidates.filter(x => !x.reason && x.signature_note)" :key="'sig-' + a.id">
+            <p class="text-xs text-amber-600 mt-1"><span class="font-medium" x-text="a.name"></span>: <span x-text="a.signature_note"></span></p>
           </template>
           <p x-show="!executorCandidates.length" class="text-xs text-gray-500 mt-1">No agent is deployed in this cluster's cloud. Deploy one from Remote Agents → Agents.</p>
         </div>

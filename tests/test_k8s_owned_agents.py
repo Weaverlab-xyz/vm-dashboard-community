@@ -2,7 +2,7 @@
 docs/design/remote-worker-and-agent.md), dashboard side.
 
   * **Only an owned agent qualifies.** Deployed by this dashboard (an agent_hosts row),
-    SPIRE-attested, Kubernetes work allowed on its host, agent 2.12+, granted
+    SPIRE-attested, Kubernetes work allowed on its host, agent 2.13+, granted
     `agent_k8s`, in the cluster's cloud. Every rule is read from the dashboard's rows.
   * **Checked at every use.** An executor that stops qualifying sends the work back to the
     remote worker; `lease_one` never hands `agent_k8s` to an agent that does not qualify.
@@ -67,10 +67,11 @@ def _fresh():
     return db
 
 
-def _agent(db, name="owned", *, deployed=True, spiffe=True, k8s=True, version="2.12.0",
-           cloud="aws", online=True, grants=None):
+def _agent(db, name="owned", *, deployed=True, spiffe=True, k8s=True, version="2.13.0",
+           cloud="aws", online=True, grants=None, signature="verified"):
     db.add(RemoteAgent(
         id=f"agent-{name}", name=name, is_active=True, agent_version=version,
+        control_k8s_signature=signature,
         public_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI" + name,
         auth_mode="spiffe" if spiffe else None,
         last_seen_at=_utcnow() if online else _utcnow() - timedelta(hours=2),
@@ -119,7 +120,7 @@ def test_every_rule_refuses_by_name():
     cases = [({"deployed": False}, "not deployed by this dashboard"),
              ({"spiffe": False}, "not SPIRE-attested"),
              ({"k8s": False}, "Kubernetes work is not allowed"),
-             ({"version": "2.11.0"}, "needs agent 2.12"),
+             ({"version": "2.12.0"}, "needs agent 2.13"),
              ({"grants": ["agent_ansible"]}, "not granted Kubernetes work"),
              ({"cloud": "gcp"}, "runs in gcp")]
     for kw, words in cases:
@@ -366,15 +367,19 @@ def test_an_agent_that_never_finishes_is_cancelled():
 
 def test_a_host_allowed_kubernetes_work_gets_the_block_by_digest():
     import yaml
+    signer = {"keyless": {"identity": "^https://x", "issuer": "https://issuer"}}
     doc = yaml.safe_load(agent_host_service.policy_yaml(["10.40.0.0/16"], 1,
-                                                        k8s_image=DIGEST_IMG))
+                                                        k8s_image=DIGEST_IMG,
+                                                        k8s_verify=signer))
     assert "agent_k8s" in doc["job_types"]
     assert doc["k8s"]["image"] == DIGEST_IMG and doc["k8s"]["enabled"] is True
+    assert doc["k8s"]["verify"] == signer
     assert {t["cidr"] for t in doc["k8s"]["targets"]} == {"0.0.0.0/0", "::/0"}
     plain = yaml.safe_load(agent_host_service.policy_yaml(["10.40.0.0/16"], 1))
     assert "k8s" not in plain and plain["job_types"] == ["agent_ansible"]
     try:
-        agent_host_service.policy_yaml(["10.40.0.0/16"], 1, k8s_image="x/y:latest")
+        agent_host_service.policy_yaml(["10.40.0.0/16"], 1, k8s_image="x/y:latest",
+                                       k8s_verify=signer)
     except agent_host_service.AgentHostError:
         pass
     else:
@@ -496,6 +501,98 @@ def test_the_pickers_and_the_inventory_name_the_executor():
     item = next(i for i in inventory_service.collect(db) if i["id"] == "k8s:cl-1")
     assert inventory_service._target_spec(item)["agent_id"] == "agent-owned"
 
+
+
+# ── the image's signature (agent 2.13) ────────────────────────────────────────
+
+def test_work_waits_on_the_worker_until_the_image_is_verified():
+    for state, words in (("pending", "still verifying"), ("failed: no matching signatures",
+                                                          "no matching signatures"),
+                         ("unchecked", "names no signer"), (None, "has not reported")):
+        db = _fresh()
+        agent = _agent(db, signature=state)
+        cluster = _cluster(db)
+        # Choosable (the picker says why it waits), but no work goes to it yet.
+        assert kex.agent_refusal(db, agent, cluster) == ""
+        assert words in kex.ready_refusal(db, agent, cluster), state
+        assert kex.executor_for(db, cluster) is None, state
+        kex.set_executor(db, cluster, agent.id)
+        (cand,) = kex.candidates(db, cluster)
+        assert cand["reason"] == "" and words in cand["signature_note"]
+        _queue(db, agent, cluster)
+        assert agent_service.lease_one(db, agent) is None, state
+
+
+def test_the_lease_records_the_updaters_check():
+    db = _fresh()
+    agent = _agent(db, signature=None)
+    agent_service.record_self_report(db, agent, control={
+        "upgrades_enabled": True, "updater_present": True, "k8s_signature": "verified"})
+    assert agent.control_k8s_signature == "verified"
+    assert kex.executor_for(db, _cluster(db)).id == agent.id
+    agent_service.record_self_report(db, agent, control={
+        "upgrades_enabled": True, "updater_present": True})
+    assert agent.control_k8s_signature == "verified", "absent leaves it alone"
+
+
+def _with_cfg(values):
+    from web_dashboard.services import config_service
+    for key in ("k8s_image_signer_identity", "k8s_image_signer_issuer",
+                "k8s_image_signer_public_key"):
+        config_service.set(key, values.get(key, ""))
+
+
+PEM = "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEexample==\n-----END PUBLIC KEY-----\n"
+
+
+def test_the_signer_is_the_projects_or_the_admins_or_none():
+    from web_dashboard.services.agent_lifecycle_service import SIGNING_IDENTITY
+    custom = "acme/kube-tools@sha256:" + "e" * 64
+    _with_cfg({})
+    verify, _ = agent_host_service.k8s_signer(DIGEST_IMG)
+    assert verify["keyless"]["identity"] == SIGNING_IDENTITY
+    verify, why = agent_host_service.k8s_signer(custom)
+    assert verify == {} and "no signer is set" in why
+    _with_cfg({"k8s_image_signer_identity": "^https://github.com/acme/",
+               "k8s_image_signer_issuer": "https://token.actions.githubusercontent.com"})
+    verify, _ = agent_host_service.k8s_signer(custom)
+    assert verify == {"keyless": {"identity": "^https://github.com/acme/",
+                                  "issuer": "https://token.actions.githubusercontent.com"}}
+    _with_cfg({"k8s_image_signer_public_key": PEM})
+    verify, pem = agent_host_service.k8s_signer(custom)
+    assert verify == {"public_key": agent_host_service.K8S_SIGNER_KEY_PATH} and pem == PEM
+    for bad in ({"k8s_image_signer_public_key": PEM, "k8s_image_signer_issuer": "https://i"},
+                {"k8s_image_signer_identity": "(", "k8s_image_signer_issuer": "https://i"},
+                {"k8s_image_signer_identity": "^x", "k8s_image_signer_issuer": "http://i"},
+                {"k8s_image_signer_public_key": "not a key"}):
+        _with_cfg(bad)
+        assert agent_host_service.k8s_signer(custom)[0] == {}, bad
+    _with_cfg({})
+
+
+def test_a_public_key_signer_reaches_the_updater_as_a_file():
+    script = agent_host_service.bootstrap_script(
+        url="https://dash.example.com", policy="job_types: []\n",
+        material={"mode": "spire", "trust_domain": "example.org", "server_address": "spire",
+                  "server_port": 8081, "bootstrap_pem": "PEM", "join_token": "t"},
+        k8s_image=DIGEST_IMG, k8s_signer_pem=PEM)
+    assert '"$D/etc/k8s-signer.pub"' in script
+    assert f'-v "$D/etc/k8s-signer.pub:{agent_host_service.K8S_SIGNER_KEY_PATH}:ro"' in script
+    assert "BEGIN PUBLIC KEY" not in script, "decoded into a file, never in the script"
+
+
+def test_a_policy_needs_a_signer_for_kubernetes_work():
+    try:
+        agent_host_service.policy_yaml(["10.40.0.0/16"], 1, k8s_image=DIGEST_IMG)
+    except agent_host_service.AgentHostError as exc:
+        assert "signer" in str(exc)
+    else:
+        raise AssertionError("a k8s block with no signer")
+
+
+def test_the_signature_migration_is_recorded():
+    from web_dashboard import schema_migrations as sm
+    assert [m.name for m in sm.MIGRATIONS if m.name == "0010_k8s_image_signature"]
 
 if __name__ == "__main__":
     fns = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]

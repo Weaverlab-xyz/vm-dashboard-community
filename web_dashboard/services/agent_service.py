@@ -656,9 +656,11 @@ MIN_DIRECTORY_VERSION = (2, 8)
 # needs nothing new and runs on any agent with the Ansible handler.
 MIN_CLOUD_WINDOWS_VERSION = (2, 9)
 
-# The agent build that first carried the `agent_k8s` handler, the `k8s:` policy block and
-# the `k8s` Config-Management run kind — Kubernetes work on a dashboard-owned agent.
-MIN_K8S_VERSION = (2, 12)
+# The agent build Kubernetes work on a dashboard-owned agent needs. 2.12 first carried the
+# `agent_k8s` handler, the `k8s:` policy block and the `k8s` run kind; 2.13 refuses to run
+# them until its updater has verified the image's cosign signature (`k8s.verify`), and
+# reports that check on every lease (k8s_executor_service.signature_refusal).
+MIN_K8S_VERSION = (2, 13)
 
 # The agent's own ceiling on `ansible.max_concurrent` (ANSIBLE_MAX_CONCURRENT_CEILING in
 # runners/agent/agent.py). A report above it is clamped: the value sizes a throttle, and an
@@ -931,6 +933,12 @@ def record_self_report(db: Session, agent: RemoteAgent, *,
             value = bool(control.get(key))
             if getattr(agent, column) is not value:
                 setattr(agent, column, value)
+                changed = True
+        # Agent 2.13+: the updater's check of the Kubernetes image's signature.
+        if "k8s_signature" in control:
+            sig = str(control.get("k8s_signature") or "")[:240]
+            if sig != (agent.control_k8s_signature or ""):
+                agent.control_k8s_signature = sig
                 changed = True
 
     # Agent 2.11+: how often it re-attests (0 = never). Absent leaves it alone.

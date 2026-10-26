@@ -196,7 +196,11 @@ customer-hosted agent never does, whatever its policy says. All of these must ho
   SPIRE-attested agents** is set to.
 - **Allow Kubernetes work** is ticked for its host (in the deploy dialog, or later; turning it
   on takes effect at the next start, turning it off at once).
-- **It runs agent 2.12 or later**, and is in the cluster's cloud.
+- **It runs agent 2.13 or later**, and is in the cluster's cloud.
+
+Work goes to a chosen agent only while it reports that the updater beside it has verified the
+Kubernetes image's signature (below). Until then, and if the check ever fails, the cluster's
+work runs on the remote worker. The executor list and the Agents page show the state.
 
 **Then, on the Kubernetes page,** choose **Runs on worker** on a cluster and pick the agent.
 The list shows every deployed agent in the cluster's cloud, with the reason any of them
@@ -209,6 +213,19 @@ policy and adds `agent_k8s` to its job types:
   `kubernetes.core`), resolved to a digest on Docker Hub when the host starts, and
   pre-pulled. If it cannot be resolved, Kubernetes work stays off for that start and the
   start job says so. The agent itself refuses a `k8s:` image that is not a digest.
+- **The image's signature is verified.** The block names who must have signed the image
+  (`k8s.verify`). For the project's own image (`chrweav/ansible-cloud`) that is the release
+  workflow's keyless identity, the same one agent upgrades are checked against. The
+  updater beside the agent runs `cosign verify` on the image by digest when the host starts,
+  and the agent runs no Kubernetes work until that check has passed for exactly this image
+  and signer. A failed check is retried with backoff (5 minutes, doubling to an hour).
+  - **A custom `ansible_cloud_image`** needs its signer under **Settings → Ansible →
+    Kubernetes image signer**: a keyless identity (a regular expression) and issuer, or a
+    cosign public key. With neither, the host gets no Kubernetes work, and its start job
+    says why. A changed signer applies to hosts started after you save it.
+  - **Egress.** Keyless verification reaches the registry and Sigstore
+    (`tuf-repo-cdn.sigstore.dev`, `rekor.sigstore.dev`, `fulcio.sigstore.dev`), as agent
+    upgrades already do. A public key needs only the registry.
 - **Endpoints.** The block allows HTTPS and port 6443 to any address, because a cluster's
   API endpoint is public and specific to it. The agent's deny list (cloud metadata,
   loopback, link-local) still applies. Since the dashboard writes this policy, it is not an
