@@ -5168,7 +5168,7 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
     code = _run_ansible_sibling(
         policy, image=image, files=files, env=run_env,
         command=command, emit=emit, cancelled=cancelled,
-        kind="k8s" if run_kind == "k8s" else "ansible")
+        **({"kind": "k8s"} if run_kind == "k8s" else {}))
 
     meaning = _ANSIBLE_EXIT.get(code, "")
     if code == 0:
