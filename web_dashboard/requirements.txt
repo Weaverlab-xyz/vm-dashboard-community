@@ -124,7 +124,7 @@ proxmoxer>=2.0.0
 requests>=2.31.0
 
 # VMware vSphere / ESXi (vSphere Web Services API)
-pyVmomi>=8.0.0
+pyVmomi>=9.1.1.0
 
 # Microsoft Hyper-V (WinRM remote PowerShell)
 pywinrm>=0.4.3
