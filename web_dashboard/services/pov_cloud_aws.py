@@ -616,7 +616,10 @@ def _forget_linux_login(env_id: str) -> None:
         try:
             config_service.delete(key)
         except Exception:  # noqa: BLE001 - never fail a teardown over housekeeping
-            logger.warning("POV %s: could not clear %s", env_id, key, exc_info=True)
+            # No key name and no traceback: the key is the password's, and a config
+            # failure's exception text can carry the row it was writing.
+            logger.warning("POV %s: could not clear the stored Standard Linux login",
+                           env_id)
 
 
 def _forget_windows_key(env_id: str) -> None:
