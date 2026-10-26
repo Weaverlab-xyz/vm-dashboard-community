@@ -3566,6 +3566,13 @@ class K8sCluster(Base):
     # creator-scoped, a name means everyone in that workgroup. The kubeconfig behind
     # this row is cluster-admin, so tagging one is a real grant, not a label.
     workgroup = Column(String(100), nullable=True, index=True)
+    # Which agent runs this cluster's Kubernetes work: NULL is the remote worker. Only an
+    # OWNED agent may be named — one the dashboard deployed (an agent_hosts row),
+    # SPIRE-attested, with Kubernetes work allowed on its host — because the work hands it
+    # a cluster-admin kubeconfig. Checked when set and again at every use
+    # (k8s_service.agent_qualifies); one that stops qualifying sends the work back to the
+    # worker. Migration 0009.
+    executor_agent_id = Column(String(36), nullable=True)
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
     # Auto-delete timer — NULL = never (see Job.expires_at). Only ever stamped on a
@@ -3688,9 +3695,10 @@ class AgentHost(Base):
     the next window all survive, and each start is a fresh host with a fresh identity
     re-bound to the same agent row. ``status`` is ``parked`` in between.
 
-    Config Management only, by construction: the dashboard writes this agent's
-    ``policy.yaml`` at launch from ``ansible_cidrs`` and ``max_concurrent``, with
-    ``job_types: [agent_ansible]`` and nothing else (services/agent_host_service).
+    Config Management by construction: the dashboard writes this agent's ``policy.yaml``
+    at launch from ``ansible_cidrs`` and ``max_concurrent``, with ``job_types:
+    [agent_ansible]`` — plus ``agent_k8s`` and a ``k8s:`` block when ``k8s_enabled``
+    (services/agent_host_service).
     """
     __tablename__ = "agent_hosts"
 
@@ -3712,6 +3720,10 @@ class AgentHost(Base):
     # What the dashboard writes into the agent's policy.yaml at launch.
     ansible_cidrs = Column(Text, nullable=False, default="[]")   # JSON list of ranges
     max_concurrent = Column(Integer, nullable=False, default=1)
+    # Kubernetes work (agent_k8s, and k8s Config-Management plays) for the clusters that
+    # name this agent. NULL is off. Takes effect at the next start: the policy is written
+    # at launch. Migration 0009.
+    k8s_enabled = Column(Boolean, nullable=True)
 
     mode = Column(String(16), nullable=False, default="always")  # always | until | window
     until_at = Column(DateTime, nullable=True)                   # UTC, mode "until"

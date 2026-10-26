@@ -369,6 +369,11 @@ MIGRATIONS: tuple = (
               (add_column("cloud_databases", "route_cidrs", "TEXT"),
                add_column("cloud_databases", "route_network", "VARCHAR(200)"),
                add_column("cloud_databases", "deploy_workgroup", "VARCHAR(100)"))),
+    # Kubernetes work on dashboard-owned agents: a cluster may name one as its executor,
+    # and a deployed host opts in. NULL is the remote worker, and off.
+    Migration("0009_k8s_on_owned_agents",
+              (add_column("k8s_clusters", "executor_agent_id", "VARCHAR(36)"),
+               add_column("agent_hosts", "k8s_enabled", "BOOLEAN"))),
 )
 
 

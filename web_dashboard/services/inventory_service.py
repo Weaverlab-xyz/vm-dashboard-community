@@ -24,7 +24,7 @@ from ..database import (CertLab, CloudDatabase, CloudFunction, ManagedDirectory,
                         PovEnvironment, SpireLab, VirtualDesktop, WorkloadCloudCredential,
                         WorkloadK8sToken)
 from . import config_mgmt_route_service as cmr
-from . import expiry_policy, hypervisor_view_service
+from . import expiry_policy, hypervisor_view_service, k8s_executor_service
 from . import ps_attribute_catalog, vm_suspend_policy
 from . import tag_policy
 
@@ -259,7 +259,7 @@ def _db_item(row, routes=cmr.EMPTY) -> dict:
     }
 
 
-def _k8s_item(row) -> dict:
+def _k8s_item(row, executor_id: str = "") -> dict:
     return {
         "id": f"k8s:{row.id}",
         "cloud": row.cloud,
@@ -277,6 +277,9 @@ def _k8s_item(row) -> dict:
         "expires_at": _iso(row.expires_at),
         "job_id": row.deploy_job_id,
         "detail_href": "/k8s",
+        # The owned agent its Kubernetes work runs on, when it still qualifies
+        # (k8s_executor_service), else None for the remote worker. Resolved by collect().
+        "agent_id": executor_id or None,
     }
 
 
@@ -784,7 +787,8 @@ def collect(db: Session) -> list:
         items.append(_db_item(row, vm_routes))
 
     for row in db.query(K8sCluster).filter(K8sCluster.status != "deleted").all():
-        items.append(_k8s_item(row))
+        executor = k8s_executor_service.executor_for(db, row)
+        items.append(_k8s_item(row, executor.id if executor is not None else ""))
 
     # Queried unconditionally, like the Certificate Lab and POV rows below: turning the
     # Cloud Functions feature off hides its page, it does not destroy the functions, and
@@ -1026,7 +1030,11 @@ def _target_spec(item: dict):
         if cloud not in acr.K8S_TARGET_CLOUDS:
             return (f"cloud {cloud!r} has no Ansible runner for Kubernetes targets "
                     f"(supported: {'/'.join(acr.K8S_TARGET_CLOUDS)}).")
-        return {"target_kind": "k8s", "target_id": item["id"].split(":", 1)[1]}
+        spec = {"target_kind": "k8s", "target_id": item["id"].split(":", 1)[1]}
+        if item.get("agent_id"):
+            # Its owned agent runs the play; the gate re-checks every rule.
+            spec.update({"agent_id": item["agent_id"], "transport": "local"})
+        return spec
 
     if kind == "database":
         if cloud not in acr.DB_TARGET_CLOUDS:

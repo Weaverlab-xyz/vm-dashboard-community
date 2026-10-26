@@ -1,0 +1,289 @@
+"""Kubernetes work on a remote agent (2.12), agent side.
+
+  * **The `k8s:` block fails closed.** Absent is off; an image not pinned by digest is
+    fatal; the API endpoint is checked against `k8s.targets` with the shared deny list.
+  * **The step set is closed.** A step names a kind and typed fields, and this agent builds
+    every argv: an unknown kind, a bad name, a `--set` with a newline, a plain-HTTP repo or
+    too many steps is refused, and no field reaches the shell unquoted.
+  * **The order is run_ansible's.** Endpoint checked before anything is fetched; audit
+    mode returns before the bundle; the sealed steps must be the kinds the signed envelope
+    listed; the kubeconfig is a file in the job volume and its credentials are redacted.
+  * **A `k8s` play** uses the k8s image and check, not the Ansible ones.
+
+Standalone or under pytest:  python tests/test_agent_k8s_run.py
+"""
+import importlib.util
+import os
+import sys
+import tempfile
+import textwrap
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _load(name, *parts):
+    spec = importlib.util.spec_from_file_location(name, os.path.join(_ROOT, *parts))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+agent = _load("agent", "runners", "agent", "agent.py")
+sealing = _load("agent_sealing", "web_dashboard", "services", "agent_sealing.py")
+
+IMG = "chrweav/ansible-cloud@sha256:" + "c" * 64
+KUBECONFIG = ("users:\n- name: u\n  user:\n    token: secret-token-123456\n"
+              "    client-key-data: S0VZREFUQTEyMzQ1Njc4\n")
+
+
+def _policy(extra: str = ""):
+    doc = textwrap.dedent("""
+        targets:
+          - cidr: 10.40.0.0/16
+            ports: [22]
+        job_types: [agent_ansible, agent_k8s]
+        ansible:
+          enabled: true
+          db_image: chrweav/ansible-cloud:latest
+          targets:
+            - cidr: 10.40.0.0/16
+              ports: [22]
+        """) + textwrap.dedent(extra)
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
+        fh.write(doc)
+        path = fh.name
+    try:
+        return agent.Policy.load(path)
+    finally:
+        os.unlink(path)
+
+
+_K8S = f"""
+k8s:
+  enabled: true
+  image: {IMG}
+  targets:
+    - cidr: 0.0.0.0/0
+      ports: [443, 6443]
+"""
+
+
+def _refused(fn, *args, **kw):
+    try:
+        fn(*args, **kw)
+    except (agent.PolicyRefusal, agent.AgentFatal) as exc:
+        return str(exc)
+    raise AssertionError("accepted")
+
+
+# ── the policy block ──────────────────────────────────────────────────────────
+
+def test_no_block_means_no_kubernetes_work():
+    pol = _policy()
+    assert pol.k8s_enabled is False
+    assert "does not enable Kubernetes work" in _refused(pol.k8s_image)
+    assert "does not enable" in _refused(pol.check_k8s, "52.1.2.3", 443)
+
+
+def test_the_image_must_be_pinned_by_digest():
+    msg = _refused(_policy, _K8S.replace(IMG, "chrweav/ansible-cloud:latest"))
+    assert "pinned by digest" in msg
+    assert _policy(_K8S).k8s_image() == IMG
+
+
+def test_the_api_endpoint_is_checked_with_the_deny_list_in_front():
+    pol = _policy(_K8S)
+    pol.check_k8s("52.1.2.3", 443)
+    pol.check_k8s("52.1.2.3", 6443)
+    assert "does not allow" in _refused(pol.check_k8s, "52.1.2.3", 22)
+    assert "denied" in _refused(pol.check_k8s, "169.254.169.254", 443)
+    assert "denied" in _refused(pol.check_k8s, "127.0.0.1", 443)
+
+
+# ── the closed step set ───────────────────────────────────────────────────────
+
+def test_each_step_kind_builds_its_own_argv():
+    files = {}
+    cmd = agent.k8s_command([
+        {"kind": "apply", "manifest": "kind: Namespace"},
+        {"kind": "delete", "manifest": "kind: Secret"},
+        {"kind": "helm_upgrade", "release": "entitle-agent", "chart": "entitle-agent",
+         "namespace": "entitle", "repo": "https://charts.entitle.io", "version": "1.2.3",
+         "set": ["agent.token=abc; rm -rf /"], "values": "a: 1", "wait": True,
+         "timeout": "10m", "create_namespace": True, "best_effort": True},
+        {"kind": "helm_uninstall", "release": "eso", "namespace": "external-secrets"},
+    ], files)
+    assert "kubectl apply -f /opt/job/step1.yaml" in cmd
+    assert "kubectl delete --ignore-not-found -f /opt/job/step2.yaml" in cmd
+    assert ("helm upgrade --install entitle-agent entitle-agent --namespace entitle "
+            "--repo https://charts.entitle.io --version 1.2.3 --create-namespace --wait "
+            "--timeout 10m --set 'agent.token=abc; rm -rf /' --values "
+            "/opt/job/step3.values.yaml") in cmd
+    assert f"|| echo {agent.K8S_BEST_EFFORT_MARKER} step=3" in cmd
+    assert "helm uninstall eso --namespace external-secrets" in cmd
+    assert set(files) == {"opt/job/step1.yaml", "opt/job/step2.yaml",
+                          "opt/job/step3.values.yaml"}
+
+
+def test_anything_outside_the_set_is_refused():
+    bad = [
+        [{"kind": "exec", "command": "id"}],
+        [{"kind": "helm_upgrade", "release": "--post-renderer", "chart": "c",
+          "namespace": "n"}],
+        [{"kind": "helm_upgrade", "release": "r", "chart": "-x", "namespace": "n"}],
+        [{"kind": "helm_upgrade", "release": "r", "chart": "c", "namespace": "n",
+          "repo": "http://charts.example.com"}],
+        [{"kind": "helm_upgrade", "release": "r", "chart": "c", "namespace": "n",
+          "set": ["a=b\n--post-renderer=/bin/sh"]}],
+        [{"kind": "helm_upgrade", "release": "r", "chart": "c", "namespace": "n",
+          "set": ["--kubeconfig=/etc/x"]}],
+        [{"kind": "helm_uninstall", "release": "r", "namespace": "Bad_NS"}],
+        [{"kind": "apply", "manifest": ""}],
+        [{"kind": "apply", "manifest": "x"}] * (agent.K8S_MAX_STEPS + 1),
+        [],
+    ]
+    for steps in bad:
+        _refused(agent.k8s_command, steps, {})
+
+
+# ── the handler ───────────────────────────────────────────────────────────────
+
+class _Dash:
+    def __init__(self, steps):
+        self.steps, self.asked = steps, []
+
+    def k8s_bundle(self, job_id, *, host, port):
+        self.asked.append((job_id, host, port))
+        return {"kubeconfig": KUBECONFIG, "steps": self.steps}
+
+
+def _run(payload, dash, *, code=0, mode="enforce"):
+    seen = {}
+    saved = agent._run_ansible_sibling, agent._resolve_all, agent.MODE
+
+    def sibling(policy, **kw):
+        seen.update(kw)
+        return code
+    agent._run_ansible_sibling = sibling
+    agent._resolve_all = lambda host: ["52.1.2.3"]
+    agent.MODE = mode
+    try:
+        return agent.run_k8s(payload, _policy(_K8S), print, lambda: False, "job-1", dash), seen
+    finally:
+        agent._run_ansible_sibling, agent._resolve_all, agent.MODE = saved
+
+
+_PAYLOAD = {"cluster_host": "abc.eks.amazonaws.com", "cluster_port": 443,
+            "step_kinds": ["apply"]}
+
+
+def test_a_run_writes_the_kubeconfig_and_runs_the_steps_in_the_k8s_sibling():
+    dash = _Dash([{"kind": "apply", "manifest": "kind: Namespace"}])
+    result, seen = _run(_PAYLOAD, dash)
+    assert result == {"exit_code": 0, "steps": 1}
+    assert dash.asked == [("job-1", "abc.eks.amazonaws.com", 443)]
+    assert seen["kind"] == "k8s" and seen["image"] == IMG
+    assert seen["files"]["opt/job/kubeconfig"] == KUBECONFIG.encode()
+    assert seen["env"]["KUBECONFIG"] == "/opt/job/kubeconfig"
+    assert "kubectl apply" in seen["command"]
+
+
+def test_sealed_steps_must_be_the_kinds_the_envelope_listed():
+    dash = _Dash([{"kind": "delete", "manifest": "kind: Namespace"}])
+    try:
+        _run(_PAYLOAD, dash)
+    except agent.PolicyRefusal as exc:
+        assert "not the ones the signed job listed" in str(exc)
+    else:
+        raise AssertionError("ran steps the envelope did not list")
+
+
+def test_audit_mode_fetches_nothing():
+    dash = _Dash([{"kind": "apply", "manifest": "x"}])
+    result, seen = _run(_PAYLOAD, dash, mode="audit")
+    assert result["audit"] is True and dash.asked == [] and seen == {}
+
+
+def test_a_failing_step_fails_the_job():
+    try:
+        _run(_PAYLOAD, _Dash([{"kind": "apply", "manifest": "x"}]), code=1)
+    except agent.RunFailure as exc:
+        assert "exited 1" in str(exc)
+    else:
+        raise AssertionError("a failed step completed")
+
+
+def test_an_envelope_with_unknown_kinds_is_refused_before_anything():
+    dash = _Dash([])
+    for payload in ({**_PAYLOAD, "step_kinds": ["exec"]}, {**_PAYLOAD, "cluster_host": ""}):
+        try:
+            _run(payload, dash)
+        except agent.PolicyRefusal:
+            continue
+        raise AssertionError(f"{payload} was accepted")
+    assert dash.asked == []
+
+
+def test_the_kubeconfigs_credentials_are_redacted():
+    assert set(agent.kubeconfig_secrets(KUBECONFIG)) == {"secret-token-123456",
+                                                         "S0VZREFUQTEyMzQ1Njc4"}
+    assert agent.kubeconfig_secrets("not: [yaml") == []
+
+
+def test_the_seal_ref_matches_the_dashboards():
+    for host, port in (("ABC.eks.amazonaws.com.", 443), ("10.0.0.1", "6443")):
+        assert agent.k8s_ref(host=host, port=port) == sealing.k8s_ref(host=host, port=port)
+
+
+# ── a k8s play ────────────────────────────────────────────────────────────────
+
+def test_a_k8s_play_uses_the_k8s_image_check_and_kubeconfig():
+    class Dash:
+        def ansible_bundle(self, job_id, **kw):
+            return {"playbook": "- hosts: localhost\n", "kubeconfig": KUBECONFIG}, []
+    seen = {}
+    saved = agent._run_ansible_sibling, agent._resolve_all
+
+    def sibling(policy, **kw):
+        seen.update(kw)
+        return 0
+    agent._run_ansible_sibling = sibling
+    agent._resolve_all = lambda host: ["52.1.2.3"]
+    try:
+        agent.run_ansible({"run_kind": "k8s", "transport": "local",
+                           "target_host": "abc.eks.amazonaws.com", "target_port": 443},
+                          _policy(_K8S), print, lambda: False, "job-2", Dash())
+    finally:
+        agent._run_ansible_sibling, agent._resolve_all = saved
+    assert seen["image"] == IMG and seen["kind"] == "k8s"
+    assert seen["files"]["opt/job/kubeconfig"] == KUBECONFIG.encode()
+    assert seen["env"]["K8S_AUTH_KUBECONFIG"] == "/opt/job/kubeconfig"
+    assert "-i localhost," in seen["command"]
+    # Without the block a k8s play is refused, even with Config Management on.
+    agent._resolve_all = lambda host: ["52.1.2.3"]
+    try:
+        _refused(agent.run_ansible, {"run_kind": "k8s", "transport": "local",
+                                     "target_host": "abc", "target_port": 443},
+                 _policy(), print, lambda: False, "job-3", Dash())
+    finally:
+        agent._resolve_all = saved[1]
+
+
+def test_the_version_is_2_12():
+    assert agent._version_tuple(agent.AGENT_VERSION) >= (2, 12, 0)
+    assert agent.HANDLERS["agent_k8s"] is agent.run_k8s
+
+
+if __name__ == "__main__":
+    fns = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
+    failures = 0
+    for fn in fns:
+        try:
+            fn()
+            print(f"ok   {fn.__name__}")
+        except Exception as e:  # noqa: BLE001
+            failures += 1
+            print(f"FAIL {fn.__name__}: {e!r}")
+    print(f"\n{len(fns) - failures}/{len(fns)} passed")
+    sys.exit(1 if failures else 0)

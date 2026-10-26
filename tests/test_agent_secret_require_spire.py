@@ -223,7 +223,7 @@ def test_every_release_route_carries_the_policy():
     _, reply_public = agent_sealing.generate_reply_keypair()
     _policy(True)
     try:
-        for route in ("gateway-key", "ansible-bundle"):
+        for route in ("gateway-key", "ansible-bundle", "k8s-bundle"):
             ed = _post(ed_private, ed_id, f"/api/agent/jobs/{ed_job}/{route}",
                        {"reply_key": reply_public})
             sp = _post(sp_private, sp_id, f"/api/agent/jobs/{sp_job}/{route}",

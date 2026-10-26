@@ -302,7 +302,8 @@ def get_agent_targets(
     # inventory_service loads it once.
     routes = cmr.load_table(db)
     accessible = inventory_service.accessible_workgroups(current_user)
-    out: dict = {"vms": [], "databases": [], "directories": [], "cloud_vms": []}
+    out: dict = {"vms": [], "databases": [], "directories": [], "cloud_vms": [],
+                 "clusters": []}
     for item in inventory_service.collect(db):
         if not item.get("agent_id"):
             continue
@@ -313,6 +314,15 @@ def get_agent_targets(
                "agent_id": item["agent_id"],
                "agent_name": agent_names.get(item["agent_id"], "(unknown agent)"),
                "reason": spec if isinstance(spec, str) else ""}
+        if item.get("kind") == "k8s":
+            row.update({"cloud": item.get("cloud") or "",
+                        "target_id": item["id"].split(":", 1)[1],
+                        "executor_source": "cluster",
+                        "executor_note": (f"Executed by {row['agent_name']}, the deployed "
+                                          f"agent this cluster runs its Kubernetes work on, "
+                                          f"instead of the remote worker.")})
+            out["clusters"].append(row)
+            continue
         if item.get("kind") == "database":
             row.update({"engine": item.get("engine") or "",
                         "host": item.get("private_host") or "",
@@ -464,8 +474,12 @@ def get_localhost_targets(
     from ..services import ansible_cloud_run_service as acr
     from ..services import config_service as cs
 
+    from ..services import k8s_executor_service
     clusters = []
     for c in db.query(K8sCluster).order_by(K8sCluster.created_at.desc()).all():
+        # One run on its owned agent is listed under /agent-targets instead.
+        if k8s_executor_service.executor_for(db, c) is not None:
+            continue
         if (c.cloud or "").lower() in acr.K8S_TARGET_CLOUDS:
             clusters.append({"id": c.id, "name": c.name, "cloud": c.cloud,
                              "status": c.status})
@@ -477,7 +491,7 @@ def get_localhost_targets(
     for d in db.query(CloudDatabase).order_by(CloudDatabase.created_at.desc()).all():
         if (d.cloud or "").lower() not in acr.DB_TARGET_CLOUDS or d.engine not in acr.ANSIBLE_DB_ENGINES:
             continue
-        if not _database_visible(d, current_user) or routes.match_for_database(d):
+        if not _row_visible(d, current_user) or routes.match_for_database(d):
             continue
         databases.append({"id": d.id, "engine": d.engine, "cloud": d.cloud,
                           "status": d.status})
@@ -857,16 +871,32 @@ def _worker_fallback(payload: "RunRequest", db, current_user) -> dict | None:
 
     kind = payload.target_kind or "vm"
     cloud = str(getattr(payload, "cloud", "") or "").strip().lower()
-    if kind not in ("vm", "database") or (kind == "vm" and cloud not in cmr.CLOUD_SCOPES):
+    if (kind not in ("vm", "database", "k8s")
+            or (kind == "vm" and cloud not in cmr.CLOUD_SCOPES)):
         return None
     agent = db.query(RemoteAgent).filter(RemoteAgent.id == payload.agent_id).first()
     if agent is None or not agent.is_active or agent_service.status_of(agent) == "online":
         return None
+    if kind == "k8s":
+        # A cluster's executor is its own choice, not a route's, and the worker is what it
+        # used before one was named: an offline executor always falls back.
+        from ..database import K8sCluster
+        from ..services import agent_host_service
+        cluster = (db.query(K8sCluster)
+                   .filter(K8sCluster.id == (payload.target_id or "")).first())
+        if (cluster is None or (cluster.executor_agent_id or "") != agent.id
+                or not _row_visible(cluster, current_user)):
+            return None
+        if agent_host_service.for_agent(db, agent.id) is not None:
+            at = _schedule_kwargs(payload, db).get("scheduled_for")
+            if not agent_host_service.booking_refusal(db, agent, at):
+                return None
+        return {"target": payload.target or "", "agent_name": agent.name, "cidr": ""}
     if kind == "database":
         row = (db.query(CloudDatabase)
                .filter(CloudDatabase.id == (payload.target_id or "")).first())
         if (row is None or row.cloud not in cmr.CLOUD_SCOPES
-                or not _database_visible(row, current_user)):
+                or not _row_visible(row, current_user)):
             return None
         return _fallback_if_opted(payload, db, agent, cmr.match_for_database(db, row),
                                   target=payload.target or "")
@@ -907,14 +937,15 @@ def _fallback_if_opted(payload, db, agent, route, *, target: str) -> dict | None
 
 
 def _log_fallback(db, job_id: str, fallback: dict) -> None:
+    via = f"the route {fallback['cidr']}" if fallback.get("cidr") else "the dashboard"
     job_service.append_job_log(
         db, job_id,
-        f"Agent '{fallback['agent_name']}' is not online, so the route "
-        f"{fallback['cidr']} sent this run to the remote worker.")
+        f"Agent '{fallback['agent_name']}' is not online, so {via} sent this run to the "
+        f"remote worker.")
 
 
-def _database_visible(row, current_user) -> bool:
-    """The inventory's RBAC rule for a database row: an administrator sees every one,
+def _row_visible(row, current_user) -> bool:
+    """The inventory's RBAC rule for a database or cluster row: an administrator sees every one,
     anybody else those in their workstreams, or untagged ones they created. No user (an
     internal caller) sees no cloud database, as for a cloud VM."""
     from ..services import inventory_service
@@ -999,15 +1030,31 @@ def _resolve_agent_target(payload: "RunRequest", db, current_user=None) -> dict:
             raise HTTPException(status_code=400, detail=refusal)
 
     if payload.target_kind == "k8s":
-        # Out of scope for now, and refused by name rather than falling through to the VM
-        # branch — which would fail on a missing hypervisor connection and read as a wiring
-        # problem. An on-prem cluster has the identical shape to an on-prem database and
-        # wants the same treatment; it just is not wired yet.
-        raise HTTPException(
-            status_code=400,
-            detail=("Kubernetes clusters cannot yet be configured through a remote agent. "
-                    "An on-premises cluster still runs on the dashboard's own runner, which "
-                    "needs a route to the cluster's API server."))
+        # Only on the cluster's own executor: an agent the dashboard OWNS, because the run
+        # receives a cluster-admin kubeconfig (k8s_executor_service). The endpoint is the
+        # cluster row's, never the request's.
+        from ..database import K8sCluster
+        from ..services import agent_k8s_meta, k8s_executor_service
+        cluster = (db.query(K8sCluster)
+                   .filter(K8sCluster.id == (payload.target_id or "")).first())
+        if cluster is None or not _row_visible(cluster, current_user):
+            raise HTTPException(status_code=404, detail="No such cluster.")
+        why = k8s_executor_service.agent_refusal(db, agent, cluster)
+        if why:
+            raise HTTPException(status_code=400, detail=why)
+        if (cluster.executor_agent_id or "") != agent.id:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"Cluster '{cluster.name}' does not run its Kubernetes work on agent "
+                        f"'{agent.name}'. Choose its agent on the Kubernetes page, or leave "
+                        f"the agent unset to use the remote worker."))
+        try:
+            host, port = agent_k8s_meta.endpoint(cluster.api_server or "")
+        except agent_k8s_meta.K8sMetaError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"run_kind": "k8s", "transport": "local", "target_host": host,
+                "target_port": port, "target_id": cluster.id, "connection_id": "",
+                "target_label": f"k8s/{cluster.name}", "executor_name": agent.name}
 
     if payload.target_kind == "portainer":
         # Same reason, and the same refusal-by-name: the agent bundle does carry the
@@ -1069,7 +1116,7 @@ def _resolve_agent_target(payload: "RunRequest", db, current_user=None) -> dict:
         row = (db.query(CloudDatabase)
                .filter(CloudDatabase.id == payload.target_id).first())
         if not row or (row.cloud in cmr.CLOUD_SCOPES
-                       and not _database_visible(row, current_user)):
+                       and not _row_visible(row, current_user)):
             raise HTTPException(status_code=404, detail="No such database.")
         if row.cloud in cmr.CLOUD_SCOPES:
             _check_cloud_database_executor(db, row, agent)

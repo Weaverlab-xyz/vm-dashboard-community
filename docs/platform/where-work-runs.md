@@ -105,6 +105,10 @@ Configuration is the overlap. Everything else is specific to one of them.
   VNet an agent runs in, routed to it by address range, and the cloud databases in the
   same network, by their subnets. See
   [Scaling configuration in the cloud](#scaling-configuration-in-the-cloud).
+- **Config Management on Kubernetes clusters, on an agent the dashboard deployed**: a
+  cluster can choose a deployed agent in its cloud to run its plays, which hands that agent
+  its cluster-admin kubeconfig for each job. See
+  [Deploying an agent → Kubernetes work](spiffe/remote-agents/deploying.md#kubernetes-work).
 - **Hypervisor discovery, inventory and power** for vCenter, ESXi, Proxmox, Hyper-V and
   VMware Workstation behind a firewall.
 - **Discovery** of on-premises databases, Kubernetes clusters, domain controllers and LDAP

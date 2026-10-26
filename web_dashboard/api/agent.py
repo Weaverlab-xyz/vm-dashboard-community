@@ -66,6 +66,7 @@ from sqlalchemy.orm import Session
 
 from ..database import Job, RemoteAgent, User, get_db
 from ..services import (agent_ansible_bundle, agent_ansible_meta, agent_gateway_meta,
+                        agent_k8s_meta,
                         agent_guard, agent_hypervisor_meta, agent_job_meta,
                         agent_assurance_service, agent_lifecycle_service,
                         agent_release_service,
@@ -450,6 +451,10 @@ def _envelope_payload(job_type: str, meta: dict) -> dict:
         # Upgrade: repository, digest, version -- exactly what the agent checks against its
         # policy.yaml before it hands the request to its updater. Restart: nothing.
         return agent_lifecycle_service.envelope_payload(job_type, meta)
+    if job_type == "agent_k8s":
+        # The cluster endpoint and the step KINDS. The kubeconfig and the steps ride the
+        # sealed /k8s-bundle channel; see agent_k8s_meta.
+        return agent_k8s_meta.envelope_payload(meta)
     if job_type == "agent_storage":
         # Carries a filename and, for an upload, its bytes — the only envelope here that
         # does. It does NOT carry a path: the share is named, and the path behind that
@@ -615,6 +620,9 @@ async def complete(job_id: str, body: CompleteRequest, request: Request,
 
     applied = agent_service.complete_job(db, agent, job, status=status,
                                          result=result, error=error)
+    if job.job_type == "agent_k8s":
+        # Its steps can hold a Secret manifest; they outlive the job by not one row.
+        agent_k8s_meta.wipe_steps(db, job)
     agent_service.audit(db, agent, "agent.complete", ip=_client_ip(request),
                         details={"job_id": job.id, "status": applied})
 
@@ -992,6 +1000,53 @@ class BundleRequest(BaseModel):
     (``canonical_request`` hashes it), so the key cannot be substituted in flight.
     """
     reply_key: str = ""
+
+
+@router.post("/jobs/{job_id}/k8s-bundle")
+async def job_k8s_bundle(job_id: str, body: BundleRequest, request: Request,
+                         agent: RemoteAgent = Depends(signed_agent),
+                         db: Session = Depends(get_db)):
+    """Hand an ``agent_k8s`` job its kubeconfig and steps, sealed.
+
+    :func:`job_ansible_bundle`'s shape, for the most powerful credential the dashboard
+    hands out: a cluster-admin kubeconfig. So on top of its checks, the agent must still
+    qualify NOW (k8s_executor_service: deployed by this dashboard, SPIRE-attested,
+    Kubernetes work allowed on its host) and still be the cluster's executor — whatever the
+    global SPIRE-only setting says. The kubeconfig is minted here, at lease time, so a
+    short-lived cloud token is fresh. The AAD ``ref`` binds it to the cluster endpoint the
+    signed envelope named."""
+    from ..services import k8s_agent_runner
+    job = _owned(db, agent, job_id, statuses=("running",))
+    _require_attested_for_release(agent)
+    if job.job_type != "agent_k8s":
+        raise HTTPException(status_code=409,
+                            detail="This job type does not use a Kubernetes bundle.")
+    try:
+        agent_sealing.check_reply_key(body.reply_key)
+    except agent_sealing.SealError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The reply key could not be used to seal a response: {exc}")
+    meta = job.metadata_dict or {}
+    try:
+        bundle, scrub = k8s_agent_runner.build_bundle(db, job=job, agent=agent)
+    except agent_k8s_meta.K8sMetaError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    ref = agent_sealing.k8s_ref(host=meta.get("cluster_host") or "",
+                                port=meta.get("cluster_port") or 0)
+    try:
+        envelope = agent_sealing.seal(
+            body.reply_key, json.dumps({"bundle": bundle, "scrub": scrub}),
+            agent_id=agent.id, audience=_resolve_audience(request), job_id=job.id, ref=ref)
+    except agent_sealing.SealError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The reply key could not be used to seal a response: {exc}")
+    agent_service.audit(db, agent, "agent.k8s_bundle", ip=_client_ip(request),
+                        details={"job_id": job.id, "cluster_id": meta.get("cluster_id") or "",
+                                 "steps": meta.get("step_kinds") or []})
+    return JSONResponse(content={"sealed": envelope},
+                        headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
 
 
 @router.post("/jobs/{job_id}/ansible-bundle")

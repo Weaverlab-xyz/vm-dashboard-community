@@ -239,7 +239,7 @@ def test_the_operator_half_is_admin_only():
     # selects the credential; the grant does. See services/runner_credential.
     agent_half = {"enroll_agent", "attest_agent", "lease_job", "heartbeat", "push_logs",
                   "complete", "job_secret", "job_ansible_bundle", "job_gateway_key",
-                  "runner_credential"}
+                  "job_k8s_bundle", "runner_credential"}
 
     # The list above and the router each function is decorated with are two spellings of
     # the same membership, and the second one is the one that decides what the agent

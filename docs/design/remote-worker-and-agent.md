@@ -2,10 +2,11 @@
 
 > **Audience:** contributor · **Profile:** `both` · **Read this when:** you are deciding whether a piece of remote work should run on the one-shot remote worker or on a SPIFFE-attested remote agent, or you are about to move a workload from one to the other.
 
-**Phases 1 and 2 built; phase 3 not built.** This note assesses the two execution paths as
+**Phases 1 and 2 built; phase 3 part A built.** This note assesses the two execution paths as
 they stand after agent 2.11 (lifecycle, ongoing checks and cloud node attestation). It
 recommends what to move, what to leave alone, and in what order. Of the
-[phases](#recommendation-agent-first-worker-kept), phases 1 and 2 are built. The user-facing comparison is
+[phases](#recommendation-agent-first-worker-kept), phases 1 and 2 are built, and phase 3's
+first part. The user-facing comparison is
 [Where work runs](../platform/where-work-runs.md); this page is the reasoning behind
 changing it.
 
@@ -258,8 +259,26 @@ Built.
 
 ### Phase 3: Kubernetes on dashboard-owned agents
 
-This is the only phase that changes the trust model, so it needs a decision before it is
-built.
+**Part A built:** the trust rules, the per-cluster executor, agent 2.12's `k8s:` block and
+`agent_k8s` handler, the sealed `/k8s-bundle` channel, the await bridge, and Kubernetes
+Config-Management plays (run kind `k8s`). **Part B, next:** routing the runner operations
+(ESO, Entitle agent, RBAC, bindings) through the bridge. The three operations that hand a
+service-account token back to the dashboard (Entitle external, PRA vault, Password Safe
+read) stay on the worker, as does the Rancher transport, so no secret flows from an agent
+to the dashboard. How it is used: [Deploying an agent → Kubernetes
+work](../platform/spiffe/remote-agents/deploying.md#kubernetes-work).
+
+As built:
+
+- **The cluster names its executor** (`k8s_clusters.executor_agent_id`). Its API endpoint is
+  public and EKS/AKS clusters sit in their own peered networks, so no route could pick the
+  agent by address.
+- **The image is pinned by digest, not signature-verified.** The agent refuses a `k8s:`
+  image that is not a digest, and the dashboard resolves `ansible_cloud_image` to one when
+  the host starts. Verifying the run image's cosign signature on the agent is a follow-up.
+- **The agent must also be SPIRE-attested,** whatever the global SPIRE-only setting says.
+
+The plan as decided:
 
 - **A new class of agent.**
   - An agent the dashboard deployed (`AgentHost`), attested through SPIRE with its cloud's
@@ -284,6 +303,9 @@ built.
 - **The hard rule.** A customer-hosted agent never qualifies, whatever its policy says. The
   dashboard decides "owned" from its own `agent_hosts` row, never from anything the agent
   reports.
+- **What stays on the worker.** The three token mints (they return a secret to the
+  dashboard mid-job) and the Rancher transport (it is chosen by the Rancher node's network,
+  not a cluster's).
 
 ### Not planned
 

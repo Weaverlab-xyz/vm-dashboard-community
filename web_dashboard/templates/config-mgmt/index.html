@@ -253,6 +253,19 @@
                 </optgroup>
               </template>
 
+              <!-- Clusters whose Kubernetes work runs on a deployed agent the dashboard owns
+                   (the cluster's own choice). The play runs on that agent, with a
+                   cluster-admin kubeconfig sealed to it for the one job. -->
+              <template x-if="agentClusters.length > 0">
+                <optgroup label="Kubernetes Clusters (via agent)">
+                  <template x-for="c in agentClusters" :key="`agentk8s:${c.id}`">
+                    <option :value="`agentk8s:${c.id}`" :disabled="!!c.reason"
+                            :title="c.reason || c.executor_note"
+                            x-text="`${c.name} — ${c.agent_name}`"></option>
+                  </template>
+                </optgroup>
+              </template>
+
               <!-- On-prem databases behind a remote agent (localhost play on the agent host) -->
               <template x-if="agentDatabases.length > 0">
                 <optgroup label="On-Prem Databases (via agent)">
@@ -919,6 +932,7 @@ function configMgmt(tabSlugs) {
     // /agent-targets — on-prem resources reachable only through a remote agent.
     agentVms: [],
     agentCloudVms: [],
+    agentClusters: [],
     agentDatabases: [],
     agentDirectories: [],
     // A directory run: 'local' = LDAP from the runner (community.general.ldap_*),
@@ -973,6 +987,7 @@ function configMgmt(tabSlugs) {
     get hasAgentTargets() {
       return this.agentVms.some(t => !t.reason)
           || this.agentCloudVms.some(t => !t.reason)
+          || this.agentClusters.some(t => !t.reason)
           || this.agentDatabases.some(t => !t.reason)
           || this.agentDirectories.some(t => !t.reason);
     },
@@ -1008,6 +1023,7 @@ function configMgmt(tabSlugs) {
       if (this.bulk) return this.bulk.kind || 'vm';
       const t = this.form.target;
       if (t.startsWith('k8s:')) return 'k8s';
+      if (t.startsWith('agentk8s:')) return 'k8s';
       if (t.startsWith('db:'))  return 'database';
       if (t.startsWith('agentdb:')) return 'database';
       if (t.startsWith('agentdir:')) return 'directory';
@@ -1028,6 +1044,8 @@ function configMgmt(tabSlugs) {
         return this.agentCloudVms.find(v => 'agentcloud:' + v.id === t) || null;
       if (t.startsWith('agentdb:'))
         return this.agentDatabases.find(d => 'agentdb:' + d.id === t) || null;
+      if (t.startsWith('agentk8s:'))
+        return this.agentClusters.find(c => 'agentk8s:' + c.id === t) || null;
       if (t.startsWith('agentdir:'))
         return this.agentDirectories.find(d => 'agentdir:' + d.id === t) || null;
       return null;
@@ -1420,12 +1438,14 @@ function configMgmt(tabSlugs) {
         const data = await API.get('/api/config-mgmt/agent-targets') || {};
         this.agentVms = data.vms || [];
         this.agentCloudVms = data.cloud_vms || [];
+        this.agentClusters = data.clusters || [];
         this.agentDatabases = data.databases || [];
         this.agentDirectories = data.directories || [];
       } catch (e) {
         // A 404 is the ordinary case: remote agents are off. Empty lists, no error.
         this.agentVms = [];
         this.agentCloudVms = [];
+        this.agentClusters = [];
         this.agentDatabases = [];
         this.agentDirectories = [];
       }
@@ -1580,7 +1600,9 @@ function configMgmt(tabSlugs) {
         const isDir = this.form.target.startsWith('agentdir:');
         // A directory run is a localhost LDAP play or a WinRM play as the directory's own
         // account: like a database, no operator connection identity or become applies.
-        const isDb = this.form.target.startsWith('agentdb:') || isDir;
+        // A cluster play is a localhost play too, with the kubeconfig the agent receives.
+        const isK8s = this.form.target.startsWith('agentk8s:');
+        const isDb = this.form.target.startsWith('agentdb:') || isDir || isK8s;
         const s = this.buildSecretPayload();
         // A localhost play has no SSH connection to authenticate, so the connection-identity
         // fields are omitted for a database rather than sent and ignored.
@@ -1594,7 +1616,7 @@ function configMgmt(tabSlugs) {
           const result = await API.post('/api/config-mgmt/run', {
             asset: assetName,
             asset_backend: assetBackend,
-            target_kind: isDir ? 'directory' : (isDb ? 'database' : 'vm'),
+            target_kind: isDir ? 'directory' : (isK8s ? 'k8s' : (isDb ? 'database' : 'vm')),
             target_id: at.target_id,
             agent_id: at.agent_id,
             connection_id: isDb ? '' : (at.connection_id || ''),
