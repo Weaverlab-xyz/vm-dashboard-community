@@ -98,7 +98,7 @@ model is inverted from the VM paths, and three things follow:
   can reach, so those runs execute in a sibling container on the dashboard
   host instead. **A cloud database a Config route covers** runs on that
   route's remote agent instead of the cloud runner; see
-  [Cloud databases](../../platform/spiffe/remote-agents/config-runs.md#cloud-databases).
+  [Databases in a cloud](../../platform/spiffe/remote-agents/config-runs.md#databases-in-a-cloud).
 - **A different runner image.** k8s/DB runs use `chrweav/ansible-cloud`
   (kubernetes.core + the DB collections + client libs + the helm CLI),
   selected via `ansible_cloud_image` — never the winrm VM image, which

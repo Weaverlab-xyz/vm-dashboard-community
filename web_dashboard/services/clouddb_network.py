@@ -90,15 +90,19 @@ def record(row, cidrs: list, network: str) -> None:
 async def record_on_provision(db, row, log=None) -> None:
     """Best-effort, after the apply: a failure is logged and leaves the database on the
     remote worker, never failing the provision."""
-    row.deploy_workgroup = row.deploy_workgroup or row.workgroup
+    row.deploy_workgroup = (getattr(row, "deploy_workgroup", None)
+                            or getattr(row, "workgroup", None))
     try:
         cidrs, network = await lookup(db, row)
         record(row, cidrs, network)
     except Exception as exc:  # noqa: BLE001 — never fails a provision
         logger.warning("clouddb %s: could not record its subnets: %s", row.id, exc)
         if log:
-            log(f"Could not record this database's subnets for Config routes ({exc}). "
-                f"Look up networks on Remote Agents → Config Routes retries it.")
+            try:
+                log(f"Could not record this database's subnets for Config routes ({exc}). "
+                    f"Look up networks on Remote Agents → Config Routes retries it.")
+            except Exception:  # noqa: BLE001 — the note is best-effort too
+                pass
     db.commit()
 
 

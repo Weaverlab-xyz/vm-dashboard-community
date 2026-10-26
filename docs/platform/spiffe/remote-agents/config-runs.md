@@ -281,7 +281,7 @@ fell back from. Some limits:
 agent **2.9** or later. An older agent is refused when the run is queued, with the upgrade
 named.
 
-### Cloud databases
+### Databases in a cloud
 
 A database the dashboard provisioned in AWS, Azure or GCP can also be configured from an
 agent in its network, through the same cloud route as that network's VMs.
