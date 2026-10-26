@@ -359,6 +359,10 @@ MIGRATIONS: tuple = (
                add_column("remote_agents", "previous_key_until", "TIMESTAMP"),
                add_column("remote_agents", "attention", "TEXT"),
                add_column("remote_agents", "reported_reattest_hours", "INTEGER"))),
+    # A cloud route may fall back to the remote worker while its agent is offline. Bare
+    # BOOLEAN, no DEFAULT: NULL reads as off, so every existing route still refuses.
+    Migration("0007_config_route_fallback",
+              (add_column(_ROUTES, "fallback_to_worker", "BOOLEAN"),)),
 )
 
 

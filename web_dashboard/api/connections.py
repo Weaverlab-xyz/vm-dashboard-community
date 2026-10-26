@@ -128,6 +128,8 @@ class RouteRequest(BaseModel):
     connection_id: str = ""
     workstream: str = ""
     network: str = ""             # cloud: one VPC / VNet / GCP network
+    # Cloud only: run on the remote worker while the agent is offline, instead of refusing.
+    fallback_to_worker: bool = False
     # Superseded by `scope`. Accepted only to refuse it: `true` used to mean "every cloud
     # too", and silently creating an on-premises route instead would route nothing.
     include_cloud_vms: Optional[bool] = None
@@ -143,6 +145,7 @@ class RouteUpdate(BaseModel):
     connection_id: Optional[str] = None
     workstream: Optional[str] = None
     network: Optional[str] = None
+    fallback_to_worker: Optional[bool] = None
     include_cloud_vms: Optional[bool] = None
 
 
@@ -239,7 +242,8 @@ def create_config_route(req: RouteRequest,
         out = cmr.create(db, agent_id=req.agent_id, cidr=req.cidr, label=req.label,
                          created_by=current_user.username, scope=req.scope,
                          region=req.region, connection_id=req.connection_id,
-                         workstream=req.workstream, network=req.network)
+                         workstream=req.workstream, network=req.network,
+                         fallback_to_worker=req.fallback_to_worker)
     except cmr.ConfigRouteError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _backfill_for(db, out, current_user)
@@ -249,7 +253,8 @@ def create_config_route(req: RouteRequest,
                                    "scope": out["scope"], "region": out["region"],
                                    "connection_id": out["connection_id"],
                                    "workstream": out["workstream"],
-                                   "network": out["network"]})
+                                   "network": out["network"],
+                                   "fallback_to_worker": out["fallback_to_worker"]})
     return out
 
 

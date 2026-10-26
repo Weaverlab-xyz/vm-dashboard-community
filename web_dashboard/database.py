@@ -1155,6 +1155,11 @@ class ConfigMgmtRoute(Base):
     # read from the deploy job (config_mgmt_route_service.network_of). The exact answer
     # that region and workstream approximate. Migration 0004.
     scope_network = Column(String(200), nullable=False, default="", server_default="")
+    # Cloud scopes only: when the agent is not online (and, for an agent the dashboard
+    # deployed, the run is not booked into a time its host will be up), run on the remote
+    # worker instead of refusing. NULL means off — migration 0007 adds a bare BOOLEAN, so
+    # no existing route changes behaviour. See api/config_mgmt._worker_fallback.
+    fallback_to_worker = Column(Boolean, nullable=True, default=False)
     created_at = Column(DateTime, default=utcnow, nullable=False)
     created_by = Column(String(100))
     updated_at = Column(DateTime, default=utcnow)

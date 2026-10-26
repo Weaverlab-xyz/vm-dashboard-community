@@ -271,6 +271,7 @@ class Route:
     connection_id: str = ""  # onprem: one connection's guests, or "" for every one
     workstream: str = ""     # cloud scopes: one workstream's VMs, or "" for every one
     network_id: str = ""     # cloud scopes: one VPC / VNet / network, or "" for every one
+    fallback_to_worker: bool = False  # cloud scopes: the worker runs it while the agent is down
 
     @property
     def narrowers(self) -> int:
@@ -380,7 +381,8 @@ def load_table(db) -> RouteTable:
                             region=(row.scope_region or "").lower(),
                             connection_id=row.scope_connection_id or "",
                             workstream=(row.scope_workstream or "").lower(),
-                            network_id=row.scope_network or ""))
+                            network_id=row.scope_network or "",
+                            fallback_to_worker=bool(row.fallback_to_worker)))
     parsed.sort(key=_order)
     return RouteTable(tuple(parsed))
 
@@ -430,6 +432,7 @@ def serialize(row) -> dict:
         "connection_id": row.scope_connection_id or "",
         "workstream": row.scope_workstream or "",
         "network": row.scope_network or "",
+        "fallback_to_worker": bool(row.fallback_to_worker),
         # Derived, for readers written before scopes: a cloud-scoped route is the one that
         # sends cloud VMs to an agent. Never read back on a write.
         "include_cloud_vms": (row.scope or "onprem") != "onprem",
@@ -623,9 +626,20 @@ def _refuse_duplicate(db, cidr: str, scope: str = "onprem", region: str = "",
         f"one to a region, workstream, network or connection.")
 
 
+def _check_fallback(scope: str, fallback: bool) -> bool:
+    """Only a cloud route may fall back to the remote worker. The worker runs in the cloud
+    and reaches a cloud VM the way it does with no route at all; it has no path to an
+    on-premises network, so an on-premises fallback would only move the failure."""
+    if fallback and scope not in CLOUD_SCOPES:
+        raise ConfigRouteError(
+            "Only a cloud route can fall back to the remote worker. The worker cannot "
+            "reach on-premises networks, which is why the run goes to an agent.")
+    return bool(fallback)
+
+
 def create(db, *, agent_id: str, cidr: str, label: str = "", created_by: str = "",
            scope: str = "onprem", region: str = "", connection_id: str = "",
-           workstream: str = "", network: str = "") -> dict:
+           workstream: str = "", network: str = "", fallback_to_worker: bool = False) -> dict:
     from sqlalchemy.exc import IntegrityError
 
     from ..database import ConfigMgmtRoute
@@ -635,11 +649,13 @@ def create(db, *, agent_id: str, cidr: str, label: str = "", created_by: str = "
     scope, region, connection_id, workstream, network = _check_scope(
         db, scope, region, connection_id, workstream, network)
     _refuse_duplicate(db, normalized, scope, region, connection_id, workstream, network)
+    fallback = _check_fallback(scope, fallback_to_worker)
     row = ConfigMgmtRoute(
         id=str(uuid.uuid4()), agent_id=agent_id, cidr=normalized,
         label=(label or "").strip() or None, is_active=True,
         scope=scope, scope_region=region, scope_connection_id=connection_id,
-        scope_workstream=workstream, scope_network=network, created_by=created_by or None)
+        scope_workstream=workstream, scope_network=network,
+        fallback_to_worker=fallback, created_by=created_by or None)
     db.add(row)
     try:
         db.commit()
@@ -677,6 +693,11 @@ def update(db, route_id: str, **fields) -> dict:
     row.scope, row.scope_region, row.scope_connection_id = scope, region, connection_id
     row.scope_workstream = workstream
     row.scope_network = network
+    # Like a qualifier, the fallback belongs to a cloud scope: a move to on-premises
+    # drops it unless the request asks for it, which _check_fallback then refuses.
+    row.fallback_to_worker = _check_fallback(
+        scope, fields["fallback_to_worker"] if fields.get("fallback_to_worker") is not None
+        else (bool(row.fallback_to_worker) and scope in CLOUD_SCOPES))
     if fields.get("label") is not None:
         row.label = str(fields["label"]).strip() or None
     if fields.get("is_active") is not None:

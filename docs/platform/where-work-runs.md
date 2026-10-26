@@ -140,15 +140,17 @@ Remote agents add capacity outside the dashboard's worker:
   a VPC or VNet, name the agent that runs inside it, and set **Applies to** to that cloud
   (and, optionally, its region). Config Management runs on that cloud's dashboard-deployed
   VMs whose private address is in the range then go to the agent, single runs and bulk
-  runs alike. VMs outside every such route stay on the remote worker.
+  runs alike. VMs outside every such route stay on the remote worker. Tick **Fall back to
+  the remote worker when the agent is offline** on a route, and its playbook runs go to
+  the remote worker while the agent is down instead of being refused.
 - **Run several at once.** Set `ansible.max_concurrent` in the agent's `policy.yaml`
   (agent 2.9 or later, up to 8). Each run is still a one-shot container beside the agent,
   so size the host at about 1 GiB per slot. To go further, run more agents and give each
   its own range.
 - **What uses no worker slot.** An agent leases its jobs directly, so a run on it holds
   none of the dashboard's job-worker slots. It sends Live Output in batches of up to 500
-  lines a request; the dashboard still records each line, which is what lets the output
-  stream and a run be cancelled mid-way.
+  lines a request, and the dashboard writes each batch in one transaction. Each line is
+  still recorded, which is what lets the output stream and a run be cancelled mid-way.
 
 The tradeoffs to accept:
 

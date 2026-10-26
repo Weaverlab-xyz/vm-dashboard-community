@@ -974,14 +974,11 @@ def append_logs(db: Session, job: Job, lines: list) -> int:
         return 0
     existing = db.query(JobLog).filter(JobLog.job_id == job.id).count()
     budget = max(0, MAX_LOG_LINES_PER_JOB - existing)
-    written = 0
-    for line in lines[:MAX_LOG_LINES_PER_REQUEST]:
-        if budget <= 0:
-            break
-        job_service.append_job_log(db, job.id, _sanitize_line(line))
-        written += 1
-        budget -= 1
-    return written
+    accepted = [_sanitize_line(line)
+                for line in lines[:min(MAX_LOG_LINES_PER_REQUEST, budget)]]
+    # One transaction for the batch, not one per line (job_service.append_job_logs).
+    job_service.append_job_logs(db, job.id, accepted)
+    return len(accepted)
 
 
 def _sanitize_line(line) -> str:

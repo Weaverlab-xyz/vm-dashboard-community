@@ -264,6 +264,19 @@ that agent for that one job. Tick **Release dashboard-held credentials only to
 SPIRE-attested agents** on **Settings → Integrations → Remote Agents**, so an agent with a
 key on disk never receives one.
 
+**When the agent is offline.** By default a run routed to an agent that is not online is
+refused, so nothing sits queued. To keep configuration going when the agent is down, tick
+**Fall back to the remote worker when the agent is offline** on the route. A run then goes
+to the remote worker, as if the VM had no route, and its Live Output says which agent it
+fell back from. Some limits:
+
+- **Cloud routes only.** The remote worker cannot reach on-premises networks, so an
+  on-premises route cannot fall back.
+- **Playbooks only.** The remote worker runs only playbooks against a cloud VM, so a
+  script or package run is refused while the agent is down.
+- **A booked run stays on its agent.** A run booked into a time an agent the dashboard
+  deployed will be up still goes to that agent.
+
 **Windows servers** are configured over OpenSSH, as the remote worker does it, and need
 agent **2.9** or later. An older agent is refused when the run is queued, with the upgrade
 named.

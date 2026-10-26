@@ -3385,6 +3385,14 @@ def _windows_args(windows: bool) -> str:
     return ansible_vm_cmd.windows_ssh_args() if windows else ""
 
 
+def _runner_public_ip() -> str:
+    """``assignPublicIp`` for the Ansible and Kubernetes Fargate runners. On by default:
+    a public subnet's internet gateway gives the task egress and no inbound path. A
+    private subnet that egresses through NAT turns ``ansible_ecs_assign_public_ip`` off."""
+    from . import config_service
+    return "ENABLED" if config_service.get_bool("ansible_ecs_assign_public_ip", True) else "DISABLED"
+
+
 def _run_ecs_ansible_sync(
     region: str,
     cluster: str,
@@ -3499,7 +3507,7 @@ def _run_ecs_ansible_sync(
         networkConfiguration={"awsvpcConfiguration": {
             "subnets": [subnet_id] if subnet_id else [],
             "securityGroups": security_group_ids or [],
-            "assignPublicIp": "ENABLED",  # public-subnet egress via IGW (sandbox has no NAT; runner needs egress, not inbound)
+            "assignPublicIp": _runner_public_ip(),
         }},
         # The SSH key and the PASSWORD_SAFE_* creds ride the RunTask override
         # (ephemeral, tiny — comfortably under the 8192-byte overrides cap), so the
@@ -3691,7 +3699,7 @@ def _run_ecs_k8s_sync(
         networkConfiguration={"awsvpcConfiguration": {
             "subnets": [subnet_id] if subnet_id else [],
             "securityGroups": security_group_ids or [],
-            "assignPublicIp": "ENABLED",  # public-subnet egress via IGW (sandbox has no NAT; runner needs egress, not inbound)
+            "assignPublicIp": _runner_public_ip(),
         }},
         overrides={"containerOverrides": [{
             "name": "k8s",
@@ -3860,7 +3868,7 @@ def _run_ecs_ansible_local_sync(
         networkConfiguration={"awsvpcConfiguration": {
             "subnets": [subnet_id] if subnet_id else [],
             "securityGroups": security_group_ids or [],
-            "assignPublicIp": "ENABLED",  # public-subnet egress via IGW (sandbox has no NAT; runner needs egress, not inbound)
+            "assignPublicIp": _runner_public_ip(),
         }},
         overrides={"containerOverrides": [{
             "name": "ansible",
