@@ -390,10 +390,11 @@
     <div class="flex flex-wrap items-end gap-2 mb-6">
       <input x-model="releaseForm.version" placeholder="2.10.1"
              class="w-28 text-sm border border-gray-300 rounded-lg px-2 py-1.5 font-mono"/>
-      <input x-model="releaseForm.repository" placeholder="chrweav/dashboard-agent (or a mirror)"
+      <input x-model="releaseForm.repository" placeholder="chrweav/dashboard-agent"
+             title="The image repository: blank for chrweav/dashboard-agent, or a mirror's name"
              class="w-64 text-sm border border-gray-300 rounded-lg px-2 py-1.5 font-mono"/>
       <input x-model="releaseForm.digest" placeholder="sha256:…"
-             class="flex-1 min-w-[16rem] text-sm border border-gray-300 rounded-lg px-2 py-1.5 font-mono"/>
+             class="flex-1 min-w-48 text-sm border border-gray-300 rounded-lg px-2 py-1.5 font-mono"/>
       <button @click="addRelease()" :disabled="releaseBusy || !releaseForm.version || !releaseForm.digest"
               class="text-sm border border-gray-300 hover:bg-gray-50 text-gray-700 px-3 py-1.5 rounded-lg font-medium transition">
         Add release
