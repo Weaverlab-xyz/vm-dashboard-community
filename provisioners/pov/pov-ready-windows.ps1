@@ -2,7 +2,8 @@
   pov-ready-windows.ps1 — the POV half of the Standard Windows image (Server 2022).
 
   Runs as a Packer PowerShell provisioner AFTER bt-ready-windows.ps1 (OpenSSH, RDP+NLA)
-  and before the template's windows-restart and EC2Launch sysprep finisher.
+  and before the template's windows-restart and sysprep finisher (EC2Launch's on AWS,
+  Sysprep.exe /generalize on Azure).
 
   What it adds, and why each one is in the IMAGE:
     * WinRM on 5985 reachable from the POV network. The Resource Broker install, the
@@ -15,7 +16,8 @@
       built-in one (the POV's functional account) gets a filtered token over WinRM and
       every admin task fails "Access is denied".
     * A boot task that re-asserts all of that and removes what the BUILD needed: Packer's
-      HTTPS listener on a cert named "packer", Basic auth, and its firewall rule. It only
+      HTTPS listener on its self-signed cert ("CN=packer" on AWS; on Azure the builder
+      names it after its temporary VM, "CN=pkrvm..."), Basic auth, and its firewall rule. It only
       acts once C:\BT\image-sealed exists (written by the finisher), so it cannot pull
       the build's own connection out from under it across the windows-restart.
     * C:\BT\staged\, and optionally one installer downloaded into it (POV_STAGE_URL) —
@@ -54,7 +56,7 @@ Start-Service WinRM
 Get-ChildItem WSMan:\Localhost\Listener | Where-Object { $_.Keys -contains 'Transport=HTTPS' } | ForEach-Object {
     $thumb = (Get-ChildItem $_.PSPath | Where-Object Name -eq 'CertificateThumbprint').Value
     $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Thumbprint -eq $thumb }
-    if ($cert -and $cert.Subject -eq 'CN=packer') {
+    if ($cert -and ($cert.Subject -eq 'CN=packer' -or $cert.Subject -like 'CN=pkrvm*')) {
         Remove-Item $_.PSPath -Recurse -Force
         Remove-Item $cert.PSPath -Force
     }
@@ -92,4 +94,4 @@ if ($env:POV_STAGE_URL) {
     Log 'no installer to stage'
 }
 
-Log 'pov-ready-windows complete — windows-restart + EC2Launch sysprep run next'
+Log 'pov-ready-windows complete — windows-restart + the sysprep finisher run next'

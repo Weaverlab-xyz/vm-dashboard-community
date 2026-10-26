@@ -2,8 +2,8 @@
 
 A POV template builder does not write Packer. They pick **Standard Linux** or **Standard
 Windows**, a region and a few toggles, and :func:`build_request` turns that into the
-same ``AWSPackerBuildRequest`` the demo Build Image tab sends — so the build itself is
-``packer_build_service`` unchanged, and a recipe is only data.
+same ``AWSPackerBuildRequest`` / ``AzurePackerBuildRequest`` the demo Build Image tab
+sends — so the build itself is ``packer_build_service``, and a recipe is only data.
 
 What a standard image carries, and what it deliberately does not:
 
@@ -15,16 +15,28 @@ What a standard image carries, and what it deliberately does not:
 * **Windows (Server 2022)** — WinRM reachable from inside the POV network on 5985, which
   the Resource Broker install, the functional account and guest steps all ride; OpenSSH
   and RDP+NLA for PRA; EC2Launch re-armed so every instance generates its own
-  Administrator password.
+  Administrator password (on Azure: Sysprep, and the platform sets the per-POV
+  ``povadmin`` password at creation).
 * **Neither** carries anything per-tenant or per-POV: no enrolment code, gateway key,
   Resource Broker install key, Entitle token or password. Those stay post-boot, through
   the agent, exactly as on a stock image.
 
-AWS only today. ``RECIPES`` is keyed by cloud so Azure and GCP are an entry each.
-"""
-from typing import Optional
+AWS and Azure. ``RECIPES`` is keyed by cloud, so GCP is one more entry and a request
+builder.
 
-from ..models.packer import AWSPackerBuildRequest
+**The Linux login differs by cloud, on purpose.** On AWS a Standard Linux target is given
+the POV's own password for ``adminuser`` by cloud-init (pov_cloud_aws), and the image's
+sshd Match block admits password login for that one account. On Azure every VM is
+CREATED with ``povadmin`` and the per-POV platform password (pov_cloud_azure), and that
+is the login ``stored_credentials`` hands Password Safe and Entitle; ``adminuser`` gets
+no password there. So the Azure recipe points the Match block at ``povadmin`` instead —
+with bt-ready's global ``PasswordAuthentication no`` read first, the platform login
+would otherwise be refused over SSH on exactly the images built for it. ``adminuser``
+is created on both, as the Password-Safe-managed bootstrap account.
+"""
+from typing import Optional, Union
+
+from ..models.packer import AWSPackerBuildRequest, AzurePackerBuildRequest
 
 
 class RecipeError(ValueError):
@@ -48,49 +60,90 @@ def control_node_images() -> tuple:
     from . import pov_broker
     return (pov_broker.AGENT_IMAGE, pov_broker.GATEWAY_IMAGE, pov_broker.ANSIBLE_VM_IMAGE)
 
+# What a recipe installs is the same on every cloud; only the base image and the size
+# of the build machine differ. Order matters in both lists: bt-ready-debian.sh seals the
+# image (host keys, machine-id, cloud-init state) and so runs LAST on Linux; the
+# operator's own script, if any, is slotted in just before it by packer_build_service.
+_LINUX_FILES = ["pov/pov-ready-linux.sh", "beyondtrust/bt-ready-debian.sh"]
+_WINDOWS_FILES = ["beyondtrust/bt-ready-windows.ps1", "pov/pov-ready-windows.ps1"]
+_LINUX_TOGGLES = {
+    "stage_epml": {
+        "label": "Install the EPM-L package (activated later, per POV)",
+        "default": False,
+    },
+    _CONTROL_NODE_IMAGES_TOGGLE: {
+        "label": "Pre-pull the control-node containers",
+        "default": True,
+    },
+}
+_WINDOWS_TOGGLES = {
+    "stage_installer": {
+        "label": ("Stage an installer from storage into C:\\BT\\staged "
+                  "(not run — e.g. EPM for Windows)"),
+        "default": False,
+        "takes": "storage_asset",
+    },
+}
+_LINUX_SUMMARY = ("Ubuntu 24.04 with Docker and cloud-init. Works as a target "
+                  "(Password Safe, PRA Shell Jump, Entitle) and as the control node.")
+_WINDOWS_SUMMARY = ("Windows Server 2022 with WinRM open to the POV network, OpenSSH "
+                    "and RDP. Hosts the Resource Broker and is a PRA RDP target.")
+
+# The account an Azure POV VM is CREATED with (pov_cloud_azure.ADMIN_USERNAME), holding
+# the per-POV platform password. Not imported: that module pulls in the Azure SDK, and
+# this one is pure. tests/test_pov_image_builder.py pins the two together.
+AZURE_PLATFORM_ADMIN_USER = "povadmin"
+
 RECIPES = {
     "aws": {
         STANDARD_LINUX: {
             "label": "Standard Linux",
-            "summary": ("Ubuntu 24.04 with Docker and cloud-init. Works as a target "
-                        "(Password Safe, PRA Shell Jump, Entitle) and as the control node."),
+            "summary": _LINUX_SUMMARY,
             "os_type": "Linux",
             "os_family": "linux",
             "source_ami_family": "ubuntu-24.04",
             "instance_type": "t3.medium",
-            # Order matters: bt-ready-debian.sh seals the image (host keys, machine-id,
-            # cloud-init state) and so runs LAST; the operator's own script, if any, is
-            # slotted in just before it by packer_build_service.
-            "files": ["pov/pov-ready-linux.sh", "beyondtrust/bt-ready-debian.sh"],
-            "toggles": {
-                "stage_epml": {
-                    "label": "Install the EPM-L package (activated later, per POV)",
-                    "default": False,
-                },
-                _CONTROL_NODE_IMAGES_TOGGLE: {
-                    "label": "Pre-pull the control-node containers",
-                    "default": True,
-                },
-            },
+            "files": _LINUX_FILES,
+            "toggles": _LINUX_TOGGLES,
         },
         STANDARD_WINDOWS: {
             "label": "Standard Windows",
-            "summary": ("Windows Server 2022 with WinRM open to the POV network, OpenSSH "
-                        "and RDP. Hosts the Resource Broker and is a PRA RDP target."),
+            "summary": _WINDOWS_SUMMARY,
             "os_type": "Windows",
             "os_family": "windows",
             "source_ami_family": "windows-server-2022",
             # Windows builds crawl on 4 GB; the build instance only lives for the build.
             "instance_type": "t3.large",
-            "files": ["beyondtrust/bt-ready-windows.ps1", "pov/pov-ready-windows.ps1"],
-            "toggles": {
-                "stage_installer": {
-                    "label": ("Stage an installer from storage into C:\\BT\\staged "
-                              "(not run — e.g. EPM for Windows)"),
-                    "default": False,
-                    "takes": "storage_asset",
-                },
-            },
+            "files": _WINDOWS_FILES,
+            "toggles": _WINDOWS_TOGGLES,
+        },
+    },
+    # Marketplace images, both Gen2. ``instance_type`` is the Azure VM size of the build
+    # machine (the key is shared so describe() and the tab need no per-cloud case).
+    "azure": {
+        STANDARD_LINUX: {
+            "label": "Standard Linux",
+            "summary": _LINUX_SUMMARY,
+            "os_type": "Linux",
+            "os_family": "linux",
+            "image": {"publisher": "Canonical", "offer": "ubuntu-24_04-lts",
+                      "sku": "server"},
+            "instance_type": "Standard_B2s",
+            "files": _LINUX_FILES,
+            "toggles": _LINUX_TOGGLES,
+        },
+        STANDARD_WINDOWS: {
+            "label": "Standard Windows",
+            "summary": _WINDOWS_SUMMARY,
+            "os_type": "Windows",
+            "os_family": "windows",
+            "image": {"publisher": "MicrosoftWindowsServer", "offer": "WindowsServer",
+                      "sku": "2022-datacenter-g2"},
+            # B-series (<= 4 GB) makes a Windows build crawl; the packer_build_service
+            # warning says the same to the demo tab.
+            "instance_type": "Standard_D2s_v3",
+            "files": _WINDOWS_FILES,
+            "toggles": _WINDOWS_TOGGLES,
         },
     },
 }
@@ -126,18 +179,20 @@ def default_name(recipe_id: str) -> str:
 
 def build_request(cloud: str, recipe_id: str, *, region: str, image_name: str = "",
                   toggles: Optional[dict] = None, extra_script: str = "",
-                  stage_asset: str = "") -> AWSPackerBuildRequest:
+                  stage_asset: str = ""
+                  ) -> Union[AWSPackerBuildRequest, AzurePackerBuildRequest]:
     """The Packer request for one recipe. Pure: resolves no URL and calls no cloud.
 
     ``extra_script`` is an operator script's TEXT (read from storage by the caller), run
     before the recipe's sealing step. ``stage_asset`` is the storage asset the Windows
     ``stage_installer`` toggle downloads into the image without running it.
     """
-    if cloud != "aws":
-        raise RecipeError(f"standard images are built on AWS only so far, not {cloud!r}")
+    if cloud not in ("aws", "azure"):
+        raise RecipeError(f"standard images are built on AWS and Azure only so far, "
+                          f"not {cloud!r}")
     recipe = get(cloud, recipe_id)
     if not (region or "").strip():
-        raise RecipeError("a region is required — an AMI exists only in the region it "
+        raise RecipeError("a region is required — an image exists only in the region it "
                           "was built in")
     chosen = {tid: bool(t.get("default")) for tid, t in recipe["toggles"].items()}
     for tid, val in (toggles or {}).items():
@@ -152,7 +207,10 @@ def build_request(cloud: str, recipe_id: str, *, region: str, image_name: str = 
         # Entitle's k3s install and Config Management `become` need full sudo; the
         # scoped default covers only Entitle's ephemeral-account commands.
         env.append({"name": "BT_ADMIN_NOPASSWD_ALL", "value": "1"})
-        env.append({"name": "POV_ADMIN_USER", "value": LINUX_ADMIN_USER})
+        # The account the sshd Match block admits for password login: the one this
+        # cloud's POV sets a password on (see the module docstring).
+        login = AZURE_PLATFORM_ADMIN_USER if cloud == "azure" else LINUX_ADMIN_USER
+        env.append({"name": "POV_ADMIN_USER", "value": login})
         if chosen.get("stage_epml"):
             kwargs["bt_epml"] = "deb"
             kwargs["bt_epml_source"] = "storage"
@@ -168,16 +226,29 @@ def build_request(cloud: str, recipe_id: str, *, region: str, image_name: str = 
             # while the job waits in the queue or for its change window.
             kwargs["bt_stage_asset"] = stage_asset.strip()
 
-    return AWSPackerBuildRequest(
+    common = dict(
         image_name=(image_name or "").strip() or default_name(recipe_id),
-        source_ami_family=recipe["source_ami_family"],
-        instance_type=recipe["instance_type"],
         os_type=recipe["os_type"],
         provisioner_files=list(recipe["files"]),
         provisioner_script=extra_script or "",
         provisioner_env_vars=env,
         region=region.strip(),
-        register_mode="ami_only",
         recipe=recipe_id,
         **kwargs,
+    )
+    if cloud == "azure":
+        image = recipe["image"]
+        return AzurePackerBuildRequest(
+            image_publisher=image["publisher"],
+            image_offer=image["offer"],
+            image_sku=image["sku"],
+            vm_size=recipe["instance_type"],
+            register_mode="image_only",
+            **common,
+        )
+    return AWSPackerBuildRequest(
+        source_ami_family=recipe["source_ami_family"],
+        instance_type=recipe["instance_type"],
+        register_mode="ami_only",
+        **common,
     )
