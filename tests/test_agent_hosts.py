@@ -221,14 +221,16 @@ def test_identity_is_a_code_unless_spire_attestation_is_on_and_in_use():
         dashboard_spire.server_in_use = lambda: False
         assert ahs.identity_material(db, agent)["mode"] == "code"
         dashboard_spire.server_in_use = lambda: True
-        dashboard_spire.migrate_agent = lambda db, a: {
-            "join_token": "jt", "trust_domain": "dash.example.com", "bootstrap_pem": "PEM"}
+        dashboard_spire.migrate_agent = lambda db, a, join_token=True: {
+            "join_token": "jt", "trust_domain": "dash.example.com", "bootstrap_pem": "PEM",
+            "node_spiffe_id": "spiffe://dash.example.com/node/x"}
         dashboard_spire.server_address = lambda: "spire.example.com:9081"
         dashboard_spire.server_port = lambda: 8081
         m = ahs.identity_material(db, agent)
         assert m == {"mode": "spire", "join_token": "jt", "trust_domain": "dash.example.com",
                      "bootstrap_pem": "PEM", "server_address": "spire.example.com",
-                     "server_port": 9081}
+                     "server_port": 9081, "node_attestor": "join_token",
+                     "node_spiffe_id": "spiffe://dash.example.com/node/x"}
     finally:
         (dashboard_spire.server_in_use, dashboard_spire.migrate_agent,
          dashboard_spire.server_address, dashboard_spire.server_port) = saved
@@ -520,6 +522,75 @@ def test_a_failed_launch_cleans_up_and_marks_the_host():
         assert cloud.destroyed, "nothing cleaned up after a failed launch"
         agent = db.query(RemoteAgent).filter(RemoteAgent.id == agent.id).first()
         assert agent.enroll_code_hash is None, "a failed start left a live code"
+
+
+class _CloudSpire:
+    """SPIRE on, AWS ticked for instance identity; records node registration and removal."""
+
+    def __init__(self, register_fails=False):
+        self.registered, self.forgotten, self.migrations = [], [], []
+        self.register_fails = register_fails
+
+    def __enter__(self):
+        names = ("server_in_use", "migrate_agent", "server_address", "server_port",
+                 "register_cloud_node", "forget_cloud_node")
+        self._saved = {n: getattr(dashboard_spire, n) for n in names}
+        config_service.set("spire_attest_enabled", "true")
+        config_service.set("spire_cloud_attest_aws", "true")
+
+        def migrate(db, agent, join_token=True):
+            self.migrations.append(join_token)
+            agent.spiffe_id = f"spiffe://dash.example.com/agent/{agent.id}"
+            db.commit()
+            return {"join_token": "JT" if join_token else "",
+                    "trust_domain": "dash.example.com",
+                    "node_spiffe_id": f"spiffe://dash.example.com/node/{agent.id}",
+                    "bootstrap_pem": "-----BEGIN CERTIFICATE-----\n"}
+
+        def register(node, selectors):
+            if self.register_fails:
+                raise dashboard_spire.DashboardSpireError("entry refused")
+            self.registered.append((node, selectors))
+
+        dashboard_spire.server_in_use = lambda: True
+        dashboard_spire.migrate_agent = migrate
+        dashboard_spire.server_address = lambda: "spire.example.com"
+        dashboard_spire.server_port = lambda: 8081
+        dashboard_spire.register_cloud_node = register
+        dashboard_spire.forget_cloud_node = lambda node: self.forgotten.append(node) or []
+        return self
+
+    def __exit__(self, *exc):
+        for n, f in self._saved.items():
+            setattr(dashboard_spire, n, f)
+        config_service.set("spire_attest_enabled", "false")
+        config_service.set("spire_cloud_attest_aws", "false")
+
+
+def test_an_aws_host_attests_with_its_instance_identity_when_ticked():
+    db = _fresh()
+    host, agent = _deploy(db)
+    with _FakeCloud() as cloud, _CloudSpire() as spire:
+        job = _run(db, host, "start")
+        assert job.status == "completed", job.error_message
+        assert spire.migrations == [False], "a join token was minted for a ticked cloud"
+        assert "SPIRE_JOIN_TOKEN" not in cloud.scripts[0] and "join.token" not in cloud.scripts[0]
+        node = f"spiffe://dash.example.com/node/{agent.id}"
+        assert spire.registered == [(node, ["aws_iid:instance:id:i-vpc-a-agent"])]
+
+        assert _run(db, ahs.get(db, host.id), "stop").status == "completed"
+        assert spire.forgotten == [node], "the stopped VM's node was not evicted"
+
+
+def test_a_host_whose_node_cannot_be_registered_is_taken_down():
+    db = _fresh()
+    host, agent = _deploy(db)
+    with _FakeCloud() as cloud, _CloudSpire(register_fails=True) as spire:
+        job = _run(db, host, "start")
+        assert job.status == "failed" and "SPIRE server" in job.error_message
+        assert cloud.destroyed, "the VM was left running without an identity"
+        assert spire.forgotten, "its node entry was not cleaned up"
+        assert ahs.get(db, host.id).status == "error"
 
 
 def test_delete_takes_the_host_down_and_removes_agent_and_routes():

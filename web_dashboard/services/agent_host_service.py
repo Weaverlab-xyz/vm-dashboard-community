@@ -321,6 +321,23 @@ def bootstrap_script(*, url: str, policy: str, material: dict,
         port = int(material["server_port"])
         if not re.match(r"^[A-Za-z0-9.-]+$", td) or not re.match(r"^[A-Za-z0-9.:-]+$", server):
             raise AgentHostError("The SPIRE trust domain or server address is not plain.")
+        # join_token (a one-use code in this script), or the cloud's own instance identity
+        # (aws_iid / azure_imds / gcp_iit): no secret here at all, the VM is the proof.
+        attestor = str(material.get("node_attestor") or "join_token")
+        if attestor == "join_token":
+            node_attestor = '    NodeAttestor "join_token" { plugin_data {} }'
+        elif attestor in ("aws_iid", "gcp_iit"):
+            node_attestor = f'    NodeAttestor "{attestor}" {{ plugin_data {{}} }}'
+        elif attestor == "azure_imds":
+            domain = str(material.get("tenant_domain") or "")
+            if not re.match(r"^[A-Za-z0-9.-]+$", domain):
+                raise AgentHostError("Azure node attestation needs the tenant domain "
+                                     "(Settings → SPIFFE and SPIRE).")
+            node_attestor = (f'    NodeAttestor "azure_imds" {{ plugin_data '
+                             f'{{ tenant_domain = "{domain}" }} }}')
+        else:
+            raise AgentHostError(f"Unknown node attestor {attestor!r}.")
+        token = attestor == "join_token"
         agent_conf = "\n".join([
             "agent {",
             '    data_dir = "/opt/spire/data"',
@@ -329,14 +346,15 @@ def bootstrap_script(*, url: str, policy: str, material: dict,
             f'    server_port = "{port}"',
             f'    trust_domain = "{td}"',
             '    trust_bundle_path = "/opt/spire/conf/bootstrap.crt"',
-            '    join_token = "${SPIRE_JOIN_TOKEN}"',
+            *(['    join_token = "${SPIRE_JOIN_TOKEN}"'] if token else []),
             '    socket_path = "/run/spire/sockets/agent.sock"',
             "}",
             "plugins {",
-            '    NodeAttestor "join_token" { plugin_data {} }',
-            # "disk", not "memory": a join token is single-use and deleted below, so
-            # the node key must survive a reboot or a SPIRE agent restart, or the host
-            # can never attest again (agent-and-human-identity.md, "Node attestation").
+            node_attestor,
+            # "disk", not "memory": every attestor here attests a node ONCE (a join token
+            # is single-use and deleted below; aws_iid, azure_imds and gcp_iit are
+            # trust-on-first-use), so the node key must survive a reboot or a SPIRE agent
+            # restart, or the host can never attest again (agent-and-human-identity.md).
             '    KeyManager "disk" { plugin_data { directory = "/opt/spire/data" } }',
             '    WorkloadAttestor "unix" { plugin_data {} }',
             "}", ""])
@@ -352,29 +370,36 @@ def bootstrap_script(*, url: str, policy: str, material: dict,
             f'echo {_b64(agent_conf)} | base64 -d > "$D/spire/conf/agent.conf"',
             f'echo {_b64(material["bootstrap_pem"])} | base64 -d > "$D/spire/conf/bootstrap.crt"',
             f'echo {_b64(helper_conf)} | base64 -d > "$D/helper/helper.conf"',
-            f'echo {_b64(material["join_token"])} | base64 -d > "$D/spire/join.token"',
+            *([f'echo {_b64(material["join_token"])} | base64 -d > "$D/spire/join.token"']
+              if token else []),
             'chmod 0444 "$D/spire/conf/agent.conf" "$D/spire/conf/bootstrap.crt"',
             'chown 1000:1000 "$D/spire/data" "$D/spire/sock" && chmod 0700 "$D/spire/data"',
-            'chown 1000:1000 "$D/spire/join.token" && chmod 0400 "$D/spire/join.token"',
+            *(['chown 1000:1000 "$D/spire/join.token" && chmod 0400 "$D/spire/join.token"']
+              if token else []),
             'chown 10001:10001 "$D/helper" "$D/helper/helper.conf"',
             'chmod 0700 "$D/helper" && chmod 0400 "$D/helper/helper.conf"',
             "docker volume create --driver local --opt type=tmpfs --opt device=tmpfs "
             "--opt o=size=1m,uid=10001,gid=10001,mode=0700 spiffe_jwt >/dev/null",
             f"docker pull {SPIRE_AGENT_IMAGE}",
             f"docker pull {SPIFFE_HELPER_IMAGE}",
-            # The join token is read into the environment from its file, so it never sits
-            # in this script's command line or in `docker inspect` of the agent.
+            # Join token: read into the environment from its file, so it never sits in this
+            # script's command line or in `docker inspect` of the agent. Cloud identity: the
+            # SPIRE agent reads the instance metadata service, so it shares the host's
+            # network (IMDSv2's default hop limit of 1 does not reach a bridged container).
+            # It listens on nothing either way: its API is the unix socket below.
             'docker run -d --name dashboard-agent-spire --restart unless-stopped '
             '--user 1000:1000 --read-only --cap-drop ALL '
             '--security-opt no-new-privileges:true --pids-limit 128 '
             '--tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m '
-            '-e SPIRE_JOIN_TOKEN="$(cat "$D/spire/join.token")" '
+            + ('-e SPIRE_JOIN_TOKEN="$(cat "$D/spire/join.token")" ' if token
+               else '--network host ') +
             '-v "$D/spire/conf/agent.conf:/opt/spire/conf/agent.conf:ro" '
             '-v "$D/spire/conf/bootstrap.crt:/opt/spire/conf/bootstrap.crt:ro" '
             '-v "$D/spire/data:/opt/spire/data" -v "$D/spire/sock:/run/spire/sockets" '
-            f'{SPIRE_AGENT_IMAGE} -config /opt/spire/conf/agent.conf -expandEnv',
+            f'{SPIRE_AGENT_IMAGE} -config /opt/spire/conf/agent.conf'
+            + (' -expandEnv' if token else ''),
             # Spent on first use; nothing on disk can attest again.
-            'rm -f "$D/spire/join.token"',
+            *(['rm -f "$D/spire/join.token"'] if token else []),
             'docker run -d --name dashboard-agent-spiffe-helper --restart unless-stopped '
             '--user 10001:10001 --read-only --cap-drop ALL '
             '--security-opt no-new-privileges:true --pids-limit 64 '
@@ -565,16 +590,22 @@ def enqueue(db, host, action: str, *, created_by: str = "system") -> str:
 
 # ── identity ──────────────────────────────────────────────────────────────────
 
-def identity_material(db, agent) -> dict:
+def identity_material(db, agent, cloud: str = "") -> dict:
     """What the host's agent proves itself with, minted for this start and single-use.
 
     SPIRE when the dashboard attests agents and its server is in use — the same entries
     "Migrate to SPIRE" creates, so the signing key never touches the host's disk. A one-time
-    enrolment code otherwise."""
+    enrolment code otherwise.
+
+    Under SPIRE the HOST proves itself with its cloud's instance identity when the operator
+    ticked that cloud (dashboard_spire.cloud_attestor): no join token in the user-data, and
+    the node entry pinning the VM is registered once it exists (register_node). A join
+    token otherwise."""
     from . import agent_service, config_service, dashboard_spire
     if config_service.get_bool("spire_attest_enabled") and dashboard_spire.server_in_use():
+        attestor = dashboard_spire.cloud_attestor(cloud)
         try:
-            out = dashboard_spire.migrate_agent(db, agent)
+            out = dashboard_spire.migrate_agent(db, agent, join_token=not attestor)
             address = dashboard_spire.server_address()
             port = dashboard_spire.server_port()
         except Exception as exc:  # noqa: BLE001 — named for the operator
@@ -586,10 +617,60 @@ def identity_material(db, agent) -> dict:
                 "SPIRE attestation is on, but there is no SPIRE server address for agents. "
                 "Set it under Settings → Integrations → Platform → SPIFFE and SPIRE.")
         host, _, maybe_port = address.partition(":")
-        return {"mode": "spire", "join_token": out["join_token"],
-                "trust_domain": out["trust_domain"], "bootstrap_pem": out["bootstrap_pem"],
-                "server_address": host, "server_port": int(maybe_port or port)}
+        material = {"mode": "spire", "join_token": out["join_token"],
+                    "node_attestor": attestor or "join_token",
+                    "node_spiffe_id": out["node_spiffe_id"],
+                    "trust_domain": out["trust_domain"], "bootstrap_pem": out["bootstrap_pem"],
+                    "server_address": host, "server_port": int(maybe_port or port)}
+        if attestor == "azure_imds":
+            material["tenant_domain"] = (config_service.get("spire_azure_tenant_domain")
+                                         or "").strip()
+            if not material["tenant_domain"]:
+                raise AgentHostError(
+                    "Azure node attestation is ticked but has no tenant domain. Set it "
+                    "under Settings → SPIFFE and SPIRE, or untick Azure there.")
+        return material
     return {"mode": "code", "code": agent_service.reissue_enroll_code(db, agent)}
+
+
+def register_node(host, material: dict, launched: dict) -> None:
+    """For a host attesting with its cloud's identity: make the agent's node a node entry
+    pinning the VM just launched. Raises AgentHostError. A no-op for a join token."""
+    from . import config_service, dashboard_spire
+    if material.get("node_attestor") in (None, "", "join_token"):
+        return
+    if host.cloud == "aws":
+        facts = {"instance_id": launched.get("host_id") or ""}
+    elif host.cloud == "gcp":
+        p = _placement(host)
+        facts = {"project": p["project"], "zone": launched.get("zone") or p["zone"],
+                 "name": host.name}
+    else:
+        facts = {"subscription": (config_service.get("azure_subscription_id") or "").strip(),
+                 "resource_group": _placement(host)["resource_group"], "name": host.name}
+    try:
+        dashboard_spire.register_cloud_node(
+            material["node_spiffe_id"],
+            dashboard_spire.cloud_node_selectors(host.cloud, **facts))
+    except dashboard_spire.DashboardSpireError as exc:
+        raise AgentHostError(f"Could not register the host with the SPIRE server: {exc}") from exc
+
+
+def forget_node(agent) -> None:
+    """Evict a stopped host's attested VM and drop the node entry pinning it, so nothing
+    attested as that VM keeps an identity. Best-effort; nothing for a join-token host."""
+    from . import dashboard_spire
+    parts = (agent.spiffe_id or "").split("/")
+    if len(parts) != 5 or not dashboard_spire.server_in_use():
+        return
+    node = dashboard_spire.ids_for(parts[2], agent.id)[1]
+    try:
+        problems = dashboard_spire.forget_cloud_node(node)
+    except Exception as exc:  # noqa: BLE001 - a stop must not fail on SPIRE
+        problems = [str(exc)]
+    if problems:
+        logger.warning("agent host for %s: SPIRE node cleanup left: %s", agent.name,
+                       "; ".join(problems))
 
 
 def park_identity(db, agent) -> None:
@@ -759,7 +840,7 @@ async def _start(db, host, job_id: str) -> None:
 
     job_service.update_progress(db, job_id, 10, "Minting a single-use identity")
     url = dashboard_url()
-    material = identity_material(db, agent)
+    material = identity_material(db, agent, host.cloud)
     spire = material.get("mode") == "spire"
     script = bootstrap_script(url=url, policy=policy_yaml(cidrs_of(host),
                                                          host.max_concurrent,
@@ -772,6 +853,9 @@ async def _start(db, host, job_id: str) -> None:
     job_service.update_progress(db, job_id, 30, f"Launching {host.cloud} host {host.name}")
     try:
         res = await launch(host, script)
+        # The VM exists, so its identity can be pinned: before this its SPIRE agent may
+        # already have attested, but nothing hands it the agent's SVID until it is.
+        register_node(host, material, res)
     except Exception:
         # A failed launch may still have left a VM behind (Azure's create can fail after
         # the NIC exists; AWS after run_instances). Remove anything by name before failing.
@@ -780,6 +864,7 @@ async def _start(db, host, job_id: str) -> None:
         except Exception as exc:  # noqa: BLE001
             logger.warning("agent host %s: cleanup after a failed launch failed: %s",
                            host.name, exc)
+        forget_node(agent)
         park_identity(db, agent)
         raise
     host.host_id = res.get("host_id") or host.name
@@ -798,10 +883,15 @@ async def _start(db, host, job_id: str) -> None:
         if agent is not None and agent_service.status_of(agent) == "online":
             break
         if loop.time() > deadline:
+            attestor = material.get("node_attestor")
             raise AgentHostError(
                 f"The host started but the agent did not come online within "
                 f"{ONLINE_TIMEOUT_S // 60} minutes. Check that the subnet reaches "
-                f"{url} (and, when attesting, the SPIRE server), then stop and start it.")
+                f"{url} (and, when attesting, the SPIRE server), then stop and start it."
+                + (f" It attests with its cloud's identity: check that the SPIRE server "
+                   f"enables NodeAttestor \"{attestor}\" with the access it needs (Settings "
+                   f"→ SPIFFE and SPIRE; docs: deploying an agent, Identity)."
+                   if attestor and attestor != "join_token" else ""))
         await asyncio.sleep(_ONLINE_POLL_S)
 
     host = get(db, host.id)
@@ -876,6 +966,7 @@ async def _stop(db, host, job_id: str, *, final: bool = False) -> None:
     await destroy(host)
     agent = db.query(RemoteAgent).filter(RemoteAgent.id == host.agent_id).first()
     if agent is not None:
+        forget_node(agent)
         park_identity(db, agent)
     host = get(db, host.id)
     host.host_id = None

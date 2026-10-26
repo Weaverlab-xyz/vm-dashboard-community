@@ -227,8 +227,9 @@ def test_each_agent_config_matches_what_it_promises_about_keys_at_rest():
     join, cloud = (_text(*_AGENT_CONFS[k]) for k in ("join", "cloud"))
     assert ("KeyManager", "disk") in _active_plugins(join), (
         "join_token cannot re-attest after a restart, so its key must persist")
-    assert ("KeyManager", "memory") in _active_plugins(cloud), (
-        "the cloud config exists to keep NO key at rest")
+    assert ("KeyManager", "disk") in _active_plugins(cloud), (
+        "aws_iid, azure_imds and gcp_iit are trust-on-first-use: a node attests once, so "
+        "a memory key would strand the host after a restart")
     for name, conf in (("join", join), ("cloud", cloud)):
         plugins = _active_plugins(conf)
         assert ("WorkloadAttestor", "unix") in plugins, name

@@ -42,6 +42,49 @@
             </p>
           </div>
 
+          <!-- ── Cloud node attestation for deployed agents ─────────────────────────
+               docs/platform/spiffe/remote-agents/deploying.md. Ticking a cloud is the
+               operator saying this server enables that NodeAttestor: the CLI cannot tell. -->
+          <div class="rounded-lg border border-gray-200 p-3 space-y-2">
+            <p class="text-sm text-gray-700">
+              Deployed agents attest with their cloud's instance identity
+              <span class="block text-[11px] text-gray-500">
+                Tick a cloud once this SPIRE server enables its NodeAttestor. A host the
+                dashboard deploys there then proves itself with the VM's own identity
+                document, with no join token in its user-data; unticked, it keeps a one-use
+                join token. AWS and Azure need the server to hold its own read-only cloud
+                identity; GCP needs none. See
+                <a href="/docs/platform/spiffe/remote-agents/deploying#identity" target="_blank" class="text-blue-600 hover:underline">the setup for each cloud</a>.
+              </span>
+            </p>
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" x-model="panelCfg.spire_cloud_attest_aws"
+                     class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+              AWS (<code class="font-mono text-xs">aws_iid</code>)
+            </label>
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" x-model="panelCfg.spire_cloud_attest_gcp"
+                     class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+              Google Cloud (<code class="font-mono text-xs">gcp_iit</code>)
+            </label>
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" x-model="panelCfg.spire_cloud_attest_azure"
+                     class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+              Azure (<code class="font-mono text-xs">azure_imds</code>)
+            </label>
+            <div x-show="panelCfg.spire_cloud_attest_azure" x-cloak>
+              <label class="block text-xs font-medium text-gray-700 mb-1">Azure tenant domain</label>
+              <input type="text" x-model="panelCfg.spire_azure_tenant_domain"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="contoso.onmicrosoft.com">
+              <p class="text-[11px] text-gray-400 mt-1">
+                The key of the server's <code class="font-mono">azure_imds</code>
+                <code class="font-mono">tenants</code> map; each Azure host's SPIRE agent is
+                configured with it too.
+              </p>
+            </div>
+          </div>
+
           <!-- ── The dashboard's own SPIFFE identity ─────────────────────────────
                docs/design/dashboard-workload-identity.md. Token files for federated
                cloud access; a stored cloud key still wins, so turning this on changes
