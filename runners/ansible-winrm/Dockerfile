@@ -40,11 +40,12 @@ USER root
 
 # Fixes published after the pinned digest was cut. The nightly Images scan failed on them
 # (2026-10-22: expat CVE-2026-77214, sudo CVE-2026-96512, certifi GHSA-6q48-6c7w-9gw2;
-# 2026-10-24: brotli CVE-2026-111497, black CVE-2026-114134, filelock CVE-2026-112940)
+# 2026-10-24: brotli CVE-2026-111497, black CVE-2026-114134, filelock CVE-2026-112940;
+# 2026-10-26: libcurl CVE-2026-92392)
 # with nothing changed in this repo. The floors make the build fail loudly rather than
 # silently install an older copy; drop a line once the base digest carries that version.
 RUN apk add --no-cache --upgrade "libexpat>=2.9.0-r0" "sudo>=1.9.17_p2-r2" \
-        "brotli-libs>=1.2.1-r0"
+        "brotli-libs>=1.2.1-r0" "libcurl>=8.23.0-r0"
 
 # Upstream installs ansible itself with pip into the system Python, and the libraries its
 # modules import (pywinrm, paramiko, the BeyondTrust library) have to live in that same

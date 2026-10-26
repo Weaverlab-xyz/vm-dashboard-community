@@ -314,6 +314,32 @@ job_types:
 # Playbooks and scripts fit; packages (.rpm, .deb, .exe, .msi) do not, and the dashboard
 # refuses those before queueing rather than failing a transfer halfway.
 
+# ── Upgrades and restarts from the dashboard (OFF; agent 2.10+, SPIRE only) ───
+#
+# Lets the dashboard upgrade this agent to a newer SIGNED release, or restart it, through
+# the updater container (docker-compose.updater.yml). The dashboard only chooses which
+# release; this block decides whether any release may run here:
+#
+#   * repository   — the only image an upgrade may come from (a registry host is allowed);
+#   * verify       — exactly one of:
+#       keyless:     the signing workflow identity (a regular expression) and its issuer.
+#                    These are the project's own release signatures.
+#       public_key:  a cosign public key mounted into the updater, for a mirrored or
+#                    air-gapped registry you re-sign yourself;
+#   * allow_downgrade — off: an upgrade to an older version is refused here;
+#   * ready_timeout_s — how long a new agent has to come up before the updater puts the
+#                    old one back (60-540s; under the dashboard's 10-minute stale limit).
+#
+# upgrades:
+#   enabled: true
+#   repository: chrweav/dashboard-agent
+#   verify:
+#     keyless:
+#       identity: "^https://github.com/Weaverlab-xyz/vm-dashboard-community/.github/workflows/publish-images.yml@refs/tags/v"
+#       issuer: "https://token.actions.githubusercontent.com"
+#   allow_downgrade: false
+#   ready_timeout_s: 480
+
 # ── Ceilings ──────────────────────────────────────────────────────────────────
 # Applied on top of whatever the dashboard requested; the smaller number always wins.
 # These bound a scan even if someone with dashboard access asks for something silly.

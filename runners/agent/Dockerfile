@@ -34,12 +34,18 @@ RUN pip install --no-cache-dir \
 
 COPY agent.py /app/agent.py
 
+# The agent version this image runs (AGENT_VERSION in agent.py), as a label: the updater
+# (runners/agent-updater) checks it before swapping, so a digest cannot pass for a version
+# it is not. Set by the release workflow; a local build without it is labelled "dev".
+ARG AGENT_VERSION=dev
+LABEL dashboard-agent.version=$AGENT_VERSION
+
 # A fixed high UID with no shell and no home. The state directory is created here so
 # the container works with a read-only root filesystem and a mounted volume; 0700
 # because it holds the agent's Ed25519 private key.
 RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin agent \
- && mkdir -p /var/lib/dashboard-agent /etc/dashboard-agent \
- && chown -R 10001:10001 /var/lib/dashboard-agent \
+ && mkdir -p /var/lib/dashboard-agent /etc/dashboard-agent /var/lib/dashboard-agent-control \
+ && chown -R 10001:10001 /var/lib/dashboard-agent /var/lib/dashboard-agent-control \
  && chmod 700 /var/lib/dashboard-agent
 
 USER 10001:10001

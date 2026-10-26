@@ -114,7 +114,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 # broker running the earlier one failed identically while reporting the same string as the
 # build that fixed it. A behaviour change the fleet cannot see is a behaviour change nobody
 # can confirm arrived, so bump this whenever the agent's behaviour moves.
-AGENT_VERSION = "2.9.0"
+AGENT_VERSION = "2.10.0"
 
 log = logging.getLogger("agent")
 
@@ -134,6 +134,12 @@ ENROLLMENT_CODE_FILE = os.environ.get("AGENT_ENROLLMENT_CODE_FILE", "").strip()
 # identity.json. Unset, nothing changes: enrolment code and identity.json, as always.
 SPIFFE_JWT_FILE = os.environ.get("AGENT_SPIFFE_JWT_FILE", "").strip()
 STATE_DIR = os.environ.get("AGENT_STATE_DIR", "/var/lib/dashboard-agent")
+# Lifecycle control (agent 2.10). A volume shared with the updater container
+# (runners/agent-updater), the ONLY channel between the two: the agent writes a request,
+# the updater writes its status, and a successor writes `ready`. The updater holds the
+# Docker socket and verifies the image signature; the agent never touches either. Unused
+# unless policy.yaml enables `upgrades:`.
+CONTROL_DIR = os.environ.get("AGENT_CONTROL_DIR", "/var/lib/dashboard-agent-control")
 POLICY_FILE = os.environ.get("AGENT_POLICY_FILE", "/etc/dashboard-agent/policy.yaml")
 CA_BUNDLE = os.environ.get("AGENT_CA_BUNDLE", "").strip()
 INSECURE_TLS = os.environ.get("AGENT_INSECURE_TLS", "").strip() in ("1", "true", "yes")
@@ -1379,9 +1385,11 @@ class Policy:
         ansible_allow = cls._parse_targets(ansible.get("targets"), "ansible.targets")
         gateway = doc.get("gateway") if isinstance(doc.get("gateway"), dict) else {}
         storage = cls._parse_storage(doc.get("storage"))
-        return cls(allow, deny, job_types, limits,
-                   hashlib.sha256(raw).hexdigest(), verbs, sibling, loopback,
-                   ansible, ansible_allow, gateway, storage)
+        pol = cls(allow, deny, job_types, limits,
+                  hashlib.sha256(raw).hexdigest(), verbs, sibling, loopback,
+                  ansible, ansible_allow, gateway, storage)
+        pol.upgrades = parse_upgrades(doc.get("upgrades"))
+        return pol
 
     @staticmethod
     def _parse_storage(value):
@@ -1835,7 +1843,11 @@ class Dashboard:
         # would have to sit on. None means "anything", which is the serial agent's answer.
         body = {"agent_version": AGENT_VERSION,
                 "job_types": sorted(set(HANDLERS) & POLICY.job_types),
-                "ansible_slots": POLICY.ansible_max_concurrent}
+                "ansible_slots": POLICY.ansible_max_concurrent,
+                # Whether this host can be upgraded or restarted from the dashboard:
+                # the operator's opt-in and a live updater beside it.
+                "control": {"upgrades_enabled": bool(getattr(POLICY, "upgrades", None)),
+                            "updater_present": updater_present()}}
         if want_job_types is not None:
             body["want_job_types"] = sorted(want_job_types)
         resp = self._request("POST", "/api/agent/lease", body)
@@ -5424,6 +5436,230 @@ HANDLERS = {"agent_discover": run_discovery,
             "agent_storage": run_storage}
 
 
+# ── Lifecycle control: upgrade and restart (agent 2.10) ──────────────────────
+#
+# The dashboard may only CHOOSE which signed release this host runs; three gates, none of
+# them the dashboard's, decide whether it does:
+#
+#   1. policy.yaml must enable `upgrades:` — the dashboard cannot turn it on;
+#   2. this agent accepts only the policy's repository, by digest, and no downgrade
+#      unless the policy allows one (:func:`check_control_request`);
+#   3. the updater, a separate container holding the Docker socket, verifies the image's
+#      cosign signature against the identity pinned in this same policy file before it
+#      pulls anything.
+#
+# The agent never holds the socket. It drains, writes `request.json` into CONTROL_DIR and
+# waits to be stopped; its successor finishes the job (:func:`finish_pending_control`).
+
+CONTROL_JOB_TYPES = ("agent_upgrade", "agent_restart")
+_UPDATER_FRESH_S = 120
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# An image name with an optional registry host[:port]: lower-case path components only,
+# never a tag or digest (those come from the request, checked separately).
+_REPO_RE = re.compile(
+    r"^(?:[a-z0-9.-]+(?::\d{1,5})?/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$")
+
+
+class HandedOff(Exception):
+    """A control job handed to the updater: this process is about to be stopped, and its
+    successor (or, after a rollback, its own restart) finishes the job."""
+
+
+def parse_upgrades(value) -> dict:
+    """Validate the `upgrades:` block. ``{}`` means lifecycle control is off.
+
+    Fatal on a wrong shape, like every other block: an operator who wrote the block meant
+    it, and silently ignoring a typo would leave them believing the host is managed."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise AgentFatal("policy.yaml: `upgrades:` must be a mapping.")
+    if value.get("enabled") is not True:
+        return {}
+    repo = str(value.get("repository") or "").strip()
+    if not _REPO_RE.match(repo):
+        raise AgentFatal(
+            "policy.yaml: `upgrades.repository` must be a plain image name such as "
+            "chrweav/dashboard-agent (a registry host is allowed; no tag or digest).")
+    verify = value.get("verify")
+    if not isinstance(verify, dict) or len(verify) != 1 or not (
+            set(verify) <= {"keyless", "public_key"}):
+        raise AgentFatal(
+            "policy.yaml: `upgrades.verify` must name exactly one of `keyless:` "
+            "(identity + issuer) or `public_key:` (a path to a cosign public key).")
+    if "keyless" in verify:
+        kl = verify["keyless"]
+        if not (isinstance(kl, dict) and str(kl.get("identity") or "").strip()
+                and str(kl.get("issuer") or "").strip()):
+            raise AgentFatal(
+                "policy.yaml: `upgrades.verify.keyless` needs both `identity` (a regular "
+                "expression for the signing workflow) and `issuer`.")
+        verify = {"keyless": {"identity": str(kl["identity"]).strip(),
+                              "issuer": str(kl["issuer"]).strip()}}
+    else:
+        key = str(verify.get("public_key") or "").strip()
+        if not key.startswith("/"):
+            raise AgentFatal("policy.yaml: `upgrades.verify.public_key` must be an "
+                             "absolute path to a cosign public key.")
+        verify = {"public_key": key}
+    timeout = value.get("ready_timeout_s", 480)
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or not 60 <= timeout <= 540:
+        raise AgentFatal(
+            "policy.yaml: `upgrades.ready_timeout_s` must be a whole number of seconds "
+            "from 60 to 540 — under the dashboard's 10-minute stale-job limit.")
+    return {"repository": repo, "verify": verify,
+            "allow_downgrade": value.get("allow_downgrade") is True,
+            "ready_timeout_s": timeout}
+
+
+def _version_tuple(text: str) -> tuple:
+    return tuple(int(p) for p in str(text).split("."))
+
+
+def check_control_request(job_type: str, payload: dict, upgrades: dict) -> dict:
+    """The request this agent will hand the updater, or raise :class:`PolicyRefusal`."""
+    if job_type == "agent_restart":
+        return {"op": "restart", "version": AGENT_VERSION}
+    repo = str(payload.get("repository") or "").strip()
+    digest = str(payload.get("digest") or "").strip()
+    version = str(payload.get("version") or "").strip()
+    if repo != upgrades["repository"]:
+        raise PolicyRefusal(f"upgrades are allowed only from {upgrades['repository']}, "
+                            f"not {repo or '(none)'}")
+    if not _DIGEST_RE.match(digest):
+        raise PolicyRefusal("an upgrade must name an image digest (sha256:…), not a tag")
+    if not _VERSION_RE.match(version):
+        raise PolicyRefusal(f"{version!r} is not a release version")
+    if (_version_tuple(version) < _version_tuple(AGENT_VERSION)
+            and not upgrades["allow_downgrade"]):
+        raise PolicyRefusal(f"{version} is older than this agent ({AGENT_VERSION}) and "
+                            f"policy.yaml does not allow downgrades")
+    return {"op": "upgrade", "repository": repo, "digest": digest, "version": version}
+
+
+def _control_path(name: str) -> str:
+    return os.path.join(CONTROL_DIR, name)
+
+
+def _read_control(name: str) -> Optional[dict]:
+    try:
+        with open(_control_path(name), encoding="utf-8") as fh:
+            doc = json.load(fh)
+        return doc if isinstance(doc, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _write_control(name: str, doc: dict) -> None:
+    """Atomically: the updater must never read half a request."""
+    tmp = _control_path(f".{name}.tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh)
+    os.replace(tmp, _control_path(name))
+
+
+def _remove_control(name: str) -> None:
+    try:
+        os.remove(_control_path(name))
+    except OSError:
+        pass
+
+
+def updater_present() -> bool:
+    """Whether an updater is running beside this agent: it touches `updater.alive`."""
+    try:
+        return time.time() - os.stat(_control_path("updater.alive")).st_mtime < _UPDATER_FRESH_S
+    except OSError:
+        return False
+
+
+SLOTS: "Optional[JobSlots]" = None
+
+
+def run_control(job_type: str, payload: dict, policy: "Policy", emit, cancelled,
+                job_id: str, dashboard: "Dashboard") -> dict:
+    """``agent_upgrade`` / ``agent_restart``: drain, hand the request to the updater, and
+    wait to be stopped. Returns only if the updater refuses before stopping us."""
+    request = check_control_request(job_type, payload, policy.upgrades)
+    if not updater_present():
+        raise RunFailure(
+            "No updater is running beside this agent, so it cannot be upgraded or "
+            "restarted from the dashboard. Add the updater container "
+            "(examples/remote-agent/docker-compose.updater.yml).")
+    slots = SLOTS
+    if slots is not None:
+        emit("Draining: no new jobs; waiting for running jobs to finish")
+        if not slots.quiesce(float(os.environ.get("AGENT_DRAIN_SECONDS", "25")) * 12):
+            slots.hold = False
+            raise RunFailure("Other jobs were still running after the drain period; "
+                             "nothing was changed. Try again when the agent is idle.")
+    request.update({"job_id": job_id, "requested_at": int(time.time()),
+                    "ready_timeout_s": policy.upgrades["ready_timeout_s"]})
+    _remove_control("ready")
+    _write_control("request.json", request)
+    emit(f"Handed to the updater: {request['op']}"
+         + (f" to {request['version']} ({request['digest'][:19]}…)"
+            if request["op"] == "upgrade" else ""))
+    deadline = time.time() + policy.upgrades["ready_timeout_s"] + 120
+    seen = ""
+    while time.time() < deadline:
+        if slots is not None and slots.draining:
+            raise HandedOff()
+        status = _read_control("status.json") or {}
+        if status.get("job_id") == job_id:
+            state = str(status.get("state") or "")
+            if state and state != seen:
+                seen = state
+                emit(f"updater: {state}" + (f" — {status.get('reason')}"
+                                           if status.get("reason") else ""))
+            if state == "failed":
+                _remove_control("request.json")
+                if slots is not None:
+                    slots.hold = False
+                raise RunFailure(f"The updater refused: {status.get('reason') or 'no reason'}")
+        time.sleep(2)
+    _remove_control("request.json")
+    if slots is not None:
+        slots.hold = False
+    raise RunFailure("The updater did not act on the request in time; nothing was changed.")
+
+
+def finish_pending_control(dashboard: "Dashboard") -> Optional[str]:
+    """At start: finish a control job a predecessor handed to the updater.
+
+    Called after the first successful lease, so `ready` means this process really reached
+    the dashboard. A successor completes the job; after a rollback the restarted previous
+    agent fails it with the updater's reason. Returns the job id it settled, if any."""
+    request = _read_control("request.json")
+    if not request or not request.get("job_id"):
+        return None
+    job_id = str(request["job_id"])
+    if time.time() - float(request.get("requested_at") or 0) > 7200:
+        _remove_control("request.json")         # a stale leftover, not a live handoff
+        return None
+    status = _read_control("status.json") or {}
+    state = str(status.get("state") or "") if status.get("job_id") == job_id else ""
+    if state in ("rolled_back", "failed"):
+        dashboard.complete(job_id, status="failed",
+                           error=f"Rolled back to {AGENT_VERSION}: "
+                                 f"{status.get('reason') or 'the new agent did not come up'}")
+    else:
+        _write_control("ready", {"job_id": job_id, "version": AGENT_VERSION,
+                                 "at": int(time.time())})
+        if request.get("op") == "upgrade" and request.get("version") != AGENT_VERSION:
+            dashboard.complete(job_id, status="failed",
+                               error=f"The agent came up as {AGENT_VERSION}, "
+                                     f"not {request.get('version')}.")
+        else:
+            dashboard.complete(job_id, status="completed",
+                               result={"version": AGENT_VERSION, "outcome":
+                                       "upgraded" if request.get("op") == "upgrade"
+                                       else "restarted"})
+    _remove_control("request.json")
+    return job_id
+
+
 # ── Job execution ─────────────────────────────────────────────────────────────
 
 class Reporter:
@@ -5483,11 +5719,21 @@ def execute(dashboard: Dashboard, policy: Policy, job: dict) -> None:
     try:
         # Two gates, both closed by default. The handler table is a dict lookup, not a
         # dispatch on a wire string, so an unknown type cannot reach any code path.
-        if job_type not in policy.job_types:
-            raise PolicyRefusal(f"policy.yaml does not permit job type '{job_type}'")
-        handler = HANDLERS.get(job_type)
-        if handler is None:
-            raise PolicyRefusal(f"this agent has no handler for job type '{job_type}'")
+        if job_type in CONTROL_JOB_TYPES:
+            # Lifecycle control has its own opt-in, not a `job_types` entry: the host's
+            # operator enables `upgrades:` deliberately, with the signing identity.
+            if not getattr(policy, "upgrades", None):
+                raise PolicyRefusal("policy.yaml does not enable `upgrades:`, so this "
+                                    "agent cannot be upgraded or restarted remotely")
+
+            def handler(payload, pol, emit, cancelled, jid, dash, _t=job_type):
+                return run_control(_t, payload, pol, emit, cancelled, jid, dash)
+        else:
+            if job_type not in policy.job_types:
+                raise PolicyRefusal(f"policy.yaml does not permit job type '{job_type}'")
+            handler = HANDLERS.get(job_type)
+            if handler is None:
+                raise PolicyRefusal(f"this agent has no handler for job type '{job_type}'")
 
         if MODE == "audit":
             reporter.emit(f"AUDIT MODE — would run {job_type}; nothing will be executed")
@@ -5504,6 +5750,11 @@ def execute(dashboard: Dashboard, policy: Policy, job: dict) -> None:
         dashboard.complete(job_id, status="completed", result=result)
         log.info("job %s completed: %d finding(s)", job_id[:8],
                  len(result.get("findings") or []))
+    except HandedOff:
+        # Not completed: the successor (or, after a rollback, this agent's own restart)
+        # settles the job from CONTROL_DIR. One last beat keeps it from looking stale.
+        log.info("job %s handed to the updater; stopping", job_id[:8])
+        reporter.stop()
     except PolicyRefusal as exc:
         # Refusals are logged locally in full. The local log is the record the
         # dashboard cannot rewrite, which matters most when the dashboard is the thing
@@ -5732,10 +5983,26 @@ def main() -> int:
 
     poll = float(os.environ.get("AGENT_POLL_INTERVAL", "5"))
     backoff = poll
+    global SLOTS
     slots = JobSlots(POLICY.ansible_max_concurrent)
+    SLOTS = slots
     _install_drain(slots)
+    settled = False
+    if _read_control("request.json"):
+        # A handoff is in flight: keep the predecessor's job from going stale while this
+        # process waits for its first lease.
+        pending = str((_read_control("request.json") or {}).get("job_id") or "")
+        if pending:
+            try:
+                dashboard.heartbeat(pending, 90, "successor attested")
+            except Exception:  # noqa: BLE001 — best effort; the lease below is what counts
+                pass
     while not slots.draining:
         try:
+            if slots.hold:
+                # A control job is draining this agent for the updater: lease nothing new.
+                slots.wait_for_free(poll, any_change=False)
+                continue
             want = None if slots.serial else slots.wanted()
             if want is not None and not want and slots.busy():
                 # Every slot busy: nothing to ask for, so wait for one to free up rather
@@ -5747,6 +6014,12 @@ def main() -> int:
             # None for a serial agent, which leases exactly as every earlier build did.
             job = dashboard.lease(want)
             backoff = poll
+            if not settled:
+                settled = True
+                try:
+                    finish_pending_control(dashboard)
+                except Exception as exc:  # noqa: BLE001 — never block the agent on this
+                    log.warning("could not settle a pending control job: %s", exc)
             if job:
                 slots.run(lambda j=job: execute(dashboard, POLICY, j),
                           job.get("job_type") or "")
@@ -5789,6 +6062,8 @@ class JobSlots:
         self.ansible = max(1, int(ansible))
         self.serial = self.ansible == 1
         self.draining = False
+        # Set by a control job: lease nothing new while it waits for the rest to finish.
+        self.hold = False
         self._lock = threading.Condition()
         self._running = {"ansible": 0, "other": 0}
         self._threads: list = []
@@ -5802,6 +6077,10 @@ class JobSlots:
             free_ansible = self._running["ansible"] < self.ansible
             free_other = self._running["other"] < 1
         types = set(HANDLERS) & POLICY.job_types
+        if getattr(POLICY, "upgrades", None):
+            # Control jobs take the serial slot (and quiesce the rest themselves). Left
+            # out, an agent running several jobs at once could never be upgraded.
+            types |= set(CONTROL_JOB_TYPES)
         return {t for t in types
                 if (free_ansible if self._kind(t) == "ansible" else free_other)}
 
@@ -5824,6 +6103,21 @@ class JobSlots:
         thread = threading.Thread(target=_wrapped, name=f"job-{kind}", daemon=True)
         self._threads = [t for t in self._threads if t.is_alive()] + [thread]
         thread.start()
+
+    def quiesce(self, timeout: float) -> bool:
+        """Stop leasing and wait until the control job is the only one running. True when
+        that happened within ``timeout`` seconds."""
+        self.hold = True
+        deadline = time.time() + timeout
+        with self._lock:
+            while True:
+                others = self._running["ansible"] + max(0, self._running["other"] - 1)
+                if self.serial or others <= 0:
+                    return True
+                left = deadline - time.time()
+                if left <= 0:
+                    return False
+                self._lock.wait(min(left, 1.0))
 
     def busy(self) -> bool:
         """Whether any job is running."""
@@ -5856,9 +6150,10 @@ def _install_drain(slots: "JobSlots") -> None:
     above that, or Docker kills the agent first. Only on the main thread, which is the only
     place Python allows a handler."""
     import signal
-    # A serial agent keeps the default — SIGTERM ends it at once, as every earlier build
-    # did — so only an agent running several jobs at once changes how it stops.
-    if slots.serial or threading.current_thread() is not threading.main_thread():
+    # Every slot count since 2.10, not only a concurrent agent: the updater stops an agent
+    # with `docker stop` to swap it, and a serial agent killed mid-job left that job to go
+    # stale. A serial job runs on the main thread, so the flag takes effect when it ends.
+    if threading.current_thread() is not threading.main_thread():
         return
 
     def _stop(signum, frame):

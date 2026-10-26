@@ -28,6 +28,12 @@ name: Publish images
 #   chrweav/ansible-cloud              (context: runners/ansible-cloud)
 #   chrweav/dashboard-agent            (context: runners/agent)
 #   chrweav/hypervisor-runner          (context: runners/hypervisor)
+#   chrweav/dashboard-agent-updater    (context: runners/agent-updater)
+#
+# chrweav/dashboard-agent and chrweav/dashboard-agent-updater are also SIGNED with cosign
+# keyless (id-token: write below), by digest: a remote agent host's updater refuses any
+# agent image whose signature does not name this workflow (docs/platform/spiffe/
+# remote-agents/lifecycle.md).
 #
 # The published Hub overview for chrweav/infra-dashboard is generated from
 # DOCKERHUB.md in the repo root by the description-sync step at the end of this
@@ -43,6 +49,9 @@ on:
 
 permissions:
   contents: read
+  # Keyless cosign signing of the agent and its updater (below): the job's OIDC token is
+  # the signing identity remote agents pin in policy.yaml `upgrades.verify.keyless`.
+  id-token: write
 
 jobs:
   publish:
@@ -73,6 +82,8 @@ jobs:
           - image: chrweav/dashboard-agent
             context: runners/agent
             dockerfile: runners/agent/Dockerfile
+            # Signed (keyless, below): the updater verifies it before an agent host runs it.
+            sign: true
           # The agent's one-shot hypervisor runner: Hyper-V (WinRM/NTLM) and bare ESXi
           # (SOAP), the two transports the agent's three-dependency image deliberately
           # cannot carry. Pulled by the operator on the agent host, like the agent
@@ -81,6 +92,13 @@ jobs:
           - image: chrweav/hypervisor-runner
             context: runners/hypervisor
             dockerfile: runners/hypervisor/Dockerfile
+          # The agent's updater: beside the agent on its host, holding the Docker socket
+          # so the agent does not, to upgrade it to a newer SIGNED image or restart it.
+          # Signed like the agent (sign: true) so a host can verify it the same way.
+          - image: chrweav/dashboard-agent-updater
+            context: runners/agent-updater
+            dockerfile: runners/agent-updater/Dockerfile
+            sign: true
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -117,7 +135,22 @@ jobs:
       # so it never lands in the published image history; the other five images
       # don't mount it and are unaffected. contents:read above is all it needs
       # (it only reads public hashicorp/packer-plugin-* release tags).
+      - name: Install cosign
+        if: matrix.sign
+        uses: sigstore/cosign-installer@v3
+
+      # The agent version (AGENT_VERSION in agent.py), which differs from the release tag:
+      # baked into the image as the `dashboard-agent.version` label the updater checks.
+      - name: Read the agent version
+        id: agent
+        if: matrix.sign
+        run: |
+          v=$(sed -n 's/^AGENT_VERSION = "\([0-9.]*\)"$/\1/p' runners/agent/agent.py)
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
@@ -128,8 +161,21 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           secrets: |
             github_token=${{ secrets.GITHUB_TOKEN }}
+          build-args: |
+            AGENT_VERSION=${{ steps.agent.outputs.version || 'dev' }}
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      # Keyless: Fulcio certifies this workflow's OIDC identity and Rekor records the
+      # signature. Signed by DIGEST, never by tag, so the signature names exactly the
+      # bytes pushed. Agent hosts verify against
+      #   identity  ^https://github.com/<owner>/vm-dashboard-community/.github/workflows/publish-images.yml@refs/tags/v
+      #   issuer    https://token.actions.githubusercontent.com
+      - name: Sign the image
+        if: matrix.sign
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${{ matrix.image }}@${DIGEST}"
 
       # Publish DOCKERHUB.md as the Hub "Repository overview", so the first page a
       # new user reads is generated from the repo instead of re-pasted by hand.
