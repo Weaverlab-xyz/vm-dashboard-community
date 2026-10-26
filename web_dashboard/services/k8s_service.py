@@ -1622,7 +1622,7 @@ _AGENT_SET_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\[\]\\-]{0,127}=[^\r\n]{0,
 
 def _agent_for(db, cluster):
     """The owned agent that runs ``cluster``'s Kubernetes work, or None for the worker."""
-    if db is None or cluster is None:
+    if db is None or not getattr(cluster, "executor_agent_id", None):
         return None
     from . import k8s_executor_service
     return k8s_executor_service.executor_for(db, cluster)
@@ -1642,6 +1642,8 @@ async def _on_agent(db, cluster, steps: list, legacy) -> str:
     """Run ``steps`` on the cluster's owned agent and wait (k8s_agent_runner), or
     ``legacy()`` when it has none or it is offline. Same return and raise shape as the
     worker path, so no caller changes."""
+    if not getattr(cluster, "executor_agent_id", None):
+        return await legacy()
     from . import k8s_agent_runner
     return await k8s_agent_runner.run_steps(db, cluster, steps,
                                             parent_job_id=_parent_job_id(db), legacy=legacy)
