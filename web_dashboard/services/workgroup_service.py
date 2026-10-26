@@ -946,6 +946,11 @@ def seed_if_empty(db: Session) -> None:
     up integrations can deploy against it without picking a name. Dev/prod also
     get the `settings.workgroups` dict entries (Hydra, Weaverlab, …) seeded
     alongside, with their UNC paths preserved.
+
+    Two processes booting together (the image's two gunicorn workers on a fresh SQLite
+    file) can both find the table empty. The slower one's insert fails on the unique
+    name; that is the other process having seeded it, so it rolls back and returns
+    rather than failing its startup.
     """
     if db.query(Workgroup.id).first() is not None:
         return
@@ -975,4 +980,10 @@ def seed_if_empty(db: Session) -> None:
             is_default=False,
             created_at=now,
         ))
-    db.commit()
+    from sqlalchemy.exc import IntegrityError
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        if db.query(Workgroup.id).filter(Workgroup.name == "default").first() is None:
+            raise
