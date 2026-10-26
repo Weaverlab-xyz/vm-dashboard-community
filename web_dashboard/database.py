@@ -2364,6 +2364,10 @@ class RegisteredImage(Base):
     # Guest OS of the artefact ("Linux" | "Windows"). Promote targets need it —
     # Azure managed-image import rejects/boots wrong with a mismatched os_type.
     os_type = Column(String(20), nullable=True)
+    # The POV standard recipe that built it ("standard-linux" | "standard-windows",
+    # services/pov_image_recipes), or NULL for anything else. Display and one behaviour:
+    # a standard-linux target gets the POV's own login at launch (pov_cloud_aws).
+    recipe = Column(String(40), nullable=True)
 
     # Per-target promotion records. Shape:
     #   { "aws":   {"image_id": "ami-…", "region": "us-east-2", "status": "completed"|"manual"|"failed", "notes": "..."},
@@ -4603,7 +4607,9 @@ class PovCloudTemplate(Base):
     Machine Image / Custom Image) would be the faithful analogue, and it is slow, region-
     locked, cloud-specific, and a standing storage bill for every template anyone ever
     saves. A spec that references the image catalog costs nothing to keep and ports to the
-    next cloud unchanged. ``source_environment_id`` is here for the slice that adds baking
+    next cloud unchanged — and the catalog's standard images, built once per region by
+    ``api/pov_images``, are what most templates reference. ``source_environment_id`` is
+    here for the slice that adds per-template baking
     so that slice needs no migration — the convention every ``pov_*`` table has followed
     since slice 1.
 

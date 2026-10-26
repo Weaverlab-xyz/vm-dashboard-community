@@ -592,7 +592,7 @@ def test_a_policy_needs_a_signer_for_kubernetes_work():
 
 def test_the_signature_migration_is_recorded():
     from web_dashboard import schema_migrations as sm
-    assert [m.name for m in sm.MIGRATIONS if m.name == "0010_k8s_image_signature"]
+    assert [m.name for m in sm.MIGRATIONS if m.name == "0011_k8s_image_signature"]
 
 if __name__ == "__main__":
     fns = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]

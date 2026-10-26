@@ -143,7 +143,23 @@ async def _bt_provisioner_env(req) -> dict:
     if fam in ("deb", "rpm"):
         source = (getattr(req, "bt_epml_source", None) or "beyondtrust").strip().lower()
         env["BT_EPML_URL"] = await _epml_package_url(fam, source)
+    stage = (getattr(req, "bt_stage_asset", None) or "").strip()
+    if stage:
+        env["POV_STAGE_URL"] = await _storage_asset_url(stage)
+        env["POV_STAGE_NAME"] = stage.rsplit("/", 1)[-1]
     return env
+
+
+async def _storage_asset_url(name: str) -> str:
+    """A presigned URL for one asset on the active storage backend, minted now."""
+    backend = storage_service.active_backend()
+    if not backend:
+        raise PackerError("No active storage backend — pick one on the Storage page.")
+    assets = await storage_service.list_assets_in(backend)
+    if name not in {a.get("name") for a in assets}:
+        raise PackerError(f"'{name}' is not on the '{backend}' storage backend any more.")
+    key = storage_service.asset_key(backend, name)
+    return await storage_service.presigned_url(backend, key, expiry_seconds=3600)
 
 
 async def _provisioner_env(req) -> tuple[dict, dict, dict]:
@@ -196,8 +212,10 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
         job_service.set_running(db, job_id)
         build_dir.mkdir(parents=True, exist_ok=True)
 
-        # Build env
-        region = _cfg("aws_region") or "us-east-2"
+        # Build env. A POV build names its region (the POV's, since an AMI is
+        # region-scoped and pov_cloud_env.resolve_image refuses a mismatch).
+        region = req.region or _cfg("aws_region") or "us-east-2"
+        is_windows = req.os_type == "Windows"
         env = _base_env()
         from .workload_credential_lease import aws_subprocess_env as _wlc_aws_env
         _dynamic = _wlc_aws_env()
@@ -226,6 +244,12 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
             job_service.update_progress(
                 db, job_id, 3, f"Resolving the newest {req.source_ami_family} AMI in {region}…")
             fam = await aws_service.find_ami_by_family(region, req.source_ami_family)
+            if (fam.get("os_type") or "Linux") != req.os_type:
+                # A shell build waiting on SSH from a Windows AMI hangs for its whole
+                # timeout, and the reverse fails as obscurely. Say which is which now.
+                raise PackerError(
+                    f"source family {req.source_ami_family} is a {fam.get('os_type')} "
+                    f"image and this is a {req.os_type} build")
             source_ami = fam["ami_id"]
             # The family's canonical login user wins over an untouched default —
             # Debian images log in as `admin`, and ec2-user would hang the build
@@ -237,22 +261,47 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
 
         # Generate template
         job_service.update_progress(db, job_id, 5, "Generating Packer template…")
-        if req.provisioner_script.strip():
+        has_script = bool(req.provisioner_script.strip())
+        if has_script or req.provisioner_files:
             plain_env, sensitive_var_names, pkr_env = await _provisioner_env(req)
         else:
             plain_env, sensitive_var_names, pkr_env = {}, {}, {}
         env.update(pkr_env)
-        template = packer_service.generate_aws_template(
-            source_ami=source_ami,
-            instance_type=req.instance_type,
-            ssh_username=ssh_username,
-            image_name=req.image_name,
-            has_provisioner=bool(req.provisioner_script.strip()),
-            provisioner_env=plain_env,
-            provisioner_sensitive_var_names=sensitive_var_names,
-        )
+        scripts = _stage_bundled(build_dir, req.provisioner_files)
+        tags = {"pov-recipe": req.recipe} if req.recipe else None
+        if is_windows:
+            if has_script:
+                scripts.append("provision.ps1")
+            template = packer_service.generate_aws_windows_template(
+                source_ami=source_ami,
+                instance_type=req.instance_type,
+                image_name=req.image_name,
+                scripts=scripts,
+                provisioner_env=plain_env,
+                provisioner_sensitive_var_names=sensitive_var_names,
+                extra_tags=tags,
+            )
+            (build_dir / "winrm_bootstrap.ps1").write_text(packer_service.AWS_WINRM_BOOTSTRAP)
+            _write_ps_provisioner(build_dir, req.provisioner_script)
+        else:
+            if scripts and has_script:
+                # The operator's script goes before the last bundled one: that one
+                # seals the image (host keys, machine-id, cloud-init state), and
+                # anything run after it would undo the seal.
+                scripts.insert(len(scripts) - 1, "provision.sh")
+            template = packer_service.generate_aws_template(
+                source_ami=source_ami,
+                instance_type=req.instance_type,
+                ssh_username=ssh_username,
+                image_name=req.image_name,
+                has_provisioner=has_script,
+                provisioner_env=plain_env,
+                provisioner_sensitive_var_names=sensitive_var_names,
+                scripts=scripts or None,
+                extra_tags=tags,
+            )
+            _write_provisioner(build_dir, req.provisioner_script)
         (build_dir / "build.pkr.hcl").write_text(template)
-        _write_provisioner(build_dir, req.provisioner_script)
 
         def on_progress(pct, msg):
             job_service.update_progress(db, job_id, pct, msg)
@@ -279,11 +328,22 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
                 except Exception as e:
                     result["archive_error"] = str(e)
 
-        # Export to portable VHD + auto-register (Phase 2)
-        export_result = await export_and_register_aws(
-            db, job_id, req.image_name, result.get("artifact_id") or "", region, created_by,
-        )
-        result.update(export_result)
+        if req.register_mode == "ami_only":
+            result.update(register_aws_ami(
+                db, job_id, req.image_name, result.get("artifact_id") or "", region,
+                created_by, os_type=req.os_type, recipe=req.recipe))
+            if result.get("register_error"):
+                # The catalog row IS this build's deliverable: an AMI nobody can pick
+                # from the template editor is not a success, whatever Packer said.
+                raise PackerError(
+                    f"AMI {result.get('artifact_id') or '(unknown)'} was built but not "
+                    f"registered: {result['register_error']}")
+        else:
+            # Export to portable VHD + auto-register (Phase 2)
+            export_result = await export_and_register_aws(
+                db, job_id, req.image_name, result.get("artifact_id") or "", region, created_by,
+            )
+            result.update(export_result)
 
         job_service.set_completed(db, job_id, result)
 
@@ -357,7 +417,19 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
         client_id, client_secret, client_jwt, tenant_id, subscription_id = (
             _azure_build_credentials())
         resource_group = _cfg("azure_resource_group") or "dashboard-rg"
-        location = _cfg("azure_location") or "centralus"
+        # A POV build names its location (the POV's): pov_cloud_env.resolve_image refuses
+        # an image registered in another one.
+        location = req.region or _cfg("azure_location") or "centralus"
+        image_only = req.register_mode == "image_only"
+        if image_only:
+            # The builder takes its location from build_resource_group_name, so a build
+            # in the POV's location needs a group THERE; the dashboard's own may be in
+            # any region. One per location, kept: it holds the images POVs boot from.
+            resource_group = _pov_image_resource_group(location)
+            job_service.update_progress(
+                db, job_id, 3, f"Ensuring resource group {resource_group} in {location}…")
+            await azure_service.ensure_resource_group(
+                resource_group, location, {"BuiltBy": "vm-dashboard", "purpose": "pov-images"})
 
         env = _base_env()
         # ARM_* kept for any subprocess that honors them; the azure-arm builder
@@ -384,7 +456,9 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
         # and Azure rejects a managed-image ID in a disk's creationData.imageReference),
         # whereas a gallery version is self-contained and exportable. Windows Server
         # still uses the managed-image path (gallery migration is a follow-up).
-        is_linux_gallery = not is_windows
+        # A POV build (image_only) never exports, and boots a managed image fine
+        # (pov_cloud_azure._image_reference), so it skips the gallery on both OSes.
+        is_linux_gallery = not is_windows and not image_only
         use_gallery = is_win_client or is_linux_gallery
 
         # Ensure the gallery + a matching image definition, then hand their
@@ -419,10 +493,13 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
             env["PKR_VAR_gallery_image_version"] = img_version
 
         job_service.update_progress(db, job_id, 5, "Generating Packer template…")
+        has_script = bool(req.provisioner_script.strip())
         if is_win_client:
             generate = packer_service.generate_azure_windows_client_template
         elif is_windows:
             generate = packer_service.generate_azure_windows_template
+        elif image_only:
+            generate = packer_service.generate_azure_template
         else:
             generate = packer_service.generate_azure_linux_gallery_template
         gen_kwargs = dict(
@@ -431,12 +508,27 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
             image_sku=req.image_sku,
             vm_size=req.vm_size,
             image_name=req.image_name,
-            has_provisioner=bool(req.provisioner_script.strip()),
+            has_provisioner=has_script,
         )
-        # Provisioner env (BT_* + generic) applies to the Linux (shell)
-        # provisioner only — Windows uses a PowerShell provisioner, which the
-        # shell environment_vars mechanism doesn't target.
-        if not is_windows and req.provisioner_script.strip():
+        # The two managed-image generators take bundled scripts and a recipe tag. The
+        # gallery ones never see a POV recipe, so they keep their demo-tab signature.
+        managed = generate in (packer_service.generate_azure_windows_template,
+                               packer_service.generate_azure_template)
+        scripts = _stage_bundled(build_dir, req.provisioner_files) if managed else []
+        if scripts and has_script:
+            if is_windows:
+                scripts.append("provision.ps1")
+            else:
+                # Before the last bundled script, which seals the image (as on AWS).
+                scripts.insert(len(scripts) - 1, "provision.sh")
+        if managed:
+            gen_kwargs["scripts"] = scripts or None
+            gen_kwargs["extra_tags"] = {"pov-recipe": req.recipe} if req.recipe else None
+        # Provisioner env (BT_* + generic) goes to the shell provisioner and, through the
+        # same environment_vars, to the Windows Server PowerShell one — the POV Windows
+        # recipe's staged installer arrives as POV_STAGE_URL. The Windows client
+        # generator has no env block, so it is still not resolved there.
+        if (has_script or scripts) and not is_win_client:
             plain_env, sensitive_var_names, pkr_env = await _provisioner_env(req)
             env.update(pkr_env)
             gen_kwargs["provisioner_env"] = plain_env
@@ -487,7 +579,16 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
                 except Exception as e:
                     result["archive_error"] = str(e)
 
-        if use_gallery:
+        if image_only:
+            result.update(register_azure_image(
+                db, job_id, req.image_name, result.get("artifact_id") or "", location,
+                created_by, os_type=req.os_type, recipe=req.recipe))
+            if result.get("register_error"):
+                # The catalog row IS this build's deliverable, as on AWS.
+                raise PackerError(
+                    f"managed image {result.get('artifact_id') or '(unknown)'} was built "
+                    f"but not registered: {result['register_error']}")
+        elif use_gallery:
             # Gallery builds (Win-client TL + all Linux) publish a gallery image
             # VERSION — there's no managed image to export to VHD. Register the
             # version directly.
@@ -499,12 +600,12 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
             result["gallery_image_version_id"] = gallery_version_id
             result.update(await _register_gallery_image(
                 db, job_id, req.image_name, gallery_version_id, location, created_by,
-                os_type=req.os_type))
+                os_type=req.os_type, recipe=req.recipe))
         else:
             # Windows Server (managed image): export to portable VHD + auto-register.
             export_result = await export_and_register_azure(
                 db, job_id, req.image_name, result.get("artifact_id") or "", resource_group, created_by,
-                os_type=req.os_type,
+                os_type=req.os_type, recipe=req.recipe, location=location,
             )
             result.update(export_result)
 
@@ -808,6 +909,41 @@ def _write_ps_provisioner(build_dir: Path, script: str) -> None:
     """Write provision.ps1 for Windows builds. Always creates the file."""
     content = script.strip() or "Write-Output 'Build complete.'"
     (build_dir / "provision.ps1").write_text(content)
+
+
+# The scripts shipped in the image (the Dockerfile COPYs provisioners/). A standard
+# POV recipe names its scripts here rather than asking anyone to upload them first.
+PROVISIONERS_DIR = Path(__file__).parent.parent.parent / "provisioners"
+
+
+def _stage_bundled(build_dir: Path, files: list) -> list:
+    """Copy bundled provisioner scripts into the build directory; their names, in order.
+
+    Each name is checked to resolve INSIDE ``PROVISIONERS_DIR`` as well as matching the
+    request model's pattern, and a missing one fails the build here, naming it — an
+    image whose Dockerfile forgot the COPY would otherwise build a bare base AMI and
+    register it as the standard one.
+    """
+    staged = []
+    root = PROVISIONERS_DIR.resolve()
+    for rel in files or []:
+        src = (PROVISIONERS_DIR / rel).resolve()
+        if root not in src.parents:
+            raise PackerError(f"provisioner file {rel!r} is outside provisioners/")
+        if not src.is_file():
+            raise PackerError(
+                f"bundled provisioner {rel} is not in this image ({src}). The image was "
+                f"built without provisioners/ — rebuild it from a current Dockerfile.")
+        name = src.name
+        if name in staged:
+            raise PackerError(f"two bundled provisioners are both named {name}")
+        # Bytes, not text: a .ps1 keeps its CRLF and a .sh its LF exactly as shipped.
+        dest = build_dir / name
+        dest.write_bytes(src.read_bytes())
+        if name.endswith(".sh"):
+            dest.chmod(0o755)
+        staged.append(name)
+    return staged
 
 
 # ── Export + auto-register helpers (Phase 2/3 — build-once, promote-many) ────
@@ -1121,9 +1257,88 @@ async def export_and_register_aws(
     return result
 
 
+def register_aws_ami(
+    db, job_id: str, image_name: str, ami_id: str, region: str, created_by: str,
+    os_type: str = "Linux", recipe: str = None,
+) -> dict:
+    """Register a freshly built AMI as itself: no VHD export, no S3 bucket.
+
+    The POV builder's path. A POV boots the AMI in the region it was built in and never
+    wants a portable copy, and ``export_and_register_aws`` registers nothing at all on an
+    install with no ``storage_s3_bucket`` — which would leave a finished build that the
+    template editor can never pick. Same shape as ``_register_gallery_image``.
+    """
+    if not ami_id:
+        msg = "Build finished but no AMI id was found in Packer's output; nothing registered."
+        job_service.update_progress(db, job_id, 99, msg)
+        return {"register_error": msg}
+    try:
+        registered = image_registry_service.register_image(
+            db,
+            name=image_name,
+            version=utcnow().strftime("%Y%m%d-%H%M%S"),
+            source_cloud="aws",
+            created_by=created_by,
+            description=f"Built by job {job_id}",
+            source_image_id=ami_id,
+            source_region=region,
+            os_type=os_type,
+            recipe=recipe,
+        )
+        job_service.update_progress(db, job_id, 99, f"Image registered: {registered['id']}")
+        return {"registered_image_id": registered["id"]}
+    except Exception as e:
+        logger.exception("AMI registration failed for job %s", job_id)
+        job_service.update_progress(db, job_id, 99, f"Image registration failed: {e}")
+        return {"register_error": str(e)}
+
+
+def _pov_image_resource_group(location: str) -> str:
+    """The resource group a POV image build runs in and leaves its managed image in."""
+    return f"pov-images-{location}"
+
+
+def register_azure_image(
+    db, job_id: str, image_name: str, image_id: str, location: str, created_by: str,
+    os_type: str = "Linux", recipe: str = None,
+) -> dict:
+    """Register a freshly built managed image as itself: no VHD export, no gallery.
+
+    The Azure twin of ``register_aws_ami``, for the same reason: a POV boots the image
+    in the location it was built in, and ``export_and_register_azure`` registers nothing
+    on an install with no ``storage_azure_account``. ``image_id`` is Packer's artifact
+    id, the managed image's resource id, which ``pov_cloud_azure._image_reference``
+    takes as it is.
+    """
+    if not image_id.startswith("/"):
+        msg = ("Build finished but no managed image id was found in Packer's output; "
+               "nothing registered.")
+        job_service.update_progress(db, job_id, 99, msg)
+        return {"register_error": msg}
+    try:
+        registered = image_registry_service.register_image(
+            db,
+            name=image_name,
+            version=utcnow().strftime("%Y%m%d-%H%M%S"),
+            source_cloud="azure",
+            created_by=created_by,
+            description=f"Built by job {job_id}",
+            source_image_id=image_id,
+            source_region=location,
+            os_type=os_type,
+            recipe=recipe,
+        )
+        job_service.update_progress(db, job_id, 99, f"Image registered: {registered['id']}")
+        return {"registered_image_id": registered["id"]}
+    except Exception as e:
+        logger.exception("Managed image registration failed for job %s", job_id)
+        job_service.update_progress(db, job_id, 99, f"Image registration failed: {e}")
+        return {"register_error": str(e)}
+
+
 async def _register_gallery_image(
     db, job_id: str, registry_name: str, gallery_version_id: str,
-    location: str, created_by: str, os_type: str = "Linux",
+    location: str, created_by: str, os_type: str = "Linux", recipe: str = None,
 ) -> dict:
     """Register a Compute Gallery image VERSION in the image registry.
 
@@ -1144,6 +1359,7 @@ async def _register_gallery_image(
             artefact_url=None,
             artefact_format=None,
             os_type=os_type,
+            recipe=recipe,
         )
         job_service.update_progress(db, job_id, 99, f"Gallery image registered: {registered['id']}")
         return {"registered_image_id": registered["id"]}
@@ -1156,6 +1372,7 @@ async def _register_gallery_image(
 async def export_and_register_azure(
     db, job_id: str, image_name: str, artefact_id: str,
     resource_group: str, created_by: str, os_type: str = "Linux",
+    recipe: str = None, location: str = "",
 ) -> dict:
     """Export an Azure managed image to VHD on the hub and register.
 
@@ -1212,10 +1429,11 @@ async def export_and_register_azure(
             created_by=created_by,
             description=f"Registered by job {job_id}",
             source_image_id=artefact_id,
-            source_region=_cfg("azure_location") or "centralus",
+            source_region=location or _cfg("azure_location") or "centralus",
             artefact_url=artefact_url,
             artefact_format="vhd",
             os_type=os_type,
+            recipe=recipe,
         )
         result["registered_image_id"] = registered["id"]
         result["artefact_backend"] = final_backend

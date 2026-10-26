@@ -41,6 +41,7 @@ def _row_to_dict(row: RegisteredImage) -> dict:
         "artefact_url":    row.artefact_url,
         "artefact_format": row.artefact_format,
         "os_type":         row.os_type or "Linux",
+        "recipe":          row.recipe,
         "promotions":      row.promotions_dict,
         "created_at":      row.created_at.isoformat() if row.created_at else "",
         "created_by":      row.created_by,
@@ -74,6 +75,7 @@ def register_image(
     artefact_url: Optional[str] = None,
     artefact_format: Optional[str] = None,
     os_type: str = "Linux",
+    recipe: Optional[str] = None,
 ) -> dict:
     if source_cloud not in VALID_CLOUDS:
         raise ImageRegistryError(
@@ -92,6 +94,7 @@ def register_image(
         artefact_url=(artefact_url or "").strip() or None,
         artefact_format=(artefact_format or "").strip() or None,
         os_type=(os_type or "").strip() or None,
+        recipe=(recipe or "").strip() or None,
         promotions=None,
         created_by=created_by,
     )

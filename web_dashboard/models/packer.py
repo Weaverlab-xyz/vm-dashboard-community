@@ -27,6 +27,11 @@ _GCE_NAME_RE = re.compile(r"^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$")
 # Project IDs are the same shape, except a domain-scoped one carries a colon and
 # dots ("example.com:my-project").
 _GCP_PROJECT_RE = re.compile(r"^[a-z][-a-z0-9.:]{0,61}[a-z0-9]$")
+# A script shipped under provisioners/: one directory, one file, no dots in the
+# directory, so no request can name a path outside that tree.
+_BUNDLED_RE = re.compile(r"^[a-z0-9_-]+/[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\.(sh|ps1)$")
+_AWS_REGION_RE = re.compile(r"^[a-z]{2}(-[a-z]+)+-\d$")
+_AZURE_LOCATION_RE = re.compile(r"^[a-z]+[a-z0-9]*$")
 
 
 class ProvisionerEnvVar(BaseModel):
@@ -73,6 +78,61 @@ class AWSPackerBuildRequest(ScheduleRequestMixin, BaseModel):
     bt_admin_user: Optional[str] = None        # → BT_ADMIN_USER (Password-Safe-managed bootstrap account)
     bt_epml: Optional[str] = None              # "deb" | "rpm" — install EPM-L package of this family (else skip)
     bt_epml_source: Optional[str] = None       # "beyondtrust" (default) | "storage" — where BT_EPML_URL points
+    # "Linux" builds over SSH with a shell provisioner; "Windows" over WinRM with a
+    # PowerShell one (packer_service.generate_aws_windows_template).
+    os_type: str = "Linux"
+    # The fields below are set by the POV image builder (services/pov_image_recipes),
+    # never by the demo Build Image tab, which leaves every one at its default.
+    #
+    # Scripts shipped in the image under provisioners/, run in order before the
+    # operator's own script. Paths relative to that directory; see _BUNDLED_RE.
+    provisioner_files: list[str] = []
+    # The region to build in. Unset is the dashboard's aws_region, as before.
+    region: Optional[str] = None
+    # "export" (default): export the AMI to VHD on the storage hub and register that.
+    # "ami_only": register the AMI itself, no export and no S3 bucket needed — a POV
+    # boots the AMI and never wants the VHD.
+    register_mode: str = "export"
+    # The standard recipe this build came from, recorded on the catalog row.
+    recipe: Optional[str] = None
+    # A storage asset to download into the image without running it → POV_STAGE_URL,
+    # presigned when the build starts.
+    bt_stage_asset: Optional[str] = None
+
+    @field_validator("os_type")
+    @classmethod
+    def _valid_os_type(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in ("linux", "windows"):
+            raise ValueError("os_type must be Linux or Windows")
+        return v.capitalize()
+
+    @field_validator("provisioner_files")
+    @classmethod
+    def _valid_bundled(cls, v: list) -> list:
+        out = []
+        for p in v or []:
+            p = (p or "").strip()
+            if not _BUNDLED_RE.match(p):
+                raise ValueError(f"invalid provisioner file {p!r}")
+            out.append(p)
+        return out
+
+    @field_validator("register_mode")
+    @classmethod
+    def _valid_register_mode(cls, v: str) -> str:
+        v = (v or "").strip().lower() or "export"
+        if v not in ("export", "ami_only"):
+            raise ValueError("register_mode must be export or ami_only")
+        return v
+
+    @field_validator("region")
+    @classmethod
+    def _valid_region(cls, v: Optional[str]) -> Optional[str]:
+        v = (v or "").strip()
+        if v and not _AWS_REGION_RE.match(v):
+            raise ValueError(f"invalid AWS region {v!r}")
+        return v or None
 
     @model_validator(mode="after")
     def _one_source(self):
@@ -106,6 +166,68 @@ class AzurePackerBuildRequest(ScheduleRequestMixin, BaseModel):
     bt_admin_user: Optional[str] = None        # → BT_ADMIN_USER (Password-Safe-managed bootstrap account)
     bt_epml: Optional[str] = None              # "deb" | "rpm" — install EPM-L package of this family (else skip)
     bt_epml_source: Optional[str] = None       # "beyondtrust" (default) | "storage" — where BT_EPML_URL points
+    # The fields below are set by the POV image builder (services/pov_image_recipes),
+    # never by the demo Build Image tab — the Azure twins of the AWS request's.
+    #
+    # Scripts shipped in the image under provisioners/, run in order, with the
+    # operator's own script slotted in as on AWS. See _BUNDLED_RE.
+    provisioner_files: list[str] = []
+    # The Azure location to build in. Unset is the dashboard's azure_location, as before.
+    region: Optional[str] = None
+    # "export" (default): the demo paths — a gallery version for Linux and Windows
+    # client, a managed image exported to VHD for Windows Server.
+    # "image_only": a MANAGED image in ``region``, registered as itself. A POV boots it in
+    # that location and never wants a VHD, and the export path registers nothing at all
+    # on an install with no storage_azure_account.
+    register_mode: str = "export"
+    recipe: Optional[str] = None
+    # A storage asset to download into the image without running it → POV_STAGE_URL.
+    bt_stage_asset: Optional[str] = None
+
+    @field_validator("os_type")
+    @classmethod
+    def _valid_os_type(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in ("linux", "windows"):
+            raise ValueError("os_type must be Linux or Windows")
+        return v.capitalize()
+
+    @field_validator("provisioner_files")
+    @classmethod
+    def _valid_bundled(cls, v: list) -> list:
+        out = []
+        for p in v or []:
+            p = (p or "").strip()
+            if not _BUNDLED_RE.match(p):
+                raise ValueError(f"invalid provisioner file {p!r}")
+            out.append(p)
+        return out
+
+    @field_validator("register_mode")
+    @classmethod
+    def _valid_register_mode(cls, v: str) -> str:
+        v = (v or "").strip().lower() or "export"
+        if v not in ("export", "image_only"):
+            raise ValueError("register_mode must be export or image_only")
+        return v
+
+    @field_validator("region")
+    @classmethod
+    def _valid_region(cls, v: Optional[str]) -> Optional[str]:
+        # Inlined into a resource-group name and passed to ARM, so the location's own
+        # shape only: "eastus", "westus3", "centralus".
+        v = (v or "").strip().lower()
+        if v and not _AZURE_LOCATION_RE.match(v):
+            raise ValueError(f"invalid Azure location {v!r}")
+        return v or None
+
+    @model_validator(mode="after")
+    def _image_only_is_a_managed_image(self):
+        # Trusted Launch cannot be captured as a managed image at all, which is the only
+        # thing image_only produces.
+        if self.register_mode == "image_only" and self.trusted_launch:
+            raise ValueError("register_mode image_only cannot build a Trusted Launch image")
+        return self
 
 
 class GCPPackerBuildRequest(ScheduleRequestMixin, BaseModel):

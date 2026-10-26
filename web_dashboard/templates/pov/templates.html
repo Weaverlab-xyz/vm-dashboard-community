@@ -53,6 +53,7 @@
   {'slug': 'build',      'label': 'Build a template', 'show': 'showsBake'},
   {'slug': 'builds',     'label': 'Build history',    'show': 'showsBake'},
   {'slug': 'templates',  'label': 'Templates',        'show': 'showsCloudTemplates'},
+  {'slug': 'images',     'label': 'Images',           'show': 'showsCloudTemplates'},
   {'slug': 'blueprints', 'label': 'Blueprints'},
 ] %}
 <div x-data='templatesPage({{ tabs | map(attribute="slug") | list | tojson }})'
@@ -482,8 +483,27 @@
               <option value="vyos">VyOS device</option>
               <option value="ot-broker">OT DMZ broker</option>
             </select>
-            <input type="text" x-model="vm.image_id" placeholder="ami-… or catalog id"
-                   class="col-span-2 rounded-md border-gray-300 text-sm font-mono">
+            {# A catalog image sets image_ref and clears image_id, and a literal does the
+               reverse: the template refuses both at once, and a catalog UUID typed into
+               the old free-text box was saved as a LITERAL and failed at RunInstances. #}
+            <div class="col-span-2 space-y-1">
+              <select x-model="vm._pick" @change="pickImage(vm)" title="Image"
+                      class="w-full rounded-md border-gray-300 text-sm">
+                <option value="">Choose an image…</option>
+                <template x-for="img in catalogImages" :key="img.id">
+                  <option :value="img.id" x-text="imageLabel(img)"></option>
+                </template>
+                <template x-if="vm.image_ref && !catalogImages.some(i => i.id === vm.image_ref)">
+                  <option :value="vm.image_ref">catalog image not found</option>
+                </template>
+                <option value="__literal">An image id…</option>
+              </select>
+              <input x-show="vm._pick === '__literal'" type="text" x-model="vm.image_id"
+                     placeholder="ami-…"
+                     class="w-full rounded-md border-gray-300 text-sm font-mono">
+              <p x-show="imageRegionWarning(vm)" x-cloak class="text-xs text-amber-700"
+                 x-text="imageRegionWarning(vm)"></p>
+            </div>
             <input type="text" x-model="vm.instance_type" placeholder="t3.medium"
                    class="col-span-2 rounded-md border-gray-300 text-sm font-mono">
             <button @click="cloudForm.vms.splice(i, 1)"
@@ -499,9 +519,10 @@
       <p class="text-xs text-gray-400 mt-2">
         Exactly one VM may be the <span class="font-medium">control node</span> — it runs
         the dashboard agent and the Gateway, and it is picked by its role, not its name.
-        Images are
-        resolved when a POV is built, not now — so a template can name a catalog image
-        that has not been promoted to this cloud yet. A <span class="font-medium">cell
+        Catalog images come from the <a href="#images" @click.prevent="select('images')"
+        class="text-blue-600 hover:underline">Images</a> tab; Standard Linux works for the
+        control node and for targets, and a Standard Linux target gets this POV's own
+        login. Images are resolved when a POV is built, not now. A <span class="font-medium">cell
         role</span> (Linux targets only) makes Wire up add that cell's PRA items — see
         <a href="/docs/profiles/pov/demo-cells" class="text-blue-600 hover:underline">Demo
         cells in a POV</a>.
@@ -528,6 +549,167 @@
       </div>
     </div>
     </template>
+  </section>
+
+  </div>
+
+  <div x-show="activeTab === 'images'" x-cloak role="tabpanel" class="space-y-6">
+
+  {# ── Images ───────────────────────────────────────────────────────────────
+     The standard images a cloud template boots (api/pov_images). Two recipes, not a
+     Packer form: the demo Build Image tabs stay off a POV instance, and what a POV needs
+     is the same two images every time. A build is an ordinary job; its Live Output is on
+     the job page. #}
+  <section x-show="showsCloudTemplates" x-cloak
+           class="bg-white rounded-lg shadow-sm border border-gray-200">
+    <div class="px-5 py-4 border-b border-gray-200">
+      <h2 class="text-lg font-medium text-gray-900">Standard images</h2>
+      <p class="text-xs text-gray-500 mt-0.5">
+        Built in this POV account, in one region — an image exists only where it was
+        built, so build it in the region your templates use. A build runs one temporary
+        instance for 15–40 minutes; the image then bills for its snapshot until it is
+        deregistered in the cloud console. See
+        <a href="/docs/profiles/pov/public-cloud/images" class="text-blue-600 hover:underline">POV
+        images</a>.
+      </p>
+    </div>
+
+    <div x-show="imgError" x-cloak class="px-5 py-3 bg-red-50 border-b border-red-200">
+      <p class="text-sm text-red-800" x-text="imgError"></p>
+    </div>
+
+    <div class="px-5 py-4">
+      <template x-if="!imgRecipes.length">
+        <p class="text-sm text-gray-500">
+          Standard images are built on AWS and Azure so far. On
+          <span x-text="(selectedCloud || 'this cloud').toUpperCase()"></span>, give each
+          template VM an image id directly.
+        </p>
+      </template>
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <template x-for="r in imgRecipes" :key="r.id">
+          <div class="rounded-md border border-gray-200 p-4 space-y-3">
+            <div>
+              <p class="text-sm font-medium text-gray-900" x-text="r.label"></p>
+              <p class="text-xs text-gray-500 mt-0.5" x-text="r.summary"></p>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <label class="block">
+                <span class="text-xs font-medium text-gray-700">Region</span>
+                <input type="text" x-model="imgForms[r.id].region" :placeholder="imgDefaultRegion"
+                       class="mt-1 w-full rounded-md border-gray-300 text-sm font-mono">
+              </label>
+              <label class="block">
+                <span class="text-xs font-medium text-gray-700">Name</span>
+                <input type="text" x-model="imgForms[r.id].image_name" :placeholder="'pov-' + r.id"
+                       class="mt-1 w-full rounded-md border-gray-300 text-sm font-mono">
+              </label>
+            </div>
+            <template x-for="t in r.toggles" :key="t.id">
+              <div>
+                <label class="inline-flex items-start gap-2 text-sm text-gray-700">
+                  <input type="checkbox" x-model="imgForms[r.id].toggles[t.id]"
+                         :disabled="t.takes === 'storage_asset' && !imgStorageOptions"
+                         class="mt-0.5 rounded border-gray-300">
+                  <span x-text="t.label"></span>
+                </label>
+                <template x-if="t.takes === 'storage_asset' && imgForms[r.id].toggles[t.id]">
+                  <select x-model="imgForms[r.id].stage_asset"
+                          class="mt-1 ml-6 w-64 rounded-md border-gray-300 text-sm">
+                    <option value="">Choose the installer…</option>
+                    <template x-for="a in storageAssets.filter(n => /\.(exe|msi|zip)$/i.test(n))" :key="a">
+                      <option :value="a" x-text="a"></option>
+                    </template>
+                  </select>
+                </template>
+              </div>
+            </template>
+            <label class="block">
+              <span class="text-xs font-medium text-gray-700">Extra script from storage (optional)</span>
+              <select x-model="imgForms[r.id].extra_script_asset" :disabled="!imgStorageOptions"
+                      class="mt-1 w-full rounded-md border-gray-300 text-sm">
+                <option value="">None</option>
+                <template x-for="a in storageAssets.filter(n => r.os_family === 'windows' ? /\.ps1$/i.test(n) : /\.sh$/i.test(n))" :key="a">
+                  <option :value="a" x-text="a"></option>
+                </template>
+              </select>
+              <span x-show="!imgStorageOptions" class="text-xs text-gray-400">
+                Storage-backed options need the storage read permission.
+              </span>
+            </label>
+            <button @click="buildImage(r)" :disabled="imgBuilding === r.id"
+                    class="px-3 py-2 text-sm rounded-md bg-blue-600 text-white hover:bg-blue-700
+                           disabled:opacity-50">
+              <span x-text="imgBuilding === r.id ? 'Queueing…' : 'Build ' + r.label"></span>
+            </button>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <div x-show="imgBuilds.length" x-cloak class="px-5 py-4 border-t border-gray-200">
+      <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Recent builds</p>
+      <div class="divide-y divide-gray-100">
+        <template x-for="b in imgBuilds" :key="b.job_id">
+          <div class="py-2 flex items-start justify-between gap-4 text-sm">
+            <div class="min-w-0">
+              <span class="font-mono" x-text="b.image_name"></span>
+              <span class="text-gray-400"> · </span><span class="font-mono text-gray-500" x-text="b.region"></span>
+              <p class="text-xs mt-0.5"
+                 :class="b.status === 'failed' ? 'text-red-700' : 'text-gray-500'"
+                 x-text="b.status === 'failed' ? (b.error_message || 'failed')
+                         : (b.status + (b.progress_message ? ' — ' + b.progress_message : ''))"></p>
+            </div>
+            <a :href="'/jobs/' + encodeURIComponent(b.job_id)"
+               class="shrink-0 text-xs text-blue-600 hover:underline">Live output</a>
+          </div>
+        </template>
+      </div>
+    </div>
+  </section>
+
+  <section x-show="showsCloudTemplates" x-cloak
+           class="bg-white rounded-lg shadow-sm border border-gray-200">
+    <div class="px-5 py-4 border-b border-gray-200">
+      <h2 class="text-lg font-medium text-gray-900">Image catalog</h2>
+      <p class="text-xs text-gray-500 mt-0.5">
+        Every catalog image usable on this cloud, built here or promoted to it. Removing one
+        removes the catalog entry only; the image itself stays in the cloud account.
+      </p>
+    </div>
+    <div class="px-5 py-4">
+      <template x-if="!catalogImages.length">
+        <p class="text-sm text-gray-500">No catalog images yet. Build a standard one above.</p>
+      </template>
+      <table x-show="catalogImages.length" class="min-w-full text-sm">
+        <thead>
+          <tr class="text-left text-xs text-gray-500">
+            <th class="py-1 pr-4 font-medium">Name</th>
+            <th class="py-1 pr-4 font-medium">Kind</th>
+            <th class="py-1 pr-4 font-medium">Region</th>
+            <th class="py-1 pr-4 font-medium">Image</th>
+            <th class="py-1"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          <template x-for="img in catalogImages" :key="img.id">
+            <tr>
+              <td class="py-2 pr-4">
+                <span class="font-mono" x-text="img.name"></span>
+                <span class="block text-xs text-gray-400" x-text="img.version"></span>
+              </td>
+              <td class="py-2 pr-4" x-text="recipeLabel(img.recipe) || img.os_type"></td>
+              <td class="py-2 pr-4 font-mono" x-text="img.region || '—'"></td>
+              <td class="py-2 pr-4 font-mono text-xs" x-text="img.image_id"></td>
+              <td class="py-2 text-right">
+                <button @click="deleteImage(img)"
+                        class="text-xs px-2 py-1 border border-red-300 text-red-700 rounded hover:bg-red-50">Remove</button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
   </section>
 
   </div>
@@ -729,6 +911,17 @@ function templatesPage(tabSlugs) {
     cloudTemplates: [],
     cloudForm: null,
     cloudError: '',
+    // The Images tab (api/pov_images). catalogImages also feeds the template VM picker.
+    imgRecipes: [],
+    imgForms: {},
+    imgBuilds: [],
+    catalogImages: [],
+    imgDefaultRegion: '',
+    imgStorageOptions: false,
+    storageAssets: [],
+    imgBuilding: '',
+    imgError: '',
+    _imgPoll: null,
     notConfigured: false,
     error: '',
     showRunner: false,
@@ -772,7 +965,8 @@ function templatesPage(tabSlugs) {
     ensureVisibleTab() {
       const shown = {
         build: this.showsBake, builds: this.showsBake,
-        templates: this.showsCloudTemplates, blueprints: true,
+        templates: this.showsCloudTemplates, images: this.showsCloudTemplates,
+        blueprints: true,
       };
       if (shown[this.activeTab]) return;
       this.select(this.tabSlugs.find(s => shown[s]) || 'blueprints', false);
@@ -921,7 +1115,44 @@ function templatesPage(tabSlugs) {
 
     blankCloudVm() {
       return { name: '', role: 'target', os_family: 'linux', cell_role: '',
-               image_ref: '', image_id: '', instance_type: '', disk_gb: 0 };
+               image_ref: '', image_id: '', instance_type: '', disk_gb: 0, _pick: '' };
+    },
+
+    // `_pick` is the picker's own state: a catalog id, '__literal' for a typed image id,
+    // or '' for none. Never sent; saveCloudTemplate() sends image_ref and image_id.
+    pickOf(v) {
+      return v.image_ref || (v.image_id ? '__literal' : '');
+    },
+
+    pickImage(vm) {
+      if (vm._pick === '__literal') { vm.image_ref = ''; return; }
+      vm.image_id = '';
+      vm.image_ref = vm._pick || '';
+      const img = this.catalogImages.find(i => i.id === vm.image_ref);
+      if (!img) return;
+      // The family follows the image: a Windows image booted as "linux" gets no key pair,
+      // so its password could never be read.
+      vm.os_family = img.os_family;
+      if (!vm.instance_type) vm.instance_type = img.os_family === 'windows' ? 't3.large' : 't3.medium';
+    },
+
+    imageLabel(img) {
+      const kind = this.recipeLabel(img.recipe) || img.os_type;
+      return `${img.name} — ${kind}${img.region ? ' · ' + img.region : ''}`;
+    },
+
+    recipeLabel(id) {
+      const r = this.imgRecipes.find(x => x.id === id);
+      return r ? r.label : '';
+    },
+
+    // The refusal resolve_image would give at build time, said in the form instead.
+    imageRegionWarning(vm) {
+      if (!vm.image_ref || !this.cloudForm) return '';
+      const img = this.catalogImages.find(i => i.id === vm.image_ref);
+      const region = this.cloudForm.region || this.imgDefaultRegion;
+      if (!img || !img.region || !region || img.region === region) return '';
+      return `This image is in ${img.region}; the template builds in ${region}.`;
     },
 
     newCloudTemplate() {
@@ -929,6 +1160,7 @@ function templatesPage(tabSlugs) {
       this.cloudForm = { id: '', name: '', description: '', region: '',
                          network_cidr: '', purdue_zones: false,
                          vms: [this.blankCloudVm()] };
+      this.loadImages();
     },
 
     editCloudTemplate(t) {
@@ -939,8 +1171,9 @@ function templatesPage(tabSlugs) {
         id: t.id, name: t.name, description: t.description || '',
         region: t.region || '', network_cidr: t.network_cidr || '',
         purdue_zones: !!t.purdue_zones,
-        vms: (t.vms || []).map(v => ({ ...v })),
+        vms: (t.vms || []).map(v => ({ ...v, _pick: this.pickOf(v) })),
       };
+      this.loadImages();
     },
 
     addCloudVm() {
@@ -960,8 +1193,87 @@ function templatesPage(tabSlugs) {
         this.cloudEnabled = false;
         this.cloudTemplates = [];
       }
+      if (this.cloudEnabled) await this.loadImages();
       // #templates with no cloud selected would show an empty panel: fall back.
       this.ensureVisibleTab();
+    },
+
+    // ── images ───────────────────────────────────────────────────────────
+    // Soft throughout, like the cloud-template read: an unreadable catalog empties the
+    // picker and says so on the Images tab, and never takes the templates down with it.
+    async loadImages() {
+      try {
+        const [cat, rec] = await Promise.all([
+          this.apiJson('/api/pov/images'),
+          this.apiJson('/api/pov/images/recipes'),
+        ]);
+        this.imgError = '';
+        this.catalogImages = cat.images || [];
+        this.imgBuilds = cat.builds || [];
+        this.imgDefaultRegion = rec.default_region || cat.default_region || '';
+        this.imgStorageOptions = !!rec.storage_options;
+        // The forms before the recipes: the cards bind imgForms[r.id] as they render.
+        const forms = { ...this.imgForms };
+        for (const r of (rec.recipes || [])) {
+          if (forms[r.id]) continue;
+          const toggles = {};
+          for (const t of r.toggles) toggles[t.id] = !!t.default;
+          forms[r.id] = { region: '', image_name: '', toggles,
+                          extra_script_asset: '', stage_asset: '' };
+        }
+        this.imgForms = forms;
+        this.imgRecipes = rec.recipes || [];
+      } catch (e) {
+        this.imgError = e.message;
+      }
+      if (this.imgStorageOptions && !this.storageAssets.length) this.loadStorageAssets();
+      this.scheduleImgPoll();
+    },
+
+    async loadStorageAssets() {
+      try {
+        const body = await this.apiJson('/api/storage/list');
+        this.storageAssets = (body.items || []).map(a => a.name || '').filter(Boolean);
+      } catch (e) { this.storageAssets = []; }
+    },
+
+    // Poll only while a build is queued or running, like schedulePoll() for the bakes.
+    scheduleImgPoll() {
+      if (this._imgPoll) { clearTimeout(this._imgPoll); this._imgPoll = null; }
+      if (!this.imgBuilds.some(b => ['pending', 'running'].includes(b.status))) return;
+      this._imgPoll = setTimeout(() => this.loadImages(), 10000);
+    },
+
+    async buildImage(r) {
+      const f = this.imgForms[r.id];
+      this.imgBuilding = r.id;
+      this.imgError = '';
+      try {
+        await this.apiJson('/api/pov/images/build', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            recipe: r.id, region: f.region, image_name: f.image_name,
+            toggles: f.toggles, extra_script_asset: f.extra_script_asset,
+            stage_asset: f.stage_asset,
+          }),
+        });
+        await this.loadImages();
+      } catch (e) {
+        this.imgError = e.message;
+      } finally {
+        this.imgBuilding = '';
+      }
+    },
+
+    async deleteImage(img) {
+      if (!confirm(`Remove "${img.name}" from the catalog? The image ${img.image_id} stays `
+                   + 'in the cloud account; deregister it there to stop its snapshot billing.')) return;
+      this.imgError = '';
+      try {
+        await this.apiJson('/api/pov/images/' + encodeURIComponent(img.id), { method: 'DELETE' });
+        await this.loadImages();
+      } catch (e) { this.imgError = e.message; }
     },
 
     async saveCloudTemplate() {
