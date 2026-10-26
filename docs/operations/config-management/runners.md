@@ -66,9 +66,13 @@ have been touched by every job that ever ran on it. The community
 edition's design refuses to be that target:
 
 - **Secrets are fetched just-in-time.** The cloud secret store is
-  consulted at the start of each run; the SSH private key lives in the
-  side-car container's tmpfs for the duration of the playbook; the
-  container is destroyed when the playbook finishes. There's no place
+  consulted at the start of each run, and the SSH private key never
+  outlives it. A cloud runner writes the key inside the task's own
+  ephemeral filesystem, which is destroyed with the task. The local runner
+  writes it, mode 0600, into a per-run temporary directory on the
+  dashboard host that is mounted into the run container and deleted when
+  the run ends. A remote agent copies it into its run container through
+  the Docker archive API, and it goes with the container. There's no place
   for the key to leak to.
 - **No process or filesystem outlives the run.** The Ansible binary,
   the playbook bytes, the asset cache, the inventory JSON — all of it

@@ -1413,6 +1413,9 @@ class AnsibleFeatureConfig(BaseModel):
     ansible_ecs_execution_role_arn: str = ""
     ansible_ecs_cpu: str = "256"
     ansible_ecs_memory: str = "512"
+    # Give the Fargate runner a public IP: egress through a public subnet's internet
+    # gateway. Off for a private subnet whose route table has a NAT gateway.
+    ansible_ecs_assign_public_ip: bool = True
     # Azure ACI runner
     ansible_aci_image: str = "chrweav/ansible-winrm:latest"
     ansible_aci_subnet_id: str = ""

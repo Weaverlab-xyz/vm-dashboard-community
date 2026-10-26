@@ -73,8 +73,11 @@ backends need nothing beyond the Docker socket (Ansible) or in-container
   [`runners/promote/README.md`](../../../runners/promote/README.md).
 - **Subnet + security group** (`ansible_ecs_subnet_id`,
   `ansible_ecs_security_group_ids`) with egress to the target VM / cluster
-  API (and to your image registry on 443). A private subnet is recommended;
-  it needs a NAT route for image pulls.
+  API (and to your image registry on 443). By default the task gets a
+  public IP (**Assign a public IP**, `ansible_ecs_assign_public_ip`), so a
+  public subnet's internet gateway gives it egress; nothing can connect in.
+  For a private subnet, clear that setting and give the subnet a NAT route,
+  or the task cannot pull its image.
 
 ### Azure (ACI)
 

@@ -2,10 +2,10 @@
 
 > **Audience:** contributor · **Profile:** `both` · **Read this when:** you are deciding whether a piece of remote work should run on the one-shot remote worker or on a SPIFFE-attested remote agent, or you are about to move a workload from one to the other.
 
-**Not built.** This note assesses the two execution paths as they stand after agent 2.11
-(lifecycle, ongoing checks and cloud node attestation). It recommends what to move, what
-to leave alone, and in what order. Nothing in the [phases](#recommendation-agent-first-worker-kept)
-is built yet. The user-facing comparison is
+**Phase 1 built; phases 2 and 3 not built.** This note assesses the two execution paths as
+they stand after agent 2.11 (lifecycle, ongoing checks and cloud node attestation). It
+recommends what to move, what to leave alone, and in what order. Of the
+[phases](#recommendation-agent-first-worker-kept), only phase 1 is built. The user-facing comparison is
 [Where work runs](../platform/where-work-runs.md); this page is the reasoning behind
 changing it.
 
@@ -199,30 +199,35 @@ Keep both paths: the user prefers that, and the costs above justify it. Make the
 default wherever one is present and healthy, and keep the worker as the fallback and for
 heavy, bursty work.
 
-### Phase 1: make the existing overlap agent-first (small)
+### Phase 1: make the existing overlap agent-first (small, built)
 
 1. **Fall back to the worker when the routed agent is offline.**
-   - Add an opt-in per route: **Fall back to the remote worker when this agent is offline**.
-   - With it on, a run routed to an offline, non-deployed agent goes to the worker instead
-     of being refused. The job records which path it took.
+   - A cloud route has an opt-in: **Fall back to the remote worker when the agent is
+     offline** (`fallback_to_worker`). An on-premises route cannot have it, because the
+     worker has no path to an on-premises network.
+   - With it on, a run routed to an offline agent goes to the worker instead of being
+     refused. A deployed agent's run booked into a time its host will be up stays on the
+     agent. The job records `fallback_from_agent`, and Live Output says so.
+   - Only a playbook falls back; anything else is refused by name, since the worker runs
+     only playbooks against a cloud VM.
    - This removes the single point of failure without giving up agent-first.
-2. **Write Live Output batches in one transaction** in `agent_service.append_logs`. One
-   commit per request, not one per line.
-3. **Correct the docs** that this note found wrong. The first two are fixed alongside this
-   note; the other two need a decision first.
+2. **Write Live Output batches in one transaction.** `agent_service.append_logs` calls
+   `job_service.append_job_logs`: one commit per request, not one per line.
+3. **Correct the docs** that this note found wrong. All four are fixed.
    - **Live Output (fixed):** the batching claim in
      [Where work runs](../platform/where-work-runs.md).
    - **The agent's credentials (fixed):**
      [runners.md](../operations/config-management/runners.md) said the agent "holds no
      target credentials at all today". It now receives sealed per-job SSH keys and
      dashboard secrets.
-   - **The runner's network (open):** `shared-cloud.md` recommends a private subnet with
-     NAT, but every cloud runner sets `assignPublicIp: ENABLED`. Decide which is intended:
-     change the code to honour a private subnet, or change the doc.
-   - **Where the key lives (open):** runners.md says the SSH key "lives in the side-car
-     container's tmpfs". The cloud runner writes `/tmp/ssh_key`, which is not necessarily
-     tmpfs, and the local runner writes a host temp directory. Either mount a tmpfs or
-     reword the claim.
+   - **The runner's network (fixed):** `shared-cloud.md` recommended a private subnet with
+     NAT, but the AWS runners always set `assignPublicIp: ENABLED`. The new setting
+     `ansible_ecs_assign_public_ip` (on by default, so nothing changes) lets a private
+     subnet with NAT work, and the doc now describes both.
+   - **Where the key lives (fixed):** runners.md said the SSH key "lives in the side-car
+     container's tmpfs". It now says what each runner does: the cloud task's ephemeral
+     filesystem, the local runner's 0600 per-run temp directory, and the agent's run
+     container through the archive API.
 
 ### Phase 2: databases in a cloud, through routes
 
@@ -274,9 +279,10 @@ built.
 
   Those are real properties, and the docs should keep presenting both paths as first-class.
 
-## The decision this needs
+## The decision
 
 Phase 3's **owned agent** is a new trust class: an agent that may receive cluster-admin
-credentials because the dashboard built and owns its host. If that is acceptable, phase 3
-is a contained change. If it is not, Kubernetes stays on the worker, and the agent-first
-model covers Config Management on VMs and databases, which is most of the volume.
+credentials because the dashboard built and owns its host. **Decided: owned agents only.**
+An agent the dashboard deployed may receive a sealed cluster-admin kubeconfig for one job;
+a customer-hosted agent never may. The dashboard decides "owned" from its own
+`agent_hosts` row, never from anything the agent reports.

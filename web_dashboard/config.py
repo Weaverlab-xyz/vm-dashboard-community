@@ -1640,7 +1640,8 @@ class Settings(BaseSettings):
     ansible_ecs_image: str = "chrweav/ansible-winrm:latest"
     ansible_ecs_cpu: str = "256"
     ansible_ecs_memory: str = "512"
-    ansible_ecs_subnet_id: str = ""           # Fargate task subnet (VPC private subnet recommended)
+    ansible_ecs_subnet_id: str = ""           # Fargate task subnet (public, or private with NAT — see below)
+    ansible_ecs_assign_public_ip: bool = True  # off for a private subnet that egresses through NAT
     ansible_ecs_security_group_ids: str = ""  # Comma-separated security group IDs (optional)
     ansible_ecs_execution_role_arn: str = ""  # Set if image pull requires it
     ansible_ssh_key_secret: str = "AWS_KEY"        # Password Safe secret title (legacy fallback)

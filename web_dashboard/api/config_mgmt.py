@@ -806,6 +806,66 @@ def _resolve_cloud_vm_target(payload: "RunRequest", db, agent, current_user) -> 
             "executor_name": agent.name}
 
 
+def _worker_fallback(payload: "RunRequest", db, current_user) -> dict | None:
+    """``{target, agent_name}`` when this agent run should go to the remote worker
+    instead, or None to leave it on the agent (which may still refuse it).
+
+    A cloud route can opt in (``fallback_to_worker``) to the remote worker running its VMs
+    while the agent is down: the worker reaches a cloud VM the way it would with no route
+    at all. Every condition is read from the dashboard's own rows, never the request:
+
+      * the target is a dashboard-deployed cloud VM the caller can see;
+      * the route covering its recorded private address names THIS agent and opts in;
+      * the agent is not online, and is not a deployed agent whose host will be up when
+        the run is booked for (that run is accepted onto the agent, as without a route
+        fallback).
+
+    The address handed back is the one the no-route path uses (public, else private).
+    Only a playbook can fall back: the worker would send anything else to the dashboard
+    host's local runner, which cannot reach the VM, so that is refused here by name.
+    """
+    from ..database import RemoteAgent
+    from ..services import agent_host_service, agent_service
+    from .aws import _accessible_workgroups
+
+    cloud = str(getattr(payload, "cloud", "") or "").strip().lower()
+    if (payload.target_kind or "vm") != "vm" or cloud not in cmr.CLOUD_SCOPES:
+        return None
+    agent = db.query(RemoteAgent).filter(RemoteAgent.id == payload.agent_id).first()
+    if agent is None or not agent.is_active or agent_service.status_of(agent) == "online":
+        return None
+    deploy_type = {"aws": "ec2_deploy", "azure": "azure_deploy", "gcp": "gce_deploy"}[cloud]
+    deploy = (db.query(Job)
+              .filter(Job.id == (payload.target_id or ""), Job.job_type == deploy_type,
+                      Job.status == "completed").first())
+    meta = deploy.metadata_dict if deploy else {}
+    accessible = _accessible_workgroups(current_user) if current_user is not None else set()
+    if (deploy is None or meta.get("destroyed")
+            or (accessible is not None
+                and (deploy.workgroup or "").strip().lower() not in accessible)):
+        return None
+    private = str(meta.get("private_ip") or "").strip()
+    scope, region, workstream, network = cmr.scope_of_job(deploy)
+    route = cmr.match_for(db, private, scope=scope, region=region, workstream=workstream,
+                          network=network)
+    if route is None or route.agent_id != agent.id or not route.fallback_to_worker:
+        return None
+    if agent_host_service.for_agent(db, agent.id) is not None:
+        at = _schedule_kwargs(payload, db).get("scheduled_for")
+        if not agent_host_service.booking_refusal(db, agent, at):
+            return None
+    if ansible_local_service.asset_type(payload.asset) != "playbook":
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Agent '{agent.name}' is not online and the route {route.cidr} falls "
+                    f"back to the remote worker, but the remote worker runs only playbooks "
+                    f"against a cloud VM. Run '{payload.asset}' once the agent is back."))
+    target = str(meta.get("public_ip") or private).strip()
+    if not target:
+        return None
+    return {"target": target, "agent_name": agent.name, "cidr": route.cidr}
+
+
 def _resolve_agent_target(payload: "RunRequest", db, current_user=None) -> dict:
     """Verify an agent-executed run against the dashboard's own rows, and return the job's
     resolved target fields.
@@ -1263,8 +1323,14 @@ async def run_playbook(
     # Checked FIRST, and before the k8s/database split, because it is the reachability
     # question rather than the target-family one: an on-prem database bound to an agent is
     # target_kind="database" and still cannot use any runner the dashboard launches.
+    fallback = None
     if payload.agent_id:
-        return await _run_agent_ansible(payload, db, current_user)
+        fallback = _worker_fallback(payload, db, current_user)
+        if fallback is None:
+            return await _run_agent_ansible(payload, db, current_user)
+        # Re-planned for the remote worker: from here this is the run the no-route path
+        # makes for this VM, with the agent it fell back from recorded on the job.
+        payload.agent_id, payload.target = "", fallback["target"]
     if payload.target_kind == "directory":
         raise HTTPException(
             status_code=400,
@@ -1404,11 +1470,17 @@ async def run_playbook(
         job_type="ansible_local",
         created_by=current_user.username,
         workgroup="ansible",
-        metadata=ansible_run_meta.run_meta(
+        metadata={**ansible_run_meta.run_meta(
             payload, description=description, asset_backend=asset_backend),
+            **({"fallback_from_agent": fallback["agent_name"]} if fallback else {})},
         batch_id=payload.batch_id,
         **_schedule_kwargs(payload, db),
     )
+    if fallback:
+        job_service.append_job_log(
+            db, job.id,
+            f"Agent '{fallback['agent_name']}' is not online, so the route "
+            f"{fallback['cidr']} sent this run to the remote worker.")
     if wants_secret or payload.epml_token_var:
         job_service.log_audit(
             db, current_user.username, "ansible_secret_use",

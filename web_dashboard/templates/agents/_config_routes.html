@@ -103,6 +103,8 @@
               <span class="inline-block px-2 py-0.5 rounded"
                     :class="r.scope === 'onprem' ? 'bg-gray-100 text-gray-700' : 'bg-blue-50 text-blue-700'"
                     x-text="r.scope_text || r.scope"></span>
+              <span x-show="r.fallback_to_worker" class="inline-block mt-1 bg-amber-50 text-amber-700 px-2 py-0.5 rounded"
+                    title="Runs go to the remote worker while the agent is offline">worker fallback</span>
             </td>
             <td class="px-4 py-3">
               <span class="inline-block bg-purple-50 text-purple-700 text-xs px-2 py-0.5 rounded"
@@ -261,6 +263,19 @@
           </p>
         </div>
 
+        <!-- Cloud only: the worker reaches a cloud VM the way it does with no route, and
+             has no path to an on-premises network. -->
+        <div x-show="form.scope !== 'onprem'">
+          <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" x-model="form.fallback_to_worker" class="rounded border-gray-300">
+            Fall back to the remote worker when the agent is offline
+          </label>
+          <p class="text-xs text-gray-400 mt-1">
+            Otherwise a run is refused while the agent is down. A run booked into a time a
+            deployed agent will be up stays on the agent. Only playbooks fall back.
+          </p>
+        </div>
+
         <label class="flex items-center gap-2 text-sm text-gray-700">
           <input type="checkbox" x-model="form.is_active" class="rounded border-gray-300">
           Active
@@ -367,7 +382,8 @@ function configRoutesPage() {
 
     _blank() {
       return {cidr: '', agent_id: '', label: '', is_active: true, scope: 'onprem',
-              region: '', scope_connection_id: '', workstream: '', network: ''};
+              region: '', scope_connection_id: '', workstream: '', network: '',
+              fallback_to_worker: false};
     },
 
     // The region picker follows the scope's cloud: only regions with a per-region config
@@ -414,6 +430,7 @@ function configRoutesPage() {
       this.form.scope_connection_id = '';
       this.form.workstream = '';
       this.form.network = '';
+      this.form.fallback_to_worker = false;
       this.loadRegions();
     },
 
@@ -430,7 +447,8 @@ function configRoutesPage() {
       this.form = {cidr: r.cidr, agent_id: r.agent_id, label: r.label || '',
                    is_active: !!r.is_active, scope: r.scope || 'onprem',
                    region: r.region || '', scope_connection_id: r.connection_id || '',
-                   workstream: r.workstream || '', network: r.network || ''};
+                   workstream: r.workstream || '', network: r.network || '',
+                   fallback_to_worker: !!r.fallback_to_worker};
       this.formError = '';
       this.loadRegions();
       this.showForm = true;
@@ -447,6 +465,7 @@ function configRoutesPage() {
                       region: this.form.scope === 'onprem' ? '' : (this.form.region || ''),
                       workstream: this.form.scope === 'onprem' ? '' : (this.form.workstream || ''),
                       network: this.form.scope === 'onprem' ? '' : (this.form.network || ''),
+                      fallback_to_worker: this.form.scope !== 'onprem' && !!this.form.fallback_to_worker,
                       // The scope narrower, sent as the API's connection_id: which
                       // discovered guests this route covers, never what a run targets.
                       connection_id: this.form.scope === 'onprem' ? (this.form.scope_connection_id || '') : ''};

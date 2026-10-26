@@ -1105,6 +1105,40 @@ def append_job_log(db: Session, job_id: str, line: str) -> None:
         db.rollback()
 
 
+def append_job_logs(db: Session, job_id: str, lines) -> None:
+    """:func:`append_job_log` for a batch: one ``MAX(seq)`` read and one commit for all of
+    ``lines``, in order. An agent posts Live Output in batches of up to 500 lines, and a
+    commit per line made each of those batches 500 transactions. Best-effort the same
+    way: on an error the batch is rolled back. A seq taken by another writer between the
+    read and the commit (the unique ``(job_id, seq)``) is retried once from a fresh read,
+    since losing a whole batch costs more than losing the one line it used to."""
+    from sqlalchemy.exc import IntegrityError
+
+    from ..database import JobLog
+    lines = list(lines)
+    if not lines:
+        return
+    for _attempt in range(2):
+        try:
+            last = (
+                db.query(JobLog.seq)
+                .filter(JobLog.job_id == job_id)
+                .order_by(JobLog.seq.desc())
+                .first()
+            )
+            nxt = (last[0] + 1) if last else 1
+            now = utcnow()
+            db.add_all([JobLog(job_id=job_id, seq=nxt + i, line=line, created_at=now)
+                        for i, line in enumerate(lines)])
+            db.commit()
+            return
+        except IntegrityError:
+            db.rollback()
+        except Exception:
+            db.rollback()
+            return
+
+
 def get_job_logs(db: Session, job_id: str, after_seq: int = 0) -> List[tuple]:
     """Return ``[(seq, line), …]`` for a job with ``seq > after_seq``, oldest first —
     the WS endpoint replays these and tails new ones so Live Output survives the
