@@ -78,9 +78,14 @@ the clear on every poll.
 | Agent is untrusted | Every request is verified before it is served: `agent_service.authenticate` checks the agent is active, the signature, and a single-use nonce inside a 60-second window |
 | Agent is untrusted | With SPIRE, `agent_service.attest` binds a key only to an agent whose single-use JWT-SVID verifies and who proves possession of that key; it runs again at every agent start, and the key is never written to disk |
 | Agent is untrusted | `dashboard_secrets_require_spire` releases dashboard-held credentials only to agents attested through SPIRE |
+| Agent is untrusted | After attestation the dashboard keeps checking (`services/agent_assurance_service.py`): a request signed by the key the last attestation replaced (a second copy), a changed policy hash, an unrecorded version, a key that stopped rotating. Each raises an attention item and an `agent.attention` notification |
+| Agent is untrusted | Agent 2.11 re-attests every `AGENT_REATTEST_HOURS` (24 by default) with a fresh in-memory key, between jobs |
+| Agent is untrusted | Revoking or unbinding an agent removes the SPIRE registration the dashboard made (`dashboard_spire.forget_agent`): the workload entry is deleted and the node evicted, so SPIRE stops issuing SVIDs for it |
+| Agent is untrusted | A host the dashboard deploys can attest with its cloud's instance identity (`aws_iid`, `azure_imds`, `gcp_iit`), pinned by a node entry to the one VM launched, with no join token in its user-data |
 | Dashboard is untrusted | Job envelopes signed by a key the agent pins at enrolment (`services/agent_signing.py`); the agent verifies before parsing the payload |
 | Dashboard is untrusted | No protocol field can carry executable content — `services/agent_job_meta.py` is a closed allowlist of scalars, enums and network addresses |
 | Dashboard is untrusted | `HANDLERS` in `runners/agent/agent.py` is a closed dict, not a dispatch on a wire string |
+| Dashboard is untrusted | An upgrade runs only when the host's own `policy.yaml` opts in (`upgrades:`). The agent accepts only that policy's repository, by digest, never a downgrade, and the updater verifies the image's cosign signature against the identity the policy pins before it pulls. The dashboard can only choose among releases the project signed |
 | Your file is the boundary | `Policy` in `runners/agent/agent.py`; the sha256 is reported and shown on the Agents page |
 | Fails closed | Missing/corrupt policy → the agent exits non-zero and runs nothing |
 | Nothing reusable on the wire | `X-Agent-Signature` over method + path + sha256(body) + audience + timestamp + nonce |
@@ -145,9 +150,9 @@ operator-supplied code. The runner stays one-shot; only the thing that launches 
 | [Hypervisor connections through an agent](remote-agents/hypervisors.md) | The verbs, what the agent can reach, the sibling runner and VMware Workstation Pro. |
 | [Credentials an agent uses](remote-agents/credentials.md) | What the dashboard holds, what the host seals, and where a credential comes from at run time. |
 | [Agent-executed Config Management](remote-agents/config-runs.md) | What the dashboard sends, the grants it needs, and what a run looks like, for VMs, on-prem databases and on-prem AD/LDAP directories. |
-| [Deploying an agent into a cloud](remote-agents/deploying.md) | The dashboard builds an agent for Config Management in AWS, Azure or Google Cloud, with no inbound access, and keeps it up always, until a time, or just around a change window. |
+| [Deploying an agent into a cloud](remote-agents/deploying.md) | The dashboard builds an agent for Config Management in AWS, Azure or Google Cloud, with no inbound access, and keeps it up always, until a time, or just around a change window. Under SPIRE the host can prove itself with its cloud's instance identity, with no join token. |
 | [Agent-brokered file shares](remote-agents/file-shares.md) | A name rather than a path, the grants, and why it needs no Docker socket. |
-| [Attesting an agent through SPIRE](remote-agents/spire-attestation.md) | Moving an agent from an Ed25519 key on disk to a SPIRE attestation at every start: the two overlays, **Migrate to SPIRE**, ports, rollback and the settings. |
+| [Attesting an agent through SPIRE](remote-agents/spire-attestation.md) | Moving an agent from an Ed25519 key on disk to a SPIRE attestation at every start: the two overlays, **Migrate to SPIRE**, ports, rollback and the settings, and the checks the dashboard keeps running afterwards. |
 | [Upgrading and restarting agents centrally](remote-agents/lifecycle.md) | Upgrade a SPIRE-attested agent to a signed release, restart or pause it from the Agents page: the three host-side gates, the updater, change windows, canary-first rollouts and rollback. |
 | [SPIFFE and SPIRE](../spiffe.md) | The dashboard's own SPIRE server that agents attest to: running it on Docker Compose or as a sidecar on a managed container runtime, its trust domain, and troubleshooting it. |
 
@@ -378,6 +383,20 @@ Hypervisor brokering followed it and is described above. Next:
   Windows desktop.
 - ~~VMware Workstation over a co-located agent~~ — shipped; see
   [VMware Workstation Pro](remote-agents/hypervisors/vmware-workstation.md).
+- ~~**Central agent lifecycle**~~ — shipped (agent 2.10). Upgrade a SPIRE-attested agent to
+  a signed release, restart it or pause it from the Agents page. Upgrades can be scheduled
+  into change windows and rolled out to canary agents first, and they roll back by
+  themselves. The host's `policy.yaml` and the updater beside the agent decide; the dashboard
+  only chooses a release. See
+  [Upgrading and restarting agents centrally](remote-agents/lifecycle.md).
+- ~~**Checking an agent after it attests**~~ — shipped (agent 2.11). The dashboard flags a
+  second copy, a changed policy, an unrecorded version and a key that stopped rotating. The
+  agent re-attests while it runs, and revoking removes the agent's SPIRE registration. See
+  [Ongoing checks](remote-agents/spire-attestation.md#ongoing-checks).
+- ~~**Cloud node attestation for deployed agents**~~ — shipped. A host the dashboard deploys
+  into AWS, Azure or Google Cloud proves itself with the VM's identity document instead of
+  a join token, opt-in per cloud. See
+  [Deploying an agent into a cloud → Identity](remote-agents/deploying.md#identity).
 
 `config.py`'s singleton hypervisor keys (one `proxmox_host`, one `vsphere_host`) were
 the blocker for all of this. They are now a one-time **seed** for the

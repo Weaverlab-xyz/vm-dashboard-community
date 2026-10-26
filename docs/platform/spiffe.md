@@ -28,7 +28,9 @@ its memory. That is why the agents' pages live here.
 | Page | Read it when |
 |---|---|
 | [Remote Agents](spiffe/remote-agents.md) | your hypervisors, databases or clusters live somewhere the dashboard cannot reach, and you want the trust model, the architecture and the agent's pages |
-| [Attesting an agent through SPIRE](spiffe/remote-agents/spire-attestation.md) | you are setting an agent up to attest, or moving an enrolled agent from a key on disk to SPIRE |
+| [Attesting an agent through SPIRE](spiffe/remote-agents/spire-attestation.md) | you are setting an agent up to attest, or moving an enrolled agent from a key on disk to SPIRE, or want to know what the dashboard keeps checking after an agent attests |
+| [Deploying an agent into a cloud → Identity](spiffe/remote-agents/deploying.md#identity) | the dashboard deploys your agents, and you want each host to prove itself with its cloud's instance identity instead of a join token |
+| [Upgrading and restarting agents centrally](spiffe/remote-agents/lifecycle.md) | you want to upgrade, restart or pause SPIRE-attested agents from the Agents page |
 
 ## Where SPIFFE shows up
 
@@ -319,6 +321,8 @@ panel as the dashboard's own identity:
 |---|---|---|---|
 | SPIRE server container | `spire_server_container` | `vmdash-spire-server` | The container the `docker` transport execs into. Ignored where `SPIRE_SERVER_SOCKET` is set |
 | SPIRE server address for agents | `spire_server_address` | blank | `host` or `host:port` an agent host dials for SPIRE. Blank means the agent audience's host on 8081. Set it when 8081 is published under another name, such as an AWS NLB's |
+| Deployed agents attest with their cloud's instance identity: AWS, Google Cloud, Azure | `spire_cloud_attest_aws`, `spire_cloud_attest_gcp`, `spire_cloud_attest_azure` | off | Tick a cloud **after** this server enables its `NodeAttestor` (`aws_iid`, `gcp_iit`, `azure_imds`). A host the dashboard deploys there then proves itself with the VM's identity document, with no join token in its user-data. The dashboard cannot see the server's plugins. See [Deploying an agent into a cloud → Identity](spiffe/remote-agents/deploying.md#identity) |
+| Azure tenant domain | `spire_azure_tenant_domain` | blank | The key of the server's `azure_imds` `tenants` map, such as `contoso.onmicrosoft.com`. Required with Azure ticked |
 
 Environment, on the dashboard's containers (all optional):
 

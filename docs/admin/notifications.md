@@ -59,6 +59,7 @@ re-sends when the row is reclaimed 10 minutes later. A duplicate alert beats sil
 | `cost.budget_exceeded` | Month-to-date spend is over `cost_monthly_budget` or a per-cloud budget. Once per day per budget. | warning |
 | `secret.stale` | Stored secrets have gone past `secret_max_age_days`. Once per day. | warning |
 | `config.drift` | Ansible targets are changed or unverified. Once per day, or again if the counts change. | warning |
+| `agent.attention` | A remote agent's [ongoing checks](../platform/spiffe/remote-agents/spire-attestation.md#ongoing-checks) raised an item: a second copy running on the key its last attestation replaced, a changed `policy.yaml`, a version that is not a recorded release, or a key it stopped rotating. Once per agent and check until someone presses **Acknowledge** on the Agents page. | warning |
 
 Selection is the **Events to send** CSV. `notify_min_severity` is a second filter on top.
 
