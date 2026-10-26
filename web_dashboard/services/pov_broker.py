@@ -1490,17 +1490,10 @@ def teardown(db: Session, env: PovEnvironment) -> str:
     # being revoked is what must happen, and it already has by the time a down server
     # would matter.
     spire_note = ""
-    if agent.spiffe_id:
-        try:
-            from . import dashboard_spire
-            td = agent.spiffe_id.split("/")[2]
-            problems = dashboard_spire.remove_workload(
-                agent.spiffe_id, dashboard_spire.ids_for(td, agent.id)[1])
-            if problems:
-                spire_note = f" SPIRE cleanup left: {'; '.join(problems)}."
-        except Exception as exc:  # noqa: BLE001
-            spire_note = f" SPIRE cleanup failed: {exc}."
     held = agent_service.revoke_agent(db, agent)
+    problems = getattr(agent, "spire_left_behind", None) or []
+    if problems:
+        spire_note = f" SPIRE cleanup left: {'; '.join(problems)}."
     agent_service.delete_agent(db, agent)
     env.broker_agent_id = None
     env.broker_vm_id = None

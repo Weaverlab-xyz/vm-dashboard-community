@@ -335,6 +335,29 @@ def register_workload(node: str, spiffe_id: str, uid: int,
     return token
 
 
+def forget_agent(agent_id: str, spiffe_id: str) -> list:
+    """Remove the SPIRE registration the dashboard made for a remote agent: its workload
+    entries and its node. Returns what could not be removed; never raises.
+
+    Acts only on a binding this dashboard created (``spiffe://<td>/agent/<agent id>``, from
+    **Migrate to SPIRE** or a deployed host). A SPIFFE ID an operator bound by hand lives in
+    a SPIRE server the dashboard does not manage, and is left to its owner. Without that,
+    revoking an agent stopped the dashboard trusting it, but SPIRE went on issuing SVIDs
+    for the identity, and a deleted row's identity could be bound to a new one with the
+    old entry still live.
+    """
+    parts = (spiffe_id or "").split("/")
+    if len(parts) != 5 or parts[:2] != ["spiffe:", ""] or not parts[2]:
+        return []
+    workload, node = ids_for(parts[2], agent_id)
+    if spiffe_id != workload:
+        return []
+    problems = remove_workload(workload, node)
+    if problems:
+        logger.warning("SPIRE cleanup for agent %s left: %s", agent_id, "; ".join(problems))
+    return problems
+
+
 def remove_workload(spiffe_id: str, node: str) -> list:
     """Delete the workload's entries and evict its node. Best-effort: returns what could
     not be done rather than raising, so revoking a credential never fails because the SPIRE

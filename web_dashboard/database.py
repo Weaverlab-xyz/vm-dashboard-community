@@ -836,6 +836,18 @@ class RemoteAgent(Base):
     spiffe_id = Column(String(255), nullable=True, unique=True, index=True)
     auth_mode = Column(String(16), nullable=True)
 
+    # Lifecycle (docs/platform/spiffe/remote-agents/lifecycle.md). The two `control_*`
+    # flags are the agent's own self-report from its lease (2.10+): its policy.yaml opts
+    # into upgrades, and an updater container is beside it. Advisory like the reported_*
+    # columns above -- they gate what the dashboard OFFERS; the host still decides.
+    # `paused` is the dashboard's: a paused agent heartbeats but is handed no new job.
+    # `upgrade_ring` orders a rollout: "canary" agents upgrade first. NULL reads as
+    # "default", so no backfill.
+    control_upgrades = Column(Boolean, nullable=True)
+    control_updater = Column(Boolean, nullable=True)
+    paused = Column(Boolean, nullable=True)
+    upgrade_ring = Column(String(16), nullable=True)
+
     # No `status` column on purpose. Status is derived from is_active / public_key /
     # last_seen_at freshness, because a stored status is how you end up with a row
     # that still reads "online" three weeks after the container died.
@@ -3579,6 +3591,51 @@ class Gateway(Base):
 
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
+
+
+class AgentRelease(Base):
+    """A release of the remote agent image the dashboard may offer as an upgrade target.
+
+    A version and the image DIGEST it is, nothing more. The dashboard never verifies the
+    signature: the updater beside each agent does, against the identity pinned in that
+    host's policy.yaml, so a wrong or forged row here can at most offer an upgrade every
+    host refuses (docs/platform/spiffe/remote-agents/lifecycle.md).
+    """
+    __tablename__ = "agent_releases"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    version = Column(String(32), nullable=False, unique=True, index=True)
+    # Where the image is: the project's repository, or a mirror's (an air-gapped site
+    # mirrors the image and pins the mirror in its policy.yaml `upgrades.repository`).
+    repository = Column(String(200), nullable=False, default="chrweav/dashboard-agent")
+    digest = Column(String(71), nullable=False)        # "sha256:" + 64 hex
+    notes = Column(Text)
+    source = Column(String(16), nullable=False, default="manual")   # manual | registry
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    created_by = Column(String(100))
+
+
+class AgentRollout(Base):
+    """One release rolled out across the eligible agents, canary ring first.
+
+    ``status``: ``canary`` (canary upgrades queued) -> ``default`` (canary all done, the
+    rest queued) -> ``done``; or ``stopped`` the moment any upgrade it queued fails, with
+    ``detail`` naming it. ``job_ids`` and ``skipped`` (agent -> reason) are JSON, so the
+    page can say which agent got what without a join table.
+    """
+    __tablename__ = "agent_rollouts"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    release_id = Column(String(36), ForeignKey("agent_releases.id"), nullable=False)
+    change_window_id = Column(String(36), nullable=True)   # provenance only, like Job's
+    status = Column(String(16), nullable=False, default="canary")
+    canary_job_ids = Column(Text)                       # JSON list
+    default_job_ids = Column(Text)                      # JSON list
+    skipped = Column(Text)                              # JSON {agent name: reason}
+    detail = Column(Text)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    created_by = Column(String(100))
+    finished_at = Column(DateTime, nullable=True)
 
 
 class AgentHost(Base):

@@ -170,6 +170,7 @@ def reissue_enroll_code(db: Session, agent: RemoteAgent) -> str:
     Also the ROLLBACK from SPIRE: the SPIFFE binding is cleared with the key, so the row
     is back to plain Ed25519 enrolment and an SVID for the old identity attests nothing.
     """
+    _forget_spire(agent)
     code = new_enroll_code()
     agent.enroll_code_hash = hash_code(code)
     agent.enroll_expires_at = utcnow() + timedelta(minutes=ENROLL_TTL_MINUTES)
@@ -207,6 +208,9 @@ def bind_spiffe_id(db: Session, agent: RemoteAgent, spiffe_id: str) -> RemoteAge
     """
     from . import spiffe_assertion
     spiffe_id = (spiffe_id or "").strip()
+    if agent.spiffe_id and spiffe_id != agent.spiffe_id:
+        # The old identity's registration goes with the binding.
+        _forget_spire(agent)
     if not spiffe_id:
         if agent.auth_mode == "spiffe":
             agent.public_key = None
@@ -291,6 +295,23 @@ def _attest(db: Session, *, svid: str, public_key: str, proof: str, audiences,
     return agent
 
 
+def _forget_spire(agent: RemoteAgent) -> list:
+    """Remove the SPIRE registration the dashboard made for ``agent``, best-effort.
+
+    What could not be removed is kept on the instance as ``spire_left_behind`` for the
+    route to report; the revoke or unbind itself has already happened either way."""
+    problems = []
+    if agent.spiffe_id:
+        try:
+            from . import dashboard_spire
+            problems = dashboard_spire.forget_agent(agent.id, agent.spiffe_id)
+        except Exception as exc:  # noqa: BLE001 - must never fail the revoke
+            logger.warning("SPIRE cleanup for agent %s failed: %s", agent.id, exc)
+            problems = [str(exc)]
+    agent.spire_left_behind = problems
+    return problems
+
+
 def revoke_agent(db: Session, agent: RemoteAgent) -> int:
     """Deactivate an agent and fail every job it currently holds.
 
@@ -303,6 +324,9 @@ def revoke_agent(db: Session, agent: RemoteAgent) -> int:
     agent.public_key = None
     agent.enroll_code_hash = None
     db.commit()
+    # And SPIRE stops issuing SVIDs for it. The binding stays on the row, as the record of
+    # what it was; nothing can attest to a revoked row anyway.
+    _forget_spire(agent)
 
     held = db.query(Job).filter(Job.agent_id == agent.id,
                                 Job.status.in_(("queued", "running"))).all()
@@ -521,7 +545,16 @@ def lease_one(db: Session, agent: RemoteAgent, *,
     transiently was re-leased instantly instead of waiting out its backoff; routing
     through the shared predicate fixes that too.
     """
+    # Paused from the Agents page: still heartbeats (authenticate bumped last_seen_at),
+    # and jobs it already holds finish, but it is handed nothing new.
+    if getattr(agent, "paused", None):
+        return None
     allowed = allowed_job_types(agent)
+    # Upgrade and restart: gated when they are queued (agent_lifecycle_service.host_gate),
+    # and claimable only by a SPIRE-attested agent, whose successor can finish the job.
+    if (getattr(agent, "auth_mode", None) or "ed25519") == "spiffe":
+        from .agent_lifecycle_service import CONTROL_JOB_TYPES
+        allowed = allowed + CONTROL_JOB_TYPES
     # An agent running several jobs at once asks only for what it has a free slot for.
     # Intersected with the grant, so the request can narrow the claim and never widen it.
     if want_job_types is not None:
@@ -816,7 +849,7 @@ def set_allowed_job_types(db: Session, agent: RemoteAgent, types) -> RemoteAgent
 
 def record_self_report(db: Session, agent: RemoteAgent, *,
                        agent_version: str = "", job_types=None,
-                       ansible_slots: int = 0) -> None:
+                       ansible_slots: int = 0, control=None) -> None:
     """Store what the agent reported about itself on this lease.
 
     ``agent_version`` was previously written only at enrolment, so an operator who
@@ -850,6 +883,16 @@ def record_self_report(db: Session, agent: RemoteAgent, *,
         if slots != (agent.reported_ansible_slots or 0):
             agent.reported_ansible_slots = slots
             changed = True
+
+    # Agent 2.10+: whether its policy.yaml opts into upgrades and an updater is beside it.
+    # Absent (older agents) leaves both alone, which is NULL: "not reported".
+    if isinstance(control, dict):
+        for column, key in (("control_upgrades", "upgrades_enabled"),
+                            ("control_updater", "updater_present")):
+            value = bool(control.get(key))
+            if getattr(agent, column) is not value:
+                setattr(agent, column, value)
+                changed = True
 
     if changed:
         db.commit()

@@ -340,6 +340,15 @@ MIGRATIONS: tuple = (
                                     ("cidr", "scope", "scope_region", "scope_connection_id",
                                      "scope_workstream", "scope_network")),
                add_column("agent_hosts", "network", "VARCHAR(200)"))),
+    # Remote-agent lifecycle: what the agent reports about its upgrade opt-in and its
+    # updater (2.10+), the dashboard's pause, and the rollout ring. All NULL-able with no
+    # DEFAULT: NULL reads as "not reported" / not paused / the default ring. The release
+    # and rollout tables are new, so create_all makes them.
+    Migration("0005_agent_lifecycle",
+              (add_column("remote_agents", "control_upgrades", "BOOLEAN"),
+               add_column("remote_agents", "control_updater", "BOOLEAN"),
+               add_column("remote_agents", "paused", "BOOLEAN"),
+               add_column("remote_agents", "upgrade_ring", "VARCHAR(16)"))),
 )
 
 

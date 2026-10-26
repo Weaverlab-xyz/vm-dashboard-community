@@ -67,11 +67,21 @@ Every start mints a new, single-use identity, and the bootstrap script spends it
 - **With SPIRE attestation on** (**Let agents attest through SPIRE**, with the dashboard's
   SPIRE server in use), the start does what **Migrate to SPIRE** does: a node entry and a
   join token for this agent's SPIFFE ID. The join token is written to a file, read into the
-  SPIRE agent's environment and deleted from the host. The SPIRE agent keeps its key in
-  memory. This is the recommended model; see
+  SPIRE agent's environment and deleted from the host. The SPIRE agent keeps its node key
+  on the host's disk (`/var/lib/dashboard-agent-host/spire/data`, readable only by the SPIRE agent),
+  so the host attests again after a reboot without a new token; the key rotates with every
+  node SVID renewal. The dashboard agent's own signing key stays in memory. This is the
+  recommended model; see
   [Attesting an agent through SPIRE](spire-attestation.md).
 - **Otherwise** it mints a one-time enrolment code. The agent reads it from a file at
   enrolment, and the script deletes the file two minutes later.
+
+A host started with SPIRE attestation also gets the updater container, and an `upgrades:`
+block in its policy that accepts only images the project's release workflow signed. The
+Agents page can then upgrade or restart it like any other attested agent; see
+[Upgrading and restarting agents centrally](lifecycle.md). A host starts the newest
+release recorded there, pinned by digest, or `chrweav/dashboard-agent:latest` when none is
+recorded. A host started with an enrolment code gets neither.
 
 Stopping the host clears the agent's key and any unused code, so a destroyed host's
 identity is dead. Revoking a deployed agent on the Agents list also takes its host down.

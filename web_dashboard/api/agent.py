@@ -67,6 +67,7 @@ from sqlalchemy.orm import Session
 from ..database import Job, RemoteAgent, User, get_db
 from ..services import (agent_ansible_bundle, agent_ansible_meta, agent_gateway_meta,
                         agent_guard, agent_hypervisor_meta, agent_job_meta,
+                        agent_lifecycle_service, agent_release_service,
                         agent_ps_credential_service, agent_sealing, agent_service,
                         agent_signing, agent_storage_meta, config_service,
                         directory_health_service,
@@ -444,6 +445,10 @@ def _envelope_payload(job_type: str, meta: dict) -> dict:
         # difference between putting a privileged container on a host and taking it away.
         # The deploy key is NOT here — it rides the sealed per-job channel.
         return agent_gateway_meta.envelope_payload(meta)
+    if job_type in agent_lifecycle_service.CONTROL_JOB_TYPES:
+        # Upgrade: repository, digest, version -- exactly what the agent checks against its
+        # policy.yaml before it hands the request to its updater. Restart: nothing.
+        return agent_lifecycle_service.envelope_payload(job_type, meta)
     if job_type == "agent_storage":
         # Carries a filename and, for an upload, its bytes — the only envelope here that
         # does. It does NOT carry a path: the share is named, and the path behind that
@@ -473,6 +478,9 @@ class LeaseRequest(BaseModel):
     # at once). Narrows the claim and can only narrow it: the grant still decides. Absent —
     # every older agent — means anything it is granted, exactly as before.
     want_job_types: Optional[list] = None
+    # Agent 2.10+: {upgrades_enabled, updater_present}. Advisory: it decides what the
+    # Agents page offers, and the host's own policy and updater still decide.
+    control: Optional[dict] = None
 
 
 @router.post("/lease")
@@ -499,7 +507,7 @@ def lease_job(request: Request, body: LeaseRequest = LeaseRequest(),
     try:
         agent_service.record_self_report(
             db, agent, agent_version=body.agent_version, job_types=body.job_types,
-            ansible_slots=body.ansible_slots)
+            ansible_slots=body.ansible_slots, control=body.control)
     except Exception:  # noqa: BLE001 — bookkeeping must never fail a lease
         logger.debug("agent: self-report update failed", exc_info=True)
 
@@ -582,6 +590,9 @@ async def complete(job_id: str, body: CompleteRequest, request: Request,
         raise HTTPException(status_code=400, detail="status must be 'completed' or 'failed'.")
 
     result = body.result or {}
+    status, error = body.status, body.error
+    if job.job_type in agent_lifecycle_service.CONTROL_JOB_TYPES:
+        status, error = agent_lifecycle_service.check_completion(job, status, result, error)
     if job.job_type == "agent_hypervisor" and body.status == "completed":
         # Apply the page, and chain the next one if the agent handed back a cursor.
         # Bounded by MAX_SYNC_PAGES — see hypervisor_sync_service.
@@ -596,8 +607,8 @@ async def complete(job_id: str, body: CompleteRequest, request: Request,
         # learn what else the dashboard manages.
         result = _annotate_findings(db, result)
 
-    applied = agent_service.complete_job(db, agent, job, status=body.status,
-                                         result=result, error=body.error)
+    applied = agent_service.complete_job(db, agent, job, status=status,
+                                         result=result, error=error)
     agent_service.audit(db, agent, "agent.complete", ip=_client_ip(request),
                         details={"job_id": job.id, "status": applied})
 
@@ -1182,6 +1193,13 @@ def _agent_row(agent: RemoteAgent, running: int = 0) -> dict:
         "spiffe_id": agent.spiffe_id or "",
         # How many Config-Management runs it executes at once, as it last reported.
         "ansible_slots": agent_service.ansible_slots(agent),
+        # Lifecycle (agent 2.10+): the host's own opt-in and updater, as it reported them,
+        # the dashboard's pause and ring, and why Upgrade/Restart are unavailable, if so.
+        "control_upgrades": bool(agent.control_upgrades),
+        "control_updater": bool(agent.control_updater),
+        "paused": bool(agent.paused),
+        "upgrade_ring": agent_lifecycle_service.ring(agent),
+        "lifecycle_blocked": agent_lifecycle_service.host_gate(None, agent) or "",
     }
 
 
@@ -1375,7 +1393,14 @@ def list_agents(current_user: User = Depends(require_explicit_permission("agents
             "spire_attest_enabled": config_service.get_bool("spire_attest_enabled"),
             "dashboard_secrets_require_spire": config_service.get_bool(
                 REQUIRE_SPIRE_FOR_SECRETS),
-            "spire_min_agent_version": dashboard_spire.MIN_AGENT_VERSION}
+            "spire_min_agent_version": dashboard_spire.MIN_AGENT_VERSION,
+            # For the "update available" badge: the newest release recorded, if any.
+            "newest_release": _newest_release(db)}
+
+
+def _newest_release(db: Session) -> Optional[dict]:
+    row = agent_release_service.newest(db)
+    return agent_release_service.release_dict(row) if row else None
 
 
 # ── The signing audience ──────────────────────────────────────────────────────
@@ -1461,6 +1486,140 @@ def _load(db: Session, agent_id: str) -> RemoteAgent:
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     return agent
+
+
+# ── Lifecycle: releases and rollouts ──────────────────────────────────────────
+# Also before the ``/{agent_id}`` routes, for the same reason as the audience above.
+# The trust model is docs/platform/spiffe/remote-agents/lifecycle.md: the dashboard picks
+# a signed release; each host's policy.yaml and updater decide whether to run it.
+
+class ReleaseRequest(BaseModel):
+    version: str
+    digest: str
+    # Blank: chrweav/dashboard-agent. A mirror's name for a mirror's digest.
+    repository: str = ""
+    notes: str = ""
+
+
+class ReleaseCheckRequest(BaseModel):
+    tag: str = "latest"
+
+
+class ScheduleFields(BaseModel):
+    """Now, a time, or a change window -- the fields every run form carries."""
+    run_at: str = ""
+    run_timezone: str = ""
+    change_window_id: str = ""
+
+
+class RolloutRequest(ScheduleFields):
+    release_id: str
+
+
+def _schedule(db: Session, body: ScheduleFields) -> dict:
+    from ..services import change_window_service
+    return change_window_service.schedule_kwargs(
+        db, run_at=body.run_at, run_timezone=body.run_timezone,
+        change_window_id=body.change_window_id)
+
+
+@admin_router.get("/releases")
+def list_releases(current_user: User = Depends(require_explicit_permission("agents", "read")),
+                  db: Session = Depends(get_db)):
+    return {"releases": [agent_release_service.release_dict(r)
+                         for r in agent_release_service.list_releases(db)],
+            "repository": agent_lifecycle_service.DEFAULT_REPOSITORY}
+
+
+@admin_router.post("/releases", status_code=201)
+def add_release(body: ReleaseRequest, request: Request,
+                current_user: User = Depends(require_explicit_permission("agents", "write")),
+                db: Session = Depends(get_db)):
+    """Record a release by hand: a version and the digest of its image (a mirror's, on
+    an air-gapped site). Not verified here; each host's updater verifies the signature."""
+    try:
+        row = agent_release_service.add(db, version=body.version, digest=body.digest,
+                                        repository=body.repository, notes=body.notes,
+                                        actor=current_user.username)
+    except agent_lifecycle_service.LifecycleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    job_service.log_audit(db, current_user.username, "agent.release_add",
+                          ip_address=_client_ip(request),
+                          details={"version": row.version, "digest": row.digest,
+                                   "repository": row.repository})
+    return agent_release_service.release_dict(row)
+
+
+@admin_router.post("/releases/check")
+def check_releases(body: ReleaseCheckRequest, request: Request,
+                   current_user: User = Depends(require_explicit_permission("agents", "write")),
+                   db: Session = Depends(get_db)):
+    """Record what Docker Hub serves for a tag (default ``latest``). Best effort: a
+    dashboard with no route to Docker Hub gets a 502 saying to add the release by hand."""
+    tag = (body.tag or "latest").strip()
+    if not re.match(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$", tag):
+        raise HTTPException(status_code=400, detail="not an image tag")
+    try:
+        row = agent_release_service.check_registry(db, actor=current_user.username, tag=tag)
+    except agent_lifecycle_service.LifecycleError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    job_service.log_audit(db, current_user.username, "agent.release_check",
+                          ip_address=_client_ip(request),
+                          details={"tag": tag, "version": row.version, "digest": row.digest})
+    return agent_release_service.release_dict(row)
+
+
+@admin_router.delete("/releases/{release_id}")
+def delete_release(release_id: str, request: Request,
+                   current_user: User = Depends(require_explicit_permission("agents", "write")),
+                   db: Session = Depends(get_db)):
+    row = agent_release_service.get(db, release_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Release not found.")
+    version = row.version
+    agent_release_service.delete(db, row)
+    job_service.log_audit(db, current_user.username, "agent.release_delete",
+                          ip_address=_client_ip(request), details={"version": version})
+    return {"detail": f"Release {version} removed."}
+
+
+@admin_router.get("/rollouts")
+def list_rollouts(current_user: User = Depends(require_explicit_permission("agents", "read")),
+                  db: Session = Depends(get_db)):
+    from ..database import AgentRollout
+    rows = db.query(AgentRollout).order_by(AgentRollout.created_at.desc()).limit(20).all()
+    return {"rollouts": [agent_lifecycle_service.rollout_dict(db, r) for r in rows]}
+
+
+@admin_router.post("/rollouts", status_code=201)
+def start_rollout(body: RolloutRequest, request: Request,
+                  current_user: User = Depends(require_explicit_permission("agents", "write")),
+                  db: Session = Depends(get_db)):
+    """Upgrade every eligible agent to a release: the canary ring first, the rest once
+    every canary has come up on it. Any failure stops the rollout."""
+    release = agent_release_service.get(db, body.release_id)
+    if release is None:
+        raise HTTPException(status_code=404, detail="Release not found.")
+    rollout = agent_lifecycle_service.start_rollout(
+        db, release, actor=current_user.username, schedule=_schedule(db, body),
+        change_window_id=body.change_window_id)
+    out = agent_lifecycle_service.rollout_dict(db, rollout)
+    job_service.log_audit(db, current_user.username, "agent.rollout",
+                          ip_address=_client_ip(request),
+                          details={"rollout": rollout.id, "version": release.version,
+                                   "jobs": len(out["jobs"]), "skipped": len(out["skipped"])})
+    return out
+
+
+@admin_router.get("/rollouts/{rollout_id}")
+def get_rollout(rollout_id: str,
+                current_user: User = Depends(require_explicit_permission("agents", "read")),
+                db: Session = Depends(get_db)):
+    from ..database import AgentRollout
+    row = db.query(AgentRollout).filter(AgentRollout.id == rollout_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Rollout not found.")
+    return agent_lifecycle_service.rollout_dict(db, row)
 
 
 @admin_router.get("/{agent_id}")
@@ -1664,6 +1823,8 @@ class AgentUpdateRequest(BaseModel):
     allowed_job_types: Optional[list] = None
     site: Optional[str] = None
     description: Optional[str] = None
+    # "canary" upgrades first in a rollout; "default" the rest.
+    upgrade_ring: Optional[str] = None
 
 
 @admin_router.patch("/{agent_id}")
@@ -1683,13 +1844,96 @@ def update_agent(agent_id: str, body: AgentUpdateRequest, request: Request,
         agent.site = str(body.site).strip()[:64]
     if body.description is not None:
         agent.description = str(body.description).strip()[:255]
+    if body.upgrade_ring is not None:
+        try:
+            agent_lifecycle_service.set_ring(db, agent, str(body.upgrade_ring))
+        except agent_lifecycle_service.LifecycleError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
     db.commit()
     db.refresh(agent)
     job_service.log_audit(db, current_user.username, "agent.update",
                           ip_address=_client_ip(request),
                           details={"agent": agent.name,
-                                   "allowed_job_types": agent.allowed_job_types_list})
+                                   "allowed_job_types": agent.allowed_job_types_list,
+                                   "upgrade_ring": agent_lifecycle_service.ring(agent)})
     return _agent_row(agent)
+
+
+# ── Lifecycle: one agent ──────────────────────────────────────────────────────
+
+class UpgradeRequest(ScheduleFields):
+    release_id: str
+    # A downgrade. The agent's own policy.yaml must allow it too (`allow_downgrade`).
+    force: bool = False
+
+
+def _lifecycle_job(db: Session, request: Request, current_user: User, agent: RemoteAgent,
+                   action: str, enqueue) -> dict:
+    try:
+        job = enqueue()
+    except agent_lifecycle_service.LifecycleError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    job_service.log_audit(db, current_user.username, f"agent.{action}",
+                          ip_address=_client_ip(request),
+                          details={"agent": agent.name, "job_id": job.id,
+                                   **{k: v for k, v in (job.metadata_dict or {}).items()
+                                      if k in ("version", "from_version", "digest")}})
+    return {"job_id": job.id, "status": job.status,
+            "scheduled_for": job.scheduled_for.isoformat() if job.scheduled_for else None}
+
+
+@admin_router.post("/{agent_id}/upgrade", status_code=202)
+def upgrade_agent(agent_id: str, body: UpgradeRequest, request: Request,
+                  current_user: User = Depends(require_explicit_permission("agents", "write")),
+                  db: Session = Depends(get_db)):
+    """Queue an upgrade to a recorded release, now or into a change window."""
+    agent = _load(db, agent_id)
+    release = agent_release_service.get(db, body.release_id)
+    if release is None:
+        raise HTTPException(status_code=404, detail="Release not found.")
+    schedule = _schedule(db, body)
+    return _lifecycle_job(db, request, current_user, agent, "upgrade",
+                          lambda: agent_lifecycle_service.upgrade(
+                              db, agent, release, actor=current_user.username,
+                              schedule=schedule, force=body.force))
+
+
+@admin_router.post("/{agent_id}/restart", status_code=202)
+def restart_agent(agent_id: str, request: Request, body: ScheduleFields = ScheduleFields(),
+                  current_user: User = Depends(require_explicit_permission("agents", "write")),
+                  db: Session = Depends(get_db)):
+    """Queue a restart. Under SPIRE this also rotates the agent's key."""
+    agent = _load(db, agent_id)
+    schedule = _schedule(db, body)
+    return _lifecycle_job(db, request, current_user, agent, "restart",
+                          lambda: agent_lifecycle_service.restart(
+                              db, agent, actor=current_user.username, schedule=schedule))
+
+
+def _set_paused(agent_id: str, paused: bool, request: Request, current_user: User,
+                db: Session) -> dict:
+    agent = _load(db, agent_id)
+    agent_lifecycle_service.set_paused(db, agent, paused)
+    job_service.log_audit(db, current_user.username,
+                          "agent.pause" if paused else "agent.resume",
+                          ip_address=_client_ip(request), details={"agent": agent.name})
+    return _agent_row(agent)
+
+
+@admin_router.post("/{agent_id}/pause")
+def pause_agent(agent_id: str, request: Request,
+                current_user: User = Depends(require_explicit_permission("agents", "write")),
+                db: Session = Depends(get_db)):
+    """Hand this agent no new jobs. It keeps heartbeating; jobs it holds finish. Any
+    agent, SPIRE or not: nothing runs on its host."""
+    return _set_paused(agent_id, True, request, current_user, db)
+
+
+@admin_router.post("/{agent_id}/resume")
+def resume_agent(agent_id: str, request: Request,
+                 current_user: User = Depends(require_explicit_permission("agents", "write")),
+                 db: Session = Depends(get_db)):
+    return _set_paused(agent_id, False, request, current_user, db)
 
 
 @admin_router.delete("/{agent_id}")
@@ -1712,8 +1956,11 @@ def revoke(agent_id: str, request: Request,
                           ip_address=_client_ip(request),
                           details={"agent": agent.name, "jobs_cleared": affected,
                                    **({"host_stop_job": stop_job} if stop_job else {})})
+    left = getattr(agent, "spire_left_behind", None) or []
     return {"detail": f"Agent '{agent.name}' revoked.", "jobs_cleared": affected,
-            "host_stop_job": stop_job}
+            "host_stop_job": stop_job,
+            # SPIRE registration that could not be removed (server down): remove by hand.
+            "spire_left_behind": left}
 
 
 @admin_router.delete("/{agent_id}/record")
