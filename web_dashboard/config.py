@@ -439,6 +439,11 @@ class Settings(BaseSettings):
     # audience's host on 8081, which is right when 8081 is published beside the agent
     # gateway (compose, an ACA TCP port mapping); an ECS NLB has its own name.
     spire_server_address: str = ""
+    # Cloud node attestation for deployed agents (services/dashboard_spire.cloud_attestor).
+    spire_cloud_attest_aws: bool = False
+    spire_cloud_attest_azure: bool = False
+    spire_cloud_attest_gcp: bool = False
+    spire_azure_tenant_domain: str = ""
     # Release dashboard-held credentials (/jobs/{id}/secret, /gateway-key, /ansible-bundle)
     # only to agents that attested through SPIRE. Off by default: Ed25519 agents keep them.
     dashboard_secrets_require_spire: bool = False

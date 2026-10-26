@@ -972,6 +972,15 @@ class SpiffeFeatureConfig(BaseModel):
     spire_server_container: str = "vmdash-spire-server"
     # Where agents dial it: "host" or "host:port"; blank = the agent audience host, 8081.
     spire_server_address: str = ""
+    # Cloud node attestation for the agents the dashboard deploys: tick a cloud once this
+    # server enables its NodeAttestor (aws_iid / azure_imds / gcp_iit). A host in that cloud
+    # then proves itself with the cloud's instance identity, no join token in its
+    # user-data. Unticked, it keeps join tokens. docs/platform/spiffe/remote-agents/deploying.md
+    spire_cloud_attest_aws: bool = False
+    spire_cloud_attest_azure: bool = False
+    spire_cloud_attest_gcp: bool = False
+    # The tenant domain the azure_imds plugin is keyed by (both sides), e.g. contoso.com.
+    spire_azure_tenant_domain: str = ""
     # The dashboard's own SPIFFE identity: token files for federated cloud access.
     dashboard_spiffe_identity_enabled: bool = False
     dashboard_spiffe_issuer: str = ""

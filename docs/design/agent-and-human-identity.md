@@ -66,14 +66,15 @@ The SPIRE agent has to prove which node it is on before it gets an SVID. How it 
 | Where the agent runs | Node attestor | Agent KeyManager | Private key at rest? | Restart behavior |
 |---|---|---|---|---|
 | Bare Docker host, no platform identity | `join_token` | `disk` | **Yes.** The SPIRE agent's own node key, rotated with each node SVID (`agent_ttl`, 168h in the shipped server config) and revocable with `spire-server agent ban` | Resumes from disk; the token is already spent |
-| AWS EC2 | `aws_iid` | `memory` | **No** | Re-attests from the instance identity document |
-| Azure VM | `azure_imds` (`azure_msi` on older SPIRE) | `memory` | **No** | Re-attests from IMDS |
-| GCP VM | `gcp_iit` | `memory` | **No** | Re-attests from the instance identity token |
+| AWS EC2 | `aws_iid` | `disk` | **Yes**, the node key, as above; no secret is ever *given* to the host | Resumes from disk. Trust-on-first-use: the same instance cannot attest twice |
+| Azure VM | `azure_imds` (`azure_msi` on older SPIRE) | `disk` | **Yes**, as for AWS | Resumes from disk; trust-on-first-use |
+| GCP VM | `gcp_iit` | `disk` | **Yes**, as for AWS | Resumes from disk; trust-on-first-use |
 | Pod on a cluster the SPIRE server can reach | `k8s_psat` | `memory` | **No** | Re-attests from a projected SA token |
 | Host with a TPM | `tpm_devid` (or a TPM plugin) | `memory` | **No**; the key is in the TPM | Re-attests from the TPM |
 
 - With `join_token` the SPIRE agent still stores a key. That is better than an Ed25519 `identity.json`: the key rotates with every node SVID (a week at most, with the shipped `agent_ttl`) instead of living indefinitely, and can be revoked centrally. But it is not zero, and the docs must not say it is.
 - `join_token` + `memory` is not an option. The token is single-use, so the first restart would leave the agent unable to attest. (Dashboard-deployed cloud hosts shipped this pairing for a while; they now use `disk`.)
+- The three cloud attestors are trust-on-first-use too: SPIRE 1.15's docs say "for any given node, attestation may occur only once". So `memory` is not an option for them either, despite what this table said until 2026-10. What they buy over a join token is that **nothing secret is handed to the host**: the cloud vouches for the VM, so there is no token in user-data to read and no 15-minute window to race. A dashboard-deployed host is a new instance on every start, so trust-on-first-use never bites it.
 - `k8s_psat` needs the SPIRE server to call that cluster's TokenReview API. That works for a cluster the dashboard already manages. It does not work for an on-prem cluster behind a firewall, which is exactly where remote agents live. For those, the agent is a `join_token` host, or a TPM host.
 
 **2. SPIRE agent ↔ server traffic is mTLS gRPC. TLS-inspecting proxies break it.**
@@ -307,7 +308,7 @@ k3s takes one `--authentication-config` file. That file holds a list of JWT auth
 - One click: a one-use join token for `spiffe://<td>/node/<agent-id>`, the workload entry `spiffe://<td>/agent/<agent-id>` selecting `unix:uid:10001` under it (reused if it exists), the trust domain registered from `bundle show -format spiffe`, and the binding. The modal shows the token once, the `.env` lines and the trust bundle for `spire/bootstrap.crt`.
 - The trust domain row is owned (`created_by="dashboard-spire"`) and re-synced daily by the existing SPIRE refresh loop, because SPIRE rotates JWT keys within `ca_ttl`. A row a SPIRE lab or an admin registered under the same name is never overwritten.
 - The banner lists active Ed25519 agents when attestation is on, says "update the image first" below agent 2.6.0, and is dismissible per agent.
-- Not automated: cloud node attestation (`aws_iid`, `azure_imds`, `gcp_iit`), whose node SPIFFE ID is derived from the instance and is unknown until it attests. Those entries are still created by hand.
+- Cloud node attestation (`aws_iid`, `azure_imds`, `gcp_iit`) is automated for agents the dashboard deploys (**Settings → SPIFFE and SPIRE**, per cloud). The attested node's SPIFFE ID is derived from the instance and unknown until it attests, so the agent keeps its parent `spiffe://<td>/node/<agent-id>` as a **node entry** whose selectors pin the one VM (`dashboard_spire.register_cloud_node`): the instance id on AWS; project, zone and name on GCP; subscription, resource group and name on Azure. Stopping or revoking evicts whatever attested as that VM (`agent list -selector`) and deletes the entry. For an agent built by hand on a cloud VM, the node entry is still the operator's to create.
 
 **Also built:** central credential storage as the recommended model for attested agents.
 - The existing per-job release routes (`/api/agent/jobs/{id}/secret`, `/gateway-key`, `/ansible-bundle`) were already scoped to the job, sealed per fetch and audited. What held the docs back from recommending them was that an Ed25519 agent's request ability is a file on the host. Attestation removes that file, so the docs now recommend `dashboard_secret` (ideally a `ps_account://` reference) for attested agents and treat host-side storage as the fallback.

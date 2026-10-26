@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 from datetime import datetime, timedelta
 from typing import Optional
@@ -320,7 +321,14 @@ def register_workload(node: str, spiffe_id: str, uid: int,
                       "-ttl", str(JOIN_TOKEN_TTL_S)).get("value") or "")
     if not token:
         raise DashboardSpireError("the SPIRE server minted no join token")
+    ensure_workload_entry(node, spiffe_id, uid, jwt_ttl_s, federates_with)
+    return token
 
+
+def ensure_workload_entry(node: str, spiffe_id: str, uid: int,
+                          jwt_ttl_s: int = JWT_SVID_TTL_S, federates_with=()) -> None:
+    """The workload entry ``spiffe_id`` selecting ``unix:uid:<uid>`` under ``node``,
+    created only if absent."""
     if not _entry_exists(spiffe_id):
         fed = [arg for td in federates_with for arg in ("-federatesWith", f"spiffe://{td}")]
         res = _json("entry", "create", "-parentID", node, "-spiffeID", spiffe_id,
@@ -332,7 +340,127 @@ def register_workload(node: str, spiffe_id: str, uid: int,
             raise DashboardSpireError(
                 f"the SPIRE server refused the workload entry: "
                 f"{status.get('message') or 'no result returned'}")
-    return token
+
+
+# ── cloud node attestation (dashboard-deployed agents) ────────────────────────
+# docs/platform/spiffe/remote-agents/deploying.md, "Identity". A deployed host in a cloud
+# whose NodeAttestor this server enables proves itself with the VM's own identity document
+# instead of a join token. The attested node's SPIFFE ID (…/spire/agent/<plugin>/…) is
+# not known until the VM exists, so the agent keeps its usual parent
+# spiffe://<td>/node/<agent-id> as a NODE ENTRY: one that matches the attested node by
+# selectors pinning that one VM. Everything under it (the workload entry, the binding,
+# attestation) is unchanged.
+
+#: The dashboard's cloud names -> the NodeAttestor plugin, and the setting that says the
+#: operator enabled it on this server (the CLI cannot list a server's plugins).
+CLOUD_ATTESTORS = {"aws": ("aws_iid", "spire_cloud_attest_aws"),
+                   "azure": ("azure_imds", "spire_cloud_attest_azure"),
+                   "gcp": ("gcp_iit", "spire_cloud_attest_gcp")}
+
+_SELECTOR_VALUE = re.compile(r"^[A-Za-z0-9._()-]{1,128}$")
+
+
+def cloud_attestor(cloud: str) -> str:
+    """The NodeAttestor a deployed host in ``cloud`` attests with, or "" for a join token."""
+    plugin, setting = CLOUD_ATTESTORS.get(cloud, ("", ""))
+    return plugin if plugin and config_service.get_bool(setting) else ""
+
+
+def cloud_node_selectors(cloud: str, *, instance_id: str = "", name: str = "",
+                         project: str = "", zone: str = "", subscription: str = "",
+                         resource_group: str = "") -> list:
+    """The selectors that pin one VM, in the formats the SPIRE 1.15 plugins emit
+    (pkg/server/plugin/nodeattestor/{awsiid,gcpiit,azureimds}).
+
+    AWS: the instance id, from the identity document. GCP: project, zone and instance
+    name, all in the identity token itself. Azure: subscription, resource group and VM
+    name, which the plugin reads from the Azure API. Each value must be plain, so a
+    selector can never be widened by what it contains."""
+    if cloud == "aws":
+        pairs = [("aws_iid", "instance:id", instance_id)]
+    elif cloud == "gcp":
+        pairs = [("gcp_iit", "project-id", project), ("gcp_iit", "zone", zone),
+                 ("gcp_iit", "instance-name", name)]
+    elif cloud == "azure":
+        pairs = [("azure_imds", "subscription-id", subscription),
+                 ("azure_imds", "resource-group", resource_group),
+                 ("azure_imds", "vm-name", name)]
+    else:
+        raise DashboardSpireError(f"no cloud node attestor for {cloud!r}")
+    for _, key, value in pairs:
+        if not _SELECTOR_VALUE.match(str(value or "")):
+            raise DashboardSpireError(f"cannot pin the VM: its {key} is {value!r}")
+    return [f"{plugin}:{key}:{value}" for plugin, key, value in pairs]
+
+
+def _entries_for(spiffe_id: str) -> list:
+    return _json("entry", "show", "-spiffeID", spiffe_id).get("entries") or []
+
+
+def _delete_entries(spiffe_id: str) -> list:
+    problems = []
+    for entry in _entries_for(spiffe_id):
+        res = _json("entry", "delete", "-entryID", str(entry.get("id") or ""))
+        results = res.get("results") or []
+        status = (results[0].get("status") or {}) if results else {}
+        if results and int(status.get("code") or 0) != 0:
+            problems.append(f"entry {entry.get('id')}: {status.get('message')}")
+    return problems
+
+
+def register_cloud_node(node: str, selectors: list) -> None:
+    """Make ``node`` (spiffe://<td>/node/<agent-id>) a node entry matching exactly the VM
+    these selectors pin, replacing whatever entry it had (a previous start's VM, or a join
+    token's). Raises DashboardSpireError."""
+    problems = _delete_entries(node)
+    if problems:
+        raise DashboardSpireError("could not replace the node entry: " + "; ".join(problems))
+    args = ["entry", "create", "-node", "-spiffeID", node]
+    for sel in selectors:
+        args += ["-selector", sel]
+    res = _json(*args)
+    results = res.get("results") or []
+    status = (results[0].get("status") or {}) if results else {}
+    if not results or int(status.get("code") or 0) != 0:
+        raise DashboardSpireError(
+            f"the SPIRE server refused the node entry: "
+            f"{status.get('message') or 'no result returned'}")
+
+
+def forget_cloud_node(node: str) -> list:
+    """Evict the attested VM(s) ``node``'s node entry matches, then delete that entry.
+    Best-effort: returns what could not be done. A no-op for a join-token agent, whose
+    ``node`` is an attested agent rather than an entry (remove_workload evicts that)."""
+    problems = []
+    try:
+        entries = _entries_for(node)
+    except DashboardSpireError as exc:
+        return [f"node entry {node}: {exc}"]
+    for entry in entries:
+        selectors = [f"{s.get('type')}:{s.get('value')}" for s in entry.get("selectors") or []]
+        if not selectors:
+            continue
+        args = ["agent", "list"]
+        for sel in selectors:
+            args += ["-selector", sel]
+        try:
+            agents = _json(*args).get("agents") or []
+        except DashboardSpireError as exc:
+            problems.append(f"agents matching {node}: {exc}")
+            agents = []
+        for found in agents:
+            ident = found.get("id") or {}
+            attested = f"spiffe://{ident.get('trust_domain')}{ident.get('path')}"
+            try:
+                _cli("agent", "evict", "-spiffeID", attested)
+            except DashboardSpireError as exc:
+                if "not found" not in str(exc).lower():
+                    problems.append(f"node {attested}: {exc}")
+    try:
+        problems += _delete_entries(node)
+    except DashboardSpireError as exc:
+        problems.append(f"node entry {node}: {exc}")
+    return problems
 
 
 def forget_agent(agent_id: str, spiffe_id: str) -> list:
@@ -352,7 +480,10 @@ def forget_agent(agent_id: str, spiffe_id: str) -> list:
     workload, node = ids_for(parts[2], agent_id)
     if spiffe_id != workload:
         return []
-    problems = remove_workload(workload, node)
+    # A deployed agent attesting with its cloud's identity: evict its VM and drop the
+    # node entry first. Nothing for a join-token agent.
+    problems = forget_cloud_node(node)
+    problems += remove_workload(workload, node)
     if problems:
         logger.warning("SPIRE cleanup for agent %s left: %s", agent_id, "; ".join(problems))
     return problems
@@ -490,17 +621,25 @@ def reserved_path(spiffe_id: str, td: str) -> bool:
                for base in (p.rstrip("/") for p in RESERVED_PREFIXES))
 
 
-def migrate_agent(db: Session, agent) -> dict:
+def migrate_agent(db: Session, agent, *, join_token: bool = True) -> dict:
     """Everything an agent needs to attest through the dashboard's SPIRE server.
 
     Idempotent: a second run reuses the workload entry and only mints a new join token
     (the old one is spent, or expires in fifteen minutes). Binding does not cut the
     agent's current key off — that happens when it first attests (agent_service.attest).
+
+    ``join_token=False`` is a deployed host attesting with its cloud's instance identity:
+    no token is minted, and the caller makes the node a node entry once the VM exists
+    (register_cloud_node). ``join_token`` in the result is then "".
     """
     from . import agent_service
     td = trust_domain()
     sid, node = ids_for(td, agent.id)
-    token = register_workload(node, sid, AGENT_UID)
+    if join_token:
+        token = register_workload(node, sid, AGENT_UID)
+    else:
+        ensure_workload_entry(node, sid, AGENT_UID)
+        token = ""
     sync_trust_domain(db, td)
     agent_service.bind_spiffe_id(db, agent, sid)
     return {"trust_domain": td, "spiffe_id": sid, "node_spiffe_id": node,

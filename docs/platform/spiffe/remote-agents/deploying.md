@@ -62,19 +62,63 @@ attesting, it also starts the SPIRE agent and SPIFFE helper, as
 
 ## Identity
 
-Every start mints a new, single-use identity, and the bootstrap script spends it:
+Every start mints a new identity for that one host. Which kind depends on the settings:
 
-- **With SPIRE attestation on** (**Let agents attest through SPIRE**, with the dashboard's
-  SPIRE server in use), the start does what **Migrate to SPIRE** does: a node entry and a
-  join token for this agent's SPIFFE ID. The join token is written to a file, read into the
-  SPIRE agent's environment and deleted from the host. The SPIRE agent keeps its node key
-  on the host's disk (`/var/lib/dashboard-agent-host/spire/data`, readable only by the SPIRE agent),
-  so the host attests again after a reboot without a new token; the key rotates with every
-  node SVID renewal. The dashboard agent's own signing key stays in memory. This is the
-  recommended model; see
-  [Attesting an agent through SPIRE](spire-attestation.md).
-- **Otherwise** it mints a one-time enrolment code. The agent reads it from a file at
-  enrolment, and the script deletes the file two minutes later.
+- **SPIRE with the cloud's instance identity** (recommended). This applies when **Let agents
+  attest through SPIRE** is on, the dashboard's SPIRE server is in use, and the host's cloud
+  is ticked under **Settings → SPIFFE and SPIRE → Deployed agents attest with their cloud's
+  instance identity**.
+  - **How it proves itself.** The host's SPIRE agent uses the VM's own identity document:
+    `aws_iid`, `azure_imds` or `gcp_iit`. No secret is written into the user-data at all.
+  - **How the dashboard pins the VM.** Once the VM exists, the dashboard makes this agent's
+    node, `spiffe://<td>/node/<agent-id>`, a node entry that matches only that VM:
+    - **AWS:** its instance id;
+    - **Google Cloud:** its project, zone and name;
+    - **Azure:** its subscription, resource group and name.
+
+    Nothing else gets the agent's identity, even another VM in the same account.
+  - **When the host stops,** the dashboard evicts that VM's node and deletes the entry.
+- **SPIRE with a join token.** This applies when SPIRE attestation is on but the cloud isn't
+  ticked.
+  - The start does what **Migrate to SPIRE** does: it creates a node entry and a join token
+    for this agent's SPIFFE ID.
+  - The join token is written to a file, read into the SPIRE agent's environment, and
+    deleted from the host.
+- **Otherwise, a one-time enrolment code.** The agent reads it from a file at enrolment, and
+  the script deletes the file two minutes later.
+
+In both SPIRE modes:
+- **The node key is on disk.** The SPIRE agent keeps it at
+  `/var/lib/dashboard-agent-host/spire/data`, readable only by the SPIRE agent.
+  - Every one of these node attestors attests a node **once**. A join token is single-use,
+    and the three cloud attestors are trust-on-first-use.
+  - So the key on disk is what lets the host come back after a reboot.
+  - It rotates with every node SVID renewal.
+- **Each start is a new VM,** so each start is a first attestation.
+- **The agent's own signing key stays in memory.**
+
+See [Attesting an agent through SPIRE](spire-attestation.md).
+
+### Turning on a cloud's instance identity
+
+Two steps, in this order. **Enable the plugin on the SPIRE server first**
+(`examples/spire-server/server.conf`, or `examples/cloud-spire/server.conf` on a managed
+runtime), restart the server, and **then** tick the cloud. The dashboard can't see the
+server's plugins, so a cloud ticked without its plugin deploys hosts that never come
+online. The start then fails after 15 minutes, naming the attestor to check.
+
+| Cloud | Server `NodeAttestor` | Access the SPIRE server needs | Setting |
+|---|---|---|---|
+| AWS | `aws_iid` with `skip_block_device = true` and `disable_instance_profile_selectors = true` | Its own read-only identity allowed `ec2:DescribeInstances`, from environment variables or an instance role. Never the dashboard's keys. | Tick **AWS**. |
+| Google Cloud | `gcp_iit` with `projectid_allow_list = ["<project>"]` | None: the identity token itself carries the project, zone and name that are checked. | Tick **Google Cloud**. |
+| Azure | `azure_imds` with a `tenants` map keyed by the tenant **domain**, with `restrict_to_subscriptions` | An app registration with **Reader** on the subscription (`secret_auth`), or a managed identity (the default credential chain). | Tick **Azure** and set **Azure tenant domain** to the same key. |
+
+On the host, the SPIRE agent shares the host's network, because it has to reach the
+instance metadata service. Under IMDSv2's default hop limit of 1, a container on the Docker
+bridge can't. It listens on nothing: its API is a unix socket.
+
+**The SPIRE server must reach the cloud APIs it calls** (AWS and Azure), and every agent host
+must still reach the SPIRE server, as with join tokens.
 
 A host started with SPIRE attestation also gets the updater container, and an `upgrades:`
 block in its policy that accepts only images the project's release workflow signed. The

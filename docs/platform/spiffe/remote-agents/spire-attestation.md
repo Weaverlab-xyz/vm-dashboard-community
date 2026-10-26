@@ -114,6 +114,14 @@ identity survives a new container. Add the updater and opt in through `policy.ya
 [Upgrading and restarting agents centrally](lifecycle.md). A restart also rotates an
 attested agent's key, and from agent 2.11 so does the agent itself while it runs (below).
 
+## Agents the dashboard deploys into a cloud
+
+A host the dashboard deploys can prove itself with the VM's own identity document instead
+of a join token: `aws_iid`, `azure_imds` or `gcp_iit`. That way no secret is written into
+its user-data. Enable the plugin on the SPIRE server, then tick the cloud under
+**Settings → SPIFFE and SPIRE**. See
+[Deploying an agent into a cloud → Identity](deploying.md#identity).
+
 ## Ongoing checks
 
 Attestation proves who the agent is at each start. After that, the dashboard keeps
