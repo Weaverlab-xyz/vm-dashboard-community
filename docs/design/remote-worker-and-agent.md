@@ -46,7 +46,7 @@ the fallback and for the heavy, bursty jobs.
 | Workload | Worker path today | Agent today | Verdict |
 |---|---|---|---|
 | **Config Management on cloud VMs** (SSH/WinRM): playbooks, plus Windows Arc join and the GCP directory DNS link, which ride the same runner | `ansible_local` → `_dispatch_cloud_runner` → Fargate/ACI/Cloud Run, image `chrweav/ansible-winrm` | **Yes, already.** Config routes send a VPC's VMs to an agent in it (`agent_ansible`, run kind `vm`). Dashboard-deployed agents create their own routes | **Move: agent-first** |
-| **Localhost plays against databases** | `ansible_cloud_run` → in-cloud runner, image `chrweav/ansible-cloud` | **Partly.** Run kind `database` exists, but only for database rows bound to an agent (`row.agent_id`). Cloud-provisioned databases have no route | **Move, after a small change** ([phase 2](#phase-2-cloud-databases-through-routes)) |
+| **Localhost plays against databases** | `ansible_cloud_run` → in-cloud runner, image `chrweav/ansible-cloud` | **Partly.** Run kind `database` exists, but only for database rows bound to an agent (`row.agent_id`). Cloud-provisioned databases have no route | **Move, after a small change** ([phase 2](#phase-2-databases-in-a-cloud-through-routes)) |
 | **Localhost plays against Kubernetes clusters** | `ansible_cloud_run`, kubeconfig in `KUBECONFIG_B64` | **No.** `target_kind == "k8s"` is refused by name. The bundle forbids `ansible_connection: local` and `ansible_*` variables, because kubectl and helm are on the image's PATH | **Owned agents only** ([phase 3](#phase-3-kubernetes-on-dashboard-owned-agents)) |
 | **Kubernetes operations** (`kubectl`/`helm`): ESO install, Entitle agent, SA token mints, RBAC, Rancher import, Entra/impersonator bindings | `k8s_runner_service.run`, image `dtzar/helm-kubectl`, a cluster-admin kubeconfig in the environment | **No.** No handler and no policy key launches a kubectl image | **Owned agents only** (phase 3) |
 | **Rancher API through a runner** | `rancher_api_runner`: one-shot `curl -K -` from inside the node's cloud, to get past a TLS-inspecting proxy | **No** | **Leave**, or fold into phase 3 |
@@ -224,7 +224,7 @@ heavy, bursty work.
      tmpfs, and the local runner writes a host temp directory. Either mount a tmpfs or
      reword the claim.
 
-### Phase 2: cloud databases through routes
+### Phase 2: databases in a cloud, through routes
 
 - **The change.** Let config routes cover cloud-provisioned databases, as they cover cloud
   VMs: match by the database's private address within its cloud scope, and send the run as
