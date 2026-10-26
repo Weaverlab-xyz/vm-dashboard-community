@@ -159,7 +159,7 @@ def test_a_control_job_is_refused_without_the_hosts_opt_in():
 # ── the handoff ───────────────────────────────────────────────────────────────
 
 def _alive():
-    with open(os.path.join(agent.CONTROL_DIR, "updater.alive"), "w") as fh:
+    with open(os.path.join(agent.CONTROL_DIR, "updater.alive"), "w", encoding="utf-8") as fh:
         fh.write("1")
 
 
@@ -349,7 +349,7 @@ def test_the_lease_reports_whether_this_host_can_be_managed():
 
 def test_the_agent_version_is_2_10():
     assert agent.AGENT_VERSION == "2.10.0"
-    src = open(os.path.join(_ROOT, "runners", "agent", "Dockerfile")).read()
+    src = open(os.path.join(_ROOT, "runners", "agent", "Dockerfile"), encoding="utf-8").read()
     assert "LABEL dashboard-agent.version=$AGENT_VERSION" in src
 
 
