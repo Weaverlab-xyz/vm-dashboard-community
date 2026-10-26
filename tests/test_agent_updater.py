@@ -46,7 +46,9 @@ def _status():
 class FakeDocker:
     """In-memory stand-in for :class:`updater.DockerAPI`, recording every call."""
 
-    def __init__(self, *, new_version="2.11.0", new_exits=False, ready_on_start=True):
+    def __init__(self, *, new_version="2.11.0", new_exits=False, ready_on_start=True,
+                 new_restarts=False):
+        self.new_restarts = new_restarts
         self.calls = []
         self.repository = REPO
         self.new_version = new_version
@@ -107,8 +109,13 @@ class FakeDocker:
         c["State"] = {"Running": True, "Status": "running"}
         if key == "new" and self.new_exits:
             c["State"] = {"Running": False, "Status": "exited", "ExitCode": 1}
+        if key == "new" and self.new_restarts:
+            # What Docker shows a crash-looping container under unless-stopped.
+            c["State"] = {"Running": True, "Status": "running", "Restarting": False,
+                          "ExitCode": 3}
+            c["RestartCount"] = 2
         req = upd.read_json("request.json") or {}
-        if self.ready_on_start and not (key == "new" and self.new_exits):
+        if self.ready_on_start and not (key == "new" and (self.new_exits or self.new_restarts)):
             version = self.new_version if key == "new" else req.get("version")
             with open(os.path.join(upd.CONTROL_DIR, "ready"), "w", encoding="utf-8") as fh:
                 json.dump({"job_id": req.get("job_id"), "version": version}, fh)
@@ -216,6 +223,17 @@ def test_a_new_agent_that_exits_is_rolled_back_at_once():
     docker = FakeDocker(new_exits=True)
     assert _run(docker, _request()) == "rolled_back"
     assert "exited (code 1)" in _status()["reason"]
+    assert docker.containers["old"]["State"]["Running"]
+
+
+def test_a_new_agent_in_a_restart_loop_is_rolled_back_at_once():
+    """The successor inherits unless-stopped, so a build that crashes at start is
+    relaunched, never left exited. Found end to end: the rollback waited out the timeout."""
+    _ctl()
+    docker = FakeDocker(new_restarts=True)
+    assert _run(docker, _request()) == "rolled_back"
+    # Not "did not report ready": that reason is the timeout, which this must not wait for.
+    assert "was restarting" in _status()["reason"], _status()
     assert docker.containers["old"]["State"]["Running"]
 
 
