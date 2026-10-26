@@ -31,3 +31,6 @@ a6b5400d5534ab9c56da1b346cc8e96444fe0abf:docs/integrations/vmware.md:curl-auth-u
 # 165 lines apart, that the private-key rule reads as one key once the Settings split put
 # them in a new file in a single commit. No key material.
 2d26805f4b1e3126091d36495d7980db5a839c70:web_dashboard/templates/settings/panels/password_safe.html:private-key:820
+# Checked 2026-10-26: a made-up kubeconfig fixture in the agent's redaction test —
+# `client-key-data` is base64 of the literal "KEYDATA12345678". No key material.
+5b470f769042a392162f576923b91fc4112a982a:tests/test_agent_k8s_run.py:generic-api-key:37
