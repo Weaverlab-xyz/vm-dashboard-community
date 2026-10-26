@@ -106,14 +106,15 @@ async def idle_check(env_id: str, window_s: int) -> tuple[bool, str]:
     return await pov_cloud_env.idle_check(CLOUD, env_id, window_s)
 
 
-def holds_login(env_id: str, os_family: str = "") -> bool:
+def holds_login(env_id: str, os_family: str = "", vm_id: str = "") -> bool:
     """Whether :func:`stored_credentials` can answer for a VM of this family. No network.
 
     Optional in the contract. AWS's capability row stays ``stored_credentials: False``,
-    because a Linux guest, or a POV built before the per-POV Windows key, still has its
-    login set by hand -- this is what lets ``pov_resource_broker`` tell those apart.
+    because a stock Linux guest, or a POV built before the per-POV Windows key, still has
+    its login set by hand -- this is what lets ``pov_resource_broker`` tell those apart.
+    ``vm_id`` is what tells a Standard Linux guest, which does have one, from the rest.
     """
-    return pov_cloud_aws.holds_login(env_id, os_family)
+    return pov_cloud_aws.holds_login(env_id, os_family, vm_id)
 
 
 async def stored_credentials(env_id: str, vm_id: str = "") -> list:

@@ -38,6 +38,10 @@ Everything a POV builds goes through the POV pages, which resolve tenants from t
 registry. That is also what keeps every cloud resource inside the auto-delete timer's
 reach.
 
+The images a POV boots are built there too: **POV → Templates → Images** builds the two
+[standard images](public-cloud/images.md) through the same Packer engine `/images` uses,
+without opening that page or its routers.
+
 ### What a cloud template is
 
 Skytap hands you a template as a first-class object: one call against a template id and N
@@ -75,11 +79,12 @@ provision job. Everything that *can* be checked without credentials is checked w
 save, because the alternative is a template that stores cleanly and fails eleven minutes
 into a build with half a network already made.
 
-**Baking a real machine image is deliberately not offered.** It would be the faithful
-analogue of Skytap's instantiate → change → bake, and it is slow, region-locked,
-cloud-specific, and a standing storage bill for every template anyone ever saves. Build
-your images with the Packer and image-promote tooling, and let the template reference
-them.
+**A template does not bake its own image.** Skytap's instantiate → change → bake would
+mean one machine image per template, which is slow, region-locked and a standing storage
+bill for every template anyone saves. Instead a template names one of the two
+[standard images](public-cloud/images.md) — Standard Linux (Ubuntu 24.04) and Standard
+Windows (Server 2022), built once per region on **POV → Templates → Images** — and pick
+them from the image column. The column also takes a literal image id for anything else.
 
 ### What gets created, and what it costs
 
@@ -119,6 +124,7 @@ Each cloud's specifics, and the cost controls, have a page:
 | [The POV suspend schedule](public-cloud/suspend-schedule.md) | you want a POV's cloud resources off outside working hours |
 | [Idle suspend on AWS](public-cloud/idle-suspend.md) | you want an AWS POV suspended when nobody has used it for a while |
 | [The POV control node on a cloud](public-cloud/control-node.md) | you need to know what the control node VM does in a cloud POV, and how to reach it |
+| [Standard POV images](public-cloud/images.md) | you need the Standard Linux or Standard Windows image a cloud template boots |
 
 ### The environment id is derived from the POV name
 

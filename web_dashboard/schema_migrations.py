@@ -374,6 +374,10 @@ MIGRATIONS: tuple = (
     Migration("0009_k8s_on_owned_agents",
               (add_column("k8s_clusters", "executor_agent_id", "VARCHAR(36)"),
                add_column("agent_hosts", "k8s_enabled", "BOOLEAN"))),
+    # The POV standard recipe a catalog image was built from. NULL for every image that
+    # predates it and every image built any other way.
+    Migration("0010_registered_image_recipe",
+              (add_column("registered_images", "recipe", "VARCHAR(40)"),)),
 )
 
 
