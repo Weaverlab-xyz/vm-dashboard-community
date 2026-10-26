@@ -54,7 +54,9 @@ reads like credential spraying in a customer's SIEM.
 | `AGENT_POLICY_FILE` | `/etc/dashboard-agent/policy.yaml` | Mount read-only, as `:ro,Z`. |
 | `AGENT_MODE` | `normal` | `audit` logs what it would do and executes nothing. |
 | `AGENT_POLL_INTERVAL` | `5` | Seconds, jittered. |
-| `AGENT_DRAIN_SECONDS` | `25` | Only with `ansible.max_concurrent` above 1: on SIGTERM the agent stops leasing and waits this long for running jobs. Set the container's stop timeout higher. |
+| `AGENT_DRAIN_SECONDS` | `25` | On SIGTERM the agent stops leasing and waits this long for running jobs (every agent from 2.10; before that only with `ansible.max_concurrent` above 1). Set the container's stop timeout higher. |
+| `AGENT_REATTEST_HOURS` | `24` | **SPIRE mode, 2.11+.** Attest again this often while running, with a fresh in-memory key, between jobs only. `0` turns it off (a restart still attests). Reported to the dashboard, which flags an agent that stops rotating. |
+| `AGENT_CONTROL_DIR` | `/var/lib/dashboard-agent-control` | **2.10+, only with `upgrades:` in policy.yaml.** The volume shared with the updater container: the agent writes an upgrade or restart request, the updater its status. See [Upgrading and restarting agents centrally](../../docs/platform/spiffe/remote-agents/lifecycle.md). |
 | `AGENT_CA_BUNDLE` | — | For a TLS-inspecting corporate proxy. |
 | `AGENT_INSECURE_TLS` | — | Lab only. Warns once at startup. Case-sensitive: `1`, `true` or `yes`. |
 | `KUBECONFIG` | `/etc/dashboard-agent/kubeconfig` | Optional. Only the server URL and version are reported. |

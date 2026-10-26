@@ -317,6 +317,14 @@ An agent that runs Config Management takes an `ansible:` block too. Its
 later). Size the host at about 1 GiB of memory per slot; see
 [Several runs at once](config-runs.md#several-runs-at-once).
 
+To let the dashboard upgrade and restart this agent (2.10 or later, attested through
+SPIRE), add an `upgrades:` block and run the updater container beside it. The block names
+the one repository the agent may be upgraded from and the signing identity, or key, the
+updater checks before it pulls anything. Without the block, the agent refuses every
+upgrade and restart: the dashboard cannot turn this on for you. The commented block in
+`policy.example.yaml` has the shape; see
+[Upgrading and restarting agents centrally](lifecycle.md) for the trust model and setup.
+
 Mount it `:ro,Z`, as the emitted command does. The `Z` is the SELinux relabel and it is not
 cosmetic: on Fedora, RHEL, CentOS, Rocky or Alma a bind mount keeps its host label, and the
 container may not read a file in your home directory however permissive its mode is — the

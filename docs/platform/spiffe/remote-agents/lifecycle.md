@@ -86,7 +86,9 @@ with the updater beside it. Until then, the Agents page says what is missing.
 **Agents the dashboard deployed** ([Deploying an agent into a cloud](deploying.md)) get
 all of this automatically when they attest through SPIRE: the updater, the control
 directory and the keyless `upgrades:` block. They also start the newest recorded release,
-pinned by digest.
+pinned by digest. With their cloud ticked under **Settings → SPIFFE and SPIRE**, they attest
+with the VM's own identity rather than a join token; see
+[Identity](deploying.md#identity).
 
 ## What an upgrade does
 
@@ -140,6 +142,11 @@ The **Lifecycle** panel lists the releases the dashboard may offer.
   (blank means `chrweav/dashboard-agent`). Use it for a mirror, or for a dashboard with no
   route to Docker Hub. The repository must be the one the host's `upgrades.repository`
   names.
+- **Recording releases also arms a check.** Once any release is recorded, an agent that
+  reports a version of 2.10 or later that is not among them is flagged **Not a recorded
+  release**. A signed build always comes from a release, so the version is either a local
+  build or a release nobody recorded yet. See
+  [Ongoing checks](spire-attestation.md#ongoing-checks).
 
 ### Rollouts
 

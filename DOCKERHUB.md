@@ -259,8 +259,11 @@ The dashboard launches most of these for you; you do not run them by hand.
 | `chrweav/dashboard-promote-runner` | Cross-cloud image promote, run transiently in the target cloud. |
 | `chrweav/dashboard-agent` | The remote on-premises agent. **You** pull this one, inside the private network — it dials out, so there are no inbound ports. The install command the Agents page hands out names this image. |
 | `chrweav/hypervisor-runner` | The agent's one-shot Hyper-V (WinRM/NTLM) and bare ESXi (SOAP) runner. Pulled by the operator on the agent host, never by the agent itself. |
+| `chrweav/dashboard-agent-updater` | Optional, beside the agent: holds the Docker socket so the agent does not, and replaces the agent with a newer **signed** release (or restarts it) when the dashboard asks and the host's `policy.yaml` allows. Verifies each image's signature before it pulls. |
 
-All six are built from the same release tag and are multi-arch.
+All seven are built from the same release tag and are multi-arch. `chrweav/dashboard-agent`
+and `chrweav/dashboard-agent-updater` are also signed with cosign (keyless, by digest), and
+the agent image carries its own version in the `dashboard-agent.version` label.
 
 ---
 
