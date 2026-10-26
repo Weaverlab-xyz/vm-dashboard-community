@@ -1,4 +1,5 @@
-"""Record the network of cloud VMs deployed before their launchers recorded it.
+"""Record the network of cloud VMs deployed before their launchers recorded it, and the
+subnets of cloud databases provisioned before they were recorded (clouddb_network).
 
 A Config-Management route may be narrowed to one network — an AWS VPC, an Azure VNet or a
 GCP network (config_mgmt_route_service.network_of). New deploys record it as they launch;
@@ -38,7 +39,8 @@ def _candidates(db) -> list:
 
 
 def missing_count(db) -> int:
-    return len(_candidates(db))
+    from . import clouddb_network
+    return len(_candidates(db)) + len(clouddb_network.candidates(db))
 
 
 def _busy(db) -> bool:
@@ -53,7 +55,7 @@ def enqueue(db, *, created_by: str) -> str:
     if _busy(db):
         return ""
     job = job_service.create_job(db, job_type=JOB_TYPE, created_by=created_by,
-                                 metadata={"description": "Look up the networks of cloud VMs"})
+                                 metadata={"description": "Look up the networks of cloud VMs and databases"})
     return job.id
 
 
@@ -119,5 +121,26 @@ async def run(db, *, job_id: str, meta: dict) -> None:
         job.metadata_dict = current
         db.commit()
         filled.append(job.id)
+    # Cloud databases: their subnets, which is how a cloud route governs them
+    # (clouddb_network). Their deploy workstream was never recorded before this, so the
+    # current one stands in for it.
+    from . import clouddb_network
+    rows = clouddb_network.candidates(db)
+    for n, row in enumerate(rows, 1):
+        job_service.update_progress(db, job_id, 100 * (n - 1) // max(1, len(rows)),
+                                    f"Looking up database {n} of {len(rows)}")
+        try:
+            cidrs, network = await clouddb_network.lookup(db, row)
+        except Exception as exc:  # noqa: BLE001 — one database's failure must not stop the rest
+            logger.warning("route network backfill: clouddb %s: %s", row.id, exc)
+            failed.append({"db_id": row.id, "error": str(exc)[:300]})
+            continue
+        if not cidrs:
+            skipped.append({"db_id": row.id, "reason": "the cloud no longer has it"})
+            continue
+        clouddb_network.record(row, cidrs, network)
+        row.deploy_workgroup = row.deploy_workgroup or row.workgroup
+        db.commit()
+        filled.append(row.id)
     job_service.set_completed(db, job_id, {"filled": len(filled), "skipped": skipped,
                                            "failed": failed})

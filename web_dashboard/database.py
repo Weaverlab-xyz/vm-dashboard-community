@@ -2507,6 +2507,19 @@ class CloudDatabase(Base):
     agent_id = Column(String(36), ForeignKey("remote_agents.id", ondelete="SET NULL"),
                       index=True, nullable=True)
 
+    # Where a cloud database lives, for Config-Management routes (migration 0008). A route
+    # governs a cloud database when its range contains EVERY one of `route_cidrs`: the DB
+    # subnet group's subnets on AWS (a failover may land in any), the delegated subnet on
+    # Azure, the private IP as a /32 on GCP. Read from the cloud by clouddb_network, at
+    # provisioning or by the route network backfill. NULL means not recorded, and such a
+    # database matches no route: it stays on the remote worker.
+    route_cidrs = Column(Text, nullable=True)              # JSON list of CIDRs
+    route_network = Column(String(200), nullable=True)     # cmr.normalize_network form
+    # The workstream it was provisioned in. reassign_database_workgroup moves `workgroup`
+    # but never this, for the reason a VM deploy keeps `deploy_workgroup`: a route narrowed
+    # to a workstream stands for that team's network, which a reassignment does not move.
+    deploy_workgroup = Column(String(100), nullable=True)
+
     # Workgroup scoping. NULL (the state every row predating this column is in)
     # falls back to creator-scoping in inventory_service.visible_to, so adding the
     # column changed nobody's access -- a row becomes shared only when someone tags it.

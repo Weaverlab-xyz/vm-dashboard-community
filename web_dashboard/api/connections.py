@@ -179,10 +179,30 @@ def list_config_routes(db: Session = Depends(get_db),
             networks.setdefault(scope, {}).setdefault(network, 0)
             networks[scope][network] += 1
     without_network = sum(1 for vm in cloud_vms if not vm[3])
+    # Cloud databases, matched by their recorded subnets. Their networks join the picker;
+    # one with no subnets recorded joins the "Look up networks" banner, which fills both.
+    from ..database import CloudDatabase
+    table = cmr.load_table(db)
+    db_counts: dict = {}
+    dbs_without_ranges = 0
+    for row in (db.query(CloudDatabase)
+                .filter(CloudDatabase.cloud.in_(cmr.CLOUD_SCOPES),
+                        CloudDatabase.status == "available").all()):
+        scope, _region, _ws, network, cidrs = cmr.scope_of_database(row)
+        if not cidrs:
+            dbs_without_ranges += (row.source or "provisioned") == "provisioned"
+            continue
+        if network:
+            networks.setdefault(scope, {}).setdefault(network, 0)
+            networks[scope][network] += 1
+        route = table.match_for_database(row)
+        if route is not None:
+            db_counts[route.id] = db_counts.get(route.id, 0) + 1
     routes = cmr.list_routes(db)
     for row in routes:
         row["matches"] = counts.get(row["id"], 0)
         row["cloud_matches"] = cloud_counts.get(row["id"], 0)
+        row["database_matches"] = db_counts.get(row["id"], 0)
     from ..database import HypervisorConnection
     from ..services import workgroup_service
     connections = {c.id: c.name for c in db.query(HypervisorConnection).all()}
@@ -203,7 +223,8 @@ def list_config_routes(db: Session = Depends(get_db),
             "networks": {scope: [{"id": n, "label": cmr.network_label(n), "vms": c}
                                  for n, c in sorted(found.items())]
                          for scope, found in networks.items()},
-            "cloud_vms_without_network": without_network}
+            "cloud_vms_without_network": without_network,
+            "cloud_dbs_without_ranges": dbs_without_ranges}
 
 
 @router.get("/config-mgmt-routes/resolve")
@@ -259,11 +280,14 @@ def create_config_route(req: RouteRequest,
 
 
 def _backfill_for(db: Session, route: dict, user: User) -> None:
-    """A network-narrowed route governs only VMs whose network is recorded. Queue the one
-    lookup for the rest, rather than leave them silently falling through."""
+    """A network-narrowed route governs only VMs whose network is recorded, and any cloud
+    route governs only databases whose subnets are. Queue the one lookup for the rest,
+    rather than leave them silently falling through."""
+    from ..services import clouddb_network, route_network_backfill
     if route.get("network"):
-        from ..services import route_network_backfill
         route_network_backfill.enqueue_if_needed(db, created_by=user.username)
+    elif route.get("scope") in cmr.CLOUD_SCOPES and clouddb_network.candidates(db):
+        route_network_backfill.enqueue(db, created_by=user.username)
 
 
 @router.post("/config-mgmt-routes/lookup-networks", status_code=202)

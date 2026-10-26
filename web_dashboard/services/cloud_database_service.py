@@ -4262,6 +4262,12 @@ async def run_provision_apply(
         row.status = "available"
         db.commit()
 
+        # Where it lives, so a cloud Config route can send its runs to an agent. Never
+        # fails the provision: an unrecorded database simply stays on the remote worker.
+        from . import clouddb_network
+        await clouddb_network.record_on_provision(
+            db, row, log=lambda line: job_service.append_job_log(db, job_id, line))
+
         # Optional Password Safe DB onboarding (AWS / Azure / GCP, opt-in). Create
         # the dedicated managed user FIRST so the tunnel/vault injects it, then let PS
         # own its rotation. Any failure falls back to the legacy admin staging. The

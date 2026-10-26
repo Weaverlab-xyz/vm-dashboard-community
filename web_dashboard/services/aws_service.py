@@ -4913,6 +4913,40 @@ async def ensure_instance_inbound_rule(region: str, instance_id: str, *, ports: 
         raise AWSError("AWS credentials not configured.")
 
 
+async def rds_subnet_ranges(region: str, identifier: str,
+                            resource_id: str = "") -> Optional[dict]:
+    """``{"vpc_id", "cidrs"}`` of an RDS instance's DB subnet group, or None if the
+    instance no longer exists. ``cidrs`` is every subnet in the group, since a failover
+    may land the instance in any of them. For Config-Management routes over cloud
+    databases (clouddb_network). Looked up by identifier, else by resource id."""
+    def _sync():
+        rds = aws_client("rds", region)
+        if identifier:
+            resp = rds.describe_db_instances(DBInstanceIdentifier=identifier)
+        else:
+            resp = rds.describe_db_instances(
+                Filters=[{"Name": "dbi-resource-id", "Values": [resource_id]}])
+        for inst in resp.get("DBInstances", []):
+            group = inst.get("DBSubnetGroup") or {}
+            ids = [s.get("SubnetIdentifier") for s in group.get("Subnets") or []
+                   if s.get("SubnetIdentifier")]
+            cidrs = []
+            if ids:
+                for sub in _get_ec2(region).describe_subnets(SubnetIds=ids).get("Subnets", []):
+                    if sub.get("CidrBlock"):
+                        cidrs.append(sub["CidrBlock"])
+            return {"vpc_id": group.get("VpcId") or "", "cidrs": sorted(cidrs)}
+        return None
+    try:
+        return await _to_thread(_sync)
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "DBInstanceNotFound":
+            return None
+        raise AWSError(f"Could not read the subnets of {identifier or resource_id}: {e}") from e
+    except (BotoCoreError, NoCredentialsError) as e:
+        raise AWSError(f"AWS error: {e}") from e
+
+
 async def instance_network(region: str, instance_id: str) -> Optional[dict]:
     """``{"vpc_id", "subnet_id"}`` an instance runs in, or None if it no longer exists.
 

@@ -55,6 +55,9 @@ AGENT_IMAGE = "chrweav/dashboard-agent:latest"
 # signature against the identity in the policy.yaml below before it pulls.
 UPDATER_IMAGE = "chrweav/dashboard-agent-updater:latest"
 ANSIBLE_IMAGE = "chrweav/ansible-winrm:latest"
+# Database plays (a cloud route covering the network's databases): the localhost image the
+# remote worker's cloud runner uses too. Pre-pulled, since the agent pulls nothing itself.
+DB_IMAGE = "chrweav/ansible-cloud:latest"
 # The SPIRE pair, pinned by digest exactly as examples/remote-agent/docker-compose.spire.yml
 # pins them. A tag here would let a registry change what runs beside the agent.
 SPIRE_AGENT_IMAGE = ("ghcr.io/spiffe/spire-agent:1.15.5@sha256:"
@@ -66,7 +69,9 @@ SPIFFE_HELPER_IMAGE = ("ghcr.io/spiffe/spiffe-helper:0.12.1@sha256:"
 # several runs at once) accept a parked agent that has not yet reported itself.
 DEPLOYED_AGENT_VERSION = "2.9.0"
 
-ANSIBLE_PORTS = (22, 5985, 5986)
+# SSH and WinRM for VMs; the engines' ports for databases (SQL Server, Oracle, MySQL,
+# PostgreSQL, MongoDB).
+ANSIBLE_PORTS = (22, 1433, 1521, 3306, 5432, 5985, 5986, 27017)
 MAX_CONCURRENT_CEILING = 8          # the agent's own ANSIBLE_MAX_CONCURRENT_CEILING
 MAX_CIDRS = 16
 # About 1 GiB per run, plus the agent: 4 GiB covers the default of 2 runs with headroom.
@@ -196,6 +201,7 @@ def policy_yaml(cidrs: list, max_concurrent: int, *, upgrades: bool = False) -> 
         "ansible": {
             "enabled": True,
             "vm_image": ANSIBLE_IMAGE,
+            "db_image": DB_IMAGE,
             "max_concurrent": slots,
             "targets": [{"cidr": c, "ports": list(ANSIBLE_PORTS)} for c in ranges],
         },
@@ -294,6 +300,7 @@ def bootstrap_script(*, url: str, policy: str, material: dict,
         'GID=$(stat -c %g /var/run/docker.sock)',
         f"docker pull {image}",
         f"docker pull {ANSIBLE_IMAGE}",
+        f"docker pull {DB_IMAGE}",
     ]
     agent_env = [
         f"-e DASHBOARD_URL={q(url)}",

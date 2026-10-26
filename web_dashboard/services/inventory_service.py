@@ -199,7 +199,17 @@ def _db_ps_system_id(row) -> str:
     return str((ref or {}).get("system_id") or "").strip() if isinstance(ref, dict) else ""
 
 
-def _db_item(row) -> dict:
+def _db_item(row, routes=cmr.EMPTY) -> dict:
+    """``routes`` decides whether a cloud route sends this cloud database's runs to an agent
+    (by its recorded subnets). The default empty table keeps every cloud database on the
+    remote worker; a cloud='local' row keeps its own registered agent either way."""
+    scope, region, workstream, network, cidrs = cmr.scope_of_database(row)
+    if scope:
+        route = routes.match_for_ranges(cidrs, scope=scope, region=region,
+                                        workstream=workstream, network=network)
+        agent_id = route.agent_id if route else None
+    else:
+        agent_id = getattr(row, "agent_id", None)
     return {
         "id": f"clouddb:{row.id}",
         "cloud": row.cloud,
@@ -223,16 +233,23 @@ def _db_item(row) -> dict:
         "expires_at": _iso(row.expires_at),
         "job_id": None,
         "detail_href": "/databases",
-        # Which agent can reach this database, for a Config-Management run. Only ever set on
-        # a cloud='local' registered row — an on-prem database the dashboard has a reference
-        # to but no route to. NULL keeps the pre-existing behaviour (the dashboard's own
-        # runner), which is the only option a provisioned cloud database has.
-        "agent_id": getattr(row, "agent_id", None),
+        # Which agent executes a Config-Management run against it: a cloud='local'
+        # registered row's own agent, or for a cloud database the agent a cloud route
+        # covering its recorded subnets names. None is the dashboard's own runner (local)
+        # or the remote worker (cloud).
+        "agent_id": agent_id,
         # The endpoint an agent-executed localhost play reaches out to. Not shown in the UI;
         # `_target_spec` needs it because an agent job carries the address, not a row id it
         # could look up.
         "private_host": getattr(row, "private_host", "") or "",
         "port": getattr(row, "port", None),
+        # The route inputs (cmr.scope_of_database), so every reader of this row asks the
+        # route table the gate's question. Empty for a non-cloud row.
+        "route_scope": scope,
+        "route_region": region,
+        "route_workstream": workstream,
+        "route_network": network,
+        "route_cidrs": cidrs,
         # Password Safe match keys — the same two `_vm_item` carries. Absent until now,
         # which made every database record in the tenant an orphan. `private_host` counts
         # only when it is a literal address: a hostname is not a join key here (see
@@ -764,7 +781,7 @@ def collect(db: Session) -> list:
 
     for row in (db.query(CloudDatabase)
                 .filter(CloudDatabase.status.notin_(("deleted", "decommissioned"))).all()):
-        items.append(_db_item(row))
+        items.append(_db_item(row, vm_routes))
 
     for row in db.query(K8sCluster).filter(K8sCluster.status != "deleted").all():
         items.append(_k8s_item(row))
