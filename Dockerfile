@@ -18,7 +18,7 @@
 # and the sidecar image; tests/test_spire_overlay.py keeps all three in step.
 FROM ghcr.io/spiffe/spire-server:1.15.5@sha256:584a9c5cc95b9457f5033e7e4488d603fffe5ec48a80c4dba14b05c5e1c2c384 AS spire
 
-FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS base
+FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS base
 
 ARG PACKER_VERSION=1.16.2
 # https://releases.hashicorp.com/packer/1.16.2/packer_1.16.2_SHA256SUMS
