@@ -343,6 +343,16 @@ _AZURE_SP_SOURCE_FIELDS = (
 )
 
 
+def _azure_tags_block(extra_tags: dict = None) -> str:
+    """``azure_tags`` for the build VM and the image it captures, or "" with none."""
+    if not extra_tags:
+        return ""
+    lines = ['    BuiltBy = "vm-dashboard"']
+    for k, v in extra_tags.items():
+        lines.append('    "%s" = "%s"' % (_hcl_escape(str(k)), _hcl_escape(str(v))))
+    return '  azure_tags = {\n' + "\n".join(lines) + '\n  }\n\n'
+
+
 def generate_azure_template(
     image_publisher: str,
     image_offer: str,
@@ -352,18 +362,31 @@ def generate_azure_template(
     has_provisioner: bool,
     provisioner_env: dict = None,
     provisioner_sensitive_var_names: dict = None,
+    scripts: list = None,
+    extra_tags: dict = None,
 ) -> str:
+    """azure-arm → a Linux managed image. The POV builder's Linux path (a POV boots the
+    managed image in the location it was built in); the demo tab publishes Linux to a
+    gallery instead (generate_azure_linux_gallery_template), for the VHD export.
+
+    ``scripts`` names files in the build directory, run in order by one shell
+    provisioner, as in generate_aws_template; unset, ``provision.sh`` alone."""
     safe = _safe_azure_name(image_name)
     envb = _provisioner_env_block(provisioner_env, provisioner_sensitive_var_names)
     decls = _sensitive_var_decls(provisioner_sensitive_var_names)
+    if scripts:
+        source = ('    scripts         = ['
+                  + ", ".join('"%s"' % _hcl_escape(x) for x in scripts) + ']\n')
+    else:
+        source = '    script          = "provision.sh"\n'
     # Azure requires waagent deprovision to generalize the image
     prov = (
         '\n  provisioner "shell" {\n'
         '    execute_command = "chmod +x {{ .Path }}; {{ .Vars }} sudo -E sh \'{{ .Path }}\'"\n'
-        '    script          = "provision.sh"\n'
+        + source
         + envb +
         '  }\n'
-    ) if has_provisioner else ""
+    ) if (has_provisioner or scripts) else ""
     deprovision = (
         '\n  provisioner "shell" {\n'
         '    execute_command = "chmod +x {{ .Path }}; {{ .Vars }} sudo -E sh \'{{ .Path }}\'"\n'
@@ -393,6 +416,7 @@ def generate_azure_template(
         '  image_publisher = "' + image_publisher + '"\n'
         '  image_offer     = "' + image_offer + '"\n'
         '  image_sku       = "' + image_sku + '"\n\n'
+        + _azure_tags_block(extra_tags) +
         # Build in an existing RG the SP already controls — avoids needing
         # subscription-level rights to create a temp pkr-Resource-Group-* (a
         # default Packer behavior that fails for an RG-scoped service principal).
@@ -496,22 +520,46 @@ def generate_azure_windows_template(
     vm_size: str,
     image_name: str,
     has_provisioner: bool,
+    provisioner_env: dict = None,
+    provisioner_sensitive_var_names: dict = None,
+    scripts: list = None,
+    extra_tags: dict = None,
 ) -> str:
+    """azure-arm over WinRM → a Windows Server managed image.
+
+    ``scripts`` names files in the build directory, run in order by one PowerShell
+    provisioner with the provisioner env (the POV recipes' bundled scripts read
+    POV_STAGE_URL from it); unset, ``provision.ps1`` alone when ``has_provisioner``.
+    """
     safe = _safe_azure_name(image_name)
+    envb = _provisioner_env_block(provisioner_env, provisioner_sensitive_var_names)
+    decls = _sensitive_var_decls(provisioner_sensitive_var_names)
+    if scripts:
+        source = ('    scripts = ['
+                  + ", ".join('"%s"' % _hcl_escape(x) for x in scripts) + ']\n')
+    else:
+        source = '    script = "provision.ps1"\n'
     # Operator script first, then a restart so feature installs settle before
     # the generalize step.
     prov = (
         '\n  provisioner "powershell" {\n'
-        '    script = "provision.ps1"\n'
+        + source
+        + envb +
         '  }\n'
         '\n  provisioner "windows-restart" {}\n'
-    ) if has_provisioner else ""
+    ) if (has_provisioner or scripts) else ""
     # Canonical Azure Windows finisher: wait for the guest agents, sysprep
     # /generalize, then poll ImageState until the reseal completes. Without it
     # the captured image is specialized and can't be deployed.
+    #
+    # The marker goes down first, after the restart: it is what tells the image's
+    # boot-time WinRM task that this is no longer the build VM
+    # (provisioners/pov/pov-ready-windows.ps1). Harmless on an image without that task.
     sysprep = (
         '\n  provisioner "powershell" {\n'
         '    inline = [\n'
+        '      "New-Item -ItemType Directory -Force -Path C:/BT | Out-Null",\n'
+        '      "Set-Content -Path C:/BT/image-sealed -Value (Get-Date -Format o)",\n'
         '      "while ((Get-Service RdAgent).Status -ne \'Running\') { Start-Sleep -s 5 }",\n'
         '      "while ((Get-Service WindowsAzureGuestAgent).Status -ne \'Running\') { Start-Sleep -s 5 }",\n'
         '      "& $env:SystemRoot\\\\System32\\\\Sysprep\\\\Sysprep.exe /oobe /generalize /quiet /quit /mode:vm",\n'
@@ -533,6 +581,7 @@ def generate_azure_windows_template(
         + _AZURE_SP_VAR_DECLS +
         'variable "resource_group" { default = "" }\n'
         'variable "location"       { default = "centralus" }\n\n'
+        + decls +
         'source "azure-arm" "build" {\n'
         + _AZURE_SP_SOURCE_FIELDS +
         '  managed_image_name                = "' + safe + '-{{timestamp}}"\n'
@@ -541,6 +590,7 @@ def generate_azure_windows_template(
         '  image_publisher = "' + image_publisher + '"\n'
         '  image_offer     = "' + image_offer + '"\n'
         '  image_sku       = "' + image_sku + '"\n\n'
+        + _azure_tags_block(extra_tags) +
         # Packer provisions a temp key vault + self-signed cert for WinRM HTTPS.
         '  communicator   = "winrm"\n'
         '  winrm_use_ssl  = true\n'

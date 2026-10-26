@@ -3,7 +3,7 @@
   GET    /api/pov/images            — the catalog images usable on the POV's cloud
   GET    /api/pov/images/recipes    — the standard recipes, and their options
   POST   /api/pov/images/build      — build one recipe in a region (a Packer job)
-  DELETE /api/pov/images/{id}       — remove a catalog row (never the AMI itself)
+  DELETE /api/pov/images/{id}       — remove a catalog row (never the cloud image itself)
 
 **Why not open ``/api/packer`` and ``/api/images`` on a POV instead.** Those stay behind
 ``cloud_pages`` (main.py): they take any source image and any script, need ``aws:write``,
@@ -37,6 +37,13 @@ router = APIRouter(
     tags=["pov"],
     dependencies=[Depends(require_permission("pov_templates", "read"))],
 )
+
+# The Packer job each POV cloud's recipes queue — the same ones the demo Build Image tab
+# queues, so the worker runs them unchanged.
+_BUILD_JOB_TYPES = {
+    "aws": "packer_aws_build",
+    "azure": "packer_azure_build",
+}
 
 # An operator script is pasted or loaded into the build. Generous for a provisioner,
 # small enough that a job row stays a job row.
@@ -90,7 +97,7 @@ def list_pov_images(db: Session = Depends(get_db),
 def _recent_builds(db: Session, limit: int = 10) -> list:
     """The last standard builds, newest first — the ones queued from this tab, told apart
     from a demo Build Image run by the ``recipe`` the job metadata carries."""
-    rows = (db.query(Job).filter(Job.job_type == "packer_aws_build")
+    rows = (db.query(Job).filter(Job.job_type.in_(tuple(_BUILD_JOB_TYPES.values())))
               .order_by(Job.created_at.desc()).limit(50).all())
     out = []
     for job in rows:
@@ -163,9 +170,14 @@ async def build_pov_image(payload: BuildRequest, db: Session = Depends(get_db),
                           current_user: User = Depends(
                               require_explicit_permission("pov_templates", "write"))):
     """Queue one standard build. Spends money in the POV account for the length of the
-    build (one instance, usually 15-40 minutes) and leaves an AMI that bills for its
-    snapshot until someone deregisters it."""
+    build (one instance, usually 15-40 minutes) and leaves an image (an AMI, an Azure
+    managed image) that bills for its storage until someone deletes it."""
     cloud = _selected_cloud()
+    job_type = _BUILD_JOB_TYPES.get(cloud)
+    if job_type is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"standard images are built on AWS and Azure only so far, not {cloud}")
     region = (payload.region or "").strip() or pov_cloud_env.driver(cloud).default_region()
 
     script = payload.extra_script
@@ -191,12 +203,18 @@ async def build_pov_image(payload: BuildRequest, db: Session = Depends(get_db),
     except (pov_image_recipes.RecipeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    # The two clouds' requests name the base image and the build size differently; the
+    # job row records each under the keys its own Build Image tab already uses.
+    if cloud == "azure":
+        source = {"image_publisher": req.image_publisher, "image_offer": req.image_offer,
+                  "image_sku": req.image_sku, "os_type": req.os_type}
+    else:
+        source = {"source_ami": req.source_ami_family, "instance_type": req.instance_type}
     job = job_service.create_job(
-        db, job_type="packer_aws_build", created_by=current_user.username,
+        db, job_type=job_type, created_by=current_user.username,
         metadata={
             "image_name": req.image_name,
-            "source_ami": req.source_ami_family,
-            "instance_type": req.instance_type,
+            **source,
             "recipe": req.recipe,
             "region": region,
             "req": req.model_dump(),

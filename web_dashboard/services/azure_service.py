@@ -1844,6 +1844,19 @@ async def delete_role_assignment(scope: str, name: str) -> None:
 # instead. Packer creates the version; the gallery + image DEFINITION must exist
 # first, so these idempotent helpers create-or-update them before the build.
 
+def _ensure_resource_group_sync(cred, sub_id: str, rg: str, location: str, tags: dict):
+    return _get_resource(cred, sub_id).resource_groups.create_or_update(
+        rg, {"location": location, "tags": tags or {}})
+
+
+async def ensure_resource_group(rg: str, location: str, tags: dict = None):
+    """Create the resource group if missing (idempotent). ARM refuses one that exists in
+    another location, so a caller wanting a per-location group puts the location in the
+    name (packer_build_service._pov_image_resource_group)."""
+    cred, sub_id = await _ensure_creds()
+    return await _to_thread(_ensure_resource_group_sync, cred, sub_id, rg, location, tags)
+
+
 def _ensure_gallery_sync(cred, sub_id: str, rg: str, location: str, gallery_name: str):
     from azure.mgmt.compute.models import Gallery
     compute = _get_compute(cred, sub_id)
