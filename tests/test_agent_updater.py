@@ -110,7 +110,7 @@ class FakeDocker:
         req = upd.read_json("request.json") or {}
         if self.ready_on_start and not (key == "new" and self.new_exits):
             version = self.new_version if key == "new" else req.get("version")
-            with open(os.path.join(upd.CONTROL_DIR, "ready"), "w") as fh:
+            with open(os.path.join(upd.CONTROL_DIR, "ready"), "w", encoding="utf-8") as fh:
                 json.dump({"job_id": req.get("job_id"), "version": version}, fh)
 
     def stop(self, cid, timeout=40):
@@ -140,7 +140,7 @@ def _run(docker, request, *, signed=True):
         if not signed:
             raise upd.Refused("the image signature did not verify: no matching signatures")
     upd.verify_signature = verify
-    with open(os.path.join(upd.CONTROL_DIR, "request.json"), "w") as fh:
+    with open(os.path.join(upd.CONTROL_DIR, "request.json"), "w", encoding="utf-8") as fh:
         json.dump(request, fh)
     clock = {"t": 0.0}
     try:
@@ -236,7 +236,7 @@ def test_a_restart_that_does_not_come_back_fails():
 def test_a_request_is_acted_on_once():
     _ctl()
     docker = FakeDocker()
-    with open(os.path.join(upd.CONTROL_DIR, "request.json"), "w") as fh:
+    with open(os.path.join(upd.CONTROL_DIR, "request.json"), "w", encoding="utf-8") as fh:
         json.dump(_request(), fh)
     upd.write_status("job-1", "done")
     assert upd.Updater(docker).tick() is None and docker.calls == []

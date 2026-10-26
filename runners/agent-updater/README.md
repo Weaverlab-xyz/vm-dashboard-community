@@ -26,7 +26,7 @@ allowlist (`DockerAPI.ALLOWED`), limited to the container labelled
 ## Run it
 
 Apply `examples/remote-agent/docker-compose.updater.yml` on top of the base and SPIRE
-files. The full guide is `docs/platform/spiffe/remote-agents/lifecycle.md`.
+files. The full guide is "Upgrading and restarting agents centrally" in the remote-agent docs.
 
 | Variable | Default | Meaning |
 |---|---|---|
