@@ -145,8 +145,10 @@ Remote agents add capacity outside the dashboard's worker:
   (agent 2.9 or later, up to 8). Each run is still a one-shot container beside the agent,
   so size the host at about 1 GiB per slot. To go further, run more agents and give each
   its own range.
-- **What uses no worker slot.** An agent leases its jobs directly, and it sends Live
-  Output in batches of up to 500 lines rather than one database write per line.
+- **What uses no worker slot.** An agent leases its jobs directly, so a run on it holds
+  none of the dashboard's job-worker slots. It sends Live Output in batches of up to 500
+  lines a request; the dashboard still records each line, which is what lets the output
+  stream and a run be cancelled mid-way.
 
 The tradeoffs to accept:
 

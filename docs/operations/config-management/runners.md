@@ -120,7 +120,7 @@ justification, and the four invariants this section actually names all survive i
 
 | Invariant above | How the agent holds it |
 |---|---|
-| Secrets fetched just-in-time | The agent holds no target credentials at all today — discovery never authenticates |
+| Secrets fetched just-in-time | The agent stores no target credential. For a run that needs one (a cloud VM's SSH key, a dashboard-held secret), the dashboard seals it to that agent for that one job, the agent copies it into the one-shot run container, and it goes with the container. With **Release dashboard-held credentials only to SPIRE-attested agents** on, only an attested agent receives one |
 | No process or filesystem outlives the run | Nothing is written per job; the only persistent state is the agent's own signing key |
 | No shared user namespace between runs | Agent-executed Ansible spawns a **one-shot sibling container** per job; the supervisor never runs a playbook itself |
 | Dashboard never holds the secret long | Strengthened, in fact: refs are resolved on demand and the agent fetches them for the life of one child container |
