@@ -5113,6 +5113,35 @@ async def ensure_vm_inbound_rule(rg: str, vm_name: str, *, rule_name: str, ports
             f"Failed to apply inbound rule {rule_name!r} for VM {vm_name}: {e}") from e
 
 
+async def subnet_prefixes(subnet_id: str) -> Optional[list]:
+    """The address prefixes of a subnet ARM id, or None when the subnet no longer exists.
+    For Config-Management routes over cloud databases (clouddb_network)."""
+    parts = (subnet_id or "").strip().split("/")
+    low = [p.lower() for p in parts]
+    try:
+        rg = parts[low.index("resourcegroups") + 1]
+        vnet = parts[low.index("virtualnetworks") + 1]
+        name = parts[low.index("subnets") + 1]
+    except (ValueError, IndexError):
+        raise AzureError(f"{subnet_id!r} is not a subnet id.")
+    cred, sub_id = await _ensure_creds()
+
+    def _sync():
+        from azure.core.exceptions import ResourceNotFoundError
+        try:
+            subnet = _get_network(cred, sub_id).subnets.get(rg, vnet, name)
+        except ResourceNotFoundError:
+            return None
+        prefixes = list(getattr(subnet, "address_prefixes", None) or [])
+        if getattr(subnet, "address_prefix", None):
+            prefixes.append(subnet.address_prefix)
+        return sorted(set(prefixes))
+    try:
+        return await _to_thread(_sync)
+    except Exception as e:  # noqa: BLE001 — named for the job's log
+        raise AzureError(f"Could not read subnet {name}: {e}") from e
+
+
 async def nic_vnet(resource_group: str, nic_name: str) -> Optional[str]:
     """The VNet ARM id (lower-cased) a NIC's first IP configuration sits in; "" when it has
     none; None when the NIC no longer exists. For the Config-Management route network

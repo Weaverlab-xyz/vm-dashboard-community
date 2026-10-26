@@ -2,10 +2,10 @@
 
 > **Audience:** contributor · **Profile:** `both` · **Read this when:** you are deciding whether a piece of remote work should run on the one-shot remote worker or on a SPIFFE-attested remote agent, or you are about to move a workload from one to the other.
 
-**Phase 1 built; phases 2 and 3 not built.** This note assesses the two execution paths as
+**Phases 1 and 2 built; phase 3 not built.** This note assesses the two execution paths as
 they stand after agent 2.11 (lifecycle, ongoing checks and cloud node attestation). It
 recommends what to move, what to leave alone, and in what order. Of the
-[phases](#recommendation-agent-first-worker-kept), only phase 1 is built. The user-facing comparison is
+[phases](#recommendation-agent-first-worker-kept), phases 1 and 2 are built. The user-facing comparison is
 [Where work runs](../platform/where-work-runs.md); this page is the reasoning behind
 changing it.
 
@@ -46,7 +46,7 @@ the fallback and for the heavy, bursty jobs.
 | Workload | Worker path today | Agent today | Verdict |
 |---|---|---|---|
 | **Config Management on cloud VMs** (SSH/WinRM): playbooks, plus Windows Arc join and the GCP directory DNS link, which ride the same runner | `ansible_local` → `_dispatch_cloud_runner` → Fargate/ACI/Cloud Run, image `chrweav/ansible-winrm` | **Yes, already.** Config routes send a VPC's VMs to an agent in it (`agent_ansible`, run kind `vm`). Dashboard-deployed agents create their own routes | **Move: agent-first** |
-| **Localhost plays against databases** | `ansible_cloud_run` → in-cloud runner, image `chrweav/ansible-cloud` | **Partly.** Run kind `database` exists, but only for database rows bound to an agent (`row.agent_id`). Cloud-provisioned databases have no route | **Move, after a small change** ([phase 2](#phase-2-databases-in-a-cloud-through-routes)) |
+| **Localhost plays against databases** | `ansible_cloud_run` → in-cloud runner, image `chrweav/ansible-cloud` | **Yes, since phase 2.** Run kind `database` for on-premises rows bound to an agent (`row.agent_id`), and for cloud databases a cloud route covers by their subnets | **Move: agent-first** ([phase 2](#phase-2-databases-in-a-cloud-through-routes)) |
 | **Localhost plays against Kubernetes clusters** | `ansible_cloud_run`, kubeconfig in `KUBECONFIG_B64` | **No.** `target_kind == "k8s"` is refused by name. The bundle forbids `ansible_connection: local` and `ansible_*` variables, because kubectl and helm are on the image's PATH | **Owned agents only** ([phase 3](#phase-3-kubernetes-on-dashboard-owned-agents)) |
 | **Kubernetes operations** (`kubectl`/`helm`): ESO install, Entitle agent, SA token mints, RBAC, Rancher import, Entra/impersonator bindings | `k8s_runner_service.run`, image `dtzar/helm-kubectl`, a cluster-admin kubeconfig in the environment | **No.** No handler and no policy key launches a kubectl image | **Owned agents only** (phase 3) |
 | **Rancher API through a runner** | `rancher_api_runner`: one-shot `curl -K -` from inside the node's cloud, to get past a TLS-inspecting proxy | **No** | **Leave**, or fold into phase 3 |
@@ -231,13 +231,30 @@ heavy, bursty work.
 
 ### Phase 2: databases in a cloud, through routes
 
-- **The change.** Let config routes cover cloud-provisioned databases, as they cover cloud
-  VMs: match by the database's private address within its cloud scope, and send the run as
-  run kind `database` to the routed agent.
-- **What it reuses.** The agent's `ansible.db_image` (`chrweav/ansible-cloud`) and the
-  sealed `login_*` bundle already exist.
+Built.
+
+- **The change.** Config routes cover cloud-provisioned databases as they cover cloud VMs,
+  and send the run as run kind `database` to the routed agent.
+- **Matched by subnets, not an address.** A database's endpoint is a DNS name on AWS and
+  Azure, and an RDS failover moves its address within its subnet group. So the dashboard
+  records each database's subnets from the cloud (`clouddb_network`): every subnet in the
+  RDS DB subnet group, the Azure delegated or private-endpoint subnet, and the Cloud SQL
+  private IP as a `/32`. A route covers the database when its range contains every one.
+  This needs no DNS from the dashboard, which often cannot resolve an Azure private-DNS
+  name.
+- **When the subnets are recorded.** At provisioning (best-effort, never failing it), and
+  by **Look up networks** for databases provisioned earlier. A database with none recorded
+  matches no route and stays on the worker.
+- **What it reuses.** The agent's `ansible.db_image` (`chrweav/ansible-cloud`), the sealed
+  `db_*` bundle from the worker's own `ansible_connection_vars`, and phase 1's worker
+  fallback. A dashboard-deployed agent's policy now carries the database ports and
+  `db_image`.
 - **Where it goes.** Through the same routes table and picker, so cloud-VM routes and
   cloud-DB routes stay one concept.
+- **Follow-up.** The agent checks the first address the endpoint resolves to against its
+  policy, and the play then resolves the name again. For a VM it pins the checked address.
+  Pinning a database's address would break TLS hostname checks on Azure SQL and Atlas, so
+  closing that gap needs its own agent change.
 
 ### Phase 3: Kubernetes on dashboard-owned agents
 

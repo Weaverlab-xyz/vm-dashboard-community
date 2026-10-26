@@ -172,6 +172,24 @@ def scope_of_job(job) -> tuple:
     return scope, region, workstream, network_of(scope, meta)
 
 
+def scope_of_database(row) -> tuple:
+    """``(scope, region, workstream, network, cidrs)`` of a cloud database — what every
+    caller matches it on, as :func:`scope_of_job` is for a VM. ``cidrs`` is its recorded
+    subnets (clouddb_network); none recorded, or a non-cloud row, matches no route."""
+    import json
+    scope = (getattr(row, "cloud", "") or "").lower()
+    if scope not in CLOUD_SCOPES:
+        return "", "", "", "", []
+    try:
+        cidrs = [str(c) for c in json.loads(getattr(row, "route_cidrs", None) or "[]")]
+    except (TypeError, ValueError):
+        cidrs = []
+    workstream = str(getattr(row, "deploy_workgroup", None) or getattr(row, "workgroup", None)
+                     or "").strip().lower()
+    return (scope, (getattr(row, "region", "") or "").lower(), workstream,
+            getattr(row, "route_network", None) or "", cidrs)
+
+
 def scope_text(scope: str, region: str = "", connection_name: str = "",
                workstream: str = "", network: str = "") -> str:
     """"AWS · us-east-2 · team-a · vpc-0abc", "On-premises · vmrest-lab" — for lists and
@@ -332,6 +350,38 @@ class RouteTable:
                 return route
         return None
 
+    def match_for_ranges(self, cidrs, *, scope: str, region: str = "",
+                         workstream: str = "", network: str = "") -> Optional[Route]:
+        """The most specific route containing EVERY one of ``cidrs``, or None.
+
+        A cloud database is matched by its subnets, not an address: its endpoint is a DNS
+        name, and a failover moves its address anywhere in its subnet group. The order is
+        the same one as :meth:`match_for`. No ranges, or one that does not parse, matches
+        nothing — a database whose subnets are unknown stays on the remote worker."""
+        nets = []
+        for raw in cidrs or []:
+            try:
+                nets.append(ipaddress.ip_network(str(raw).strip(), strict=False))
+            except ValueError:
+                return None
+        if not nets:
+            return None
+        for route in self.routes:
+            if not route.covers(scope=scope, region=region, workstream=workstream,
+                                network=network):
+                continue
+            if all(n.version == route.network.version and n.subnet_of(route.network)
+                   for n in nets):
+                return route
+        return None
+
+    def match_for_database(self, row) -> Optional[Route]:
+        scope, region, workstream, network, cidrs = scope_of_database(row)
+        if not scope:
+            return None
+        return self.match_for_ranges(cidrs, scope=scope, region=region,
+                                     workstream=workstream, network=network)
+
     def executor_for(self, address: str, *, fallback: str = "", scope: str = "onprem",
                      region: str = "", connection_id: str = "", workstream: str = "",
                      network: str = "") -> str:
@@ -414,6 +464,12 @@ def match_for(db, address: str, *, scope: str = "onprem", region: str = "",
     return load_table(db).match_for(address, scope=scope, region=region,
                                     connection_id=connection_id, workstream=workstream,
                                     network=network)
+
+
+def match_for_database(db, row) -> Optional[Route]:
+    """The route governing a cloud database, or None. Same answer as
+    :meth:`RouteTable.match_for_database`."""
+    return load_table(db).match_for_database(row)
 
 
 # ── CRUD ──────────────────────────────────────────────────────────────────────

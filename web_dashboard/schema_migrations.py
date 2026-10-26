@@ -363,6 +363,12 @@ MIGRATIONS: tuple = (
     # BOOLEAN, no DEFAULT: NULL reads as off, so every existing route still refuses.
     Migration("0007_config_route_fallback",
               (add_column(_ROUTES, "fallback_to_worker", "BOOLEAN"),)),
+    # Where a cloud database lives, so a cloud route can govern it by subnet range. All
+    # NULL-able: NULL is "not recorded", and such a database stays on the remote worker.
+    Migration("0008_clouddb_route_ranges",
+              (add_column("cloud_databases", "route_cidrs", "TEXT"),
+               add_column("cloud_databases", "route_network", "VARCHAR(200)"),
+               add_column("cloud_databases", "deploy_workgroup", "VARCHAR(100)"))),
 )
 
 

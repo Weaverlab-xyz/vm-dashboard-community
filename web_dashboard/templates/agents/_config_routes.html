@@ -45,13 +45,23 @@
   <!-- Cloud VMs deployed before their network was recorded cannot match a route narrowed
        to a network (they fall back to a broader route or the remote worker). One lookup
        per VM fills it in. -->
-  <div x-show="!noAccess && withoutNetwork > 0" x-cloak
+  <div x-show="!noAccess && (withoutNetwork > 0 || withoutRanges > 0)" x-cloak
        class="mb-4 border border-amber-200 bg-amber-50 rounded-lg px-4 py-3 text-sm text-amber-800 flex items-center justify-between gap-4">
     <span>
-      <span x-text="withoutNetwork"></span>
-      <span x-text="withoutNetwork === 1 ? 'cloud VM has' : 'cloud VMs have'"></span>
-      no recorded network, so a route narrowed to a network will not cover
-      <span x-text="withoutNetwork === 1 ? 'it' : 'them'"></span> yet.
+      <span x-show="withoutNetwork > 0">
+        <span x-text="withoutNetwork"></span>
+        <span x-text="withoutNetwork === 1 ? 'cloud VM has' : 'cloud VMs have'"></span>
+        no recorded network, so a route narrowed to a network will not cover
+        <span x-text="withoutNetwork === 1 ? 'it' : 'them'"></span> yet.
+      </span>
+      <!-- A cloud database is matched by its subnets, so with none recorded no route
+           covers it and it stays on the remote worker. -->
+      <span x-show="withoutRanges > 0">
+        <span x-text="withoutRanges"></span>
+        <span x-text="withoutRanges === 1 ? 'cloud database has' : 'cloud databases have'"></span>
+        no recorded subnets, so no route covers
+        <span x-text="withoutRanges === 1 ? 'it' : 'them'"></span> yet.
+      </span>
     </span>
     <button @click="lookupNetworks()" :disabled="lookingUp"
             class="shrink-0 text-sm bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded-lg font-medium disabled:opacity-50">
@@ -190,15 +200,16 @@
           <select x-model="form.scope" @change="scopeChanged()"
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             <template x-for="sc in scopes" :key="sc.id">
-              <option :value="sc.id" x-text="sc.id === 'onprem' ? 'On-premises guests' : sc.label + ' VMs'"
+              <option :value="sc.id" x-text="sc.id === 'onprem' ? 'On-premises guests' : sc.label + ' VMs and databases'"
                       :selected="sc.id === form.scope"></option>
             </template>
           </select>
           <p x-show="form.scope !== 'onprem'" class="text-xs text-gray-400 mt-1">
-            Dashboard-deployed VMs in this cloud whose private address is in the range run
-            their Config Management on this agent instead of the remote worker. Run the agent
-            inside that VPC or VNet. Their SSH key is sealed to the agent per job: consider
-            "Release dashboard-held credentials only to SPIRE-attested agents".
+            Dashboard-deployed VMs in this cloud whose private address is in the range, and
+            databases whose subnets all are, run their Config Management on this agent
+            instead of the remote worker. Run the agent inside that VPC or VNet. Their SSH key
+            or database login is sealed to the agent per job: consider "Release
+            dashboard-held credentials only to SPIRE-attested agents".
           </p>
         </div>
 
@@ -315,7 +326,7 @@
 function configRoutesPage() {
   return {
     routes: [], agents: [], grantedIds: [], connections: [], regions: [], workstreams: [],
-    networks: {}, withoutNetwork: 0, lookingUp: false,
+    networks: {}, withoutNetwork: 0, withoutRanges: 0, lookingUp: false,
     scopes: [{id: 'onprem', label: 'On-premises'}],
     loading: true, busy: '',
     noAccess: '',   // the 403 text when this user holds no `connections` permission
@@ -338,6 +349,7 @@ function configRoutesPage() {
         this.workstreams = data.workstreams || [];
         this.networks = data.networks || {};
         this.withoutNetwork = data.cloud_vms_without_network || 0;
+        this.withoutRanges = data.cloud_dbs_without_ranges || 0;
         if ((data.scopes || []).length) this.scopes = data.scopes;
         this.noAccess = '';
       } catch (e) {
@@ -371,12 +383,19 @@ function configRoutesPage() {
       const vms = n === 1 ? '1 VM' : n + ' VMs';
       if (r.scope === 'onprem') return vms;
       const c = r.cloud_matches || 0;
-      return c === 1 ? '1 cloud VM' : c + ' cloud VMs';
+      const d = r.database_matches || 0;
+      const out = c === 1 ? '1 cloud VM' : c + ' cloud VMs';
+      return d ? out + ', ' + (d === 1 ? '1 database' : d + ' databases') : out;
     },
+    // A cloud route can also cover that cloud's databases, which need their engines' ports
+    // and the database image. Same list as agent_host_service.ANSIBLE_PORTS.
     policySnippet() {
-      return ['ansible:', '  enabled: true', '  vm_image: chrweav/ansible-winrm:latest',
-              '  targets:', '    - cidr: ' + (this.form.cidr || ''),
-              '      ports: [22, 5985, 5986]'].join('\n');
+      const cloud = this.form.scope && this.form.scope !== 'onprem';
+      const ports = cloud ? '[22, 1433, 1521, 3306, 5432, 5985, 5986, 27017]' : '[22, 5985, 5986]';
+      return ['ansible:', '  enabled: true', '  vm_image: chrweav/ansible-winrm:latest']
+        .concat(cloud ? ['  db_image: chrweav/ansible-cloud:latest'] : [])
+        .concat(['  targets:', '    - cidr: ' + (this.form.cidr || ''),
+                 '      ports: ' + ports]).join('\n');
     },
     flash(m, t) { this.toast = m; this.toastType = t || 'success'; setTimeout(() => this.toast = '', 4500); },
 

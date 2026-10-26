@@ -102,7 +102,8 @@ Configuration is the overlap. Everything else is specific to one of them.
   The agent runs each job in a one-shot container beside it, so the run itself is
   ephemeral even though the agent is not.
 - **Config Management on cloud VMs, if you opt in**: dashboard-deployed VMs in the VPC or
-  VNet an agent runs in, routed to it by address range. See
+  VNet an agent runs in, routed to it by address range, and the cloud databases in the
+  same network, by their subnets. See
   [Scaling configuration in the cloud](#scaling-configuration-in-the-cloud).
 - **Hypervisor discovery, inventory and power** for vCenter, ESXi, Proxmox, Hyper-V and
   VMware Workstation behind a firewall.

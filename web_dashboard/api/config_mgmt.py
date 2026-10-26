@@ -316,7 +316,24 @@ def get_agent_targets(
         if item.get("kind") == "database":
             row.update({"engine": item.get("engine") or "",
                         "host": item.get("private_host") or "",
+                        "cloud": item.get("cloud") or "",
                         "target_id": item["id"].split(":", 1)[1]})
+            route = (routes.match_for_ranges(item.get("route_cidrs") or [],
+                                             scope=item.get("route_scope") or "",
+                                             region=item.get("route_region") or "",
+                                             workstream=item.get("route_workstream") or "",
+                                             network=item.get("route_network") or "")
+                     if item.get("route_scope") else None)
+            if route is not None:
+                via = route.label or route.cidr
+                row.update({"executor_source": "route", "executor_via": via,
+                            "executor_note": (
+                                f"Executed by {row['agent_name']}, in this database's "
+                                f"network: the Config-Management route {via} "
+                                f"({route.cidr}) covers its subnets, so it runs there "
+                                f"instead of on the remote worker.")})
+                if not row["reason"]:
+                    row["reason"] = _executor_unusable(agents.get(row["agent_id"]), route)
             out["databases"].append(row)
         elif item.get("kind") == "directory":
             row.update({"provider": item.get("provider") or "",
@@ -452,11 +469,18 @@ def get_localhost_targets(
         if (c.cloud or "").lower() in acr.K8S_TARGET_CLOUDS:
             clusters.append({"id": c.id, "name": c.name, "cloud": c.cloud,
                              "status": c.status})
+    # A database a cloud route sends to an agent is listed once, under /agent-targets,
+    # where the picker names that agent — as a routed VM leaves /cloud-targets. Only the
+    # caller's own databases, by the inventory's rule.
+    routes = cmr.load_table(db)
     databases = []
     for d in db.query(CloudDatabase).order_by(CloudDatabase.created_at.desc()).all():
-        if (d.cloud or "").lower() in acr.DB_TARGET_CLOUDS and d.engine in acr.ANSIBLE_DB_ENGINES:
-            databases.append({"id": d.id, "engine": d.engine, "cloud": d.cloud,
-                              "status": d.status})
+        if (d.cloud or "").lower() not in acr.DB_TARGET_CLOUDS or d.engine not in acr.ANSIBLE_DB_ENGINES:
+            continue
+        if not _database_visible(d, current_user) or routes.match_for_database(d):
+            continue
+        databases.append({"id": d.id, "engine": d.engine, "cloud": d.cloud,
+                          "status": d.status})
     portainer = []
     portainer_url = (cs.get("portainer_url") or "").strip()
     # get_raw, not get: the token may be stored as a vault reference, and resolving
@@ -814,26 +838,38 @@ def _worker_fallback(payload: "RunRequest", db, current_user) -> dict | None:
     while the agent is down: the worker reaches a cloud VM the way it would with no route
     at all. Every condition is read from the dashboard's own rows, never the request:
 
-      * the target is a dashboard-deployed cloud VM the caller can see;
-      * the route covering its recorded private address names THIS agent and opts in;
+      * the target is a dashboard-deployed cloud VM, or a cloud database, the caller can
+        see;
+      * the route covering its recorded private address (a database: its recorded
+        subnets) names THIS agent and opts in;
       * the agent is not online, and is not a deployed agent whose host will be up when
         the run is booked for (that run is accepted onto the agent, as without a route
         fallback).
 
-    The address handed back is the one the no-route path uses (public, else private).
+    The address handed back is the one the no-route path uses (public, else private); a
+    database needs none, since its localhost play reads the endpoint from its row.
     Only a playbook can fall back: the worker would send anything else to the dashboard
     host's local runner, which cannot reach the VM, so that is refused here by name.
     """
-    from ..database import RemoteAgent
-    from ..services import agent_host_service, agent_service
+    from ..database import CloudDatabase, RemoteAgent
+    from ..services import agent_service
     from .aws import _accessible_workgroups
 
+    kind = payload.target_kind or "vm"
     cloud = str(getattr(payload, "cloud", "") or "").strip().lower()
-    if (payload.target_kind or "vm") != "vm" or cloud not in cmr.CLOUD_SCOPES:
+    if kind not in ("vm", "database") or (kind == "vm" and cloud not in cmr.CLOUD_SCOPES):
         return None
     agent = db.query(RemoteAgent).filter(RemoteAgent.id == payload.agent_id).first()
     if agent is None or not agent.is_active or agent_service.status_of(agent) == "online":
         return None
+    if kind == "database":
+        row = (db.query(CloudDatabase)
+               .filter(CloudDatabase.id == (payload.target_id or "")).first())
+        if (row is None or row.cloud not in cmr.CLOUD_SCOPES
+                or not _database_visible(row, current_user)):
+            return None
+        return _fallback_if_opted(payload, db, agent, cmr.match_for_database(db, row),
+                                  target=payload.target or "")
     deploy_type = {"aws": "ec2_deploy", "azure": "azure_deploy", "gcp": "gce_deploy"}[cloud]
     deploy = (db.query(Job)
               .filter(Job.id == (payload.target_id or ""), Job.job_type == deploy_type,
@@ -848,6 +884,13 @@ def _worker_fallback(payload: "RunRequest", db, current_user) -> dict | None:
     scope, region, workstream, network = cmr.scope_of_job(deploy)
     route = cmr.match_for(db, private, scope=scope, region=region, workstream=workstream,
                           network=network)
+    target = str(meta.get("public_ip") or private).strip()
+    return _fallback_if_opted(payload, db, agent, route, target=target) if target else None
+
+
+def _fallback_if_opted(payload, db, agent, route, *, target: str) -> dict | None:
+    """The shared half of :func:`_worker_fallback`, once the target's route is known."""
+    from ..services import agent_host_service
     if route is None or route.agent_id != agent.id or not route.fallback_to_worker:
         return None
     if agent_host_service.for_agent(db, agent.id) is not None:
@@ -859,11 +902,56 @@ def _worker_fallback(payload: "RunRequest", db, current_user) -> dict | None:
             status_code=400,
             detail=(f"Agent '{agent.name}' is not online and the route {route.cidr} falls "
                     f"back to the remote worker, but the remote worker runs only playbooks "
-                    f"against a cloud VM. Run '{payload.asset}' once the agent is back."))
-    target = str(meta.get("public_ip") or private).strip()
-    if not target:
-        return None
+                    f"against a cloud target. Run '{payload.asset}' once the agent is back."))
     return {"target": target, "agent_name": agent.name, "cidr": route.cidr}
+
+
+def _log_fallback(db, job_id: str, fallback: dict) -> None:
+    job_service.append_job_log(
+        db, job_id,
+        f"Agent '{fallback['agent_name']}' is not online, so the route "
+        f"{fallback['cidr']} sent this run to the remote worker.")
+
+
+def _database_visible(row, current_user) -> bool:
+    """The inventory's RBAC rule for a database row: an administrator sees every one,
+    anybody else those in their workstreams, or untagged ones they created. No user (an
+    internal caller) sees no cloud database, as for a cloud VM."""
+    from ..services import inventory_service
+    if current_user is None:
+        return False
+    return inventory_service.visible_to(
+        {"workgroup": (row.workgroup or "").strip().lower() or None,
+         "deployed_by": row.created_by},
+        inventory_service.accessible_workgroups(current_user), current_user.username)
+
+
+def _check_cloud_database_executor(db, row, agent) -> None:
+    """A cloud database runs on an agent only when a route covering its recorded subnets
+    names that agent. The subnets come from the row, never the request."""
+    from ..services import ansible_cloud_run_service as acr
+    if row.engine not in acr.ANSIBLE_DB_ENGINES:
+        raise HTTPException(status_code=400,
+                            detail=f"Engine {row.engine!r} has no Ansible run support.")
+    route = cmr.match_for_database(db, row)
+    if route is None:
+        scope, region, workstream, network, cidrs = cmr.scope_of_database(row)
+        why = ("its subnets are not recorded yet — Look up networks on Remote Agents → "
+               "Config Routes" if not cidrs else
+               f"no route scoped to {cmr.scope_text(scope, region, '', workstream, network)} "
+               f"contains all of {', '.join(cidrs)}")
+        raise HTTPException(
+            status_code=400,
+            detail=(f"No Config-Management route sends this database to an agent ({why}), "
+                    f"so it runs on the remote worker. Leave the agent unset."))
+    if route.agent_id != agent.id:
+        runner = db.query(type(agent)).filter(type(agent).id == route.agent_id).first()
+        raise HTTPException(
+            status_code=400,
+            detail=(f"This database is routed to agent "
+                    f"'{runner.name if runner else route.agent_id}' by the Config-Management "
+                    f"route {route.cidr}, so agent '{agent.name}' cannot run against it. "
+                    f"Select the target again, or change that route."))
 
 
 def _resolve_agent_target(payload: "RunRequest", db, current_user=None) -> dict:
@@ -980,9 +1068,12 @@ def _resolve_agent_target(payload: "RunRequest", db, current_user=None) -> dict:
     if payload.target_kind == "database":
         row = (db.query(CloudDatabase)
                .filter(CloudDatabase.id == payload.target_id).first())
-        if not row:
+        if not row or (row.cloud in cmr.CLOUD_SCOPES
+                       and not _database_visible(row, current_user)):
             raise HTTPException(status_code=404, detail="No such database.")
-        if (row.agent_id or "") != agent.id:
+        if row.cloud in cmr.CLOUD_SCOPES:
+            _check_cloud_database_executor(db, row, agent)
+        elif (row.agent_id or "") != agent.id:
             raise HTTPException(
                 status_code=400,
                 detail=f"That database is not reachable through agent '{agent.name}'.")
@@ -1174,7 +1265,7 @@ async def _run_agent_ansible(payload: "RunRequest", db, current_user):
     return {"job_id": job.id, "status": "queued"}
 
 
-async def _run_cloud_localhost(payload: "RunRequest", db, current_user):
+async def _run_cloud_localhost(payload: "RunRequest", db, current_user, fallback=None):
     """Enqueue a Kubernetes-cluster / cloud-database / Portainer Config-Management run.
 
     These are localhost plays that reach out via a kubeconfig / DB login vars / the
@@ -1284,10 +1375,13 @@ async def _run_cloud_localhost(payload: "RunRequest", db, current_user):
             "asset_backend": asset_backend,
             "extra_vars": payload.extra_vars or {},
             "secret_vars": payload.secret_vars or {},
+            **({"fallback_from_agent": fallback["agent_name"]} if fallback else {}),
         },
         batch_id=payload.batch_id,
         **_schedule_kwargs(payload, db),
     )
+    if fallback:
+        _log_fallback(db, job.id, fallback)
     if wants_secret:
         job_service.log_audit(
             db, current_user.username, "ansible_secret_use",
@@ -1329,7 +1423,7 @@ async def run_playbook(
         if fallback is None:
             return await _run_agent_ansible(payload, db, current_user)
         # Re-planned for the remote worker: from here this is the run the no-route path
-        # makes for this VM, with the agent it fell back from recorded on the job.
+        # makes for this target, with the agent it fell back from recorded on the job.
         payload.agent_id, payload.target = "", fallback["target"]
     if payload.target_kind == "directory":
         raise HTTPException(
@@ -1338,7 +1432,7 @@ async def run_playbook(
                    "choose the agent it was registered with.")
 
     if payload.target_kind in ("k8s", "database", "portainer"):
-        return await _run_cloud_localhost(payload, db, current_user)
+        return await _run_cloud_localhost(payload, db, current_user, fallback)
 
     targets = ansible_local_service.get_configured_targets(db)
     valid_keys = {t["key"] for t in targets}
@@ -1477,10 +1571,7 @@ async def run_playbook(
         **_schedule_kwargs(payload, db),
     )
     if fallback:
-        job_service.append_job_log(
-            db, job.id,
-            f"Agent '{fallback['agent_name']}' is not online, so the route "
-            f"{fallback['cidr']} sent this run to the remote worker.")
+        _log_fallback(db, job.id, fallback)
     if wants_secret or payload.epml_token_var:
         job_service.log_audit(
             db, current_user.username, "ansible_secret_use",

@@ -281,6 +281,41 @@ fell back from. Some limits:
 agent **2.9** or later. An older agent is refused when the run is queued, with the upgrade
 named.
 
+### Cloud databases
+
+A database the dashboard provisioned in AWS, Azure or GCP can also be configured from an
+agent in its network, through the same cloud route as that network's VMs.
+
+**A route covers a database by its subnets.** Its endpoint is a DNS name on AWS and Azure,
+so the dashboard records the database's subnets instead, when it provisions the database:
+
+- **AWS:** every subnet in its DB subnet group, since a failover can land it in any of them.
+- **Azure:** the delegated subnet (Flexible Server) or the private-endpoint subnet (SQL).
+- **GCP:** its private IP.
+
+A route covers the database when the route's range contains all of them. For a database
+provisioned before this, use **Look up networks** on **Config Routes**; until then it has
+no subnets recorded, matches no route, and stays on the remote worker. The Config Routes
+list shows how many databases each route covers, and saving a cloud route looks them up
+for you.
+
+**The workstream a route is narrowed to is the one the database was provisioned in.**
+Reassigning it later does not move it to another team's agent. A database looked up
+afterwards counts its current workstream as that one.
+
+**On the agent:**
+
+- `ansible.db_image` must name the localhost image, `chrweav/ansible-cloud:latest`, pulled
+  on the host. The agent never pulls an image itself.
+- `ansible.targets` must cover the subnets on the engine's port: 5432 (PostgreSQL), 3306
+  (MySQL), 1433 (SQL Server), 1521 (Oracle) or 27017 (MongoDB).
+
+The route form shows the snippet. An agent the dashboard deployed gets both automatically.
+
+The credential is the one the remote worker would use, read when the agent asks and sealed
+to that agent for that one job. A route's **Fall back to the remote worker when the agent is
+offline** covers its databases as well.
+
 ### Several runs at once
 
 By default an agent runs one job at a time. To let it run several Config-Management runs at

@@ -179,10 +179,11 @@ def test_only_a_playbook_falls_back():
     assert exc.status_code == 400 and "only playbooks" in exc.detail, exc.detail
 
 
-def test_a_hypervisor_guest_run_is_never_a_fallback():
+def test_a_hypervisor_guest_or_cluster_run_is_never_a_fallback():
+    # A cloud database can fall back: tests/test_config_mgmt_cloud_db_routes.py.
     db = _scene()
     assert cm._worker_fallback(_request(cloud=""), db, _user()) is None
-    assert cm._worker_fallback(_request(target_kind="database"), db, _user()) is None
+    assert cm._worker_fallback(_request(target_kind="k8s"), db, _user()) is None
 
 
 def test_a_vm_the_caller_cannot_see_is_not_a_fallback():
