@@ -325,9 +325,16 @@ class Updater:
                     return ""
                 return f"the new agent came up as {ready.get('version')}, not {version}"
             if watch:
-                state = (self.docker.inspect(watch).get("State") or {})
+                info = self.docker.inspect(watch)
+                state = info.get("State") or {}
                 if not state.get("Running") and state.get("Status") in ("exited", "dead"):
                     return f"the new agent exited (code {state.get('ExitCode')})"
+                # The successor inherits the restart policy, so one that crashes at start
+                # is relaunched rather than left exited. A restart before `ready` is the
+                # same failure; waiting out the timeout only delays the rollback.
+                if state.get("Restarting") or int(info.get("RestartCount") or 0) > 0:
+                    return (f"the new agent exited (code {state.get('ExitCode')}) and "
+                            f"was restarting")
             self.sleep(POLL_S)
         return f"the new agent did not report ready within {timeout}s"
 
