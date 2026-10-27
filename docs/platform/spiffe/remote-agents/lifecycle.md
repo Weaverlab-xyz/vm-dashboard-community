@@ -32,6 +32,11 @@ it runs:
    dashboard, or a compromised agent, can at most request a release the project itself
    signed.
 
+The updater has one more job on a host the dashboard deployed with Kubernetes work: it
+verifies the Kubernetes image's signature against the policy's `k8s.verify` the same way,
+and writes the result (`k8s-image.json`) for the agent. See
+[Deploying an agent → Kubernetes work](deploying.md#kubernetes-work).
+
 The dashboard never verifies a signature itself. A wrong release recorded on the
 dashboard just offers an upgrade that every host refuses.
 

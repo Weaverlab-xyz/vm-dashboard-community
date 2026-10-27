@@ -41,6 +41,11 @@ insufficient:
 block (written by the dashboard into the policy of a host it deployed, never by you)
 enables Kubernetes work: the `agent_k8s` handler and the `k8s` Config-Management run kind.
 The block's image must be pinned by digest (`repo@sha256:…`) or the agent will not start.
+From 2.13 the block also names who signed that image (`k8s.verify`: `keyless:` identity and
+issuer, or `public_key:` path, the shape of `upgrades.verify`). The updater beside the agent
+checks the signature with cosign and writes `k8s-image.json` in the control volume; the
+agent runs no Kubernetes work until that file says the check passed for exactly its image
+and signer, and reports the state (`verified`, `pending`, `failed: …`) on every lease.
 The work is a closed set of steps (apply, delete, helm upgrade, helm uninstall) whose
 commands the agent builds itself, with a cluster-admin kubeconfig sealed to the job. A
 customer-hosted agent is never sent this work, whatever its policy says: see

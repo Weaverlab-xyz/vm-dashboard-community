@@ -18,6 +18,13 @@ The dashboard only *chooses* a release. Whether any release may run is decided o
    before it pulls anything. The default `keyless` identity is this project's release
    workflow; `public_key` is for a mirror you re-sign yourself.
 
+**It also checks the Kubernetes image** on a host with a `k8s:` block that names a signer
+(`k8s.verify`): it runs `cosign verify` on `k8s.image` (by digest, no Docker call) and
+writes `k8s-image.json` (`{key, image, ok, reason, at}`) into the control volume. The agent
+runs no Kubernetes work until that file says `ok: true` under the key of its own image and
+signer. A pass is final for that image; a failure is retried after 5 minutes, doubling to an
+hour.
+
 It has **no network listener** and **never talks to the dashboard**. Its only input is
 `request.json` in the volume it shares with the agent. Its Docker operations are a fixed
 allowlist (`DockerAPI.ALLOWED`), limited to the container labelled

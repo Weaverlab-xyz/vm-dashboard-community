@@ -378,6 +378,10 @@ MIGRATIONS: tuple = (
     # predates it and every image built any other way.
     Migration("0010_registered_image_recipe",
               (add_column("registered_images", "recipe", "VARCHAR(40)"),)),
+    # Agent 2.13: its updater's cosign check of the Kubernetes image, as it last reported
+    # it (verified | pending | unchecked | failed: ...). NULL is "not reported".
+    Migration("0011_k8s_image_signature",
+              (add_column("remote_agents", "control_k8s_signature", "VARCHAR(240)"),)),
 )
 
 

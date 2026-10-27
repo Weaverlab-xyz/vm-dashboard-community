@@ -1258,6 +1258,9 @@ def _agent_row(agent: RemoteAgent, running: int = 0) -> dict:
         # the dashboard's pause and ring, and why Upgrade/Restart are unavailable, if so.
         "control_upgrades": bool(agent.control_upgrades),
         "control_updater": bool(agent.control_updater),
+        # Agent 2.13+: the updater's cosign check of the Kubernetes image ("" = not
+        # reported). Kubernetes work runs on it only while this is "verified".
+        "k8s_signature": agent.control_k8s_signature or "",
         "paused": bool(agent.paused),
         "upgrade_ring": agent_lifecycle_service.ring(agent),
         "lifecycle_blocked": agent_lifecycle_service.host_gate(None, agent) or "",

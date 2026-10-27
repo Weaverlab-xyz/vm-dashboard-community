@@ -122,7 +122,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 # broker running the earlier one failed identically while reporting the same string as the
 # build that fixed it. A behaviour change the fleet cannot see is a behaviour change nobody
 # can confirm arrived, so bump this whenever the agent's behaviour moves.
-AGENT_VERSION = "2.12.0"
+AGENT_VERSION = "2.13.0"
 
 log = logging.getLogger("agent")
 
@@ -1059,6 +1059,10 @@ class Policy:
     # defaults so a Policy built without one (every test fixture before 2.12) has it off.
     k8s_enabled = False
     k8s_image_name = ""
+    # 2.13: who must have signed k8s.image ({} = digest only) and the key the updater's
+    # verification result must carry (k8s_verify_key).
+    k8s_verify: dict = {}
+    k8s_verify_key = ""
     k8s_allow: list = []
     k8s_network = "bridge"
     k8s_max_runtime_minutes = 20
@@ -1271,6 +1275,12 @@ class Policy:
         if not self.k8s_image_name:
             raise PolicyRefusal("policy.yaml enables Kubernetes work but names no "
                                 "`k8s.image`.")
+        state = k8s_signature_state(self)
+        if state not in ("verified", "unchecked"):
+            raise PolicyRefusal(
+                f"the Kubernetes image's cosign signature is not verified ({state}). The "
+                f"updater beside this agent checks it against `k8s.verify`; until it "
+                f"passes, this agent runs no Kubernetes work.")
         return self.k8s_image_name
 
     def check_k8s(self, ip: str, port: int) -> None:
@@ -1939,7 +1949,9 @@ class Dashboard:
                 # Whether this host can be upgraded or restarted from the dashboard:
                 # the operator's opt-in and a live updater beside it.
                 "control": {"upgrades_enabled": bool(getattr(POLICY, "upgrades", None)),
-                            "updater_present": updater_present()},
+                            "updater_present": updater_present(),
+                            # 2.13: the updater's check of k8s.image's signature.
+                            "k8s_signature": k8s_signature_state(POLICY)},
                 # 2.11: the policy hash on every lease, so a changed file shows without
                 # waiting for the next attestation, and how often this agent re-attests.
                 "policy_hash": POLICY.digest,
@@ -5235,6 +5247,10 @@ def parse_k8s(policy: "Policy", value, parse_targets) -> None:
         runtime = int(value.get("max_runtime_minutes") or 20)
     except (TypeError, ValueError):
         raise AgentFatal("policy.yaml: `k8s.max_runtime_minutes` must be a whole number.")
+    verify = value.get("verify")
+    policy.k8s_verify = {} if verify is None else parse_verify(verify, "k8s.verify")
+    policy.k8s_verify_key = (k8s_verify_key(image, policy.k8s_verify)
+                             if policy.k8s_verify else "")
     policy.k8s_enabled = enabled
     policy.k8s_image_name = image
     policy.k8s_allow = parse_targets(value.get("targets"), "k8s.targets")
@@ -5835,27 +5851,7 @@ def parse_upgrades(value) -> dict:
         raise AgentFatal(
             "policy.yaml: `upgrades.repository` must be a plain image name such as "
             "chrweav/dashboard-agent (a registry host is allowed; no tag or digest).")
-    verify = value.get("verify")
-    if not isinstance(verify, dict) or len(verify) != 1 or not (
-            set(verify) <= {"keyless", "public_key"}):
-        raise AgentFatal(
-            "policy.yaml: `upgrades.verify` must name exactly one of `keyless:` "
-            "(identity + issuer) or `public_key:` (a path to a cosign public key).")
-    if "keyless" in verify:
-        kl = verify["keyless"]
-        if not (isinstance(kl, dict) and str(kl.get("identity") or "").strip()
-                and str(kl.get("issuer") or "").strip()):
-            raise AgentFatal(
-                "policy.yaml: `upgrades.verify.keyless` needs both `identity` (a regular "
-                "expression for the signing workflow) and `issuer`.")
-        verify = {"keyless": {"identity": str(kl["identity"]).strip(),
-                              "issuer": str(kl["issuer"]).strip()}}
-    else:
-        key = str(verify.get("public_key") or "").strip()
-        if not key.startswith("/"):
-            raise AgentFatal("policy.yaml: `upgrades.verify.public_key` must be an "
-                             "absolute path to a cosign public key.")
-        verify = {"public_key": key}
+    verify = parse_verify(value.get("verify"), "upgrades.verify")
     timeout = value.get("ready_timeout_s", 480)
     if isinstance(timeout, bool) or not isinstance(timeout, int) or not 60 <= timeout <= 540:
         raise AgentFatal(
@@ -5864,6 +5860,54 @@ def parse_upgrades(value) -> dict:
     return {"repository": repo, "verify": verify,
             "allow_downgrade": value.get("allow_downgrade") is True,
             "ready_timeout_s": timeout}
+
+
+def parse_verify(verify, where: str) -> dict:
+    """A cosign signer block (`upgrades.verify`, `k8s.verify`): exactly one of
+    ``keyless: {identity, issuer}`` or ``public_key: /abs/path``. Fatal otherwise."""
+    if not isinstance(verify, dict) or len(verify) != 1 or not (
+            set(verify) <= {"keyless", "public_key"}):
+        raise AgentFatal(
+            f"policy.yaml: `{where}` must name exactly one of `keyless:` "
+            f"(identity + issuer) or `public_key:` (a path to a cosign public key).")
+    if "keyless" in verify:
+        kl = verify["keyless"]
+        if not (isinstance(kl, dict) and str(kl.get("identity") or "").strip()
+                and str(kl.get("issuer") or "").strip()):
+            raise AgentFatal(
+                f"policy.yaml: `{where}.keyless` needs both `identity` (a regular "
+                f"expression for the signing workflow) and `issuer`.")
+        return {"keyless": {"identity": str(kl["identity"]).strip(),
+                            "issuer": str(kl["issuer"]).strip()}}
+    key = str(verify.get("public_key") or "").strip()
+    if not key.startswith("/"):
+        raise AgentFatal(f"policy.yaml: `{where}.public_key` must be an "
+                         f"absolute path to a cosign public key.")
+    return {"public_key": key}
+
+
+def k8s_verify_key(image: str, verify: dict) -> str:
+    """What the updater's `k8s-image.json` must carry to count for THIS image and signer
+    (runners/agent-updater/updater.py computes the same): a result for another digest, or
+    for the same digest checked against another signer, is not this policy's."""
+    canon = json.dumps(verify, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(f"{image}\n{canon}".encode("utf-8")).hexdigest()
+
+
+def k8s_signature_state(policy: "Policy") -> str:
+    """``unchecked`` (no `k8s.verify`), ``pending`` (no result for this image and signer
+    yet), ``failed: <reason>`` or ``verified``. Reported on every lease, so the dashboard
+    sends a cluster's work to the remote worker until it reads ``verified``."""
+    if not getattr(policy, "k8s_enabled", False):
+        return "off"
+    if not getattr(policy, "k8s_verify", None):
+        return "unchecked"
+    doc = _read_control("k8s-image.json") or {}
+    if doc.get("key") != policy.k8s_verify_key:
+        return "pending"
+    if doc.get("ok") is True:
+        return "verified"
+    return f"failed: {str(doc.get('reason') or 'no reason given')[:200]}"
 
 
 def _version_tuple(text: str) -> tuple:

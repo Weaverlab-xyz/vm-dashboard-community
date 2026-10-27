@@ -1282,6 +1282,13 @@ class Settings(BaseSettings):
     # runners/ansible-cloud/. Used for ALL cloud runners (ECS/ACI/Cloud Run) on k8s/DB
     # targets — never the winrm image (it lacks these collections).
     ansible_cloud_image: str = "chrweav/ansible-cloud:latest"
+    # Who signed a CUSTOM ansible_cloud_image, for a dashboard-owned agent's updater to
+    # verify before that agent runs Kubernetes work with it (agent_host_service.k8s_signer):
+    # a cosign keyless identity (regex) + issuer, or a cosign public key (PEM). Blank: only
+    # the project's own image, signed by its release workflow, runs on owned agents.
+    k8s_image_signer_identity: str = ""
+    k8s_image_signer_issuer: str = ""
+    k8s_image_signer_public_key: str = ""
 
     # Azure resource-management credentials.
     # Preferred: set the four direct env vars below (community edition / simple

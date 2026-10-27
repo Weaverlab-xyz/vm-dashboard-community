@@ -278,9 +278,13 @@ As built:
 - **The cluster names its executor** (`k8s_clusters.executor_agent_id`). Its API endpoint is
   public and EKS/AKS clusters sit in their own peered networks, so no route could pick the
   agent by address.
-- **The image is pinned by digest, not signature-verified.** The agent refuses a `k8s:`
+- **The image is pinned by digest and signature-verified.** The agent refuses a `k8s:`
   image that is not a digest, and the dashboard resolves `ansible_cloud_image` to one when
-  the host starts. Verifying the run image's cosign signature on the agent is a follow-up.
+  the host starts. The release workflow signs `chrweav/ansible-cloud` (keyless), the policy
+  names that signer (`k8s.verify`, or an admin-set signer for a custom image), and the
+  updater beside the agent verifies it with cosign. The agent (2.13) runs no Kubernetes
+  work until the check has passed, and the dashboard sends the cluster's work to the remote
+  worker meanwhile. The agent itself still holds no cosign.
 - **The agent must also be SPIRE-attested,** whatever the global SPIRE-only setting says.
 
 The plan as decided:
