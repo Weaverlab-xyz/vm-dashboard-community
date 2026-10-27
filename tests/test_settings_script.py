@@ -118,12 +118,14 @@ def test_the_check_sees_a_duplicate_across_files():
 def test_the_split_left_every_member_somewhere():
     names = [n for _, ns in _feature_sources() for n in ns]
     # The page's script had 148 members before the split; a member dropped while moving
-    # code between files would leave a binding with nothing behind it.
+    # code between files would leave a binding with nothing behind it. 151 since the POV
+    # cloud panel's multi-cloud checkboxes added povCloudChoices, povCloudOn and
+    # togglePovCloud -- an ADDED member is the only reason to change this number.
     for must in ("init", "openPanel", "savePanelConfig", "loadFeatureFlags", "integrations",
                  "saveBranding", "startRegistration", "saveRegionSets", "loadDbops",
                  "showToast"):
         assert must in names, f"{must} is defined nowhere in the Settings script"
-    assert len(names) == 148, len(names)
+    assert len(names) == 151, len(names)
 
 
 if __name__ == "__main__":
