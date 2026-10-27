@@ -5250,8 +5250,9 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
     emit(f"running {run_kind} Config Management against {ip}:{port}")
     code = _run_ansible_sibling(
         policy, image=image, files=files, env=run_env,
-        command=command, emit=emit, cancelled=cancelled, pin=pin,
-        **({"kind": "k8s"} if run_kind == "k8s" else {}))
+        command=command, emit=emit, cancelled=cancelled,
+        **({"kind": "k8s"} if run_kind == "k8s" else {}),
+        **({"pin": pin} if pin else {}))
 
     meaning = _ANSIBLE_EXIT.get(code, "")
     if code == 0:
