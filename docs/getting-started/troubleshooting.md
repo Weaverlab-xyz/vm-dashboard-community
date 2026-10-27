@@ -199,7 +199,8 @@ Open a GitHub issue with:
 1. The output of `.\scripts\Onboard-Dashboard.ps1` (copy the terminal)
 2. The last 100 lines of `docker compose logs app`
 3. Your OS / Docker Desktop / PowerShell versions
-4. What you expected vs. what happened
+4. The dashboard version from menu → **About**
+5. What you expected vs. what happened
 
 **Do not paste `.env` contents** — they contain your cloud credentials.
 
