@@ -323,6 +323,75 @@ async def create_network(env_id: str, region: str, cidr: str, sub_cidr: str,
                                         sub_cidr, zones)
 
 
+# ── the image-build network ──────────────────────────────────────────────────
+#
+# Where a POV standard-image build (packer_build_service) launches its instance. The
+# provisioning role can launch only into a subnet tagged as the dashboard's own, so the
+# account's default VPC is out of reach, and a POV environment's network is not the
+# build's to borrow. One per region, built on first use and kept: it costs nothing
+# standing (no NAT gateway), and Packer brings and removes its own security group.
+#
+# Tagged povManagedBy but with NO povEnvironment: every listing and teardown groups on
+# the environment tag, so this network never shows up as an orphaned POV on /pov/cloud
+# and no environment's delete can take it down mid-build.
+
+IMAGE_BUILD_ROLE = "image-build"
+_IMAGE_BUILD_CIDR = "10.254.0.0/16"
+_IMAGE_BUILD_SUBNET_CIDR = "10.254.0.0/24"
+
+
+def image_build_tags() -> dict:
+    """The tags on the image-build network, and on everything a POV build creates."""
+    return {env.TAG_MANAGED_BY: env.MANAGED_BY, env.TAG_ESTATE: env.MANAGED_BY,
+            env.TAG_ROLE: IMAGE_BUILD_ROLE}
+
+
+def _image_build_spec(resource_type: str, name: str) -> dict:
+    tags = {**image_build_tags(), env.TAG_NAME: name}
+    return {"ResourceType": resource_type,
+            "Tags": [{"Key": k, "Value": v} for k, v in tags.items()]}
+
+
+def _image_build_filters() -> list:
+    return [{"Name": f"tag:{env.TAG_MANAGED_BY}", "Values": [env.MANAGED_BY]},
+            {"Name": f"tag:{env.TAG_ROLE}", "Values": [IMAGE_BUILD_ROLE]}]
+
+
+def _ensure_image_build_subnet_sync(region: str) -> str:
+    ec2 = aws_service._get_ec2_pinned(region)
+    subnets = [s for s in ec2.describe_subnets(Filters=_image_build_filters()).get("Subnets") or []
+               if s.get("State") == "available"]
+    if subnets:
+        # The oldest-looking id wins, so two builds always pick the same one.
+        return sorted(s["SubnetId"] for s in subnets)[0]
+
+    name = "vm-dashboard-image-build"
+    vpc_id = ec2.create_vpc(CidrBlock=_IMAGE_BUILD_CIDR,
+                            TagSpecifications=[_image_build_spec("vpc", name)])["Vpc"]["VpcId"]
+    ec2.modify_vpc_attribute(VpcId=vpc_id, EnableDnsHostnames={"Value": True})
+    subnet_id = ec2.create_subnet(
+        VpcId=vpc_id, CidrBlock=_IMAGE_BUILD_SUBNET_CIDR,
+        TagSpecifications=[_image_build_spec("subnet", f"{name}-subnet")])["Subnet"]["SubnetId"]
+    # Packer connects to the build instance over its public address.
+    ec2.modify_subnet_attribute(SubnetId=subnet_id, MapPublicIpOnLaunch={"Value": True})
+    igw_id = ec2.create_internet_gateway(
+        TagSpecifications=[_image_build_spec("internet-gateway", f"{name}-igw")]
+    )["InternetGateway"]["InternetGatewayId"]
+    ec2.attach_internet_gateway(InternetGatewayId=igw_id, VpcId=vpc_id)
+    rt_id = ec2.describe_route_tables(
+        Filters=[{"Name": "vpc-id", "Values": [vpc_id]}])["RouteTables"][0]["RouteTableId"]
+    ec2.create_route(RouteTableId=rt_id, DestinationCidrBlock="0.0.0.0/0", GatewayId=igw_id)
+    ec2.create_tags(Resources=[rt_id],
+                    Tags=_image_build_spec("route-table", f"{name}-rt")["Tags"])
+    logger.info("built the POV image-build network in %s: %s / %s", region, vpc_id, subnet_id)
+    return subnet_id
+
+
+async def ensure_image_build_subnet(region: str) -> str:
+    """The image-build subnet in ``region``, built the first time a region needs one."""
+    return await aws_service._to_thread(_ensure_image_build_subnet_sync, region)
+
+
 def _root_device(ec2, image_id: str) -> tuple:
     """``(device_name, minimum_size_gb)`` for an AMI.
 

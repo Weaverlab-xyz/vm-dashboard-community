@@ -204,6 +204,53 @@ def test_demo_linux_template_unchanged():
         image_name="demo", has_provisioner=True)
     assert 'script = "provision.sh"' in t
     assert 'Name    = "demo"' in t and 'BuiltBy = "vm-dashboard"' in t
+    assert "subnet_id" not in t and "run_tags" not in t
+
+
+_RUN_TAGS = {"povManagedBy": "vm-dashboard", "managed-by": "vm-dashboard",
+             "povRole": "image-build"}
+
+
+def test_pov_templates_build_in_the_image_subnet_with_every_resource_tagged():
+    """The POV provisioning role launches only into a subnet it built and creates only
+    resources tagged as its own: the default VPC and an untagged temporary key pair were
+    a 403 on ec2:CreateKeyPair for both standard builds."""
+    linux = ps.generate_aws_template(
+        source_ami="ami-123", instance_type="t3.medium", ssh_username="ubuntu",
+        image_name="pov-standard-linux", has_provisioner=False,
+        subnet_id="subnet-0abc", run_tags=_RUN_TAGS)
+    windows = ps.generate_aws_windows_template(
+        source_ami="ami-win", instance_type="t3.large", image_name="pov-standard-windows",
+        subnet_id="subnet-0abc", run_tags=_RUN_TAGS)
+    for t in (linux, windows):
+        assert 'subnet_id                   = "subnet-0abc"' in t
+        assert "associate_public_ip_address = true" in t
+        for block in ("run_tags", "run_volume_tags", "snapshot_tags"):
+            body = t[t.index(f"  {block} = {{"):]
+            assert '"povManagedBy" = "vm-dashboard"' in body[:body.index("}")], block
+        ami = t[t.index("  tags = {"):]
+        assert '"povManagedBy" = "vm-dashboard"' in ami[:ami.index("}")]
+
+
+def test_pov_build_service_places_the_build():
+    src = _read("web_dashboard", "services", "packer_build_service.py")
+    body = src[src.index("async def _run_aws_build"):src.index("def _azure_build_credentials")]
+    assert "pov_cloud_aws.ensure_image_build_subnet(region)" in body
+    assert body.count("**placement") == 2, "both the Linux and Windows templates"
+    drv = _read("web_dashboard", "services", "pov_cloud_aws.py")
+    fn = drv[drv.index("def image_build_tags"):drv.index("def _image_build_spec")]
+    # Never the environment tag: that is what every listing and teardown groups on.
+    assert "TAG_ENVIRONMENT" not in fn and "TAG_MANAGED_BY" in fn
+
+
+def test_provision_policy_covers_the_packer_build():
+    tf = _read("terraform", "pov_cloud_aws_policy", "main.tf")
+    for action in ("ec2:CreateKeyPair", "ec2:CreateImage", "ec2:DeregisterImage",
+                   "ec2:DeleteSnapshot"):
+        assert f'"{action}"' in tf, action
+    creating = tf[tf.index("creating_actions = ["):]
+    creating = creating[:creating.index("]")]
+    assert '"CreateKeyPair"' in creating and '"CreateImage"' in creating
 
 
 def test_windows_template():

@@ -154,6 +154,8 @@ def generate_aws_template(
     provisioner_sensitive_var_names: dict = None,
     scripts: list = None,
     extra_tags: dict = None,
+    subnet_id: str = "",
+    run_tags: dict = None,
 ) -> str:
     """amazon-ebs over SSH. ``scripts`` names files in the build directory, run in
     order by one shell provisioner; unset, it is ``provision.sh`` alone when
@@ -184,7 +186,8 @@ def generate_aws_template(
         '  instance_type = "' + instance_type + '"\n'
         '  ssh_username  = "' + ssh_username + '"\n'
         '  ami_name      = "' + safe + '-{{timestamp}}"\n\n'
-        + _aws_tags_block(image_name, extra_tags) +
+        + _aws_placement_block(subnet_id, run_tags)
+        + _aws_tags_block(image_name, extra_tags, run_tags) +
         '}\n\n'
         'build {\n'
         '  name    = "vm-dashboard"\n'
@@ -194,11 +197,37 @@ def generate_aws_template(
     )
 
 
-def _aws_tags_block(image_name: str, extra_tags: dict = None) -> str:
+def _hcl_tag_lines(tags: dict) -> list:
+    return ['    "%s" = "%s"' % (_hcl_escape(str(k)), _hcl_escape(str(v)))
+            for k, v in (tags or {}).items()]
+
+
+def _aws_tags_block(image_name: str, extra_tags: dict = None, run_tags: dict = None) -> str:
     lines = ['    Name    = "' + image_name + '"', '    BuiltBy = "vm-dashboard"']
-    for k, v in (extra_tags or {}).items():
-        lines.append('    "%s" = "%s"' % (_hcl_escape(str(k)), _hcl_escape(str(v))))
+    lines += _hcl_tag_lines({**(run_tags or {}), **(extra_tags or {})})
     return '  tags = {\n' + "\n".join(lines) + '\n  }\n'
+
+
+def _aws_placement_block(subnet_id: str = "", run_tags: dict = None) -> str:
+    """Where a POV build runs, and the tags on everything it creates on the way.
+
+    A POV install's provisioning role is tag-conditioned (terraform/pov_cloud_aws_policy):
+    it launches only into a subnet it built and creates only resources tagged as its own.
+    So a POV build names the image-build subnet (pov_cloud_aws.ensure_image_build_subnet)
+    instead of the default VPC, and ``run_tags`` reaches Packer's temporary key pair and
+    security group, the instance, its volumes, and the AMI and its snapshots: every one a
+    create call whose request tags the policy checks. Both unset (the demo Build Image
+    tab), the template is what it always was."""
+    out = ""
+    if subnet_id:
+        out += ('  subnet_id                   = "' + _hcl_escape(subnet_id) + '"\n'
+                '  associate_public_ip_address = true\n\n')
+    if run_tags:
+        body = "\n".join(_hcl_tag_lines(run_tags))
+        for block in ("run_tags", "run_volume_tags", "snapshot_tags"):
+            out += '  ' + block + ' = {\n' + body + '\n  }\n'
+        out += "\n"
+    return out
 
 
 # The build's own WinRM, brought up by EC2 user-data before Packer connects. A
@@ -230,6 +259,8 @@ def generate_aws_windows_template(
     provisioner_sensitive_var_names: dict = None,
     extra_tags: dict = None,
     volume_size_gb: int = 0,
+    subnet_id: str = "",
+    run_tags: dict = None,
 ) -> str:
     """amazon-ebs over WinRM, for a Windows Server AMI.
 
@@ -300,7 +331,8 @@ def generate_aws_windows_template(
         '  winrm_timeout            = "30m"\n'
         '  windows_password_timeout = "30m"\n'
         + volume + '\n'
-        + _aws_tags_block(image_name, extra_tags) +
+        + _aws_placement_block(subnet_id, run_tags)
+        + _aws_tags_block(image_name, extra_tags, run_tags) +
         '}\n\n'
         'build {\n'
         '  name    = "vm-dashboard"\n'
