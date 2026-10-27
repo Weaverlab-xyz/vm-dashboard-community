@@ -2,7 +2,7 @@
 {% block title %}POV Cloud{% endblock %}
 
 {#
-  The POV's read-only view of its cloud provider.
+  The POV's read-only view of its cloud providers, one cloud at a time.
 
   There is deliberately no deploy control on this page and no endpoint behind one. The
   demo cloud consoles stay 404 on a POV instance because their deploys resolve the GLOBAL
@@ -21,13 +21,24 @@
     <div>
       <h1 class="text-2xl font-semibold text-gray-900">POV Cloud</h1>
       <p class="text-sm text-gray-500 mt-1">
-        What this instance has running on its cloud provider — including anything it has
+        What this instance has running on its cloud providers — including anything it has
         stopped keeping track of.
       </p>
     </div>
-    <button @click="load()" :disabled="loading"
-            class="px-3 py-2 text-sm rounded-md border border-gray-300 hover:bg-gray-50
-                   disabled:opacity-50">Refresh</button>
+    <div class="flex items-center gap-2">
+      {# One cloud per view: each has its own account, region and bill, and a merged table
+         would hide which one an orphan is costing money in. #}
+      <select x-show="data.clouds.length > 1" x-cloak x-model="cloud" @change="load()"
+              aria-label="Cloud"
+              class="px-3 py-2 text-sm rounded-md border border-gray-300 bg-white">
+        <template x-for="c in data.clouds" :key="c">
+          <option :value="c" x-text="c.toUpperCase()" :selected="c === cloud"></option>
+        </template>
+      </select>
+      <button @click="load()" :disabled="loading"
+              class="px-3 py-2 text-sm rounded-md border border-gray-300 hover:bg-gray-50
+                     disabled:opacity-50">Refresh</button>
+    </div>
   </div>
 
   <div x-show="data.reason" x-cloak class="rounded-md bg-amber-50 border border-amber-200 p-4">
@@ -160,11 +171,13 @@ function povCloudPage() {
   return {
     loading: false,
     error: '',
+    // The cloud on screen; blank until the first answer names the default.
+    cloud: '',
     // Shaped like the endpoint's empty answer so the template can render before the first
     // load resolves — an Alpine expression reading `.length` off undefined kills the whole
     // page, not just the row.
     data: {
-      cloud: '', configured: false, reason: '', region: '',
+      cloud: '', clouds: [], configured: false, reason: '', region: '',
       environments: [], orphans: [],
       footprint: { environments: 0, vms: 0, vms_running: 0, disk_gb: 0, instance_types: [] },
       estimate: { available: false, reason: '', running_hourly: 0, monthly_if_left: 0,
@@ -195,10 +208,12 @@ function povCloudPage() {
       this.loading = true;
       this.error = '';
       try {
-        const res = await this.apiFetch('/api/pov/cloud/overview');
+        const q = this.cloud ? `?cloud=${encodeURIComponent(this.cloud)}` : '';
+        const res = await this.apiFetch('/api/pov/cloud/overview' + q);
         const body = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(body.detail || `overview failed (${res.status})`);
-        this.data = body;
+        this.data = { ...body, clouds: body.clouds || [] };
+        this.cloud = body.cloud || '';
       } catch (e) {
         this.error = e.message;
       } finally {

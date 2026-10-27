@@ -53,6 +53,25 @@ function settingsPovCloudCredentials() {
       }
     },
 
+    // The POV cloud selection is a comma list in pov_cloud_platform ("aws,azure"), kept in
+    // registry order so the same choice always saves as the same string.
+    povCloudChoices: [
+      { value: 'aws', label: 'AWS' }, { value: 'azure', label: 'Azure' },
+      { value: 'gcp', label: 'GCP' }, { value: 'oci', label: 'OCI' },
+    ],
+
+    povCloudOn(cloud) {
+      return (this.panelCfg.pov_cloud_platform || '').split(',')
+        .map(c => c.trim().toLowerCase()).includes(cloud);
+    },
+
+    togglePovCloud(cloud) {
+      const on = new Set(this.povCloudChoices.map(c => c.value).filter(c => this.povCloudOn(c)));
+      if (on.has(cloud)) on.delete(cloud); else on.add(cloud);
+      this.panelCfg.pov_cloud_platform = this.povCloudChoices
+        .map(c => c.value).filter(c => on.has(c)).join(',');
+    },
+
     // Azure twin of choosePovAwsSource. The federated path needs the identity and the
     // Azure audience (api://AzureADTokenExchange) on; 'spiffe_wlc' also makes the SPIFFE
     // identity Azure's EVERYDAY credential (wlc_azure_everyday_source = federation).

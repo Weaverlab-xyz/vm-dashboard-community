@@ -1,6 +1,6 @@
 """The POV image builder: standard images a cloud POV template boots.
 
-  GET    /api/pov/images            — the catalog images usable on the POV's cloud
+  GET    /api/pov/images            — the catalog images usable on a POV cloud (?cloud=)
   GET    /api/pov/images/recipes    — the standard recipes, and their options
   POST   /api/pov/images/build      — build one recipe in a region (a Packer job)
   DELETE /api/pov/images/{id}       — remove a catalog row (never the cloud image itself)
@@ -20,7 +20,7 @@ not a way to read a file you could not open there.
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
@@ -50,14 +50,26 @@ _BUILD_JOB_TYPES = {
 _MAX_SCRIPT = 64 * 1024
 
 
-def _selected_cloud() -> str:
-    cloud = lab_platforms.selected_cloud()
-    if not cloud:
+def _cloud_or_default(cloud: str) -> str:
+    """The cloud a read means: the named one if it is selected, the first selected one
+    when none is named, else "" — which the reads answer with an empty list."""
+    asked = (cloud or "").strip().lower()
+    if asked:
+        return asked if lab_platforms.cloud_selected(asked) else ""
+    return lab_platforms.selected_cloud()
+
+
+def _selected_cloud(cloud: str) -> str:
+    """The cloud a build targets, or a 409 that says why there is none."""
+    chosen = _cloud_or_default(cloud)
+    if not chosen:
         raise HTTPException(
             status_code=409,
-            detail=("no POV cloud provider is selected on this instance. Choose one in "
-                    "Settings → Integrations → POV cloud provider first."))
-    return cloud
+            detail=((f"{cloud} is not one of this instance's POV cloud providers. "
+                     if (cloud or "").strip() else
+                     "no POV cloud provider is selected on this instance. ")
+                    + "Choose them in Settings → Integrations → POV cloud provider first."))
+    return chosen
 
 
 def _usable_on(img: dict, cloud: str) -> Optional[dict]:
@@ -73,9 +85,9 @@ def _usable_on(img: dict, cloud: str) -> Optional[dict]:
 
 
 @router.get("")
-def list_pov_images(db: Session = Depends(get_db),
+def list_pov_images(cloud: str = Query(""), db: Session = Depends(get_db),
                     current_user: User = Depends(get_current_user)):
-    cloud = lab_platforms.selected_cloud()
+    cloud = _cloud_or_default(cloud)
     images = []
     for img in image_registry_service.list_images(db) if cloud else []:
         where = _usable_on(img, cloud)
@@ -119,8 +131,8 @@ def _recent_builds(db: Session, limit: int = 10) -> list:
 
 
 @router.get("/recipes")
-def list_recipes(current_user: User = Depends(get_current_user)):
-    cloud = lab_platforms.selected_cloud()
+def list_recipes(cloud: str = Query(""), current_user: User = Depends(get_current_user)):
+    cloud = _cloud_or_default(cloud)
     return {
         "selected_cloud": cloud,
         "recipes": pov_image_recipes.describe(cloud),
@@ -133,6 +145,8 @@ def list_recipes(current_user: User = Depends(get_current_user)):
 
 class BuildRequest(BaseModel):
     recipe: str
+    # Which selected cloud to build on; blank = the first selected one.
+    cloud: str = ""
     region: str = ""
     image_name: str = ""
     toggles: dict = {}
@@ -172,7 +186,7 @@ async def build_pov_image(payload: BuildRequest, db: Session = Depends(get_db),
     """Queue one standard build. Spends money in the POV account for the length of the
     build (one instance, usually 15-40 minutes) and leaves an image (an AMI, an Azure
     managed image) that bills for its storage until someone deletes it."""
-    cloud = _selected_cloud()
+    cloud = _selected_cloud(payload.cloud)
     job_type = _BUILD_JOB_TYPES.get(cloud)
     if job_type is None:
         raise HTTPException(
