@@ -194,7 +194,7 @@ inert — the property `test_the_agent_imports_no_execution_machinery` protects.
 
 Hyper-V and **bare ESXi** are the only two the agent cannot talk to itself: WinRM is SOAP
 with NTLM/Negotiate, and a standalone ESXi host serves only the SOAP API. Rather than put
-a real auth stack and pyVmomi into an image whose three-dependency restraint *is* the
+a real auth stack and pyVmomi into an image whose four-dependency restraint *is* the
 security argument, those two run in a one-shot container the agent creates, reads one line
 of JSON from, and deletes.
 
