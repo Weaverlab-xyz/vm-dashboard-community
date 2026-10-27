@@ -251,10 +251,14 @@ Built.
   `db_image`.
 - **Where it goes.** Through the same routes table and picker, so cloud-VM routes and
   cloud-DB routes stay one concept.
-- **Follow-up.** The agent checks the first address the endpoint resolves to against its
-  policy, and the play then resolves the name again. For a VM it pins the checked address.
-  Pinning a database's address would break TLS hostname checks on Azure SQL and Atlas, so
-  closing that gap needs its own agent change.
+- **The endpoint is pinned to the checked address (agent 2.14).** The agent checks every
+  address the endpoint resolves to against its policy, not just the first. The play's
+  `db_login_host` must be the signed target, or the run is refused. The name is then pinned
+  to the checked address with one hosts entry in the run's container. The play still
+  connects by name, so TLS hostname checks (Azure SQL, Atlas) keep working, but its lookup
+  can no longer land anywhere the agent did not check. This hosts entry is the one container
+  setting derived from a job: the agent builds it from the signed name and its own lookup,
+  never from the bundle.
 
 ### Phase 3: Kubernetes on dashboard-owned agents
 

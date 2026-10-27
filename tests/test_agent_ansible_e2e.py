@@ -305,13 +305,15 @@ check("winrm inventory", inv["ansible_connection"] == "winrm"
 check("no key file when there is no key", "opt/job/id_rsa" not in eng.archives[0])
 check("no --private-key when there is no key",
       "--private-key" not in eng.created["Cmd"][2], eng.created["Cmd"][2])
+check("a VM run gets no hosts entry (its inventory pins the IP)",
+      "ExtraHosts" not in eng.created["HostConfig"], eng.created["HostConfig"])
 
 # ── a database run ────────────────────────────────────────────────────────────
 db = {"run_kind": "database", "transport": "local", "playbook": "- hosts: localhost\n",
       "asset_name": "", "asset_b64": "", "extra_vars": {},
       "login_user": "", "login_password": "", "become_password": "",
       "ssh_private_key": "", "winrm": {}, "env": {},
-      "db": {"db_engine": "postgres", "db_login_host": "db.lan",
+      "db": {"db_engine": "postgres", "db_login_host": "loop.test",
              "db_login_password": "dbpw-1234", "db_login_user": "admin"}}
 res, lines, eng = run(bundle=db, payload={"run_kind": "database", "transport": "local",
                                           "target_host": "loop.test", "target_port": 22})
@@ -322,7 +324,17 @@ check("database run is a localhost play", "-c local" in eng.created["Cmd"][2]
 check("no inventory file for a localhost play",
       "opt/job/inventory.json" not in eng.archives[0], sorted(eng.archives[0]))
 dv = json.loads(eng.archives[0]["opt/job/secret_vars.json"])
-check("db login vars reach the play", dv.get("db_login_host") == "db.lan", dv)
+check("db login vars reach the play", dv.get("db_login_host") == "loop.test", dv)
+check("the endpoint name is pinned to the checked address (2.14)",
+      eng.created["HostConfig"].get("ExtraHosts") == ["loop.test:127.0.0.1"],
+      eng.created["HostConfig"].get("ExtraHosts"))
+try:
+    run(bundle={**db, "db": {**db["db"], "db_login_host": "elsewhere.example.com"}},
+        payload={"run_kind": "database", "transport": "local",
+                 "target_host": "loop.test", "target_port": 22})
+    check("a bundle naming another host is refused", False, "ran")
+except agent.PolicyRefusal as exc:
+    check("a bundle naming another host is refused", "not the target" in str(exc), str(exc))
 
 # ── failure paths ─────────────────────────────────────────────────────────────
 try:

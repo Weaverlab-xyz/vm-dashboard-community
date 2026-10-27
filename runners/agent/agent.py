@@ -122,7 +122,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 # broker running the earlier one failed identically while reporting the same string as the
 # build that fixed it. A behaviour change the fleet cannot see is a behaviour change nobody
 # can confirm arrived, so bump this whenever the agent's behaviour moves.
-AGENT_VERSION = "2.13.0"
+AGENT_VERSION = "2.14.0"
 
 log = logging.getLogger("agent")
 
@@ -4599,7 +4599,8 @@ def _stream_logs(container: str, on_line, deadline: float) -> None:
 
 
 def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict,
-                         command: str, emit, cancelled, kind: str = "ansible") -> int:
+                         command: str, emit, cancelled, kind: str = "ansible",
+                         pin: Optional[tuple] = None) -> int:
     """Run one playbook in a throwaway container, streaming its output. Returns the exit code.
 
     Same guarantees as :func:`_run_sibling` — the image comes from policy, every HostConfig
@@ -4608,6 +4609,14 @@ def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict
 
     ``kind="k8s"`` is Kubernetes work (2.12): the same container shape, gated on the
     ``k8s:`` block instead, with its network and runtime ceiling.
+
+    ``pin`` (2.14, database runs only) is the ONE exception to "every HostConfig field is a
+    constant": ``(name, ip)``, the signed target's name and the address this agent resolved
+    and checked, as one ``ExtraHosts`` entry. A database play connects by NAME, because TLS
+    verifies the certificate against it, so the checked address cannot go in its vars the
+    way a VM's ``ansible_host`` does; without the entry its client would resolve the name
+    again, in another namespace, after the check. Re-validated here (:func:`_pin_entry`), so
+    no caller can widen it into anything but one hostname mapped to one address.
     """
     if kind == "k8s":
         if not policy.k8s_enabled:
@@ -4645,7 +4654,8 @@ def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict
         "Tty": False,              # the deframer's precondition, stated rather than assumed
         "Labels": {SIBLING_LABEL: "1"},
         "HostConfig": {**_ANSIBLE_HOSTCONFIG, "NetworkMode": network,
-                       "NanoCpus": _ansible_nano_cpus()},
+                       "NanoCpus": _ansible_nano_cpus(),
+                       **({"ExtraHosts": [_pin_entry(*pin)]} if pin else {})},
     }
     status, body = _engine("POST", "/containers/create", spec)
     if status == 404:
@@ -4973,7 +4983,9 @@ def _vm_inventory(*, ip: str, port: int, transport: str, login_user: str,
     validated the resolved address to defeat DNS rebinding, but the connection happens later,
     in another process, in another namespace — so pinning the address here is what makes that
     check mean anything. It goes in the inventory rather than in ``HostConfig.ExtraHosts``,
-    which would be a job-derived HostConfig field and would break the property that none are.
+    which would be a job-derived HostConfig field. A database run is the one exception
+    (2.14): its play must connect by name for TLS, so the name is pinned with a single
+    ExtraHosts entry the agent builds itself (:func:`_run_ansible_sibling`, ``pin``).
     """
     hostvars = {"ansible_host": ip, "ansible_port": int(port)}
     if transport == "winrm":
@@ -5031,6 +5043,50 @@ def _ansible_argv(*, run_kind: str, transport: str, has_key: bool,
     return argv
 
 
+# A DNS name as a database endpoint carries it: labels of letters, digits and hyphens, at
+# most 253 characters. Nothing that could add a second ExtraHosts entry or a Docker option.
+_PIN_NAME_RE = re.compile(
+    r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$")
+
+
+def _norm_host(name: str) -> str:
+    return str(name or "").strip().rstrip(".").lower()
+
+
+def _is_ip(text: str) -> bool:
+    try:
+        ipaddress.ip_address(text)
+        return True
+    except ValueError:
+        return False
+
+
+def _pin_entry(name: str, ip: str) -> str:
+    """``name:ip`` for ``HostConfig.ExtraHosts``, or raise. Both halves checked: the name
+    is a plain hostname, the address a literal IP."""
+    name = _norm_host(name)
+    if not _PIN_NAME_RE.match(name) or _is_ip(name):
+        raise PolicyRefusal(f"{name!r} is not a hostname this agent can pin.")
+    try:
+        addr = ipaddress.ip_address(str(ip))
+    except ValueError:
+        raise PolicyRefusal(f"{ip!r} is not an address this agent can pin {name} to.")
+    return f"{name}:{addr}"
+
+
+def _check_every_address(policy: "Policy", host: str, addresses: list, port: int,
+                         check) -> None:
+    """Check EVERY address ``host`` resolves to, not just the one this run uses: a name
+    whose other answers point somewhere the policy denies is not a target to trust, and a
+    client that re-resolves it (or retries the next answer) could land there."""
+    for addr in addresses:
+        try:
+            check(addr, port)
+        except PolicyRefusal as exc:
+            raise PolicyRefusal(f"{host} also resolves to {addr}, which this agent's "
+                                f"policy refuses: {exc}")
+
+
 def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
                 dashboard) -> dict:
     """Run one Config-Management job on this host, in a one-shot container.
@@ -5070,11 +5126,9 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
     if not addresses:
         raise PolicyRefusal(f"{host!r} does not resolve to any address from this agent.")
     ip = addresses[0]
-    if run_kind == "k8s":
-        # A cluster's API server, checked against `k8s.targets`, not `ansible.targets`.
-        policy.check_k8s(ip, port)
-    else:
-        policy.check_ansible(ip, port)
+    # A cluster's API server is checked against `k8s.targets`, not `ansible.targets`.
+    _check_every_address(policy, host, addresses, port,
+                         policy.check_k8s if run_kind == "k8s" else policy.check_ansible)
     emit(f"target {host} resolved to {ip}:{port} and is allowed by policy.yaml")
 
     if MODE == "audit":
@@ -5144,7 +5198,24 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
     # ANSIBLE expects; that is this agent naming them, not the dashboard, which is the whole
     # reason `_check_extra_vars` runs against the dashboard's dict and not against this one.
     play_vars = dict(extra_vars)
-    play_vars.update(bundle.get("db") or {})
+    db_vars = bundle.get("db") or {}
+    pin = None
+    if run_kind == "database":
+        # The play connects to `db_login_host`, so it must be the target checked above: a
+        # bundle naming another host would send the credential somewhere the policy never
+        # saw. Then that name is pinned to the checked address for this run (2.14).
+        login_host = _norm_host(db_vars.get("db_login_host") or host)
+        if login_host != _norm_host(host):
+            raise PolicyRefusal(
+                f"the dashboard's connection details name {login_host!r}, not the target "
+                f"this job was signed for ({_norm_host(host)!r}); nothing was run.")
+        if not _is_ip(login_host):
+            pin = (login_host, ip)
+            emit(f"pinned {login_host} to {ip} for this run")
+    play_vars.update(db_vars)
+    if pin:
+        # The exact spelling pinned (lower-case, no trailing dot), so the lookup hits it.
+        play_vars["db_login_host"] = pin[0]
     # dir_* bind vars for the LDAP / microsoft.ad modules. Only keys with that prefix: the
     # dict is the dashboard's, and this is the agent choosing which names it accepts.
     play_vars.update({k: v for k, v in (bundle.get("directory") or {}).items()
@@ -5180,7 +5251,8 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
     code = _run_ansible_sibling(
         policy, image=image, files=files, env=run_env,
         command=command, emit=emit, cancelled=cancelled,
-        **({"kind": "k8s"} if run_kind == "k8s" else {}))
+        **({"kind": "k8s"} if run_kind == "k8s" else {}),
+        **({"pin": pin} if pin else {}))
 
     meaning = _ANSIBLE_EXIT.get(code, "")
     if code == 0:
@@ -5366,7 +5438,7 @@ def run_k8s(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
     if not addresses:
         raise PolicyRefusal(f"{host!r} does not resolve to any address from this agent.")
     ip = addresses[0]
-    policy.check_k8s(ip, port)
+    _check_every_address(policy, host, addresses, port, policy.check_k8s)
     emit(f"cluster {host} resolved to {ip}:{port} and is allowed by policy.yaml")
     if MODE == "audit":
         emit(f"AUDIT MODE — would run {len(kinds)} Kubernetes step(s) ({', '.join(kinds)}) "

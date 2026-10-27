@@ -299,6 +299,17 @@ no subnets recorded, matches no route, and stays on the remote worker. The Confi
 list shows how many databases each route covers, and saving a cloud route looks them up
 for you.
 
+**What the agent checks (2.14).**
+
+- It resolves the database's endpoint and checks **every** address against `ansible.targets`
+  and its deny list.
+- It refuses a run whose connection details name a different host than the signed target.
+- It pins the endpoint name to the address it checked, with one hosts entry in the run's
+  container. The play connects by name (TLS verifies the certificate against it) and
+  reaches only that address.
+- A play that itself connects to some other host is limited by the runner's network and the
+  deny list, not by this pin.
+
 **The workstream a route is narrowed to is the one the database was provisioned in.**
 Reassigning it later does not move it to another team's agent. A database looked up
 afterwards counts its current workstream as that one.
