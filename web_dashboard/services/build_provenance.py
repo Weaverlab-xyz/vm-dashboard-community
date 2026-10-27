@@ -31,6 +31,7 @@ never fail a deploy.
 """
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import subprocess
@@ -43,6 +44,9 @@ _ENV_COMMIT = "DASHBOARD_GIT_SHA"
 _ENV_REF = "DASHBOARD_GIT_REF"
 _ENV_ORIGIN = "DASHBOARD_GIT_ORIGIN"
 _ENV_BUILT_AT = "DASHBOARD_BUILT_AT"
+# The release this image was published as (the git tag minus its leading "v", e.g.
+# 26.10.42). Set by publish-images.yml from the tag that triggered the build.
+_ENV_VERSION = "DASHBOARD_VERSION"
 
 _REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -124,6 +128,48 @@ def collect(source_root: str = "") -> dict:
     except Exception as exc:
         logger.debug("provenance: could not resolve build metadata: %s", exc)
     return provenance
+
+
+def _git_version() -> str:
+    """The nearest release tag in a source checkout, ``git describe`` style.
+
+    ``26.10.42`` on the tagged commit itself, ``26.10.42-3-g9e6f7f4`` three commits
+    past it, with ``-dirty`` appended for uncommitted changes -- so a developer's
+    About box can never claim to be a release it is not.
+    """
+    described = _git("describe", "--tags", "--match", "v[0-9]*", "--dirty")
+    return described[1:] if described.startswith("v") else described
+
+
+@functools.lru_cache(maxsize=1)
+def app_version() -> dict:
+    """The dashboard release that is running, for the About box.
+
+    Cached for the life of the process: the answer cannot change without a restart,
+    and the source-checkout fallback shells out to git. Never raises.
+    """
+    version, source = _env(_ENV_VERSION), "image"
+    if not version:
+        try:
+            version, source = _git_version(), "git"
+        except Exception as exc:
+            logger.debug("provenance: could not describe the checkout: %s", exc)
+            version = ""
+    if not version:
+        version, source = "dev", "unknown"
+    try:
+        build = _image_provenance() or _git_provenance()
+    except Exception as exc:
+        logger.debug("provenance: could not resolve build metadata: %s", exc)
+        build = {}
+    return {
+        "version": version,
+        "version_source": source,
+        "commit": str(build.get("commit") or ""),
+        "ref": str(build.get("ref") or ""),
+        "built_at": str(build.get("built_at") or ""),
+        "dirty": build.get("dirty"),
+    }
 
 
 def describe(provenance: dict) -> str:
