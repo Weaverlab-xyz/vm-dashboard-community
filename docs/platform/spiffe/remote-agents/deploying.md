@@ -60,6 +60,11 @@ attesting, it also starts the SPIRE agent and SPIFFE helper, as
   **Settings → Clouds**. Only regions with one are offered.
 - **The subnet must reach the dashboard**, and the SPIRE server too when attesting.
 
+The form reads the subnet the host will go into and offers its range and its VPC's or
+VNet's (Google Cloud has none: a VPC there is global) under **Ranges it may configure**.
+An empty box gets the subnet's range; click another to add it. Nothing is filled over a
+range you typed. If the subnet can't be read, the form says why and you type the ranges.
+
 ## Identity
 
 Every start mints a new identity for that one host. Which kind depends on the settings:

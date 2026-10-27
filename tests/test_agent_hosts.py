@@ -714,6 +714,85 @@ def test_the_options_name_the_agent_address_problem():
     config_service.set(agent_service.AUDIENCE_CONFIG, URL)
 
 
+class _Patch:
+    """Swap module attributes for one test and put them back, without pytest."""
+    def __init__(self, *triples):
+        self.triples, self.saved = triples, []
+
+    def __enter__(self):
+        for mod, name, value in self.triples:
+            self.saved.append((mod, name, getattr(mod, name)))
+            setattr(mod, name, value)
+        return self
+
+    def __exit__(self, *exc):
+        for mod, name, value in reversed(self.saved):
+            setattr(mod, name, value)
+
+
+def _regions(table):
+    return lambda cloud, region: {"default_subnet_id": "", "default_security_group_id": "",
+                                  "resource_group": "", "subnetwork": "", "network": "",
+                                  **table.get((cloud, region), {})}
+
+
+def test_the_network_suggests_the_subnet_then_its_vnet():
+    from web_dashboard.services import azure_service, region_config
+    sub_id = ("/subscriptions/s/resourceGroups/rg-net/providers/Microsoft.Network/"
+              "virtualNetworks/vnet-cus/subnets/vms")
+    seen = []
+
+    async def fake(subnet_id):
+        seen.append(subnet_id)
+        return {"subnet_cidrs": ["10.20.1.0/24"], "subnet_name": "vms",
+                "network_name": "vnet-cus", "network_cidrs": ["10.20.0.0/16", "fd00::/48"]}
+
+    table = {("azure", "centralus"): {"default_subnet_id": sub_id, "resource_group": "rg-vm"}}
+    with _Patch((region_config, "resolve_region", _regions(table)),
+                (azure_service, "subnet_network", fake)):
+        r = _client(_Reader).get("/api/agent-hosts/network?cloud=azure&region=centralus")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["subnet"] == sub_id and body["error"] == ""
+        # The subnet first, since it is where the host and the VMs beside it are; IPv6
+        # is dropped, because a policy target is IPv4.
+        assert body["suggestions"] == [{"cidr": "10.20.1.0/24", "label": "subnet vms"},
+                                       {"cidr": "10.20.0.0/16", "label": "VNet vnet-cus"}]
+        # A subnet named on the form wins over the region's.
+        _client().get("/api/agent-hosts/network?cloud=azure&region=centralus&subnet=" + "x" * 3)
+        assert seen[-1] == "xxx"
+
+
+def test_the_network_reports_what_is_missing_and_never_fails():
+    from web_dashboard.services import aws_service, region_config
+
+    async def broken(region, subnet_id):
+        raise aws_service.AWSError("Failed to read subnet subnet-1: AccessDenied")
+
+    table = {("aws", "us-east-2"): {"default_subnet_id": "subnet-1",
+                                    "default_security_group_id": "sg-1"}}
+    with _Patch((region_config, "resolve_region", _regions(table)),
+                (aws_service, "subnet_network", broken)):
+        c = _client()
+        body = c.get("/api/agent-hosts/network?cloud=aws&region=us-east-2").json()
+        assert body["suggestions"] == [] and "AccessDenied" in body["error"]
+        body = c.get("/api/agent-hosts/network?cloud=aws&region=us-west-2").json()
+        assert body["suggestions"] == [] and "No VM subnet" in body["error"]
+        assert c.get("/api/agent-hosts/network?cloud=oci&region=x").status_code == 400
+
+
+def test_the_form_fills_only_an_empty_ranges_box():
+    # The fill is marked as the form's own, so a region change replaces it, and a range
+    # the user typed is never overwritten.
+    path = os.path.join(_ROOT, "web_dashboard", "templates", "agents", "_deployed.html")
+    with open(path, encoding="utf-8") as f:
+        src = f.read()
+    assert "/api/agent-hosts/network?cloud=" in src
+    assert 'x-model="form.ranges" @input="rangesAuto = false"' in src
+    assert "if (!this.form.ranges.trim() && this.network.suggestions.length)" in src
+    assert "if (seq !== this._networkSeq) return;" in src
+
+
 def test_a_window_deploy_waits_for_its_window():
     db = _fresh()
     w = _window(db, start=(_utcnow() + timedelta(hours=6)).strftime("%H:00"), minutes=60)

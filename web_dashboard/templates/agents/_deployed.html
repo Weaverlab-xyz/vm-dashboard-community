@@ -133,7 +133,7 @@
         </div>
         <div>
           <label class="block text-xs font-medium text-gray-600 mb-1">Region</label>
-          <select x-model="form.region" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          <select x-model="form.region" @change="loadNetwork()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             <template x-for="r in regions" :key="r">
               <option :value="r" x-text="r" :selected="r === form.region"></option>
             </template>
@@ -149,14 +149,33 @@
         </div>
         <div class="sm:col-span-2">
           <label class="block text-xs font-medium text-gray-600 mb-1">Subnet <span class="text-gray-400">(optional: blank uses the region's VM subnet)</span></label>
-          <input type="text" x-model="form.subnet"
+          <input type="text" x-model="form.subnet" @change="loadNetwork()"
+                 :placeholder="network.subnet && !form.subnet ? network.subnet : ''"
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"/>
         </div>
         <div class="sm:col-span-2">
           <label class="block text-xs font-medium text-gray-600 mb-1">Ranges it may configure</label>
-          <input type="text" x-model="form.ranges" placeholder="10.40.0.0/16"
+          <input type="text" x-model="form.ranges" @input="rangesAuto = false" placeholder="10.40.0.0/16"
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"/>
           <p class="text-xs text-gray-500 mt-1">Comma- or space-separated. Written into the agent's own policy, which it enforces.</p>
+          <div class="mt-2 text-xs text-gray-600">
+            <span x-show="networkLoading" class="text-gray-400">Reading the subnet&hellip;</span>
+            <template x-if="!networkLoading && network.suggestions.length">
+              <div class="flex flex-wrap items-center gap-2">
+                <span>In this subnet:</span>
+                <template x-for="s in network.suggestions" :key="s.cidr">
+                  <button type="button" @click="addRange(s.cidr)"
+                          :class="hasRange(s.cidr) ? 'bg-blue-50 border-blue-300 text-blue-700' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'"
+                          class="border rounded-full px-2 py-0.5 font-mono"
+                          :title="hasRange(s.cidr) ? 'Already in the ranges' : 'Add to the ranges'">
+                    <span x-text="s.cidr"></span>
+                    <span class="font-sans text-gray-500" x-text="'(' + s.label + ')'"></span>
+                  </button>
+                </template>
+              </div>
+            </template>
+            <span x-show="!networkLoading && network.error" class="text-amber-700" x-text="network.error"></span>
+          </div>
         </div>
         <div>
           <label class="block text-xs font-medium text-gray-600 mb-1">Runs at once</label>
@@ -238,6 +257,13 @@ function deployedAgentsPanel() {
     deployOpen: false,
     saving: false,
     regions: [],
+    // The subnet the host would go into and its ranges, offered under "Ranges". The
+    // subnet's own range fills an empty box; rangesAuto marks that fill as ours, so a
+    // region change replaces it and anything the user typed is left alone.
+    network: {subnet: '', suggestions: [], error: ''},
+    networkLoading: false,
+    rangesAuto: false,
+    _networkSeq: 0,
     opts: {clouds: [], default_sizes: {}, max_concurrent_ceiling: 8, windows: [],
            dashboard_url_error: '', identity: 'code'},
     form: {},
@@ -275,6 +301,7 @@ function deployedAgentsPanel() {
 
     async openDeploy() {
       this.form = this.blankForm();
+      this.rangesAuto = false;
       try {
         this.opts = await API.get('/api/agent-hosts/options');
       } catch (e) {
@@ -294,6 +321,38 @@ function deployedAgentsPanel() {
         this.regions = [];
         this.form.region = '';
       }
+      await this.loadNetwork();
+    },
+
+    async loadNetwork() {
+      const seq = ++this._networkSeq;
+      if (this.rangesAuto) { this.form.ranges = ''; this.rangesAuto = false; }
+      this.network = {subnet: '', suggestions: [], error: ''};
+      this.networkLoading = !!this.form.region;
+      if (!this.form.region) return;
+      let r;
+      try {
+        r = await API.get('/api/agent-hosts/network?cloud=' + encodeURIComponent(this.form.cloud)
+          + '&region=' + encodeURIComponent(this.form.region)
+          + '&subnet=' + encodeURIComponent(this.form.subnet || ''));
+      } catch (e) {
+        r = {subnet: '', suggestions: [], error: e.message || String(e)};
+      }
+      if (seq !== this._networkSeq) return;   // a later cloud, region or subnet won
+      this.networkLoading = false;
+      this.network = {subnet: r.subnet || '', suggestions: r.suggestions || [], error: r.error || ''};
+      if (!this.form.ranges.trim() && this.network.suggestions.length) {
+        this.form.ranges = this.network.suggestions[0].cidr;
+        this.rangesAuto = true;
+      }
+    },
+
+    rangeList() { return this.form.ranges.split(/[\s,]+/).filter(Boolean); },
+    hasRange(cidr) { return this.rangeList().includes(cidr); },
+    addRange(cidr) {
+      if (this.hasRange(cidr)) return;
+      this.form.ranges = this.rangeList().concat([cidr]).join(', ');
+      this.rangesAuto = false;
     },
 
     payload() {

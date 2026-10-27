@@ -1728,6 +1728,38 @@ async def subnet_cidr(region: str, subnet_id: str) -> str:
         return ""
 
 
+def _subnet_network_sync(region: str, subnet_id: str) -> dict:
+    ec2 = _get_ec2(region)
+    subnets = ec2.describe_subnets(SubnetIds=[subnet_id]).get("Subnets") or []
+    if not subnets:
+        return {}
+    s = subnets[0]
+    vpc_id = s.get("VpcId") or ""
+    vpc_cidrs = []
+    if vpc_id:
+        for vpc in ec2.describe_vpcs(VpcIds=[vpc_id]).get("Vpcs") or []:
+            for a in vpc.get("CidrBlockAssociationSet") or []:
+                if (a.get("CidrBlockState") or {}).get("State", "associated") == "associated":
+                    vpc_cidrs.append(a.get("CidrBlock") or "")
+            if not vpc_cidrs and vpc.get("CidrBlock"):
+                vpc_cidrs.append(vpc["CidrBlock"])
+    name = next((t.get("Value") for t in s.get("Tags") or [] if t.get("Key") == "Name"), "")
+    return {"subnet_cidrs": [s.get("CidrBlock") or ""], "subnet_name": name or subnet_id,
+            "network_name": vpc_id, "network_cidrs": vpc_cidrs}
+
+
+async def subnet_network(region: str, subnet_id: str) -> dict:
+    """A subnet's IPv4 range and its VPC's, for a form to suggest:
+    ``{"subnet_cidrs", "subnet_name", "network_name", "network_cidrs"}``, or ``{}`` when
+    the subnet does not exist. Raises AWSError when it cannot be read."""
+    try:
+        return await _to_thread(_subnet_network_sync, region, subnet_id)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to read subnet {subnet_id}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
 def _assign_secondary_private_ips_sync(region: str, eni_id: str,
                                        ips: list) -> list:
     ec2 = _get_ec2(region)

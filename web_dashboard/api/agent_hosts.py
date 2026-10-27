@@ -2,6 +2,7 @@
 
   GET    /api/agent-hosts              — every deployed agent, with its schedule
   GET    /api/agent-hosts/options      — clouds, default sizes and change windows for the form
+  GET    /api/agent-hosts/network      — the ranges of the subnet a host would go into
   POST   /api/agent-hosts              — deploy one (and optionally route its ranges to it)
   PATCH  /api/agent-hosts/{id}         — lifecycle, size, ranges, runs at once
   POST   /api/agent-hosts/{id}/start   — bring its host up now
@@ -154,6 +155,17 @@ def options(current_user: User = Depends(require_explicit_permission("agents", "
         "identity": ("spire" if config_service.get_bool("spire_attest_enabled")
                      and dashboard_spire.server_in_use() else "code"),
     }
+
+
+@router.get("/network")
+async def network(cloud: str, region: str, subnet: str = "",
+                  current_user: User = Depends(require_explicit_permission("agents", "read"))):
+    """The ranges of the subnet a host would go into, for the form to suggest. A read of
+    the cloud, never a write; no database session, since this awaits the cloud."""
+    cloud = (cloud or "").strip().lower()
+    if cloud not in ahs.CLOUDS or not region_catalog.validate(cloud, region):
+        raise HTTPException(status_code=400, detail=f"Invalid {cloud} region '{region}'.")
+    return await ahs.network_ranges(cloud, region_catalog.normalize(cloud, region), subnet)
 
 
 @router.post("", status_code=201)
