@@ -93,7 +93,7 @@ These are read-only. To edit them, use the controls on the POV list page.
 | Page | What's in it |
 |---|---|
 | [Standing up a POV instance](standing-one-up.md) | Its own JWT key, its own env file, and the registry of customer tenants it resolves against. |
-| [Running POVs on a public cloud](public-cloud.md) | One cloud at a time, what gets created, what it costs, and the per-provider differences. |
+| [Running POVs on a public cloud](public-cloud.md) | Choosing clouds, what gets created, what it costs, and the per-provider differences. |
 | [The Gateway and the Resource Broker](gateway-and-broker.md) | The outbound-dialling Gateway that brokers sessions in, and the Resource Broker that lets Password Safe reach the guests. |
 | [Wiring a POV's VMs into PRA, Password Safe and Entitle](wiring.md) | Jump items, vaulted accounts and just-in-time grants, per POV and per tenant. |
 | [Demo cells in a POV](demo-cells.md) | Carry the OT simulator or a VyOS network device into a POV as a guest with a cell role. |

@@ -1611,13 +1611,13 @@ class SkytapFeatureConfig(BaseModel):
 
 
 class PovCloudFeatureConfig(BaseModel):
-    """The one public cloud a POV instance may also run POVs on.
+    """The public clouds a POV instance may also run POVs on.
 
     Its own panel rather than re-opening the wizard's cloud steps, and the reason is the
     guard in ``_apply_config``: those steps persist every non-secret field whether or not
     it was filled in, so letting a POV instance through them would store
     ``aws_region="us-east-2"`` for four clouds and make each read as half-configured. A
-    POV picks exactly one cloud, deliberately, on this panel.
+    POV ticks the clouds it uses, deliberately, on this panel.
 
     The credential fields are the SAME config keys the demo wizard writes — ``aws_*``,
     read by ``aws_service._aws_kwargs``. Not a parallel ``pov_aws_*`` namespace: that
@@ -1628,18 +1628,18 @@ class PovCloudFeatureConfig(BaseModel):
     ``/api/aws/*`` stay 404 on a POV — their deploys resolve the global BeyondTrust
     tenant singletons. The POV's view of its cloud is ``/pov/cloud``.
 
-    One cloud's fields per built driver. GCP and OCI add theirs alongside when they land;
-    until then ``pov_cloud_platform`` will not accept their names — see
+    One cloud's fields per built driver; ``pov_cloud_platform`` accepts only the names in
     ``lab_platforms.CLOUD_PLATFORMS``.
 
-    The panel renders only the selected cloud's block, but every field stays declared here
+    The panel renders only the selected clouds' blocks, but every field stays declared here
     whatever is chosen. A bound-but-undeclared field is silently DISCARDED on save, and a
-    model that changed shape with the selection would drop the other cloud's credentials
-    the first time somebody switched — which reads as the dashboard having forgotten them.
+    model that changed shape with the selection would drop an unticked cloud's
+    credentials — which reads as the dashboard having forgotten them.
     """
     enabled: bool = False
-    # "" | "aws". Validated against the registry rather than a literal tuple here, so a
-    # name whose adapter does not exist cannot be stored.
+    # A comma-separated list ("aws,azure"), or blank. Validated against the registry
+    # rather than a literal tuple here, so a name whose adapter does not exist cannot be
+    # stored; normalised to registry order so equal selections are equal strings.
     pov_cloud_platform: str = ""
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""     # encrypted at rest
@@ -1690,12 +1690,13 @@ class PovCloudFeatureConfig(BaseModel):
     @classmethod
     def _known_cloud(cls, v: str) -> str:
         from ..services import lab_platforms
-        value = (v or "").strip().lower()
-        if value and value not in lab_platforms.CLOUD_PLATFORMS:
+        names = [p.strip().lower() for p in (v or "").split(",") if p.strip()]
+        unknown = [p for p in names if p not in lab_platforms.CLOUD_PLATFORMS]
+        if unknown:
             raise ValueError(
-                f"{v!r} is not a POV cloud platform this build supports; choose one of "
-                f"{', '.join(lab_platforms.CLOUD_PLATFORMS)} or leave it blank")
-        return value
+                f"{', '.join(unknown)} is not a POV cloud platform this build supports; "
+                f"choose from {', '.join(lab_platforms.CLOUD_PLATFORMS)} or leave it blank")
+        return ",".join(lab_platforms.parse_clouds(",".join(names)))
 
 
 class VSphereFeatureConfig(BaseModel):
@@ -2372,7 +2373,7 @@ _FEATURE_MODELS = {
     # feature_flags._POV_ONLY, so the panel there refuses to enable rather than
     # storing a flag nothing reads.
     "skytap":       SkytapFeatureConfig,
-    # The one public cloud a POV instance may ALSO run POVs on. POV-only for
+    # The public clouds a POV instance may ALSO run POVs on. POV-only for
     # the same reason Skytap is: a demo instance has no use for one, and this
     # panel holds cloud credentials on the instance doing customer work.
     "pov_cloud":    PovCloudFeatureConfig,
@@ -2846,28 +2847,47 @@ async def test_skytap_connection(request: Request):
 
 @router.post("/pov-cloud/test")
 async def test_pov_cloud_connection(request: Request):
-    """Prove the stored credentials of the selected POV cloud provider.
+    """Prove the stored credentials of a selected POV cloud provider.
+
+    ``?cloud=`` names the one to test — each cloud's block on the panel has its own
+    button. Without it, every selected cloud is tested and the answer is ok only if all
+    of them are.
 
     Answers **200 either way**, with the outcome in the body, for the reason the Skytap
     probe above gives at length: a credential that does not work is an ANSWER, not a
     transport failure, and an endpoint that raises here is one refactor away from somebody
     writing ``detail=str(exc)`` and re-introducing a stack-trace exposure.
 
-    Routed through the lab-platform registry rather than importing a cloud adapter, so the
-    day Azure lands this endpoint needs no edit.
+    Routed through the lab-platform registry rather than importing a cloud adapter, so a
+    new cloud needs no edit here.
     """
     _require_admin(request)
     from ..services import lab_platforms
-    chosen = lab_platforms.selected_cloud()
-    if not chosen:
+    asked = (request.query_params.get("cloud") or "").strip().lower()
+    if asked:
+        if not lab_platforms.cloud_selected(asked):
+            return {"ok": False,
+                    "message": (f"{asked} is not a selected POV cloud provider. Tick it "
+                                "above and save, then test.")}
+        clouds = [asked]
+    else:
+        clouds = lab_platforms.selected_clouds()
+    if not clouds:
         return {"ok": False,
                 "message": ("No POV cloud provider is selected. Pick one above and save, "
                             "then test.")}
-    if not lab_platforms.supports(chosen, "verify"):
-        return {"ok": False,
-                "message": f"The {chosen} adapter offers no credential check."}
-    ok, message = await lab_platforms.adapter(chosen).verify()
-    return {"ok": ok, "message": message}
+    results = []
+    for cloud in clouds:
+        if not lab_platforms.supports(cloud, "verify"):
+            results.append((False, f"The {cloud} adapter offers no credential check."))
+        else:
+            results.append(await lab_platforms.adapter(cloud).verify())
+    if len(results) == 1:
+        ok, message = results[0]
+        return {"ok": ok, "message": message}
+    return {"ok": all(ok for ok, _ in results),
+            "message": " ".join(f"{lab_platforms.capabilities(c)['label']}: {m}"
+                                for c, (_, m) in zip(clouds, results))}
 
 
 

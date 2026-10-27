@@ -138,16 +138,24 @@ async def _probe_skytap() -> Result:
 async def _probe_pov_cloud() -> Result:
     key, label = "pov_cloud", "POV cloud provider"
     from . import lab_platforms
-    chosen = lab_platforms.selected_cloud()
-    if not chosen:
+    clouds = lab_platforms.selected_clouds()
+    if not clouds:
         return _unconfigured(key, label, "No POV cloud provider is selected.")
-    if not lab_platforms.supports(chosen, "verify"):
-        # Configured, and genuinely unprobeable — `ok=None`, not False. The adapter
-        # offering no credential check says nothing about whether the cloud works.
-        return Result(key, f"{label} ({chosen})", True, None,
-                      f"The {chosen} adapter offers no credential check.")
-    ok, message = await lab_platforms.adapter(chosen).verify()
-    return Result(key, f"{label} ({chosen})", True, bool(ok), message or "")
+    # One row for every selected cloud: the worst outcome wins, and each cloud's message is
+    # kept so a red row still says WHICH cloud is broken.
+    outcomes, messages = [], []
+    for cloud in clouds:
+        if not lab_platforms.supports(cloud, "verify"):
+            # Configured, and genuinely unprobeable — `ok=None`, not False. The adapter
+            # offering no credential check says nothing about whether the cloud works.
+            ok, message = None, f"The {cloud} adapter offers no credential check."
+        else:
+            ok, message = await lab_platforms.adapter(cloud).verify()
+            ok = bool(ok)
+        outcomes.append(ok)
+        messages.append((message or "") if len(clouds) == 1 else f"{cloud}: {message or ''}")
+    ok = False if False in outcomes else (None if None in outcomes else True)
+    return Result(key, f"{label} ({', '.join(clouds)})", True, ok, " ".join(messages))
 
 
 async def _probe_workload_credentials() -> Result:

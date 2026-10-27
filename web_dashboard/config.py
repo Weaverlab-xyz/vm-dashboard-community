@@ -48,12 +48,13 @@ class Settings(BaseSettings):
     # without losing which cloud they had chosen.
     pov_cloud_enabled: bool = False     # POV cloud lab platform (pov profile only)
 
-    # Which public cloud, if any, this POV instance may ALSO run POVs on. One of
-    # "aws" | "azure" | "gcp" | "oci", or blank for none. Blank is the default and keeps
-    # a POV instance exactly as it was.
+    # Which public clouds, if any, this POV instance may ALSO run POVs on: a
+    # comma-separated list of "aws" | "azure" | "gcp" | "oci" ("aws,azure"), or blank for
+    # none. Blank is the default and keeps a POV instance exactly as it was; a value
+    # stored when this held one cloud ("aws") is a one-item list and means the same.
     #
-    # **One at a time, deliberately.** A POV instance is meant to be narrow: one cloud's
-    # credentials, one cloud's quota to watch, one cloud's bill to explain. The limit is
+    # Any number of clouds: an instance that runs SE environments on AWS and Azure is a
+    # legitimate shape, and each cloud keeps its own credentials. The selection is
     # enforced by lab_platforms.selectable_platforms(), which is what the create form and
     # the provision endpoint both read — not by hiding the others in the UI.
     #

@@ -1,4 +1,4 @@
-"""The POV's own read-only view of its cloud provider.
+"""The POV's own read-only view of its cloud providers, one cloud at a time.
 
     GET /api/pov/cloud/overview   — what this instance has running, and what is orphaned
 
@@ -18,7 +18,7 @@ reason to render a cloud page on a POV instance at all.
 """
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, User, get_db
@@ -37,17 +37,22 @@ router = APIRouter(
 
 
 @router.get("/overview")
-async def overview(db: Session = Depends(get_db),
+async def overview(cloud: str = Query(""), db: Session = Depends(get_db),
                    current_user: User = Depends(get_current_user)):
-    """Everything the cloud view renders, in one call.
+    """Everything the cloud view renders, for ONE selected cloud, in one call.
 
-    Answers 200 with ``configured: false`` rather than refusing when no cloud is selected
-    or its credentials are missing. The page exists to explain the state of the cloud
-    integration, and a 409 would leave it unable to explain the most common state of all.
+    ``?cloud=`` picks which; blank means the first selected. ``clouds`` lists them all so
+    the page can offer the others. Answers 200 with ``configured: false`` rather than
+    refusing when no cloud is selected or its credentials are missing. The page exists to
+    explain the state of the cloud integration, and a 409 would leave it unable to explain
+    the most common state of all.
     """
-    cloud = lab_platforms.selected_cloud()
+    clouds = lab_platforms.selected_clouds()
+    asked = (cloud or "").strip().lower()
+    cloud = asked if asked in clouds else (clouds[0] if clouds and not asked else "")
     out = {
         "cloud": cloud,
+        "clouds": clouds,
         "configured": False,
         "reason": "",
         "region": "",
@@ -57,8 +62,9 @@ async def overview(db: Session = Depends(get_db),
         "estimate": {"available": False, "reason": ""},
     }
     if not cloud:
-        out["reason"] = ("No POV cloud provider is selected. Choose one in "
-                         "Settings → Integrations → POV cloud provider.")
+        out["reason"] = ((f"{asked} is not one of this instance's POV cloud providers."
+                          if asked else "No POV cloud provider is selected.")
+                         + " Choose them in Settings → Integrations → POV cloud provider.")
         return out
 
     mod = lab_platforms.adapter(cloud)

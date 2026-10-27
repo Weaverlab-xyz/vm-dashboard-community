@@ -124,13 +124,35 @@ def test_configured_but_unprobeable_is_not_a_failure_either():
     """A POV cloud adapter with no credential check says nothing about whether the cloud
     works — so `ok` is None, not False."""
     _stub("lab_platforms",
-          selected_cloud=lambda: "aws",
+          selected_clouds=lambda: ["aws"],
           supports=lambda cloud, cap: False,
           adapter=lambda c: None)
     r = _run(preflight._probe_pov_cloud())
     assert r.configured is True
     assert r.ok is None
     assert "no credential check" in r.detail
+
+
+def test_every_selected_pov_cloud_is_probed_and_the_worst_wins():
+    """With several clouds selected, one broken cloud makes the row red, and the detail
+    still says which cloud said what."""
+    class _Adapter:
+        def __init__(self, ok, msg):
+            self._out = (ok, msg)
+
+        async def verify(self):
+            return self._out
+
+    adapters = {"aws": _Adapter(True, "assumed the role"),
+                "azure": _Adapter(False, "AADSTS70021")}
+    _stub("lab_platforms",
+          selected_clouds=lambda: ["aws", "azure"],
+          supports=lambda cloud, cap: True,
+          adapter=lambda c: adapters[c])
+    r = _run(preflight._probe_pov_cloud())
+    assert r.configured is True
+    assert r.ok is False
+    assert "aws: assumed the role" in r.detail and "azure: AADSTS70021" in r.detail
 
 
 def test_a_reachable_integration_reports_ok_with_its_message():

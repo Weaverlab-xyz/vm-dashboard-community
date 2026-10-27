@@ -81,8 +81,8 @@
            this is a secondary view that only exists when a cloud is selected — which the
            nav has no way to know. -->
       {# /pov/cloud reads the instance-wide cloud overview, which is pov:write only. #}
-      <a x-show="cloudPlatform && canManagePlatform" x-cloak href="/pov/cloud"
-         :title="'What this instance has running on ' + cloudPlatform.toUpperCase() + ', including orphans'"
+      <a x-show="cloudPlatforms.length && canManagePlatform" x-cloak href="/pov/cloud"
+         :title="'What this instance has running on ' + cloudPlatforms.join(', ').toUpperCase() + ', including orphans'"
          class="px-3 py-2 text-sm rounded-lg border border-gray-300 hover:bg-gray-50">
         Cloud
       </a>
@@ -1257,7 +1257,7 @@ function povPage(tabSlugs) {
     canManagePlatform: false,
     canSaveBlueprints: false,
     platform: '',
-    cloudPlatform: '',
+    cloudPlatforms: [],
     platforms: [],
     managed: [],
     archive: [],
@@ -1540,7 +1540,8 @@ function povPage(tabSlugs) {
         if (!res.ok) { this.error = 'Could not read the lab platform registry.'; this.loading = false; return; }
         const data = await res.json();
         this.platforms = data.platforms || [];
-        this.cloudPlatform = data.selected_cloud || '';
+        this.cloudPlatforms = data.selected_clouds
+          || (data.selected_cloud ? [data.selected_cloud] : []);
         this.platform = data.default || (this.platforms[0] || {}).name || '';
         // May this user create a POV? Everything the platform read feeds -- the create
         // form, its two pickers, the live "all environments" table, Re-check -- is

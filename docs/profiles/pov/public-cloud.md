@@ -2,28 +2,32 @@
 
 > **Audience:** operator · **Profile:** `pov` · **Read this when:** you are running POVs on AWS, Azure, GCP or OCI rather than on a lab platform.
 
-Part of [A POV Instance](README.md). One cloud at a time, what gets created, what it costs, and the per-provider differences.
+Part of [A POV Instance](README.md). Choosing clouds, what gets created, what it costs, and the per-provider differences.
 
 ## Running POVs on a public cloud
 
-Skytap is not the only place a POV can run. A POV instance may also select **one** public
-cloud, and build POVs on it through the same pages, the same blueprints, the same wire-up
-and the same auto-delete timer. Today that cloud is AWS, Azure, GCP or OCI.
+Skytap is not the only place a POV can run. A POV instance may also select any of the
+public clouds AWS, Azure, GCP and OCI — one or several — and build POVs on them through
+the same pages, the same blueprints, the same wire-up and the same auto-delete timer.
 
-Turn it on in **Settings → Integrations → POV cloud provider** (`pov_cloud_platform`: blank, `aws`, `azure`, `gcp` or `oci`): pick the provider, paste
-its credentials, save, then **Test connection**. The POV page's platform selector gains it
-alongside Skytap.
+Turn them on in **Settings → Integrations → POV cloud provider**: tick each provider,
+fill in its credentials, save, then **Test connection**, which tests every ticked cloud.
+The stored setting is `pov_cloud_platform`, a comma-separated list such as `aws,azure`,
+or blank for Skytap only. A value from before the list (`aws`) still means that one cloud.
+The POV page's platform selector gains each ticked cloud alongside Skytap.
 
-### One cloud at a time
+### Choosing clouds
 
-The limit is deliberate, and it is enforced in one place —
-`lab_platforms.selectable_platforms()`, which the create form renders from and the
-provision endpoint refuses against. A POV instance is meant to be narrow: one cloud's
-credentials to protect, one account's quota to watch, one bill to explain.
+The selection is enforced in one place — `lab_platforms.selectable_platforms()`, which
+the create form renders from and the provision endpoint refuses against. Each cloud keeps
+its own credentials, quota and bill, so selecting two is two independent integrations,
+not one shared one. The cloud-specific pages take the cloud explicitly: **POV templates**
+and its **Images** tab follow the platform toggle, and **POV Cloud** (`/pov/cloud`) shows
+one cloud at a time with a switcher.
 
-Switching provider does **not** disturb POVs you already built. Reads, power and teardown
-never ask whether a platform is still selected — only *creating a new environment* does —
-so the POVs on your old provider stay visible, suspendable and destroyable until you are
+Unticking a cloud does **not** disturb POVs you already built there. Reads, power and
+teardown never ask whether a platform is still selected — only *creating a new
+environment* does — so those POVs stay visible, suspendable and destroyable until you are
 done with them.
 
 ### Selecting a cloud does not open the cloud consoles

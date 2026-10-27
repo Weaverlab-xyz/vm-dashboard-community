@@ -416,11 +416,12 @@ class CloudTemplateRequest(BaseModel):
 
 
 def _cloud_or_selected(cloud: str) -> str:
-    """The cloud a request means, defaulting to the one this instance has selected.
+    """The cloud a request means, defaulting to the first one this instance has selected.
 
-    A default rather than a required field: a POV instance runs one cloud, so making
-    every call name it would be asking the operator to repeat a setting back to the
-    dashboard. An explicit value still wins, and an unknown one is refused by the service.
+    A default rather than a required field, so a client that predates multiple clouds
+    (and an instance that runs one) keeps working without naming it. The editor names the
+    toggled cloud explicitly; an explicit value wins, and an unknown one is refused by the
+    service.
     """
     return (cloud or "").strip().lower() or lab_platforms.selected_cloud()
 
@@ -430,14 +431,15 @@ def list_cloud_templates(cloud: str = Query(""), db: Session = Depends(get_db),
                                current_user: User = Depends(get_current_user)):
     """The cloud templates on this instance.
 
-    Answers with the selected cloud and the built ones so the editor can render itself
+    Answers with the selected clouds and the built ones so the editor can render itself
     without a second call — and so a page loaded on an instance with no cloud selected
     can say that, rather than showing an empty list that looks like "none saved yet".
     """
-    selected = lab_platforms.selected_cloud()
     rows = pov_cloud_template_service.list_for(db, _cloud_or_selected(cloud))
     return {
-        "selected_cloud": selected,
+        "selected_clouds": lab_platforms.selected_clouds(),
+        # The first of them, for a client that predates the list.
+        "selected_cloud": lab_platforms.selected_cloud(),
         "clouds": list(lab_platforms.CLOUD_PLATFORMS),
         "default_network_cidr": pov_cloud_env.DEFAULT_NETWORK_CIDR,
         "roles": list(pov_cloud_template_service.VALID_ROLES),
@@ -471,7 +473,7 @@ def create_cloud_template(payload: CloudTemplateRequest,
     if not cloud:
         raise HTTPException(
             status_code=409,
-            detail=("no POV cloud provider is selected on this instance. Choose one in "
+            detail=("no POV cloud provider is selected on this instance. Choose them in "
                     "Settings → Integrations → POV cloud provider, then save this "
                     "template."))
     try:

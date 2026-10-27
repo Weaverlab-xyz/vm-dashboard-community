@@ -356,7 +356,7 @@
            class="bg-white rounded-lg shadow-sm border border-gray-200">
     <div class="px-5 py-4 border-b border-gray-200 flex items-center justify-between gap-3">
       <h2 class="text-lg font-medium text-gray-900"
-          x-text="(current.label || (selectedCloud || '').toUpperCase()) + ' templates'"></h2>
+          x-text="(current.label || (platform || '').toUpperCase()) + ' templates'"></h2>
       <button @click="newCloudTemplate()"
               class="px-3 py-2 text-sm rounded-md bg-blue-600 text-white hover:bg-blue-700">
         New template
@@ -582,7 +582,7 @@
       <template x-if="!imgRecipes.length">
         <p class="text-sm text-gray-500">
           Standard images are built on AWS and Azure so far. On
-          <span x-text="(selectedCloud || 'this cloud').toUpperCase()"></span>, give each
+          <span x-text="current.label || 'this cloud'"></span>, give each
           template VM an image id directly.
         </p>
       </template>
@@ -906,7 +906,8 @@ function templatesPage(tabSlugs) {
     savingBp: false,
     savingCloud: false,
     cloudEnabled: false,
-    selectedCloud: '',
+    // Every cloud selected in Settings; the platform toggle picks which one this page is on.
+    selectedClouds: [],
     defaultCidr: '',
     cloudTemplates: [],
     cloudForm: null,
@@ -951,7 +952,8 @@ function templatesPage(tabSlugs) {
     },
 
     get showsCloudTemplates() {
-      return !!this.current.cloud && this.cloudEnabled && this.platform === this.selectedCloud;
+      return !!this.current.cloud && this.cloudEnabled
+        && this.selectedClouds.includes(this.platform);
     },
 
     // /api/pov/builds is every build on every platform; the history tab shows the toggled
@@ -979,7 +981,7 @@ function templatesPage(tabSlugs) {
     get bpTemplateGroups() {
       const p = this.platforms.find(x => x.name === this.platform);
       let templates = this.templates;
-      if (!templates.length && this.platform === this.selectedCloud) {
+      if (!templates.length && this.selectedClouds.includes(this.platform)) {
         templates = this.cloudTemplates;
       }
       const groups = [{ platform: this.platform,
@@ -1180,11 +1182,18 @@ function templatesPage(tabSlugs) {
       this.cloudForm.vms.push(this.blankCloudVm());
     },
 
+    // The toggled cloud's, named explicitly: with several clouds selected, the API's
+    // default (the first of them) is not necessarily the one on screen.
+    cloudQuery() {
+      return this.current.cloud ? `?cloud=${encodeURIComponent(this.platform)}` : '';
+    },
+
     async loadCloudTemplates() {
       try {
-        const body = await this.apiJson('/api/pov/cloud-templates');
-        this.selectedCloud = body.selected_cloud || '';
-        this.cloudEnabled = !!this.selectedCloud;
+        const body = await this.apiJson('/api/pov/cloud-templates' + this.cloudQuery());
+        this.selectedClouds = body.selected_clouds
+          || (body.selected_cloud ? [body.selected_cloud] : []);
+        this.cloudEnabled = this.selectedClouds.includes(this.platform);
         this.defaultCidr = body.default_network_cidr || '';
         this.cloudTemplates = body.templates || [];
       } catch (e) {
@@ -1204,8 +1213,8 @@ function templatesPage(tabSlugs) {
     async loadImages() {
       try {
         const [cat, rec] = await Promise.all([
-          this.apiJson('/api/pov/images'),
-          this.apiJson('/api/pov/images/recipes'),
+          this.apiJson('/api/pov/images' + this.cloudQuery()),
+          this.apiJson('/api/pov/images/recipes' + this.cloudQuery()),
         ]);
         this.imgError = '';
         this.catalogImages = cat.images || [];
@@ -1253,7 +1262,7 @@ function templatesPage(tabSlugs) {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            recipe: r.id, region: f.region, image_name: f.image_name,
+            recipe: r.id, cloud: this.platform, region: f.region, image_name: f.image_name,
             toggles: f.toggles, extra_script_asset: f.extra_script_asset,
             stage_asset: f.stage_asset,
           }),
@@ -1281,6 +1290,8 @@ function templatesPage(tabSlugs) {
       this.cloudError = '';
       const f = this.cloudForm;
       const payload = {
+        // Only a NEW template takes its cloud from the toggle; a saved one keeps its own.
+        ...(f.id ? {} : { cloud: this.platform }),
         name: f.name, description: f.description, region: f.region,
         network_cidr: f.network_cidr,
         purdue_zones: !!f.purdue_zones,

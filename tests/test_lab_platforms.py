@@ -151,53 +151,74 @@ def test_configured_platforms_survives_a_broken_adapter():
         "the adapter raised, so its platform cannot be reported as configured"
 
 
-# ── one cloud at a time ──────────────────────────────────────────────────────
+# ── the cloud selection ──────────────────────────────────────────────────────
 
-def _with_selected_cloud(value):
-    """Pin what `selected_cloud()` reads, without touching config.
+def _with_selected_clouds(value):
+    """Pin what `selected_clouds()` reads, without touching config.
 
     Patching the function rather than writing an `app_config` row: the tests share a real
     `vm_cli.db` AND the developer's `.env`, so a "cleared" key still resolves through
     settings and a written one mutates real config.
     """
-    original = lp.selected_cloud
-    lp.selected_cloud = lambda: value
+    original = lp.selected_clouds
+    lp.selected_clouds = lambda: list(value)
     return original
 
 
 def test_skytap_is_always_selectable():
-    original = _with_selected_cloud("")
+    original = _with_selected_clouds([])
     try:
         assert lp.selectable_platforms() == ["skytap"], (
             "with no cloud selected a POV instance is exactly what it was before")
         assert lp.selectable("skytap") is True
+        assert lp.selected_cloud() == "", "no default cloud when none is selected"
     finally:
-        lp.selected_cloud = original
+        lp.selected_clouds = original
 
 
-def test_exactly_one_cloud_is_selectable_at_a_time():
-    original = _with_selected_cloud("aws")
+def test_one_selected_cloud_is_selectable():
+    original = _with_selected_clouds(["aws"])
     try:
-        chosen = lp.selectable_platforms()
-        assert chosen == ["skytap", "aws"], chosen
-        clouds = [p for p in chosen if p in lp.CLOUD_PLATFORMS]
-        assert len(clouds) == 1, (
-            f"{clouds} — the POV instance is meant to hold one cloud's credentials, one "
-            f"cloud's quota and one cloud's bill")
+        assert lp.selectable_platforms() == ["skytap", "aws"]
+        assert lp.selected_cloud() == "aws"
     finally:
-        lp.selected_cloud = original
+        lp.selected_clouds = original
+
+
+def test_several_clouds_may_be_selected_at_once():
+    """An instance may build POVs on more than one cloud: each keeps its own credentials,
+    and Skytap -- not a cloud -- stays selectable beside them."""
+    original = _with_selected_clouds(["aws", "azure"])
+    try:
+        assert lp.selectable_platforms() == ["skytap", "aws", "azure"]
+        assert lp.selectable("azure") and lp.selectable("aws")
+        assert lp.selectable("gcp") is False, "an unticked cloud is still refused"
+        assert lp.cloud_selected("AZURE") is True
+        assert lp.cloud_selected("gcp") is False
+        assert lp.selected_cloud() == "aws", "the default is the first selected"
+    finally:
+        lp.selected_clouds = original
+
+
+def test_parse_clouds_reads_the_stored_comma_list():
+    """`pov_cloud_platform` held ONE name before it held a list, so a single name must
+    still parse; order is the registry's, duplicates and unknown names drop out."""
+    assert lp.parse_clouds("") == []
+    assert lp.parse_clouds("aws") == ["aws"]
+    assert lp.parse_clouds(" Azure , aws,aws") == ["aws", "azure"]
+    assert lp.parse_clouds("aws,azurre,vmware") == ["aws"]
 
 
 def test_an_unselected_cloud_is_refused_even_though_it_is_a_valid_platform():
     """`selectable` and `valid` answer different questions, and the API keeps the two
-    failures apart: 'not the selected cloud' has a different remedy from 'no
+    failures apart: 'not a selected cloud' has a different remedy from 'no
     credentials'."""
-    original = _with_selected_cloud("")
+    original = _with_selected_clouds([])
     try:
         assert lp.valid("aws") is True, "aws is a real platform"
         assert lp.selectable("aws") is False, "…but not one this instance may use"
     finally:
-        lp.selected_cloud = original
+        lp.selected_clouds = original
 
 
 def test_selected_cloud_ignores_a_name_that_has_no_adapter():

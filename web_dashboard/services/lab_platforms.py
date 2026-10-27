@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 # this module's docstring is about.
 #
 # **This tuple lists the clouds that are BUILT, not the clouds that are planned.** A
-# fifth needs a driver module and a CAPABILITIES row before its name may appear here; adding a name early would make `pov_cloud_platform = "azure"` a selectable
+# fifth needs a driver module and a CAPABILITIES row before its name may appear here; adding a name early would make it a selectable `pov_cloud_platform`
 # option that fails at import time, which is the "half-added platform" the registry's own
 # test exists to catch.
 CLOUD_PLATFORMS = ("aws", "azure", "gcp", "oci")
@@ -336,41 +336,70 @@ def supports(platform: str, capability: str) -> bool:
     """
     return bool(CAPABILITIES[normalize(platform)].get(capability))
 
-def selected_cloud() -> str:
-    """The one public cloud this instance may run POVs on, or "".
+def parse_clouds(raw: str) -> list[str]:
+    """``pov_cloud_platform``'s stored value as a list, in ``CLOUD_PLATFORMS`` order.
+
+    The setting holds a comma-separated list ("aws,azure"), so a value written when it
+    held exactly one cloud ("aws") still means what it meant. Unknown names are dropped
+    rather than raised, matching ``feature_flags.install_profile`` — a typo in one config
+    row must not take the POV page down, and dropping a name can only ever subtract.
+    """
+    names = {p.strip().lower() for p in (raw or "").split(",")}
+    return [c for c in CLOUD_PLATFORMS if c in names]
+
+
+def selected_clouds() -> list[str]:
+    """The public clouds this instance may run POVs on, possibly none.
 
     Read live rather than cached: it is a Settings row, and the create form has to reflect
-    a change without a restart. An unrecognised value resolves to "" rather than raising,
-    matching ``feature_flags.install_profile`` — a typo in one config row must not take
-    the POV page down, and falling back to "no cloud" can only ever subtract.
+    a change without a restart.
     """
     from . import config_service, feature_flags   # local: stay import-cheap
     from ..config import settings
     # The flag first. It is what the demo profile masks, so a demo instance answers "no
     # cloud" here whatever is stored — and an operator who switches the feature off keeps
-    # their choice of cloud for when they switch it back on.
+    # their choice of clouds for when they switch it back on.
     if not feature_flags.enabled("pov_cloud_enabled"):
-        return ""
-    raw = (config_service.get("pov_cloud_platform")
-           or getattr(settings, "pov_cloud_platform", "") or "")
-    raw = raw.strip().lower()
-    return raw if raw in CLOUD_PLATFORMS else ""
+        return []
+    return parse_clouds(config_service.get("pov_cloud_platform")
+                        or getattr(settings, "pov_cloud_platform", "") or "")
+
+
+def selected_cloud() -> str:
+    """The DEFAULT cloud — the first selected one — or "".
+
+    Only for a request that does not name a cloud: an older client, or an instance that
+    runs one. Anything that acts on a cloud should take it explicitly and check it with
+    :func:`cloud_selected`, because "the" cloud stopped being a thing once an instance
+    could run several.
+    """
+    clouds = selected_clouds()
+    return clouds[0] if clouds else ""
+
+
+def cloud_selected(cloud: str) -> bool:
+    """Whether ``cloud`` is one of this instance's selected POV clouds."""
+    return (cloud or "").strip().lower() in selected_clouds()
 
 
 def selectable_platforms() -> list[str]:
-    """The platforms a POV may be created on: Skytap, plus at most one cloud.
+    """The platforms a POV may be created on: Skytap plus every selected cloud.
 
-    **This is where "one cloud at a time" is enforced**, and it is one list rather than a
+    **This is where the cloud selection is enforced**, and it is one list rather than a
     check scattered over the form, the API and the job — a rule that lives in three places
     is a rule that disagrees with itself. ``api/pov`` renders the platform selector from
     this and refuses a provision on anything absent from it.
+
+    Any number of clouds may be selected: each has its own credentials, quota and bill,
+    and an instance that serves several clouds' SE environments is a legitimate shape.
+    Skytap is not a cloud and is unaffected.
 
     Deliberately NOT folded into :func:`configured_platforms`. "Not the selected cloud" and
     "no credentials" are different failures with different remedies, and collapsing them
     gives an operator who just added an Azure key a 409 that says the key is missing.
     """
-    return [p for p in VALID_PLATFORMS
-            if p not in CLOUD_PLATFORMS or p == selected_cloud()]
+    clouds = selected_clouds()
+    return [p for p in VALID_PLATFORMS if p not in CLOUD_PLATFORMS or p in clouds]
 
 
 def selectable(platform: str) -> bool:
