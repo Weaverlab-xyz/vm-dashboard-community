@@ -4047,7 +4047,7 @@ _SIBLING_KINDS = ("hyperv", "esxi")
 # ── The sibling runner ────────────────────────────────────────────────────────
 #
 # Hyper-V (WinRM/NTLM) and bare ESXi (SOAP) are the two transports this agent cannot
-# carry itself. Rather than fatten the image — the three-dependency rule is the security
+# carry itself. Rather than fatten the image — the four-dependency rule is the security
 # argument, in executable form, and two tests enforce it — those two run in a one-shot
 # container that exits when the work is done. The supervisor stays inert.
 #
@@ -4455,7 +4455,7 @@ def _archive_put(container: str, dest: str, files: dict) -> None:
     ``docker inspect`` for the life of the container, and these files are not.
 
     Modes are set in the tar rather than by a shell step afterwards, so the private key is
-    never briefly world-readable. ``tarfile`` is stdlib, so the three-dependency rule holds.
+    never briefly world-readable. ``tarfile`` is stdlib, so the four-dependency rule holds.
 
     Everything is extracted into ``dest``, which must be a mount — see ``_JOB_DIR``. Members
     are named relative to it, so ``files`` stays keyed by the absolute path each file will
