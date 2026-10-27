@@ -1536,6 +1536,30 @@ def _subnetwork_cidr_sync(project_id: str, region: str, subnetwork: str) -> str:
         return ""
 
 
+def _subnetwork_network_sync(project_id: str, region: str, subnetwork: str) -> dict:
+    from google.cloud import compute_v1
+    name = subnetwork.rstrip("/").split("/")[-1]
+    region = subnetwork_region(subnetwork) or region
+    sn = compute_v1.SubnetworksClient(credentials=_gcp_creds()).get(
+        project=project_id, region=region, subnetwork=name)
+    cidrs = [sn.ip_cidr_range] if sn.ip_cidr_range else []
+    return {"subnet_cidrs": cidrs, "subnet_name": name,
+            "network_name": (sn.network or "").rstrip("/").split("/")[-1],
+            # A GCP VPC is global and has no range of its own: each subnetwork carries one.
+            "network_cidrs": []}
+
+
+async def subnetwork_network(project_id: str, region: str, subnetwork: str) -> dict:
+    """A subnetwork's range, for a form to suggest, in the shape of
+    ``aws_service.subnet_network``. Raises GCPError when it cannot be read."""
+    if not (project_id and subnetwork):
+        return {}
+    try:
+        return await _to_thread(_subnetwork_network_sync, project_id, region, subnetwork)
+    except Exception as e:  # noqa: BLE001 - the SDK raises several unrelated types
+        raise GCPError(f"Failed to read subnetwork {subnetwork}: {e}") from e
+
+
 def _run_gce_jumpoint_sync(
     project_id: str,
     zone: str,

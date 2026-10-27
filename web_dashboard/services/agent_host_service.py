@@ -37,6 +37,7 @@ import logging
 import re
 import shlex
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -816,6 +817,47 @@ def _placement(host) -> dict:
     tags = [t.strip() for t in (rc.get("default_network_tag") or "").split(",") if t.strip()]
     return {"project": project, "subnetwork": subnet, "network": rc.get("network") or "",
             "zone": host.zone or rc.get("zone") or "", "tag": tags[0] if tags else ""}
+
+
+async def network_ranges(cloud: str, region: str, subnet: str = "") -> dict:
+    """The ranges a host would sit in, for the deploy form to suggest: the subnet it is
+    placed in (``subnet``, else the region's VM subnet) and that subnet's VPC or VNet.
+
+    Returns ``{"subnet", "suggestions": [{"cidr", "label"}], "error"}``. Never raises: a
+    region with nothing configured, or a cloud that cannot be read, is a message for the
+    form, never a reason to refuse the deploy itself. Overridable in tests, like launch."""
+    probe = SimpleNamespace(cloud=cloud, region=region, subnet=(subnet or "").strip(), zone="")
+    try:
+        p = await asyncio.to_thread(_placement, probe)
+    except AgentHostError as exc:
+        return {"subnet": "", "suggestions": [], "error": str(exc)}
+    sub = p.get("subnet") or p.get("subnetwork") or ""
+    if not sub:
+        return {"subnet": "", "suggestions": [],
+                "error": f"No VM subnetwork is configured for {region}, only a network."}
+    try:
+        if cloud == "aws":
+            from . import aws_service
+            net = await aws_service.subnet_network(region, sub)
+        elif cloud == "azure":
+            from . import azure_service
+            net = await azure_service.subnet_network(sub)
+        else:
+            from . import gcp_service
+            net = await gcp_service.subnetwork_network(p["project"], region, sub)
+    except Exception as exc:  # noqa: BLE001 - each cloud's own error type, all reported
+        return {"subnet": sub, "suggestions": [], "error": str(exc)}
+    if not net:
+        return {"subnet": sub, "suggestions": [], "error": f"Subnet {sub} was not found."}
+    kind = {"aws": "VPC", "azure": "VNet", "gcp": "network"}[cloud]
+    out, seen = [], set()
+    for cidrs, label in ((net.get("subnet_cidrs"), f"subnet {net.get('subnet_name') or sub}"),
+                         (net.get("network_cidrs"), f"{kind} {net.get('network_name') or ''}".strip())):
+        for c in cidrs or []:
+            if c and ":" not in c and c not in seen:   # IPv4 only: policy targets are v4
+                seen.add(c)
+                out.append({"cidr": c, "label": label})
+    return {"subnet": sub, "suggestions": out, "error": ""}
 
 
 async def _ensure_egress(host) -> None:

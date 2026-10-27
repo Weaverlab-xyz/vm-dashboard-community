@@ -2425,6 +2425,32 @@ def _subnet_parts(subnet_id: str) -> tuple[str, str, str]:
         return ("", "", "")
 
 
+def _subnet_network_sync(cred, sub_id: str, subnet_id: str) -> dict:
+    srg, vnet, sub = _subnet_parts(subnet_id)
+    if not (srg and vnet and sub):
+        return {}
+    network = _get_network(cred, sub_id)
+    s = network.subnets.get(srg, vnet, sub)
+    v = network.virtual_networks.get(srg, vnet)
+    prefixes = list(s.address_prefixes or []) or ([s.address_prefix] if s.address_prefix else [])
+    space = list(getattr(v.address_space, "address_prefixes", None) or []) if v.address_space else []
+    return {"subnet_cidrs": prefixes, "subnet_name": sub,
+            "network_name": vnet, "network_cidrs": space}
+
+
+async def subnet_network(subnet_id: str) -> dict:
+    """A subnet's address prefixes and its VNet's address space, for a form to suggest:
+    ``{"subnet_cidrs", "subnet_name", "network_name", "network_cidrs"}``, or ``{}`` when
+    ``subnet_id`` is not an ARM subnet id. Raises AzureError when it cannot be read."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(_subnet_network_sync, cred, sub_id, subnet_id)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to read subnet {subnet_id}: {e}") from e
+
+
 def _vm_jumpoint_cloud_init(container_image: str, deploy_key: str,
                             install_db_clients: bool = False) -> str:
     """Base64 cloud-init: install Docker, then run the BT Jumpoint container
