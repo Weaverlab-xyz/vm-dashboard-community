@@ -1312,6 +1312,14 @@ class Settings(BaseSettings):
     azure_vnet_resource_group: str = ""           # RG containing VNets (may differ)
     azure_shared_image_gallery: str = ""          # Shared Image Gallery name (optional)
     azure_gallery_resource_group: str = ""        # RG of the gallery (optional)
+    # On-demand outbound internet for Azure VMs (the analog of aws_nat_instance_enabled
+    # and gcp_vm_nat_enabled). Before a VM is created in a subnet with no way out — an
+    # NSG that denies the internet, like the sandbox's deny-internet-out, or a private
+    # subnet — the dashboard attaches a NAT gateway (one per VNet, Standard public IP)
+    # and adds an allow that outranks the deny; both go once the subnet's last NIC does.
+    # A subnet that already reaches the internet is never touched. Set by the sandbox
+    # scripts. See services/azure_nat_service.py.
+    azure_vm_nat_enabled: bool = False
     # ACI Jumpoint (mirrors bt_ecs_* settings)
     azure_aci_resource_group: str = ""            # defaults to azure_resource_group if empty
     azure_aci_subnet_id: str = ""                 # required for ACI VNet injection

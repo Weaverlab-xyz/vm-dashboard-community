@@ -621,6 +621,7 @@ _cfg=(
   "azure_aci_resource_group=$RG"
   "azure_aci_subnet_id=$ACI_SUBNET_ID                      # ACI lands here, has internet egress"
   "azure_default_subnet_id=$VM_SUBNET_ID                   # VMs land here, NSG-restricted to VNet"
+  "azure_vm_nat_enabled=true                               # on-demand NAT gateway + NSG allow while a VM exists"
   "azure_desktops_subnet_id=$DESKTOPS_SUBNET_ID            # VDI desktop pools (no delegation, 443 egress for the jump client)"
   "azure_db_subnet_id=$DB_SUBNET_ID                        # Flexible Server delegated subnet (private)"
   "azure_db_private_dns_zone_id=$DB_DNS_ZONE_ID            # Private DNS zone for the DB FQDN"

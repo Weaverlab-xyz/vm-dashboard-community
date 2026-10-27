@@ -66,7 +66,10 @@ deploy still succeeds):
 2. **Ensure on-demand egress** — AWS: the shared **NAT instance** (`aws_nat_instance_enabled`)
    plus **SSM interface endpoints** (`aws_ssm_endpoints_enabled`). GCP: a **Cloud NAT**
    gateway for the VM subnet plus the egress allow rule (`gcp_vm_nat_enabled`). Both are
-   ref-counted and reclaimed when the last VM goes; Azure and OCI do nothing here.
+   ref-counted and reclaimed when the last VM goes. Azure: a **NAT gateway** for the
+   VNet plus an NSG allow that outranks the subnet's internet deny
+   (`azure_vm_nat_enabled`), only where the subnet has no way out, removed when the
+   subnet's last VM goes. OCI does nothing here.
 3. **Fetch the SSH public key** from the cloud's secret store and inject it (Linux via
    cloud-init / `admin_ssh_key` / `ssh-keys` metadata; Windows skips key injection).
 4. **Launch the instance** (SDK).

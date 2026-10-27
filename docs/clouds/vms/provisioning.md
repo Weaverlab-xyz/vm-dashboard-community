@@ -111,6 +111,7 @@ and a service principal with **Contributor** on the RG.
 | `azure_aci_subnet_id` / `azure_aci_docker_deploy_key` | — | ACI gateway (Layer 1) |
 | `azure_jumpoint_subnet_id` | — | subnet for the shared VM gateway (falls back to `azure_aci_subnet_id`) |
 | `azure_vm_jumpoint_mode` | `shared` | `shared` (the ref-counted `clouddb-jumpoint` VM) or `aci` (a container group per VM) |
+| `azure_vm_nat_enabled` | `false` (sandbox `true`) | on-demand NAT gateway + NSG allow for VM internet, removed with the subnet's last VM |
 
 Azure single deploys borrow the **shared, ref-counted gateway VM** that cloud databases,
 k8s tunnels and VDI seats already use, following `azure_vm_jumpoint_mode` (editable under
@@ -142,6 +143,38 @@ Windows is supported: the dashboard generates a local-admin password and stores 
 Password Safe or a secret manager (never the dashboard database), and Windows VMs get a
 **Shell Jump over OpenSSH**, with an RDP jump on request. They can also be joined to Entra ID — see
 [Windows servers](../windows-servers.md).
+
+### On-demand VM egress on Azure
+
+The sandbox's vm-subnet NSG allows the VNet at priority 100 and denies `Internet` at 200
+(`deny-internet-out`), so a VM cannot `apt update`. A private subnet
+(`defaultOutboundAccess=false`) has no way out whatever its NSG says. With
+`azure_vm_nat_enabled` on, every Azure VM the dashboard creates (VMs, desktops, OT hosts,
+Portainer and Rancher nodes, deployed agents) first opens its subnet:
+
+1. **A NAT gateway** `dashboard-vm-nat-<vnet>`, with a Standard static public IP
+   `…-pip`, in the VNet's resource group. One per VNet, because a NAT gateway serves the
+   subnets of one VNet. It is attached to the VM's subnet.
+2. **An allow rule** `dashboard-vm-egress-<subnet>` in each NSG (the subnet's, and the
+   VM's NIC NSG) whose rules deny HTTPS to the internet. It takes the highest free
+   priority below that deny, so it outranks it and as little else as possible, and its
+   source is the subnet's own range.
+
+It acts **only where egress is closed**. A subnet that has its own NAT gateway, or whose
+NSGs let HTTPS out, is left alone: attaching a gateway there would change the address every
+VM in it leaves from, and bill for it, without fixing anything. The sandbox's own rules
+are never edited.
+
+Both halves go when the subnet holds no NIC any more, which is Azure's own count, so a VM
+removed by any path, or by hand, counts the same. The rules are removed first, so a failure
+part-way leaves the subnet closed rather than open. A destroy within ten minutes of a
+deploy defers to the worker's pass, which runs every ten minutes and catches anything a
+release missed. Everything this creates is tagged `managed-by=vm-dashboard`,
+`purpose=vm-egress`. While it exists a NAT gateway bills by the hour, plus its address and
+per GB it carries; when no VM needs it, it doesn't exist.
+
+Egress is opened at **create** time. A VM that existed before the setting was turned on has
+none until it is redeployed or another VM is deployed into its subnet.
 
 ## GCP (GCE)
 
