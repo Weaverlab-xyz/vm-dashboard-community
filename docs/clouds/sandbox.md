@@ -195,6 +195,12 @@ portal: **VM → Networking → Outbound port rules → Effective security
 rules** should show your `deny-internet-out` rule active. From the VM
 itself, `curl https://example.com` should fail at TCP, not at TLS.
 
+The sandbox sets `azure_vm_nat_enabled=true`, so while a dashboard VM exists in the
+vm-subnet you will also see a `dashboard-vm-egress-vm-subnet` allow rule just above the
+deny, and a `dashboard-vm-nat-<vnet>` NAT gateway attached to the subnet. That is the
+dashboard's on-demand egress; both are removed with the subnet's last VM. See
+[On-demand VM egress on Azure](vms/provisioning.md#on-demand-vm-egress-on-azure).
+
 ## Cost
 
 Estimates if you leave the sandbox sitting idle (no VMs deployed). The

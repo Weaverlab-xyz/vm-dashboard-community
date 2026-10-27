@@ -41,8 +41,11 @@ of 2 runs at once. Allow about 1 GiB more for each extra run, up to 8.
 The host goes into the region's VM subnet (the network dashboard-deployed VMs use) unless
 you name another subnet. It has **no public address and no inbound rule**: the agent only
 dials out. On AWS and Google Cloud it reaches the dashboard through the same on-demand NAT
-that VMs use, and that NAT is not reclaimed while a deployed agent is up. On Azure it uses
-the subnet's default outbound access, as VMs do.
+that VMs use, and that NAT is not reclaimed while a deployed agent is up. On Azure it gets
+the same on-demand NAT gateway and NSG allow as a VM when `azure_vm_nat_enabled` is on and
+the subnet has no way out; with it off, the subnet must already reach the internet. A host
+that can't reach it never installs Docker, and the start fails after 15 minutes. See
+[On-demand VM egress on Azure](../../../clouds/vms/provisioning.md#on-demand-vm-egress-on-azure).
 
 At first boot a script pulls the agent and Ansible runner images and starts the agent with
 the Docker socket, as `examples/remote-agent/docker-compose.sibling.yml` does. When

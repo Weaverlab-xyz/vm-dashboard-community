@@ -1680,9 +1680,12 @@ async def deploy_vm(
     trusted_launch: bool = False,
     entra_join: bool = False,
 ) -> dict:
+    # Before the VM exists, so cloud-init's first package install already has a way out.
+    from . import azure_nat_service
+    egress = await azure_nat_service.ensure(subnet_id, list(nsg_ids or [])[:1])
     try:
         cred, sub_id = await _ensure_creds()
-        return await _to_thread(
+        result = await _to_thread(
             _deploy_vm_sync,
             cred, sub_id, rg, location, vm_name, vm_size,
             image_id, subnet_id, nsg_ids, create_public_ip,
@@ -1696,6 +1699,9 @@ async def deploy_vm(
         raise
     except Exception as e:
         raise AzureError(f"Failed to deploy VM {vm_name}: {e}") from e
+    if egress and egress.get("status") == "ready" and isinstance(result, dict):
+        result["egress_nat_gateway"] = egress.get("nat_gateway", "")
+    return result
 
 
 # ── Entra ID join for Windows VMs ─────────────────────────────────────────────
@@ -2236,6 +2242,8 @@ def _terminate_vm_sync(cred, sub_id: str, rg: str, vm_name: str) -> None:
 
 
 async def terminate_vm(rg: str, vm_name: str) -> None:
+    from . import azure_nat_service
+    subnet_id = await vm_subnet(rg, vm_name) if azure_nat_service.enabled() else ""
     try:
         cred, sub_id = await _ensure_creds()
         await _to_thread(_terminate_vm_sync, cred, sub_id, rg, vm_name)
@@ -2243,6 +2251,8 @@ async def terminate_vm(rg: str, vm_name: str) -> None:
         raise
     except Exception as e:
         raise AzureError(f"Failed to terminate VM {vm_name}: {e}") from e
+    # After the NIC is gone, so the subnet's own count no longer includes this VM.
+    await azure_nat_service.release(subnet_id)
 
 
 
@@ -3634,6 +3644,8 @@ async def run_vm_container_node(
 ) -> dict:
     """Ensure the managed node VM (idempotent on name). ``public_ip=False`` gives it none:
     a node that only dials out, like a deployed remote agent."""
+    from . import azure_nat_service
+    await azure_nat_service.ensure(subnet_id, [nsg_id] if nsg_id else [])
     try:
         cred, sub_id = await _ensure_creds()
         return await _to_thread(
@@ -3766,14 +3778,317 @@ def _stop_vm_container_node_sync(cred, sub_id: str, rg: str, name: str,
 async def stop_vm_container_node(rg: str, name: str, *,
                                  keep_public_ip: bool = False) -> None:
     """Delete the node VM plus its NIC, and its public IP unless ``keep_public_ip``."""
+    from . import azure_nat_service
+    subnet_id = ""
     try:
         cred, sub_id = await _ensure_creds()
+        if azure_nat_service.enabled():
+            subnet_id = await _to_thread(_subnet_of_nic_sync, _get_network(cred, sub_id),
+                                         rg, f"{name}-nic")
         await _to_thread(_stop_vm_container_node_sync, cred, sub_id, rg, name,
                          keep_public_ip)
     except AzureError:
         raise
     except Exception as e:
         raise AzureError(f"Failed to delete the node {name}: {e}") from e
+    await azure_nat_service.release(subnet_id)
+
+
+# ── On-demand VM egress: a NAT gateway and an NSG allow, by reference count ────
+# The policy (when, and whether at all) is services/azure_nat_service.py. These are the
+# ARM halves. Everything here is find-or-create on deterministic names, and every
+# resource it creates carries EGRESS_TAGS, so a later pass can find what it owns and
+# never mistakes a customer's NAT gateway for one of ours.
+
+EGRESS_TAGS = {"managed-by": "vm-dashboard", "purpose": "vm-egress"}
+_EGRESS_ENSURED_TAG = "egress-ensured-at"     # epoch seconds of the last ensure
+_EGRESS_NSG_TAG = "egress-nsg-"               # + 8 hex: an NSG we put an allow rule in
+_INTERNET_DESTS = {"internet", "*", "0.0.0.0/0", "any"}
+
+
+def _arm_parts(rid: str, kind: str) -> tuple[str, str]:
+    """(resource_group, name) of an ARM id whose last type segment is ``kind``."""
+    p = [s for s in (rid or "").split("/") if s]
+    try:
+        return p[p.index("resourceGroups") + 1], p[p.index(kind) + 1]
+    except (ValueError, IndexError):
+        return "", ""
+
+
+def egress_nat_name(vnet: str) -> str:
+    """One NAT gateway per VNet: Azure attaches a NAT gateway to subnets of ONE VNet."""
+    return f"dashboard-vm-nat-{vnet}"[:80]
+
+
+_EGRESS_RULE_PREFIX = "dashboard-vm-egress-"
+
+
+def egress_rule_name(subnet: str) -> str:
+    """One allow rule per subnet, so subnets that share an NSG are released apart."""
+    return f"{_EGRESS_RULE_PREFIX}{subnet}"[:80]
+
+
+def _port_covers(rule, port: int) -> bool:
+    ranges = [rule.destination_port_range] + list(rule.destination_port_ranges or [])
+    for r in ranges:
+        r = (r or "").strip()
+        if r == "*":
+            return True
+        lo, _, hi = r.partition("-")
+        try:
+            if int(lo) <= port <= int(hi or lo):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _egress_verdict(nsg) -> tuple[str, Optional[int]]:
+    """("deny", priority) when this NSG's winning outbound rule for HTTPS to the
+    internet is a Deny, else ("allow", None). Every rule this feature wrote is ignored:
+    a second ensure must re-assert rather than read its own allow as proof the subnet
+    was open, and another subnet's allow is scoped to THAT subnet's range, so it opens
+    nothing here. With no matching custom rule Azure's default AllowInternetOutBound
+    decides, which is an allow."""
+    rules = [r for r in (nsg.security_rules or [])
+             if (r.direction or "").lower() == "outbound"
+             and not (r.name or "").startswith(_EGRESS_RULE_PREFIX)]
+    for r in sorted(rules, key=lambda r: r.priority or 0):
+        dests = [r.destination_address_prefix] + list(r.destination_address_prefixes or [])
+        if not any((d or "").strip().lower() in _INTERNET_DESTS for d in dests):
+            continue
+        if (r.protocol or "*").lower() not in ("*", "tcp") or not _port_covers(r, 443):
+            continue
+        return ("deny", r.priority) if (r.access or "").lower() == "deny" else ("allow", None)
+    return "allow", None
+
+
+def _free_priority_below(nsg, ceiling: int, own: str) -> Optional[int]:
+    """The highest free outbound priority under ``ceiling`` (so it outranks that rule
+    and as little else as possible), reusing the one our own rule already holds."""
+    taken = set()
+    for r in (nsg.security_rules or []):
+        if (r.direction or "").lower() != "outbound":
+            continue
+        if r.name == own:
+            if (r.priority or 0) < ceiling:
+                return r.priority
+            continue
+        taken.add(r.priority)
+    for p in range(ceiling - 1, 99, -1):
+        if p not in taken:
+            return p
+    return None
+
+
+def _ensure_vm_egress_sync(cred, sub_id: str, subnet_id: str, nic_nsg_ids: list) -> dict:
+    """Give ``subnet_id`` a path to the internet if it has none. See azure_nat_service."""
+    from azure.mgmt.network.models import (
+        NatGateway, NatGatewaySku, SecurityRule, SubResource,
+    )
+    network = _get_network(cred, sub_id)
+    srg, vnet_name, sub_name = _subnet_parts(subnet_id)
+    if not (srg and vnet_name and sub_name):
+        return {"status": "skipped", "reason": f"'{subnet_id}' is not a subnet id"}
+    subnet = network.subnets.get(srg, vnet_name, sub_name)
+    nat_name = egress_nat_name(vnet_name)
+    rule = egress_rule_name(sub_name)
+    current = subnet.nat_gateway.id if subnet.nat_gateway else ""
+    if current and _arm_parts(current, "natGateways")[1].lower() != nat_name.lower():
+        return {"status": "skipped", "reason": "the subnet already has its own NAT gateway"}
+
+    nsg_ids = []
+    for nid in [subnet.network_security_group.id if subnet.network_security_group else ""] \
+            + list(nic_nsg_ids or []):
+        if nid and nid.lower() not in {n.lower() for n in nsg_ids}:
+            nsg_ids.append(nid)
+    closed = []                                  # [(nsg, deny_priority)]
+    for nid in nsg_ids:
+        nrg, nname = _arm_parts(nid, "networkSecurityGroups")
+        nsg = network.network_security_groups.get(nrg, nname)
+        verdict, prio = _egress_verdict(nsg)
+        if verdict == "deny":
+            closed.append((nsg, prio))
+    # An older SDK model has no such field; None there means "Azure's default".
+    no_default = getattr(subnet, "default_outbound_access", None) is False
+    if not current and not closed and not no_default:
+        return {"status": "skipped", "reason": "the subnet already reaches the internet"}
+
+    vnet = network.virtual_networks.get(srg, vnet_name)
+    location = vnet.location
+    pip = network.public_ip_addresses.begin_create_or_update(srg, f"{nat_name}-pip", PublicIPAddress(
+        location=location, sku=PublicIPAddressSku(name="Standard"),
+        public_ip_allocation_method="Static", public_ip_address_version="IPv4",
+        tags=dict(EGRESS_TAGS))).result()
+
+    try:
+        existing = network.nat_gateways.get(srg, nat_name)
+        tags = dict(existing.tags or {})
+    except ResourceNotFoundError:
+        tags = {}
+    tags.update(EGRESS_TAGS)
+    tags[_EGRESS_ENSURED_TAG] = str(int(time.time()))
+    for nsg, _ in closed:
+        tags[_EGRESS_NSG_TAG + hashlib.sha256(nsg.id.lower().encode()).hexdigest()[:8]] = nsg.id
+    nat = network.nat_gateways.begin_create_or_update(srg, nat_name, NatGateway(
+        location=location, sku=NatGatewaySku(name="Standard"),
+        public_ip_addresses=[SubResource(id=pip.id)], idle_timeout_in_minutes=4,
+        tags=tags)).result()
+    created_nat = not current
+    if created_nat:
+        subnet.nat_gateway = SubResource(id=nat.id)
+        network.subnets.begin_create_or_update(srg, vnet_name, sub_name, subnet).result()
+
+    prefixes = list(subnet.address_prefixes or []) or [subnet.address_prefix]
+    rules, problems = [], []
+    for nsg, deny_prio in closed:
+        prio = _free_priority_below(nsg, deny_prio, rule)
+        if prio is None:
+            problems.append(f"no free priority below {deny_prio} in NSG {nsg.name}")
+            continue
+        nrg, _ = _arm_parts(nsg.id, "networkSecurityGroups")
+        network.security_rules.begin_create_or_update(nrg, nsg.name, rule, SecurityRule(
+            priority=prio, direction="Outbound", access="Allow", protocol="*",
+            source_address_prefixes=[p for p in prefixes if p], source_port_range="*",
+            destination_address_prefix="Internet", destination_port_range="*",
+            description=("vm-dashboard: on-demand VM egress. Removed with the NAT gateway "
+                         "once the subnet's last VM is gone."))).result()
+        rules.append(f"{nsg.name}:{prio}")
+    return {"status": "ready", "nat_gateway": nat_name, "public_ip": pip.ip_address or "",
+            "nsg_rules": rules, "problems": problems, "attached": created_nat}
+
+
+async def ensure_vm_egress(subnet_id: str, nic_nsg_ids: Optional[list] = None) -> dict:
+    """Find-or-create the VNet's on-demand NAT gateway, attach it to ``subnet_id``, and
+    open each NSG whose rules deny the internet, when the subnet has no path out.
+    Returns ``{"status": "ready"|"skipped", ...}``. Raises AzureError on ARM errors."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(_ensure_vm_egress_sync, cred, sub_id, subnet_id,
+                                list(nic_nsg_ids or []))
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to open VM egress for {subnet_id}: {e}") from e
+
+
+def _release_vm_egress_sync(cred, sub_id: str, subnet_id: str, grace_s: int) -> str:
+    network = _get_network(cred, sub_id)
+    srg, vnet_name, sub_name = _subnet_parts(subnet_id)
+    if not (srg and vnet_name and sub_name):
+        return "not a subnet id"
+    try:
+        subnet = network.subnets.get(srg, vnet_name, sub_name)
+    except ResourceNotFoundError:
+        return "subnet gone"
+    nat_name = egress_nat_name(vnet_name)
+    current = subnet.nat_gateway.id if subnet.nat_gateway else ""
+    if not current or _arm_parts(current, "natGateways")[1].lower() != nat_name.lower():
+        return "no on-demand NAT on this subnet"
+    if subnet.ip_configurations:
+        return f"in use ({len(subnet.ip_configurations)} address(es) in the subnet)"
+    nat = network.nat_gateways.get(srg, nat_name)
+    tags = dict(nat.tags or {})
+    if any(tags.get(k) != v for k, v in EGRESS_TAGS.items()):
+        return "the NAT gateway is not tagged as ours"
+    try:
+        ensured = int(tags.get(_EGRESS_ENSURED_TAG) or 0)
+    except ValueError:
+        ensured = 0
+    if grace_s and time.time() - ensured < grace_s:
+        # A deploy opened egress moments ago and has not created its NIC yet.
+        return "ensured recently; a deploy may be about to use it"
+
+    # Close the NSGs first: a failure after this leaves the subnet with LESS egress.
+    rule = egress_rule_name(sub_name)
+    nsg_ids = [v for k, v in tags.items() if k.startswith(_EGRESS_NSG_TAG)]
+    if subnet.network_security_group:
+        nsg_ids.append(subnet.network_security_group.id)
+    for nid in {n.lower(): n for n in nsg_ids}.values():
+        nrg, nname = _arm_parts(nid, "networkSecurityGroups")
+        try:
+            network.security_rules.begin_delete(nrg, nname, rule).result()
+        except ResourceNotFoundError:
+            pass
+    subnet.nat_gateway = None
+    network.subnets.begin_create_or_update(srg, vnet_name, sub_name, subnet).result()
+    nat = network.nat_gateways.get(srg, nat_name)
+    if nat.subnets:
+        return "detached; the NAT gateway still serves another subnet"
+    network.nat_gateways.begin_delete(srg, nat_name).result()
+    try:
+        network.public_ip_addresses.begin_delete(srg, f"{nat_name}-pip").result()
+    except ResourceNotFoundError:
+        pass
+    return "released"
+
+
+async def release_vm_egress(subnet_id: str, grace_s: int = 0) -> str:
+    """Undo ensure_vm_egress for ``subnet_id`` once nothing is left in it: remove its
+    allow rules, detach the NAT gateway, and delete the gateway and its address when no
+    subnet still uses them. Returns what it did, in words. Raises AzureError."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(_release_vm_egress_sync, cred, sub_id, subnet_id, grace_s)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to release VM egress for {subnet_id}: {e}") from e
+
+
+def _list_vm_egress_nats_sync(cred, sub_id: str) -> list:
+    network = _get_network(cred, sub_id)
+    out = []
+    for nat in network.nat_gateways.list_all():
+        tags = nat.tags or {}
+        if all(tags.get(k) == v for k, v in EGRESS_TAGS.items()):
+            out.append({"id": nat.id, "name": nat.name,
+                        "subnets": [s.id for s in (nat.subnets or [])]})
+    return out
+
+
+async def list_vm_egress_nats() -> list:
+    """Every NAT gateway this feature created: ``[{"id", "name", "subnets"}]``."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(_list_vm_egress_nats_sync, cred, sub_id)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to list the on-demand NAT gateways: {e}") from e
+
+
+def _subnet_of_nic_sync(network, rg: str, nic_name: str) -> str:
+    try:
+        nic = network.network_interfaces.get(rg, nic_name)
+    except Exception:  # noqa: BLE001 - best-effort: the caller only loses the release
+        return ""
+    for cfg in (nic.ip_configurations or []):
+        if cfg.subnet is not None and cfg.subnet.id:
+            return cfg.subnet.id
+    return ""
+
+
+async def vm_subnet(rg: str, vm_name: str) -> str:
+    """The subnet id of a VM's primary NIC, or "" — read before a delete, so the
+    egress it used can be released after."""
+    try:
+        cred, sub_id = await _ensure_creds()
+    except Exception:  # noqa: BLE001
+        return ""
+
+    def _sync():
+        compute, network = _get_compute(cred, sub_id), _get_network(cred, sub_id)
+        try:
+            vm = compute.virtual_machines.get(rg, vm_name)
+        except Exception:  # noqa: BLE001
+            return ""
+        nics = getattr(vm.network_profile, "network_interfaces", None) or []
+        if not nics:
+            return ""
+        nrg, nname = _arm_parts(nics[0].id, "networkInterfaces")
+        return _subnet_of_nic_sync(network, nrg or rg, nname)
+    return await _to_thread(_sync)
 
 
 def _run_aci_jumpoint_sync(

@@ -1427,12 +1427,16 @@ async def _main() -> None:
     from .services.health import runner as health_runner
     health = asyncio.create_task(health_runner.run_loop(), name="health")
     spiffe = asyncio.create_task(_spiffe_token_loop(), name="spiffe-tokens")
+    # The safety net for on-demand Azure VM egress: a NAT gateway left behind by a
+    # deferred or missed release bills by the hour. A no-op while the feature is off.
+    from .services import azure_nat_service
+    aznat = asyncio.create_task(azure_nat_service.reclaim_loop(), name="azure-vm-nat")
     try:
         await _run_loop(shutdown=shutdown)   # returns once shutdown is set and jobs drain
     finally:
-        for task in (drain, stats, dirhealth, health, spiffe):
+        for task in (drain, stats, dirhealth, health, spiffe, aznat):
             task.cancel()
-        for task in (drain, stats, dirhealth, health, spiffe):
+        for task in (drain, stats, dirhealth, health, spiffe, aznat):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         # Non-blocking: a poller's thread still parked in time.sleep() would otherwise

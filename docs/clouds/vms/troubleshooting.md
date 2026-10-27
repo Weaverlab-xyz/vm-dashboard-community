@@ -7,10 +7,12 @@ Part of [Cloud VMs](../vms.md).
 - **Destroy** (`DELETE /api/{cloud}/instances|vms/{id}`) removes the instance, deregisters
   the PRA Shell Jump (from stored state), and off-boards Password Safe / Entitle if they were
   wired. AWS reclaims the shared NAT instance + SSM endpoints when the last VM is gone; GCP
-  reclaims the on-demand Cloud NAT + egress rule when the last VM **in that region** is gone.
+  reclaims the on-demand Cloud NAT + egress rule when the last VM **in that region** is gone;
+  Azure removes the on-demand NAT gateway + NSG allow when the subnet's last VM is gone.
 - **VM can't reach the internet** — by design (private subnet). On AWS enable
   `aws_nat_instance_enabled`; on OCI the vm-subnet already has a NAT Gateway; on GCP enable
-  `gcp_vm_nat_enabled` (default on). Note GCP denies egress through **two** independent gates —
+  `gcp_vm_nat_enabled` (default on); on Azure enable `azure_vm_nat_enabled`, which opens both
+  the NSG's `deny-internet-out` and a private subnet's missing outbound path. Note GCP denies egress through **two** independent gates —
   the vm-subnet is left off the sandbox Cloud NAT *and* a priority-1000 rule denies egress on
   the VM network tag — so opening only one changes nothing. DNS still resolves either way
   (the metadata server is always reachable), so the symptom is a **connection timeout**, not a
