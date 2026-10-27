@@ -54,6 +54,16 @@ Remove it once the role works.
 actions are conditioned on the `povManagedBy=vm-dashboard` tag, so the role cannot change a
 resource a POV did not create. EC2 forces two exceptions: the VPC's main route table, which
 exists before it can be tagged, and the AMI and network interface a `RunInstances` names.
+
+The policy also covers the standard-image builds on **POV → Templates → Images**. Because
+the role cannot launch into the account's default VPC, the first build in a region creates
+a small network of its own, `vm-dashboard-image-build` (`10.254.0.0/16`, with an internet
+gateway and no NAT gateway), and every later build reuses it. Packer tags its temporary key
+pair, security group, instance, volumes and the AMI with `povManagedBy`. That network has
+no `povEnvironment` tag, so it never appears as an orphaned POV. A policy applied before
+this change lacks `ec2:CreateKeyPair` and `ec2:CreateImage`, so re-apply
+`pov_cloud_aws_policy` before you build an image.
+
 If a build fails with `UnauthorizedOperation`, decode the message with
 `aws sts decode-authorization-message`. Setting `tag_conditions = false` rules the
 conditions out while you diagnose.

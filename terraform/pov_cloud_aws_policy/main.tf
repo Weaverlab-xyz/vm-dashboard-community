@@ -5,7 +5,8 @@
 #   pov-cloud-read       what the request path needs: the overview, the environment list,
 #                        Test connection, image lookup and the optional price estimate.
 #   pov-cloud-provision  read, plus what the worker's jobs need to build, power and tear
-#                        down a POV's VPC, subnets, security groups, gateway and instances.
+#                        down a POV's VPC, subnets, security groups, gateway and instances,
+#                        and to build the standard images (Packer, in its own subnet).
 #
 # With the SPIFFE identity alone, attach provision to the federated role. With SPIFFE for
 # everyday calls and Workload Credentials for jobs, attach read to the federated role and
@@ -46,7 +47,7 @@ locals {
   # table that cannot be tagged at creation.
   creating_actions = [
     "CreateVpc", "CreateSubnet", "CreateSecurityGroup", "CreateInternetGateway",
-    "RunInstances", "ImportKeyPair",
+    "RunInstances", "ImportKeyPair", "CreateKeyPair", "CreateImage",
   ]
 
   request_tagged = var.tag_conditions ? {
@@ -164,6 +165,44 @@ locals {
       Resource = [
         "${local.ec2}:vpc/*", "${local.ec2}:subnet/*", "${local.ec2}:security-group/*",
         "${local.ec2}:internet-gateway/*", "${local.ec2}:instance/*",
+      ]
+      Cond = local.resource_tagged
+    },
+    # The standard-image build (POV → Templates → Images): Packer's amazon-ebs builder in
+    # the image-build subnet, with povManagedBy on every resource it creates (run_tags,
+    # run_volume_tags, snapshot_tags and the AMI's own tags). The launch, the temporary
+    # security group, stopping, terminating and the Windows password read are covered
+    # above; these are the calls only Packer makes.
+    {
+      Sid      = "PovImageBuildKey"
+      Action   = ["ec2:CreateKeyPair"]
+      Resource = ["${local.ec2}:key-pair/*"]
+      Cond     = local.request_tagged
+    },
+    {
+      Sid      = "PovImageFromOwnInstance"
+      Action   = ["ec2:CreateImage"]
+      Resource = ["${local.ec2}:instance/*"]
+      Cond     = local.resource_tagged
+    },
+    {
+      # An AMI and its snapshots: tagged by CreateImage itself, then again by Packer's
+      # tagging step (a plain CreateTags, so it is the request tags that are checked).
+      Sid    = "PovImageTagged"
+      Action = ["ec2:CreateImage", "ec2:CreateTags"]
+      Resource = [
+        "arn:${local.p}:ec2:*::image/*", "${local.ec2}:image/*",
+        "arn:${local.p}:ec2:*::snapshot/*", "${local.ec2}:snapshot/*",
+      ]
+      Cond = local.request_tagged
+    },
+    {
+      # Packer's cleanup of a cancelled build's half-made AMI.
+      Sid    = "PovImageCleanup"
+      Action = ["ec2:DeregisterImage", "ec2:DeleteSnapshot"]
+      Resource = [
+        "arn:${local.p}:ec2:*::image/*", "${local.ec2}:image/*",
+        "arn:${local.p}:ec2:*::snapshot/*", "${local.ec2}:snapshot/*",
       ]
       Cond = local.resource_tagged
     },

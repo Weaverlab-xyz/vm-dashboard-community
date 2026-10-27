@@ -269,6 +269,21 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
         env.update(pkr_env)
         scripts = _stage_bundled(build_dir, req.provisioner_files)
         tags = {"pov-recipe": req.recipe} if req.recipe else None
+        # A POV build runs under the POV's tag-conditioned provisioning role
+        # (terraform/pov_cloud_aws_policy), which cannot launch into the default VPC or
+        # create an untagged key pair. So it builds in the dashboard's own image-build
+        # subnet and tags everything Packer creates. The demo tab's build is unchanged.
+        placement = {}
+        if req.recipe:
+            from . import pov_cloud_aws
+            job_service.update_progress(
+                db, job_id, 5, f"Preparing the image-build network in {region}…")
+            try:
+                placement = {"subnet_id": await pov_cloud_aws.ensure_image_build_subnet(region),
+                             "run_tags": pov_cloud_aws.image_build_tags()}
+            except Exception as exc:
+                raise PackerError(
+                    f"could not prepare the image-build network in {region}: {exc}") from exc
         if is_windows:
             if has_script:
                 scripts.append("provision.ps1")
@@ -280,6 +295,7 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
                 provisioner_env=plain_env,
                 provisioner_sensitive_var_names=sensitive_var_names,
                 extra_tags=tags,
+                **placement,
             )
             (build_dir / "winrm_bootstrap.ps1").write_text(packer_service.AWS_WINRM_BOOTSTRAP)
             _write_ps_provisioner(build_dir, req.provisioner_script)
@@ -299,6 +315,7 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
                 provisioner_sensitive_var_names=sensitive_var_names,
                 scripts=scripts or None,
                 extra_tags=tags,
+                **placement,
             )
             _write_provisioner(build_dir, req.provisioner_script)
         (build_dir / "build.pkr.hcl").write_text(template)
