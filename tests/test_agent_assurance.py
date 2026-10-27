@@ -232,7 +232,7 @@ def test_an_unrecorded_signed_era_version_is_flagged_only_when_releases_exist():
             row = db.query(RemoteAgent).filter(RemoteAgent.id == agent_id).first()
             agent_service.record_self_report(db, row, agent_version="2.9.4")
             assert agent_assurance_service.items(row) == [], "pre-signing builds are not flagged"
-            agent_service.record_self_report(db, row, agent_version="2.14.0")
+            agent_service.record_self_report(db, row, agent_version="2.15.0")
             assert [i["kind"] for i in agent_assurance_service.items(row)] == ["unsigned_version"]
     finally:
         with SessionLocal() as db:

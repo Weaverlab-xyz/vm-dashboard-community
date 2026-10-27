@@ -51,6 +51,12 @@ commands the agent builds itself, with a cluster-admin kubeconfig sealed to the 
 customer-hosted agent is never sent this work, whatever its policy says: see
 [Deploying an agent → Kubernetes work](../../docs/platform/spiffe/remote-agents/deploying.md#kubernetes-work).
 
+**Database runs (2.14).** A database play connects to its endpoint by name, so that TLS can
+verify the certificate. The agent checks every address that name resolves to. It refuses a
+bundle whose `db_login_host` is not the signed target. It then pins the name to the address
+it checked, with one hosts entry in the run's container. That entry is the only container
+setting derived from a job, and the agent builds it from the signed name and its own lookup.
+
 Probes never authenticate. Discovery is a TCP connect plus a pre-auth protocol banner
 (Postgres SSLRequest, MySQL greeting, TDS PRELOGIN, Oracle TNS, Kubernetes
 `GET /version`). Authenticated probing of unknown hosts locks out service accounts and

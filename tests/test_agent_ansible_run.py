@@ -520,6 +520,62 @@ def test_the_container_spec_passes_cmd_as_a_list_and_clears_the_entrypoint():
         "the base image's ENTRYPOINT must be cleared or it is prepended to Cmd")
 
 
+
+# ── a database endpoint is pinned to the checked address (2.14) ───────────────
+
+def test_the_pin_entry_is_one_hostname_and_one_address():
+    assert agent._pin_entry("DB.Example.com.", "10.40.1.5") == "db.example.com:10.40.1.5"
+    assert agent._pin_entry("db.example.com", "fd00::5") == "db.example.com:fd00::5"
+    for name, ip in (("db.example.com\n--privileged", "10.0.0.1"), ("db:1", "10.0.0.1"),
+                     ("10.0.0.9", "10.0.0.1"), ("-x.example.com", "10.0.0.1"),
+                     ("a" * 254, "10.0.0.1"), ("db.example.com", "db.example.com"),
+                     ("db.example.com", "10.0.0.1 extra")):
+        try:
+            agent._pin_entry(name, ip)
+        except agent.PolicyRefusal:
+            continue
+        raise AssertionError(f"pinned {name!r} to {ip!r}")
+
+
+def test_every_resolved_address_is_checked():
+    pol = _policy(_FULL)
+    agent._check_every_address(pol, "db.example.com", ["10.20.10.5"], 22, pol.check_ansible)
+    try:
+        agent._check_every_address(pol, "db.example.com", ["10.20.10.5", "169.254.169.254"],
+                                   22, pol.check_ansible)
+        raise AssertionError("a denied second answer was allowed")
+    except agent.PolicyRefusal as exc:
+        assert "also resolves to 169.254.169.254" in str(exc)
+
+
+def test_only_the_pin_is_added_to_the_constant_hostconfig():
+    """The one exception to `test_no_hostconfig_field_is_derived_from_a_job`: a database
+    run adds exactly ExtraHosts, built by `_pin_entry`, and nothing else changes."""
+    created = []
+
+    def engine(method, path, body=None, **kw):
+        if path == "/containers/create":
+            created.append(body)
+            return 500, "stop here"
+        return 200, {}
+    saved = agent._engine
+    agent._engine = engine
+    pol = _policy(_FULL)
+    try:
+        for pin in (None, ("db.example.com", "10.20.10.5")):
+            try:
+                agent._run_ansible_sibling(pol, image="x", files={}, env={}, command="true",
+                                           emit=lambda line: None, cancelled=lambda: False,
+                                           pin=pin)
+            except agent.PolicyRefusal:
+                pass
+    finally:
+        agent._engine = saved
+    plain, pinned = (c["HostConfig"] for c in created)
+    assert "ExtraHosts" not in plain
+    assert pinned.pop("ExtraHosts") == ["db.example.com:10.20.10.5"]
+    assert pinned == plain
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
