@@ -2041,6 +2041,25 @@ function responsiveNav() {
         mobileNav: false,
         _pinned: false,
 
+        // The About box: the running release (26.10.42) and its build. Fetched on first
+        // open, through window.API -- /api/about needs the bearer header -- and kept, since
+        // the answer cannot change without a restart. A failure leaves `about` null so the
+        // next open retries.
+        aboutOpen: false,
+        about: null,
+        aboutError: '',
+        async openAbout() {
+            this.mobileNav = false;
+            this.aboutOpen = true;
+            if (this.about) return;
+            this.aboutError = '';
+            try {
+                this.about = await API.get('/api/about');
+            } catch (e) {
+                this.aboutError = (e && e.message) || 'Could not read the version.';
+            }
+        },
+
         // Persona nav pinning. CURATION ONLY, and now structurally so: the links are
         // REORDERED within the one list that exists. Nothing is moved to a second
         // container that could hide it, and nothing is removed, so "a persona can never

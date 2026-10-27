@@ -2287,6 +2287,17 @@ async def health():
     return {"status": "ok", "version": settings.api_version}
 
 
+@app.get("/api/about", tags=["health"])
+async def about(current_user=Depends(_docs_current_user)):
+    """The running release (e.g. 26.10.42) and its build, for the About box.
+
+    Authenticated, unlike /api/health: an exact version tells an anonymous scanner
+    which advisories apply.
+    """
+    from .services import build_provenance
+    return {**build_provenance.app_version(), "api_version": settings.api_version}
+
+
 @app.get("/api/features", tags=["health"])
 async def features():
     """Expose the enabled feature set to the frontend (reads from config_service

@@ -167,19 +167,26 @@ COPY web_dashboard/ ./web_dashboard/
 #     --build-arg GIT_SHA="$(git rev-parse HEAD)" \
 #     --build-arg GIT_REF="$(git rev-parse --abbrev-ref HEAD)" \
 #     --build-arg GIT_ORIGIN="$(git config --get remote.origin.url)" \
-#     --build-arg BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" .
+#     --build-arg BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+#     --build-arg APP_VERSION="26.10.42" .
+#
+# APP_VERSION is the release shown in the UI's About box (publish-images.yml passes
+# the tag without its "v"). Unset, the About box says "dev".
 #
 # Declared AFTER the COPY so changing them does not bust the dependency layers.
 ARG GIT_SHA=""
 ARG GIT_REF=""
 ARG GIT_ORIGIN=""
 ARG BUILT_AT=""
+ARG APP_VERSION=""
 ENV DASHBOARD_GIT_SHA=${GIT_SHA} \
     DASHBOARD_GIT_REF=${GIT_REF} \
     DASHBOARD_GIT_ORIGIN=${GIT_ORIGIN} \
-    DASHBOARD_BUILT_AT=${BUILT_AT}
+    DASHBOARD_BUILT_AT=${BUILT_AT} \
+    DASHBOARD_VERSION=${APP_VERSION}
 LABEL org.opencontainers.image.revision=${GIT_SHA} \
-      org.opencontainers.image.created=${BUILT_AT}
+      org.opencontainers.image.created=${BUILT_AT} \
+      org.opencontainers.image.version=${APP_VERSION}
 
 # In-repo docs, rendered at /docs/<page> by api/docs_pages.py (the "guide" links
 # in Settings). Markdown only; small.

@@ -315,6 +315,53 @@
           Logout
         </button>
       </div>
+      <div class="flex-shrink-0 px-4 pb-4 -mt-1">
+        <button type="button" @click="openAbout()"
+                class="w-full text-center text-xs px-3 py-2 rounded-md {{ nav_hover }} {{ user_text }} hover:text-white transition">
+          About
+        </button>
+      </div>
+    </div>
+
+    {# About box. Above the drawer (z-50) because it opens from it; openAbout() shuts the
+       drawer anyway, so this only matters for the one frame both are leaving/entering. #}
+    <div x-show="aboutOpen" x-cloak
+         class="fixed inset-0 z-[60] flex items-center justify-center p-4"
+         @keydown.escape.window="aboutOpen = false">
+      <div class="absolute inset-0 bg-black/40 touch-none" @click="aboutOpen = false"></div>
+      <div class="relative w-full max-w-sm bg-white text-gray-800 rounded-lg shadow-2xl"
+           role="dialog" aria-modal="true" aria-labelledby="about-title">
+        <div class="flex items-center justify-between px-5 py-4 border-b border-gray-200">
+          <h3 id="about-title" class="text-base font-semibold text-gray-900">About {{ theme.product }}</h3>
+          <button type="button" @click="aboutOpen = false" aria-label="Close"
+                  class="text-gray-400 hover:text-gray-600 transition-colors">
+            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+        <div class="px-5 py-4 text-sm">
+          <p x-show="!about && !aboutError" class="text-gray-500">Loading&hellip;</p>
+          <p x-show="aboutError" class="text-red-600" x-text="aboutError"></p>
+          <template x-if="about">
+            <dl class="grid grid-cols-3 gap-x-3 gap-y-2">
+              <dt class="text-gray-500">Version</dt>
+              <dd class="col-span-2 font-mono font-semibold text-gray-900 break-all" x-text="about.version"></dd>
+              <dt class="text-gray-500">Commit</dt>
+              <dd class="col-span-2 font-mono break-all"
+                  x-text="about.commit ? about.commit.slice(0, 12) + (about.dirty ? ' (modified)' : '') : 'unknown'"></dd>
+              <template x-if="about.built_at">
+                <dt class="text-gray-500">Built</dt>
+              </template>
+              <template x-if="about.built_at">
+                <dd class="col-span-2" x-text="new Date(about.built_at).toLocaleString()"></dd>
+              </template>
+              <dt class="text-gray-500">API</dt>
+              <dd class="col-span-2 font-mono" x-text="about.api_version"></dd>
+            </dl>
+          </template>
+        </div>
+      </div>
     </div>
 
     {# Flyout backdrop: dims the page while the drawer is open. Click to dismiss. Sits

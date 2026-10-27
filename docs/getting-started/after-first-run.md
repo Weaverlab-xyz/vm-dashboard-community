@@ -64,6 +64,18 @@ collapsed; the group holding the page you are on opens by itself, and your brows
 remembers which other groups you left open. A focus chosen on the Dashboard still pins
 its shortlist of pages above the groups.
 
+### Which version am I running?
+
+Open the navigation menu and choose **About**, at the bottom under Settings and Logout. It
+shows the release (for example `26.10.42`, the image tag without its `v`), the commit it
+was built from, when it was built, and the API version. Signed-in API clients can read the
+same thing from `GET /api/about`; unlike `/api/health` it needs a token, so an anonymous
+caller cannot learn the exact release.
+
+An image built by hand without `--build-arg APP_VERSION=…` shows `dev`. Run from a git
+checkout, it shows the nearest release tag in `git describe` form — `26.10.42-3-g9e6f7f4`
+is three commits past 26.10.42, and `-dirty` means uncommitted changes.
+
 
 ### Protect and back up the JWT key
 

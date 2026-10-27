@@ -20,7 +20,7 @@ from web_dashboard.services import build_provenance as prov
 from web_dashboard.services import cloud_function_package as pkg
 
 _ENV_KEYS = ("DASHBOARD_GIT_SHA", "DASHBOARD_GIT_REF", "DASHBOARD_GIT_ORIGIN",
-             "DASHBOARD_BUILT_AT")
+             "DASHBOARD_BUILT_AT", "DASHBOARD_VERSION")
 
 
 def _clear_env():
@@ -208,7 +208,7 @@ def test_the_module_is_stdlib_only():
             imported |= {a.name.split(".")[0] for a in node.names}
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
             imported.add(node.module.split(".")[0])
-    assert imported <= {"logging", "os", "subprocess", "__future__"}, imported
+    assert imported <= {"functools", "logging", "os", "subprocess", "__future__"}, imported
 
 
 if __name__ == "__main__":
@@ -222,3 +222,48 @@ if __name__ == "__main__":
             failures += 1
             print(f"FAIL {fn.__name__}: {exc}")
     sys.exit(1 if failures else 0)
+
+
+# ── The release shown in the About box ──────────────────────────────────────
+
+def _version_with(git=None):
+    """app_version() with the cache cleared, and optionally a stubbed _git."""
+    real = prov._git
+    if git is not None:
+        prov._git = git
+    prov.app_version.cache_clear()
+    try:
+        return prov.app_version()
+    finally:
+        prov._git = real
+        prov.app_version.cache_clear()
+
+
+def test_the_image_version_build_arg_wins():
+    _clear_env()
+    os.environ.update({"DASHBOARD_VERSION": "26.10.42", "DASHBOARD_GIT_SHA": "a" * 40,
+                       "DASHBOARD_BUILT_AT": "2026-10-27T00:00:00Z"})
+    try:
+        got = _version_with(git=lambda *a: "v1.2.3")
+    finally:
+        _clear_env()
+    assert got["version"] == "26.10.42"
+    assert got["version_source"] == "image"
+    assert got["commit"] == "a" * 40
+    assert got["built_at"] == "2026-10-27T00:00:00Z"
+
+
+def test_a_source_checkout_describes_its_nearest_tag_without_the_v():
+    _clear_env()
+    got = _version_with(git=lambda *a: ("v26.10.42-3-g9e6f7f4-dirty"
+                                        if a[0] == "describe" else ""))
+    assert got["version"] == "26.10.42-3-g9e6f7f4-dirty"
+    assert got["version_source"] == "git"
+
+
+def test_no_version_anywhere_says_dev_rather_than_guessing():
+    _clear_env()
+    got = _version_with(git=lambda *a: "")
+    assert got["version"] == "dev"
+    assert got["version_source"] == "unknown"
+    assert got["commit"] == ""
