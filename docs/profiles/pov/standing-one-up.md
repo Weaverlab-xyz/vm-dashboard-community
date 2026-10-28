@@ -74,7 +74,7 @@ catalogue nobody could author from here, and because the parts of the
 image — the metadata runner and a container runtime — had no automation at all.
 
 **A blueprint** is a saved POV recipe: the fields the create form asks, under one name. Pick
-one on the POV page, type the POV's own name and choose its tenants, and press **Build**. On
+one on the POV page's **Build** tab, type the POV's own name and choose its tenants, and press **Build**. On
 the **Blueprints** tab of **POV → Templates**, the blueprint form's **Template** picker lists
 the toggled platform's templates, and a blueprint belongs to that platform: toggle to the
 cloud to save one from a cloud template. For a given
