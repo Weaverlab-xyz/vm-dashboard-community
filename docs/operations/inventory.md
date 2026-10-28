@@ -47,6 +47,14 @@ picker:
   shown, so a column added in a later release appears for you rather than staying hidden.
 * **Show every column** resets your choice.
 
+### Using the full screen width
+
+Pages sit in a centred column with margins either side. On a large monitor, the expand
+button in the top bar (next to your username) removes those margins so the table can use the
+whole width. Press it again to go back. The choice is remembered in this browser and
+cleared when you log out. The button only appears on screens 1024px wide and up; phones and
+tablets always use the standard layout. Form and settings pages keep their narrower column.
+
 ---
 
 ## Tags

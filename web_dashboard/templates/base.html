@@ -86,7 +86,32 @@
        under `white-space: pre`, and overflow-x on something that fits is inert. */
     main code, main pre { overflow-wrap: anywhere; }
     main pre { max-width: 100%; overflow-x: auto; }
+
+    /* Wide layout: an opt-in, per-browser lift of the content cap.
+
+       <main> is max-w-7xl (1280px) and the bar max-w-screen-2xl (1536px). That is the
+       clean default, but a grid on a 2560px monitor leaves most of the screen empty. The
+       header toggle puts `wide` on <html> (the head script below applies it before first
+       paint, so there is no width flash) and both caps come off together so the edges
+       stay aligned. Plain CSS rather than a Tailwind utility, so no rebuild of the
+       committed tailwind.css is needed.
+
+       Only from `lg` up, matching the toggle, which is hidden below it: a stored `wide`
+       can never change a phone or tablet layout. A page's own nested max-w-6xl/2xl
+       wrapper (forms, cards) is deliberately not touched. */
+    @media (min-width: 1024px) {
+      html.wide main, html.wide nav > div { max-width: none; }
+    }
   </style>
+  <script>
+    // Before first paint, and guarded: storage can throw (private window, blocked site data).
+    try { if (localStorage.getItem('vm_cli_width') === 'wide') document.documentElement.classList.add('wide'); } catch (e) {}
+    window.toggleWideLayout = function () {
+      var on = document.documentElement.classList.toggle('wide');
+      try { localStorage.setItem('vm_cli_width', on ? 'wide' : 'normal'); } catch (e) {}
+      return on;
+    };
+  </script>
   {# The operator's own three colours, if they set any. Included here rather than through
      {% block head %} because it is app-wide chrome, not a feature's stylesheet -- the same
      distinction the note below draws -- and placed after the block above so a page's own
@@ -192,6 +217,20 @@
              convenience, dropped on a phone where the bar's ~190px is worth more as
              controls than as a label. #}
           <span class="hidden md:inline text-sm {{ user_text }}" x-text="$store.auth.username"></span>
+          {# Wide layout toggle. lg and up only: below that the cap is not in play and the
+             wide CSS is gated to the same breakpoint. Deliberately NOT repeated in the
+             drawer -- it does nothing on a phone. State lives in the head script. #}
+          <button type="button" x-data="{ on: document.documentElement.classList.contains('wide') }"
+                  @click="on = window.toggleWideLayout()"
+                  class="hidden lg:inline-flex items-center justify-center p-2.5 rounded-md text-sm {{ user_text }} hover:text-white {{ nav_hover }} transition"
+                  :title="on ? 'Use standard width' : 'Use full width'"
+                  :aria-label="on ? 'Use standard width' : 'Use full width'"
+                  :aria-pressed="on" title="Use full width" aria-label="Use full width">
+            <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path x-show="!on" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4h4M20 8V4h-4M4 16v4h4M20 16v4h-4"/>
+              <path x-show="on" x-cloak stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/>
+            </svg>
+          </button>
           {# Settings stays in the bar at EVERY width. It is the only route to MFA and
              passkeys, and one tap is the right price for it; the drawer carries a second
              copy only because the open drawer covers this one. p-2.5 makes it the same

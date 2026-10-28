@@ -87,6 +87,7 @@ document.addEventListener('alpine:init', () => {
             // user's hidden inventory columns and see a table missing data they never
             // chose to hide.
             localStorage.removeItem('vm_cli_inventory_cols');
+            localStorage.removeItem('vm_cli_width');
             // Both persona cookies, not just the assigned one. These are per-BROWSER and
             // the next person to log in here would otherwise inherit this user's focus --
             // harmless (a persona grants nothing) but baffling, and it would make an
