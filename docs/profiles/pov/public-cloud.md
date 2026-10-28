@@ -14,7 +14,9 @@ Turn them on in **Settings → Integrations → POV cloud provider**: tick each 
 fill in its credentials, save, then **Test connection**, which tests every ticked cloud.
 The stored setting is `pov_cloud_platform`, a comma-separated list such as `aws,azure`,
 or blank for Skytap only. A value from before the list (`aws`) still means that one cloud.
-The POV page's platform selector gains each ticked cloud alongside Skytap.
+The POV page's **Build** tab platform selector gains each ticked cloud alongside Skytap. It only
+chooses which platform's blueprints a new POV is built from; **Mine** and **Past** list every
+platform, show a **Platform** column, and have their own **All platforms** filter.
 
 ### Choosing clouds
 

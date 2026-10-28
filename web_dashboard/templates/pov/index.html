@@ -48,13 +48,16 @@
 #}
 
 {% block content %}
-{# Four tabs over what used to be one long scroll of inventories, all under the one povPage()
-   component. The header, the Build-a-POV strip and the "Build by hand" form stay above the
-   tab bar: they are how a POV is made, not one of the lists. A tab's `show` mirrors the
+{# Five tabs over what used to be one long scroll of inventories, all under the one povPage()
+   component. Build is a tab of its own, and the platform toggle lives INSIDE it: the toggle
+   only chooses which platform's blueprints a new POV is built from, and sat above the
+   tab bar it read as a filter on Mine and Past, which it never was. Those two lists carry a
+   Platform column and their own filter instead. A tab's `show` mirrors the
    gate its section always had -- Past only once there is a destroyed POV to list, All
    environments only for pov:write on a configured platform -- so a stakeholder never sees
    a tab that would open onto nothing. #}
 {% set tabs = [
+  {'slug': 'build',   'label': 'Build',            'show': 'canProvision'},
   {'slug': 'mine',    'label': 'Mine'},
   {'slug': 'past',    'label': 'Past',             'show': 'archive.length'},
   {'slug': 'tenants', 'label': 'Tenants'},
@@ -70,12 +73,6 @@
       </p>
     </div>
     <div class="flex items-center gap-2">
-      <select x-show="platforms.length > 1" x-model="platform" @change="load().then(() => ensureTab())"
-              class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
-        <template x-for="p in platforms" :key="p.name">
-          <option :value="p.name" x-text="p.label"></option>
-        </template>
-      </select>
       <!-- The POV's read-only view of its cloud provider. A link from here rather than a
            nav entry: the nav already overflows at 1280px with every integration on, and
            this is a secondary view that only exists when a cloud is selected — which the
@@ -96,11 +93,6 @@
       <button x-show="canManagePlatform" @click="recheck()" :disabled="notConfigured || rechecking"
               class="px-3 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
               x-text="rechecking ? 'Checking…' : 'Re-check platform'"></button>
-      <!-- Secondary now: the one-click strip below is the primary way in, and this opens
-           the eleven-field form for the cases a saved recipe does not cover. -->
-      <button x-show="canProvision" @click="toggleCreate()" :disabled="notConfigured"
-              class="px-4 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-              x-text="showCreate ? 'Hide the full form' : 'Build by hand'"></button>
     </div>
   </div>
 
@@ -119,6 +111,25 @@
   </div>
   <div x-show="notice" class="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3">
     <p class="text-sm text-blue-800" x-text="notice"></p>
+  </div>
+
+  <div x-show="activeTab === 'build'" x-cloak role="tabpanel" class="space-y-6">
+
+  {# The platform toggle and Build by hand live here, not in the page header: both only
+     steer a BUILD, and neither touches the Mine / Past lists. #}
+  <div class="flex flex-wrap items-center justify-end gap-2">
+    <select x-show="platforms.length > 1" x-model="platform" @change="load().then(() => ensureTab())"
+            aria-label="Build on platform"
+            class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+      <template x-for="p in platforms" :key="p.name">
+        <option :value="p.name" x-text="p.label"></option>
+      </template>
+    </select>
+    <!-- Secondary: the one-click strip below is the primary way in, and this opens
+         the eleven-field form for the cases a saved recipe does not cover. -->
+    <button x-show="canProvision" @click="toggleCreate()" :disabled="notConfigured"
+            class="px-4 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+            x-text="showCreate ? 'Hide the full form' : 'Build by hand'"></button>
   </div>
 
   {# ── Build from a blueprint ────────────────────────────────────────────────────
@@ -373,7 +384,9 @@
     </div>
   </div>
 
-  <div x-show="loading" class="text-sm text-gray-400">Loading…</div>
+  </div>
+
+  <div x-show="loading"class="text-sm text-gray-400">Loading…</div>
 
   {{ tab_bar(tabs, "POV sections", class="") }}
 
@@ -383,16 +396,30 @@
   <div x-show="!loading" class="space-y-3">
     <div class="flex items-baseline justify-between">
       <h2 class="text-lg font-medium text-gray-900">Your POV environments</h2>
-      <span class="text-xs text-gray-400" x-text="managed.length + ' managed'"></span>
+      <div class="flex items-center gap-3">
+        <select x-show="listPlatforms.length > 1" x-model="listPlatform" @change="saveListPlatform()"
+                aria-label="Filter by platform"
+                class="border border-gray-300 rounded-lg px-2 py-1 text-xs">
+          <option value="">All platforms</option>
+          <template x-for="n in listPlatforms" :key="'mine-pf-' + n">
+            <option :value="n" x-text="platformLabel(n)"></option>
+          </template>
+        </select>
+        <span class="text-xs text-gray-400" x-text="managed.length + ' managed'"></span>
+      </div>
     </div>
     <div x-show="managed.length === 0" class="text-sm text-gray-400 border border-dashed border-gray-200 rounded-lg px-4 py-6 text-center">
-      None yet. <span x-show="canProvision && !notConfigured">Use <span class="font-medium">New POV</span> to create one from a template.</span>
+      None yet. <span x-show="canProvision && !notConfigured">Use the <span class="font-medium">Build</span> tab to create one from a blueprint.</span>
     </div>
-    <div x-show="managed.length" class="overflow-hidden border border-gray-200 rounded-lg">
+    <div x-show="managed.length && !filteredManaged.length" class="text-sm text-gray-400 border border-dashed border-gray-200 rounded-lg px-4 py-6 text-center">
+      No POVs on this platform.
+    </div>
+    <div x-show="filteredManaged.length" class="overflow-hidden border border-gray-200 rounded-lg">
       <table class="min-w-full divide-y divide-gray-200 text-sm">
         <thead class="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
           <tr>
             <th class="px-4 py-2 text-left font-medium">Name</th>
+            <th class="px-4 py-2 text-left font-medium">Platform</th>
             <th class="px-4 py-2 text-left font-medium">Status</th>
             <th class="px-4 py-2 text-left font-medium">Power</th>
             <th class="px-4 py-2 text-left font-medium">Control node</th>
@@ -415,7 +442,7 @@
            what lets each POV own two rows -- its columns, then its setup ladder. It cannot
            be two sibling <tr> inside the x-for: that template clones its first ELEMENT
            child and the second row would silently never render. #}
-        <template x-for="e in managed" :key="e.id">
+        <template x-for="e in filteredManaged" :key="e.id">
           <tbody class="divide-y divide-gray-100 bg-white">
             <tr>
               <td class="px-4 py-2">
@@ -426,6 +453,7 @@
                    class="font-medium text-blue-700 hover:underline" x-text="e.name"></a>
                 <p x-show="e.error_message" class="text-xs text-red-600 mt-0.5" x-text="e.error_message"></p>
               </td>
+              <td class="px-4 py-2 text-gray-600" x-text="platformLabel(e.platform)"></td>
               <td class="px-4 py-2">
                 <span class="text-xs px-2 py-0.5 rounded-full"
                       :class="{'bg-green-100 text-green-700': e.status === 'active',
@@ -876,7 +904,7 @@
                Rendered inline and never as a popover -- the wrapper above is
                `overflow-hidden`, which clips a floating layer into a dead control. #}
             <tr x-show="e.setup && e.setup.steps">
-              <td :colspan="17" class="px-4 pb-3 pt-0">
+              <td :colspan="18"class="px-4 pb-3 pt-0">
                 <div class="flex flex-wrap items-center gap-x-1.5 gap-y-1">
                   <template x-for="s in (e.setup ? e.setup.steps : [])" :key="s.key">
                     <span class="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded"
@@ -925,18 +953,32 @@
   <div x-show="archive.length" class="space-y-3">
     <div class="flex items-baseline justify-between">
       <h2 class="text-lg font-medium text-gray-900">Past POVs</h2>
-      <span class="text-xs text-gray-400" x-show="archiveTruncated">
-        showing the most recent <span x-text="archive.length"></span>
-      </span>
+      <div class="flex items-center gap-3">
+        <select x-show="listPlatforms.length > 1" x-model="listPlatform" @change="saveListPlatform()"
+                aria-label="Filter by platform"
+                class="border border-gray-300 rounded-lg px-2 py-1 text-xs">
+          <option value="">All platforms</option>
+          <template x-for="n in listPlatforms" :key="'past-pf-' + n">
+            <option :value="n" x-text="platformLabel(n)"></option>
+          </template>
+        </select>
+        <span class="text-xs text-gray-400" x-show="archiveTruncated">
+          showing the most recent <span x-text="archive.length"></span>
+        </span>
+      </div>
+    </div>
+    <div x-show="!filteredArchive.length" class="text-sm text-gray-400 border border-dashed border-gray-200 rounded-lg px-4 py-6 text-center">
+      No past POVs on this platform.
     </div>
     <p class="text-sm text-gray-500">
       Destroyed environments. The infrastructure is gone; what the evaluation covered is not.
     </p>
-    <div class="overflow-hidden border border-gray-200 rounded-lg">
+    <div x-show="filteredArchive.length" class="overflow-hidden border border-gray-200 rounded-lg">
       <table class="min-w-full divide-y divide-gray-200 text-sm">
         <thead class="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
           <tr>
             <th class="px-4 py-2 text-left font-medium">Name</th>
+            <th class="px-4 py-2 text-left font-medium">Platform</th>
             <th class="px-4 py-2 text-left font-medium">Started</th>
             <th class="px-4 py-2 text-left font-medium">Wired into</th>
             <th class="px-4 py-2 text-left font-medium">Covered</th>
@@ -945,12 +987,13 @@
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-100 bg-white">
-          <template x-for="a in archive" :key="a.id">
+          <template x-for="a in filteredArchive" :key="a.id">
             <tr>
               <td class="px-4 py-2">
                 <a :href="'/pov/' + a.id + '#summary'"
                    class="font-medium text-blue-700 hover:underline" x-text="a.name"></a>
               </td>
+              <td class="px-4 py-2 text-gray-600" x-text="platformLabel(a.platform)"></td>
               <td class="px-4 py-2 text-gray-600"
                   x-text="a.created_at ? a.created_at.slice(0, 10) : '—'"></td>
               <td class="px-4 py-2 text-gray-600 text-xs"
@@ -1257,6 +1300,7 @@ function povPage(tabSlugs) {
     canManagePlatform: false,
     canSaveBlueprints: false,
     platform: '',
+    listPlatform: '',
     cloudPlatforms: [],
     platforms: [],
     managed: [],
@@ -1526,15 +1570,47 @@ function povPage(tabSlugs) {
     // hidden and its panel empty, so fall back to Mine once the load has said which.
     ensureTab() {
       const hidden = (this.activeTab === 'past' && !this.archive.length)
+        || (this.activeTab === 'build' && !this.canProvision)
         || (this.activeTab === 'all' && !(this.canManagePlatform && !this.notConfigured));
       if (hidden) this.select('mine', false);
+    },
+
+    // The platform behind a row, as the registry labels it ("AWS", "Skytap"). A platform
+    // the registry no longer lists falls back to its stored name rather than to blank.
+    platformLabel(name) {
+      const p = this.platforms.find(x => x.name === name);
+      return (p && p.label) || name || '—';
+    },
+
+    // The Mine / Past filter. NOT `platform`: that one is the Build tab's toggle and
+    // only chooses which blueprints a new POV is built from.
+    get listPlatforms() {
+      const seen = new Set();
+      for (const r of this.managed.concat(this.archive)) if (r.platform) seen.add(r.platform);
+      return Array.from(seen).sort();
+    },
+    // A saved choice that no row carries any more shows everything rather than an empty list.
+    get activeListPlatform() {
+      return this.listPlatforms.includes(this.listPlatform) ? this.listPlatform : '';
+    },
+    get filteredManaged() {
+      const p = this.activeListPlatform;
+      return p ? this.managed.filter(e => e.platform === p) : this.managed;
+    },
+    get filteredArchive() {
+      const p = this.activeListPlatform;
+      return p ? this.archive.filter(a => a.platform === p) : this.archive;
+    },
+    saveListPlatform() {
+      try { localStorage.setItem('pov.listPlatform', this.listPlatform || ''); } catch (e) { /* storage may be blocked */ }
     },
 
     async init() {
       // Pick the tab before any load so the page never renders with no panel.
       // #bt-tenants is the older anchor -- the Blueprints form on /pov/templates links
       // it -- so it still opens the Tenants tab.
-      this.pickTab(window.location.hash === '#bt-tenants' ? 'tenants' : '');
+      this.pickTab(window.location.hash === '#bt-tenants' ? 'tenants' : 'mine');
+      try { this.listPlatform = localStorage.getItem('pov.listPlatform') || ''; } catch (e) { /* storage may be blocked */ }
       try {
         const res = await this.apiFetch('/api/pov/platforms');
         if (!res.ok) { this.error = 'Could not read the lab platform registry.'; this.loading = false; return; }
@@ -1558,6 +1634,8 @@ function povPage(tabSlugs) {
       }
       await this.load();
       this.ensureTab();
+      // A first visit with nothing to list opens on Build; a bookmark's fragment wins.
+      if (!window.location.hash && this.canProvision && !this.managed.length) this.select('build', false);
       // /pov?edit=rb&env=<id> is where the POV detail page's Setup tab sends the Resource
       // Broker step: that form (installer picker, zone, key) lives here, so open it.
       const q = new URLSearchParams(window.location.search);
