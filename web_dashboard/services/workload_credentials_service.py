@@ -494,6 +494,37 @@ def parse_jwt_expiry(token: str, now_epoch: float) -> float:
         return now_epoch
 
 
+def describe_jwt(token: str) -> dict:
+    """``{"aud": [...], "exp": epoch|None}`` read out of a JWT. Pure.
+
+    Display only, and unverified for the same reason as :func:`parse_jwt_expiry`.
+    ``aud`` is always a list, because RFC 7519 allows a string or an array. Used by
+    Test connection so an operator can compare the token's real audience with the
+    claim condition in the Pathfinder registration instead of guessing — on a
+    projected file the audience was fixed in the pod spec, not here.
+    """
+    import base64
+    import json as _json
+
+    parts = (token or "").split(".")
+    if len(parts) < 2:
+        return {"aud": [], "exp": None}
+    payload = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        claims = _json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
+    except Exception:                              # noqa: BLE001 — display only
+        return {"aud": [], "exp": None}
+    if not isinstance(claims, dict):
+        return {"aud": [], "exp": None}
+    aud = claims.get("aud")
+    auds = [aud] if isinstance(aud, str) else [str(a) for a in aud] if isinstance(aud, list) else []
+    try:
+        exp = float(claims["exp"])
+    except (KeyError, TypeError, ValueError):
+        exp = None
+    return {"aud": auds, "exp": exp}
+
+
 def parse_identity_token(payload: Any, now_epoch: float) -> tuple:
     """``(token, expires_at_epoch)`` from a managed-identity token response. Pure.
 
@@ -993,8 +1024,24 @@ def test_connection() -> dict:
     """
     _request("GET", "/session")
     base = (_cfg("wlc_api_base_url") or DEFAULT_API_URL).rstrip("/")
-    return {"ok": True,
-            "message": f"Connected to Workload Credentials at {base} (site {_cfg('wlc_site_id')})."}
+    message = f"Connected to Workload Credentials at {base} (site {_cfg('wlc_site_id')})."
+    result: dict = {"ok": True}
+    if auth_mode() == AUTH_MODE_WORKLOAD:
+        # The token was just fetched (or served from the memo) by _request, so this
+        # is free. Report what it actually says, not what the panel hopes it says.
+        import time
+        info = describe_jwt(_workload_token())
+        aud = ", ".join(info["aud"]) or "(none)"
+        if info["exp"]:
+            left = int(info["exp"] - time.time())
+            exp = (f"{datetime.fromtimestamp(info['exp'], timezone.utc):%Y-%m-%d %H:%M:%S} UTC"
+                   f" ({left // 60} min left)")
+        else:
+            exp = "(unreadable)"
+        message += f" Token aud: {aud}; exp: {exp}."
+        result.update(token_aud=info["aud"], token_exp=info["exp"])
+    result["message"] = message
+    return result
 
 
 # Confirmed against a live site: collections come back as {"data": [...]}. The other

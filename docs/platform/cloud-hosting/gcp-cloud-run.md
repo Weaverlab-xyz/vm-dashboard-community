@@ -37,6 +37,54 @@ gcloud run deploy dash-worker \
   --set-env-vars=APP_ENV=production,PUBLIC_BASE_URL=https://dash.example.com
 ```
 
+## Pathfinder without a PAT
+
+Cloud Run hands every revision a Google-signed OIDC identity token from the metadata
+server, so the dashboard can reach BeyondTrust Pathfinder with **no stored Personal
+Access Token**. This applies if you use [Workload Credentials](../../beyondtrust/workload-credentials.md);
+the [Azure walkthrough](azure-container-apps/workload-identity.md) explains the trust
+model, and this section is the Cloud Run version of it.
+
+1. **Give the service an identity.** Both `dash` and `dash-worker` need a runtime
+   service account, and **the worker is where credentials are minted**, so set it on both:
+
+   ```bash
+   gcloud run services update dash --region us-east1 --service-account dash-runtime@PROJECT.iam.gserviceaccount.com
+   gcloud run services update dash-worker --region us-east1 --service-account dash-runtime@PROJECT.iam.gserviceaccount.com
+   ```
+
+   The account needs no IAM roles for this; the token proves who it is, not what it may do.
+
+2. **Register the trust in Pathfinder** (a GUI action, by design): **Administration →
+   Workload Identities → Register Workload Identity**, type **Custom IDP**.
+   - **Issuer:** `https://accounts.google.com`
+   - **Claim conditions** (AND-matched): `aud` equals the audience you choose in step 3,
+     and `email` equals the service account's address (or `sub` equals its numeric unique
+     ID). Pin the account, not just the issuer: every Google workload shares the issuer.
+   - Grant the Product Scopes and site exactly as in the Azure walkthrough.
+
+3. **Settings → Integrations → Workload Credentials:**
+   - **Authentication** → *Workload identity (nothing stored)*
+   - **Identity platform** → *GCP — Cloud Run, GCE, GKE*
+   - **Service name** → the Service Name from step 2
+   - **Token audience** → any string, as long as it matches the `aud` condition. A URL such
+     as `https://pathfinder.example.com` is conventional.
+
+4. **Save, then press Test connection.** It is an unmetered `GET /session`, and on success
+   it prints the token's real **`aud`** and **`exp`**. Compare that `aud` with the
+   registration: a mismatch is the usual cause of a bare `HTTP 401`.
+
+| What you see | What it means |
+|---|---|
+| `could not get a workload identity token on gcp` | no service account is attached to this revision, or the metadata server is unreachable |
+| `HTTP 401` from Workload Credentials | the token was fine and Pathfinder declined it: wrong site, a Service Name that does not match (a trailing space is **not** trimmed), an `email`/`sub` that is not this account, or an `aud` that differs from the token audience |
+
+The token is fetched per process and cached until five minutes before its `exp`; a fetch
+is free, so `dash` and `dash-worker` each keep their own. Once Test connection passes,
+clear `wlc_pat`: switching modes does not delete it.
+
+**Status:** unit-tested, not yet run against a live Pathfinder registration on Cloud Run.
+
 ## SPIRE sidecar
 
 **Remote agents cannot attest through SPIRE on Cloud Run.** Cloud Run's only ingress is
