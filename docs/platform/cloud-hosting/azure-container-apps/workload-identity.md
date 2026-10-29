@@ -7,10 +7,8 @@ Part of [Cloud Hosting: Azure Container Apps](../azure-container-apps.md).
 > **Applies to:** an install using [Workload Credentials](../../../beyondtrust/workload-credentials.md).
 > Skip this if you do not. **Status:** run end to end on the Azure Container
 > Apps install on 2026-09-15, so the walkthrough below is a transcript rather
-> than a sketch. Two legs are still unproven: the *worker* minting under a real
-> job, which is a different process from the one Test connection exercises — and
-> the **GCP and AWS platforms**, whose client paths are unit-tested but which
-> nobody has yet pointed at a live Pathfinder registration.
+> than a sketch. The one leg still unproven is the *worker* minting under a
+> real job, which is a different process from the one Test connection exercises.
 
 Workload Credentials replaced three standing cloud keys with **one** standing
 platform credential: a Personal Access Token, stored encrypted in `app_config`.
@@ -25,10 +23,11 @@ short-lived OIDC token it fetched from the platform a moment earlier, and there
 is **no BeyondTrust credential anywhere in the deployment** — nothing in
 `app_config`, nothing in the Container App's secrets, nothing to rotate.
 
-**This is not Azure-only, and the walkthrough below is Azure only because that
-is the install it was run on.** The three hosting options at the top of this
-page each hand a container an identity, with one exception worth knowing before
-you start:
+**This is not Azure-only, and the walkthrough below is the Azure one because that
+is the install it was run on.** GCP and AWS have their own:
+[GCP Cloud Run](../gcp-cloud-run.md#pathfinder-without-a-pat) and
+[AWS (EKS)](../aws-ecs.md#pathfinder-without-a-pat). Each platform hands a
+container an identity, with one exception worth knowing before you start:
 
 | Identity platform | Where the token comes from | Registers in Pathfinder as |
 |---|---|---|

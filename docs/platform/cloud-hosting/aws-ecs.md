@@ -27,6 +27,61 @@ sidecar property.
 - **Private subnets with a NAT gateway.** The tasks need outbound reach to every
   cloud API they manage, plus your registry.
 
+## Pathfinder without a PAT
+
+**ECS gives a task no OIDC token.** A Fargate task or EC2 instance gets SigV4 credentials
+and a signed identity document, and neither is a JWT, so there is nothing for Pathfinder
+to trust. On ECS you have two choices: the dashboard's [own SPIFFE
+identity](../oidc/dashboard-identity.md#beyondtrust-workload-credentials) (the SPIRE
+sidecar below), which needs no cloud underneath it, or a stored PAT.
+
+**EKS does issue one**, and the dashboard reads it from disk. If you run the dashboard on
+EKS and use [Workload Credentials](../../beyondtrust/workload-credentials.md), this is the
+walkthrough; the [Azure one](azure-container-apps/workload-identity.md) explains the trust model.
+
+1. **Project a token with your own audience.** IRSA mounts the file named by
+   `AWS_WEB_IDENTITY_TOKEN_FILE`, with audience `sts.amazonaws.com` unless overridden, and Pod
+   Identity sets `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`, read the same way. Either way **the
+   audience is fixed in the pod spec, not in the panel.** To choose it, project a dedicated
+   token into both the `dash` and `dash-worker` pods:
+
+   ```yaml
+   volumes:
+     - name: pathfinder-token
+       projected:
+         sources:
+           - serviceAccountToken:
+               audience: https://pathfinder.example.com
+               expirationSeconds: 3600
+               path: token
+   # mount read-only at /var/run/secrets/pathfinder
+   ```
+
+   Then pick **Identity platform → Other** and set the token file to
+   `/var/run/secrets/pathfinder/token`.
+
+2. **Register the trust in Pathfinder** (GUI only), type **Custom IDP**, issuer = the
+   cluster's OIDC provider URL (`aws eks describe-cluster --name CLUSTER --query
+   cluster.identity.oidc.issuer`). Conditions: `aud` equals the projected audience and `sub`
+   equals `system:serviceaccount:NAMESPACE:SERVICEACCOUNT`.
+
+3. **Settings → Integrations → Workload Credentials:** *Workload identity (nothing stored)*,
+   the platform from step 1 (*AWS* for the default IRSA file, *Other* for a custom path), and
+   the **Service name** from step 2.
+
+4. **Save, then press Test connection.** It prints the token's **`aud`** and **`exp`**, which
+   is how you confirm the projected audience matches the registration.
+
+The file is **re-read on every call**, never cached, because the kubelet rotates it in place
+before expiry and a stale copy would give the same `401` as a dead PAT. It is trimmed on read.
+
+| What you see | What it means |
+|---|---|
+| `no projected identity token at …` | the volume is not mounted in this container, or this is ECS |
+| `HTTP 401` from Workload Credentials | wrong site, a Service Name mismatch, a `sub` that is not this ServiceAccount, or an `aud` that differs from the one Test connection printed |
+
+**Status:** unit-tested, not yet run against a live Pathfinder registration on EKS.
+
 ## SPIRE sidecar
 
 For [SPIRE attestation](../spiffe.md#on-a-managed-container-runtime)

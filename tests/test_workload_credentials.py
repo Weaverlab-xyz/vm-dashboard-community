@@ -1363,3 +1363,44 @@ if __name__ == "__main__":
             print(f"FAIL {fn.__name__}: {e}")
     print(f"\n{len(fns) - failures}/{len(fns)} passed")
     sys.exit(1 if failures else 0)
+
+
+def _jwt(claims: dict) -> str:
+    import base64
+    import json as _json
+    payload = base64.urlsafe_b64encode(_json.dumps(claims).encode()).decode().rstrip("=")
+    return f"eyJhbGciOiJSUzI1NiJ9.{payload}.sig"
+
+
+def test_describe_jwt_reports_audience_as_a_list_and_the_expiry():
+    """RFC 7519 allows `aud` to be a string or an array; Test connection shows a list."""
+    assert wlc.describe_jwt(_jwt({"aud": "api://x", "exp": 1789000000})) ==         {"aud": ["api://x"], "exp": 1789000000.0}
+    assert wlc.describe_jwt(_jwt({"aud": ["a", "b"], "exp": 5}))["aud"] == ["a", "b"]
+
+
+def test_describe_jwt_never_raises_on_garbage():
+    for bad in ("", "not-a-jwt", "a.b", "a.!!!!.c", _jwt({"aud": 7})):
+        out = wlc.describe_jwt(bad)
+        assert out["aud"] == [] and out["exp"] is None
+
+
+def test_test_connection_reports_the_token_aud_and_exp_in_workload_mode(monkeypatch):
+    token = _jwt({"aud": "api://pathfinder", "exp": 4102444800})
+    monkeypatch.setattr(wlc, "_request", lambda *a, **k: {})
+    monkeypatch.setattr(wlc, "auth_mode", lambda: wlc.AUTH_MODE_WORKLOAD)
+    monkeypatch.setattr(wlc, "_workload_token", lambda: token)
+    out = wlc.test_connection()
+    assert out["ok"] is True
+    assert out["token_aud"] == ["api://pathfinder"]
+    assert out["token_exp"] == 4102444800.0
+    assert "api://pathfinder" in out["message"] and "2100-01-01" in out["message"]
+
+
+def test_test_connection_in_pat_mode_does_not_touch_the_identity_token(monkeypatch):
+    monkeypatch.setattr(wlc, "_request", lambda *a, **k: {})
+    monkeypatch.setattr(wlc, "auth_mode", lambda: wlc.AUTH_MODE_PAT)
+
+    def boom():
+        raise AssertionError("PAT mode must not fetch an identity token")
+    monkeypatch.setattr(wlc, "_workload_token", boom)
+    assert "token_aud" not in wlc.test_connection()
