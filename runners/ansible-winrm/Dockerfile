@@ -28,8 +28,8 @@
 # and Trivy scans it, which is the "confirm the build still passes" step. The 2026-08-24
 # digest carried 44 fixable HIGH/CRITICAL findings (OpenSSL, expat, python3, rsync,
 # ansible-core); this one has none.
-#   willhallonline/ansible:latest as of 2026-10-06
-FROM willhallonline/ansible:latest@sha256:969f0990b1ce6669cb6c6096e45047011c99e0d6b1b6c66eea942fb30ff898db
+#   willhallonline/ansible:latest as of 2026-10-26
+FROM willhallonline/ansible:latest@sha256:0b8923ad5642ec78d4db1d6c495a4aa3abc3a6d9845a3d4845679a24a75725c0
 
 # The upstream image now defaults to the unprivileged `ansible` user. Both RUN layers
 # below write to system paths, and every runner that consumes this image ran as root for
@@ -39,13 +39,12 @@ FROM willhallonline/ansible:latest@sha256:969f0990b1ce6669cb6c6096e45047011c99e0
 USER root
 
 # Fixes published after the pinned digest was cut. The nightly Images scan failed on them
-# (2026-10-22: expat CVE-2026-77214, sudo CVE-2026-96512, certifi GHSA-6q48-6c7w-9gw2;
-# 2026-10-24: brotli CVE-2026-111497, black CVE-2026-114134, filelock CVE-2026-112940;
-# 2026-10-26: libcurl CVE-2026-92392; 2026-10-29: python3 CVE-2026-115557)
-# with nothing changed in this repo. The floors make the build fail loudly rather than
-# silently install an older copy; drop a line once the base digest carries that version.
-RUN apk add --no-cache --upgrade "libexpat>=2.9.0-r0" "sudo>=1.9.17_p2-r2" \
-        "brotli-libs>=1.2.1-r0" "libcurl>=8.23.0-r0" \
+# (2026-10-29: python3 CVE-2026-115557) with nothing changed in this repo. The floors make
+# the build fail loudly rather than silently install an older copy; drop a line once the
+# base digest carries that version. The 2026-10-26 digest above already carries the
+# earlier floors (expat, sudo, brotli, libcurl; certifi, black, filelock), so they went
+# with the bump. Dependabot proposes the next digest weekly (.github/dependabot.yml).
+RUN apk add --no-cache --upgrade \
         "python3>=3.14.10-r0" "python3-pyc>=3.14.10-r0" "pyc>=3.14.10-r0"
 
 # Upstream installs ansible itself with pip into the system Python, and the libraries its
@@ -62,9 +61,6 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1
 RUN pip install --no-cache-dir \
         "pywinrm>=0.4.3" \
         "requests-ntlm>=1.2.0" \
-        "certifi>=2026.10.19" \
-        "black>=26.10.1" \
-        "filelock>=4.2.1" \
  && python -c "import winrm, requests_ntlm; print('pywinrm', winrm.__version__, 'OK')"
 
 # paramiko is the SSH backend ansible.netcommon.network_cli needs for network devices --
