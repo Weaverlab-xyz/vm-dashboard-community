@@ -3804,6 +3804,11 @@ EGRESS_TAGS = {"managed-by": "vm-dashboard", "purpose": "vm-egress"}
 _EGRESS_ENSURED_TAG = "egress-ensured-at"     # epoch seconds of the last ensure
 _EGRESS_NSG_TAG = "egress-nsg-"               # + 8 hex: an NSG we put an allow rule in
 _INTERNET_DESTS = {"internet", "*", "0.0.0.0/0", "any"}
+# What the allow opens: HTTP and HTTPS, which is what package installs, image pulls and
+# playbooks need. Not every port: on the sandbox the deny is deliberate, and SSH, SMTP or
+# anything else out stays as closed as it was. DNS and NTP go to Azure's own host, which is
+# not "Internet", so they need nothing here.
+EGRESS_PORTS = ("80", "443")
 
 
 def _arm_parts(rid: str, kind: str) -> tuple[str, str]:
@@ -3948,9 +3953,10 @@ def _ensure_vm_egress_sync(cred, sub_id: str, subnet_id: str, nic_nsg_ids: list)
             continue
         nrg, _ = _arm_parts(nsg.id, "networkSecurityGroups")
         network.security_rules.begin_create_or_update(nrg, nsg.name, rule, SecurityRule(
-            priority=prio, direction="Outbound", access="Allow", protocol="*",
+            priority=prio, direction="Outbound", access="Allow", protocol="Tcp",
             source_address_prefixes=[p for p in prefixes if p], source_port_range="*",
-            destination_address_prefix="Internet", destination_port_range="*",
+            destination_address_prefix="Internet",
+            destination_port_ranges=list(EGRESS_PORTS),
             description=("vm-dashboard: on-demand VM egress. Removed with the NAT gateway "
                          "once the subnet's last VM is gone."))).result()
         rules.append(f"{nsg.name}:{prio}")

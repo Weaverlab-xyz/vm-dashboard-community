@@ -220,8 +220,12 @@ def _aws_placement_block(subnet_id: str = "", run_tags: dict = None) -> str:
     tab), the template is what it always was."""
     out = ""
     if subnet_id:
+        # A public address in a public subnet: Packer's temporary security group would
+        # otherwise open SSH (or WinRM) to 0.0.0.0/0 for the whole build. This limits it
+        # to the address Packer itself calls from.
         out += ('  subnet_id                   = "' + _hcl_escape(subnet_id) + '"\n'
-                '  associate_public_ip_address = true\n\n')
+                '  associate_public_ip_address = true\n'
+                '  temporary_security_group_source_public_ip = true\n\n')
     if run_tags:
         body = "\n".join(_hcl_tag_lines(run_tags))
         for block in ("run_tags", "run_volume_tags", "snapshot_tags"):
