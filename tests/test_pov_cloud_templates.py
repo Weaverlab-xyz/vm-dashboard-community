@@ -70,6 +70,32 @@ def _refusal(fn, *args, **kwargs) -> str:
     raise AssertionError("expected a CloudTemplateError, got none")
 
 
+# ── the API refuses a cloud this instance does not run ───────────────────────
+
+def test_a_template_for_an_unselected_cloud_is_refused_at_the_api():
+    from fastapi import HTTPException
+    from web_dashboard.api import pov_templates as api
+    db = _session()
+    saved = lp.selected_clouds
+    lp.selected_clouds = lambda: [lp.CLOUD_PLATFORMS[0]]
+    try:
+        other = lp.CLOUD_PLATFORMS[1]
+        req = api.CloudTemplateRequest(cloud=other, name="tpl-one", region="us-east-2",
+                                       vms=[_vm()])
+        try:
+            api.create_cloud_template(req, db=db, current_user=None)
+            raise AssertionError("saved a template for an unselected cloud")
+        except HTTPException as exc:
+            assert exc.status_code == 409 and other in exc.detail
+        assert db.query(PovCloudTemplate).count() == 0
+        ok = api.create_cloud_template(
+            api.CloudTemplateRequest(cloud=_CLOUD, name="tpl-one", region="us-east-2", vms=[_vm()]),
+            db=db, current_user=None)
+        assert ok["template"]["cloud"] == _CLOUD
+    finally:
+        lp.selected_clouds = saved
+
+
 # ── the happy path ───────────────────────────────────────────────────────────
 
 def test_a_template_saves_with_its_vms_and_reads_back():
