@@ -56,6 +56,9 @@ verify the certificate. The agent checks every address that name resolves to. It
 bundle whose `db_login_host` is not the signed target. It then pins the name to the address
 it checked, with one hosts entry in the run's container. That entry is the only container
 setting derived from a job, and the agent builds it from the signed name and its own lookup.
+From 2.15 a Kubernetes run is pinned the same way: every cluster in the kubeconfig must be
+the API server the job was signed for, and that name is pinned to the address the agent
+checked, so kubectl still verifies the certificate by name but reaches only that address.
 
 Probes never authenticate. Discovery is a TCP connect plus a pre-auth protocol banner
 (Postgres SSLRequest, MySQL greeting, TDS PRELOGIN, Oracle TNS, Kubernetes

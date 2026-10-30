@@ -370,6 +370,7 @@ class Updater:
     def __init__(self, docker: DockerAPI, *, sleep=time.sleep, clock=time.time):
         self.docker = docker
         self._k8s_retry_at = 0.0
+        self._k8s_last_error = ""
         self._k8s_delay = K8S_RETRY_FIRST_S
         self.sleep = sleep
         self.clock = clock
@@ -503,8 +504,13 @@ class Updater:
         try:
             k8s = load_k8s()
         except Refused as exc:
-            log.warning("k8s image: %s", exc)
+            # Logged when it changes, not on every 2-second pass: a bad block stays bad
+            # until someone edits the file, and the agent refuses it too.
+            if str(exc) != self._k8s_last_error:
+                log.warning("k8s image: %s", exc)
+                self._k8s_last_error = str(exc)
             return None
+        self._k8s_last_error = ""
         if not k8s:
             return None
         done = read_json("k8s-image.json") or {}

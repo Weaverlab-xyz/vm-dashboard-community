@@ -247,6 +247,11 @@ policy and adds `agent_k8s` to its job types:
   the one-shot container.
 - **The steps** are a closed set: apply, delete, helm upgrade, helm uninstall. The agent
   builds every command itself; no step can name one.
+- **The API server is pinned (agent 2.15).** The agent checks every address the API
+  server's name resolves to, and refuses a kubeconfig whose `server` is not the endpoint
+  the job was signed for. It then pins that name to the address it checked with one hosts
+  entry in the run's container. kubectl still verifies the certificate by name, but cannot
+  be sent anywhere the agent did not check.
 - **Fallback.** While the agent is offline, and its host is not about to be up, the work
   runs on the remote worker, and the job's Live Output says so. So does anything that
   does not fit the step set, such as a Helm `--set` value with a newline: it stays on the

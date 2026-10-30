@@ -33,7 +33,8 @@ agent = _load("agent", "runners", "agent", "agent.py")
 sealing = _load("agent_sealing", "web_dashboard", "services", "agent_sealing.py")
 
 IMG = "chrweav/ansible-cloud@sha256:" + "c" * 64
-KUBECONFIG = ("users:\n- name: u\n  user:\n    token: secret-token-123456\n"
+KUBECONFIG = ("clusters:\n- name: c\n  cluster:\n    server: https://abc.eks.amazonaws.com\n"
+              "users:\n- name: u\n  user:\n    token: secret-token-123456\n"
               "    client-key-data: S0VZREFUQTEyMzQ1Njc4\n")
 
 
@@ -274,6 +275,37 @@ def test_the_version_is_2_12():
     assert agent._version_tuple(agent.AGENT_VERSION) >= (2, 12, 0)
     assert agent.HANDLERS["agent_k8s"] is agent.run_k8s
 
+
+
+# ── the API server is pinned to the checked address (2.15) ────────────────────
+
+_KC = ("clusters:\n- name: c\n  cluster:\n    server: https://ABC.eks.amazonaws.com\n"
+       "users:\n- name: u\n  user:\n    token: secret-token-123456\n")
+
+
+def test_a_kubernetes_run_pins_the_api_name_to_the_checked_address():
+    assert agent._k8s_pin(_KC, "abc.eks.amazonaws.com", 443, "52.1.2.3") == (
+        "abc.eks.amazonaws.com", "52.1.2.3")
+    ip_kc = _KC.replace("ABC.eks.amazonaws.com", "52.1.2.3")
+    assert agent._k8s_pin(ip_kc, "52.1.2.3", 443, "52.1.2.3") is None, "an address needs none"
+
+
+def test_a_kubeconfig_naming_another_server_is_refused():
+    for kc in (_KC.replace("ABC.eks", "evil.eks"),
+               _KC.replace(".com\n", ".com:6443\n", 1),
+               _KC.replace("https://", "http://"),
+               _KC.replace("users:", "- name: d\n  cluster:\n    server: "
+                           "https://other.example.com\nusers:"),
+               "users: []\n", "{not yaml"):
+        _refused(agent._k8s_pin, kc, "abc.eks.amazonaws.com", 443, "52.1.2.3")
+
+
+def test_run_k8s_passes_the_pin_to_the_sibling():
+    dash = _Dash([{"kind": "apply", "manifest": "kind: Namespace"}])
+    dash.k8s_bundle = lambda job_id, **kw: {"kubeconfig": _KC, "steps": dash.steps}
+    result, seen = _run(_PAYLOAD, dash)
+    assert result["exit_code"] == 0
+    assert seen["pin"] == ("abc.eks.amazonaws.com", "52.1.2.3")
 
 if __name__ == "__main__":
     fns = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
