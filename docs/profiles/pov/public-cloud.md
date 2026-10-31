@@ -25,7 +25,9 @@ the create form renders from and the provision endpoint refuses against. Each cl
 its own credentials, quota and bill, so selecting two is two independent integrations,
 not one shared one. The cloud-specific pages take the cloud explicitly: **POV templates**
 and its **Images** tab follow the platform toggle, and **POV Cloud** (`/pov/cloud`) shows
-one cloud at a time with a switcher.
+one cloud at a time with a switcher. A new cloud template can only be saved for a selected
+cloud, since no POV could be built from one for an unticked cloud; templates already saved
+for a cloud you untick stay listed and editable.
 
 Unticking a cloud does **not** disturb POVs you already built there. Reads, power and
 teardown never ask whether a platform is still selected — only *creating a new

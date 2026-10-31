@@ -476,6 +476,15 @@ def create_cloud_template(payload: CloudTemplateRequest,
             detail=("no POV cloud provider is selected on this instance. Choose them in "
                     "Settings → Integrations → POV cloud provider, then save this "
                     "template."))
+    # Only a selected cloud: provision refuses the others, so a template saved for one
+    # is a template no POV can be built from. Reads and edits of an existing one stay
+    # open, so unticking a cloud does not hide the templates already saved for it.
+    if not lab_platforms.cloud_selected(cloud):
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{cloud} is not one of this instance's POV cloud providers. Tick it "
+                    "in Settings → Integrations → POV cloud provider, then save this "
+                    "template."))
     try:
         row = pov_cloud_template_service.create(
             db, cloud=cloud, name=payload.name, description=payload.description,
