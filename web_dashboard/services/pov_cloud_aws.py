@@ -26,6 +26,7 @@ and the one most likely to be interrupted.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -358,38 +359,69 @@ def _image_build_filters() -> list:
 
 
 def _ensure_image_build_subnet_sync(region: str) -> str:
+    """Find-or-create each piece of the image-build network, so a run that failed half
+    way (a VPC with no subnet, an internet gateway never attached, no default route) is
+    finished by the next one instead of leaving a VPC behind and starting another: an
+    account has five VPCs per region by default."""
     ec2 = aws_service._get_ec2_pinned(region)
-    subnets = [s for s in ec2.describe_subnets(Filters=_image_build_filters()).get("Subnets") or []
+    name = "vm-dashboard-image-build"
+    filters = _image_build_filters()
+    subnets = [s for s in ec2.describe_subnets(Filters=filters).get("Subnets") or []
                if s.get("State") == "available"]
     if subnets:
         # The oldest-looking id wins, so two builds always pick the same one.
-        return sorted(s["SubnetId"] for s in subnets)[0]
+        subnet = sorted(subnets, key=lambda s: s["SubnetId"])[0]
+        vpc_id, subnet_id = subnet["VpcId"], subnet["SubnetId"]
+    else:
+        vpcs = sorted(v["VpcId"] for v in ec2.describe_vpcs(Filters=filters).get("Vpcs") or [])
+        if vpcs:
+            vpc_id = vpcs[0]
+        else:
+            vpc_id = ec2.create_vpc(
+                CidrBlock=_IMAGE_BUILD_CIDR,
+                TagSpecifications=[_image_build_spec("vpc", name)])["Vpc"]["VpcId"]
+        ec2.modify_vpc_attribute(VpcId=vpc_id, EnableDnsHostnames={"Value": True})
+        subnet_id = ec2.create_subnet(
+            VpcId=vpc_id, CidrBlock=_IMAGE_BUILD_SUBNET_CIDR,
+            TagSpecifications=[_image_build_spec("subnet", f"{name}-subnet")]
+        )["Subnet"]["SubnetId"]
+        # Packer connects to the build instance over its public address.
+        ec2.modify_subnet_attribute(SubnetId=subnet_id, MapPublicIpOnLaunch={"Value": True})
 
-    name = "vm-dashboard-image-build"
-    vpc_id = ec2.create_vpc(CidrBlock=_IMAGE_BUILD_CIDR,
-                            TagSpecifications=[_image_build_spec("vpc", name)])["Vpc"]["VpcId"]
-    ec2.modify_vpc_attribute(VpcId=vpc_id, EnableDnsHostnames={"Value": True})
-    subnet_id = ec2.create_subnet(
-        VpcId=vpc_id, CidrBlock=_IMAGE_BUILD_SUBNET_CIDR,
-        TagSpecifications=[_image_build_spec("subnet", f"{name}-subnet")])["Subnet"]["SubnetId"]
-    # Packer connects to the build instance over its public address.
-    ec2.modify_subnet_attribute(SubnetId=subnet_id, MapPublicIpOnLaunch={"Value": True})
-    igw_id = ec2.create_internet_gateway(
-        TagSpecifications=[_image_build_spec("internet-gateway", f"{name}-igw")]
-    )["InternetGateway"]["InternetGatewayId"]
-    ec2.attach_internet_gateway(InternetGatewayId=igw_id, VpcId=vpc_id)
-    rt_id = ec2.describe_route_tables(
-        Filters=[{"Name": "vpc-id", "Values": [vpc_id]}])["RouteTables"][0]["RouteTableId"]
-    ec2.create_route(RouteTableId=rt_id, DestinationCidrBlock="0.0.0.0/0", GatewayId=igw_id)
-    ec2.create_tags(Resources=[rt_id],
-                    Tags=_image_build_spec("route-table", f"{name}-rt")["Tags"])
-    logger.info("built the POV image-build network in %s: %s / %s", region, vpc_id, subnet_id)
+    igws = ec2.describe_internet_gateways(
+        Filters=[{"Name": "attachment.vpc-id", "Values": [vpc_id]}]).get("InternetGateways") or []
+    if igws:
+        igw_id = igws[0]["InternetGatewayId"]
+    else:
+        loose = [g for g in ec2.describe_internet_gateways(Filters=filters)
+                 .get("InternetGateways") or [] if not g.get("Attachments")]
+        igw_id = (loose[0]["InternetGatewayId"] if loose else ec2.create_internet_gateway(
+            TagSpecifications=[_image_build_spec("internet-gateway", f"{name}-igw")]
+        )["InternetGateway"]["InternetGatewayId"])
+        ec2.attach_internet_gateway(InternetGatewayId=igw_id, VpcId=vpc_id)
+    rt = ec2.describe_route_tables(
+        Filters=[{"Name": "vpc-id", "Values": [vpc_id]},
+                 {"Name": "association.main", "Values": ["true"]}])["RouteTables"][0]
+    if not any(r.get("DestinationCidrBlock") == "0.0.0.0/0" for r in rt.get("Routes") or []):
+        ec2.create_route(RouteTableId=rt["RouteTableId"], DestinationCidrBlock="0.0.0.0/0",
+                         GatewayId=igw_id)
+        ec2.create_tags(Resources=[rt["RouteTableId"]],
+                        Tags=_image_build_spec("route-table", f"{name}-rt")["Tags"])
+        logger.info("built the POV image-build network in %s: %s / %s",
+                    region, vpc_id, subnet_id)
     return subnet_id
+
+
+# One build per region prepares the network at a time, so two builds starting together
+# find one network rather than racing to create two.
+_IMAGE_BUILD_LOCKS: dict = {}
 
 
 async def ensure_image_build_subnet(region: str) -> str:
     """The image-build subnet in ``region``, built the first time a region needs one."""
-    return await aws_service._to_thread(_ensure_image_build_subnet_sync, region)
+    lock = _IMAGE_BUILD_LOCKS.setdefault(region, asyncio.Lock())
+    async with lock:
+        return await aws_service._to_thread(_ensure_image_build_subnet_sync, region)
 
 
 def _root_device(ec2, image_id: str) -> tuple:

@@ -280,6 +280,9 @@ def test_ensure_opens_the_sandbox_subnet_without_editing_its_rules():
     allow = rules["dashboard-vm-egress-vm-subnet"]
     assert (allow.priority, allow.access, allow.destination_address_prefix) == (199, "Allow", "Internet")
     assert allow.source_address_prefixes == ["10.99.2.0/24"]
+    # Web traffic only: the sandbox's deny still closes every other port.
+    assert allow.protocol == "Tcp" and list(allow.destination_port_ranges) == ["80", "443"]
+    assert not getattr(allow, "destination_port_range", None)
     # The sandbox's own rules are exactly as they were.
     assert rules["deny-internet-out"].priority == 200 and rules["allow-vnet-out"].priority == 100
 

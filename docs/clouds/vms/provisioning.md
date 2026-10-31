@@ -158,7 +158,8 @@ Portainer and Rancher nodes, deployed agents) first opens its subnet:
 2. **An allow rule** `dashboard-vm-egress-<subnet>` in each NSG (the subnet's, and the
    VM's NIC NSG) whose rules deny HTTPS to the internet. It takes the highest free
    priority below that deny, so it outranks it and as little else as possible, and its
-   source is the subnet's own range.
+   source is the subnet's own range. It opens TCP 80 and 443 only, what package installs,
+   image pulls and playbooks need; every other port stays as the NSG left it.
 
 It acts **only where egress is closed**. A subnet that has its own NAT gateway, or whose
 NSGs let HTTPS out, is left alone: attaching a gateway there would change the address every
