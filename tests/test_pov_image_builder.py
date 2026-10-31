@@ -225,6 +225,8 @@ def test_pov_templates_build_in_the_image_subnet_with_every_resource_tagged():
     for t in (linux, windows):
         assert 'subnet_id                   = "subnet-0abc"' in t
         assert "associate_public_ip_address = true" in t
+        # The temporary security group admits only Packer's own address, never 0.0.0.0/0.
+        assert "temporary_security_group_source_public_ip = true" in t
         for block in ("run_tags", "run_volume_tags", "snapshot_tags"):
             body = t[t.index(f"  {block} = {{"):]
             assert '"povManagedBy" = "vm-dashboard"' in body[:body.index("}")], block
