@@ -122,7 +122,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 # broker running the earlier one failed identically while reporting the same string as the
 # build that fixed it. A behaviour change the fleet cannot see is a behaviour change nobody
 # can confirm arrived, so bump this whenever the agent's behaviour moves.
-AGENT_VERSION = "2.14.0"
+AGENT_VERSION = "2.15.0"
 
 log = logging.getLogger("agent")
 
@@ -4610,7 +4610,7 @@ def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict
     ``kind="k8s"`` is Kubernetes work (2.12): the same container shape, gated on the
     ``k8s:`` block instead, with its network and runtime ceiling.
 
-    ``pin`` (2.14, database runs only) is the ONE exception to "every HostConfig field is a
+    ``pin`` (2.14 database runs, 2.15 Kubernetes runs) is the ONE exception to "every HostConfig field is a
     constant": ``(name, ip)``, the signed target's name and the address this agent resolved
     and checked, as one ``ExtraHosts`` entry. A database play connects by NAME, because TLS
     verifies the certificate against it, so the checked address cannot go in its vars the
@@ -5087,6 +5087,36 @@ def _check_every_address(policy: "Policy", host: str, addresses: list, port: int
                                 f"policy refuses: {exc}")
 
 
+def _k8s_pin(kubeconfig: str, host: str, port: int, ip: str) -> Optional[tuple]:
+    """``(name, ip)`` to pin for a Kubernetes run (2.15), or None when the target is an
+    address already. Raises :class:`PolicyRefusal` unless every cluster the kubeconfig
+    names is the endpoint this job was signed for: kubectl connects to the kubeconfig's
+    ``server``, not to the envelope, so a kubeconfig naming another API server would send
+    a cluster-admin credential somewhere this agent never checked.
+
+    Pinned for the same reason a database run is: kubectl verifies the API server's
+    certificate by NAME, so the checked address cannot replace the name in the
+    kubeconfig, and without the entry the name would be resolved again after the check."""
+    try:
+        doc = yaml.safe_load(kubeconfig) or {}
+    except yaml.YAMLError:
+        raise PolicyRefusal("the dashboard's kubeconfig is not YAML.")
+    clusters = doc.get("clusters") if isinstance(doc, dict) else None
+    want = (_norm_host(host), int(port))
+    if not isinstance(clusters, list) or not clusters:
+        raise PolicyRefusal("the dashboard's kubeconfig names no cluster.")
+    for entry in clusters:
+        server = ((entry or {}).get("cluster") or {}).get("server") \
+            if isinstance(entry, dict) else None
+        parsed = urlparse(str(server or ""))
+        got = (_norm_host(parsed.hostname or ""), parsed.port or 443)
+        if parsed.scheme != "https" or got != want:
+            raise PolicyRefusal(
+                f"the dashboard's kubeconfig points at {server!r}, not the API server this "
+                f"job was signed for ({want[0]}:{want[1]}); nothing was run.")
+    return None if _is_ip(want[0]) else (want[0], ip)
+
+
 def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
                 dashboard) -> dict:
     """Run one Config-Management job on this host, in a one-shot container.
@@ -5170,10 +5200,14 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
                             f"{transport!r}.")
 
     run_env = dict(bundle.get("env") or {})
+    pin = None
     if run_kind == "k8s":
         kubeconfig = str(bundle.get("kubeconfig") or "")
         if not kubeconfig.strip():
             raise PolicyRefusal("the dashboard sent no kubeconfig for this cluster run.")
+        pin = _k8s_pin(kubeconfig, host, port, ip)
+        if pin:
+            emit(f"pinned {pin[0]} to {ip} for this run")
         files[f"{_JOB_DIR.strip('/')}/kubeconfig"] = kubeconfig.encode("utf-8")
         # Set by the AGENT, after the env the dashboard sent: kubernetes.core reads
         # K8S_AUTH_KUBECONFIG, kubectl and helm read KUBECONFIG.
@@ -5199,7 +5233,6 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
     # reason `_check_extra_vars` runs against the dashboard's dict and not against this one.
     play_vars = dict(extra_vars)
     db_vars = bundle.get("db") or {}
-    pin = None
     if run_kind == "database":
         # The play connects to `db_login_host`, so it must be the target checked above: a
         # bundle naming another host would send the credential somewhere the policy never
@@ -5452,12 +5485,16 @@ def run_k8s(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
     kubeconfig = str(bundle.get("kubeconfig") or "")
     if not kubeconfig.strip():
         raise PolicyRefusal("the dashboard sent no kubeconfig for this cluster.")
+    pin = _k8s_pin(kubeconfig, host, port, ip)
+    if pin:
+        emit(f"pinned {pin[0]} to {ip} for this run")
     files = {f"{_JOB_DIR.strip('/')}/kubeconfig": kubeconfig.encode("utf-8")}
     command = k8s_command(steps, files)
 
     emit(f"running {len(steps)} Kubernetes step(s) against {ip}:{port}")
     code = _run_ansible_sibling(policy, image=image, files=files, env=_k8s_env(),
-                                command=command, emit=emit, cancelled=cancelled, kind="k8s")
+                                command=command, emit=emit, cancelled=cancelled, kind="k8s",
+                                **({"pin": pin} if pin else {}))
     if code < 0:
         return {"exit_code": code, "cancelled": True}
     if code != 0:

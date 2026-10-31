@@ -240,6 +240,26 @@ def test_nothing_to_check_without_verify_or_k8s():
         upd.subprocess.run = saved
 
 
+
+def test_a_bad_policy_is_logged_once_not_every_pass():
+    import logging
+    saved = upd.subprocess.run
+    try:
+        u, calls, _ = _updater(_policy_text(image="not-a-digest"), [])
+        records = []
+        handler = logging.Handler()
+        handler.emit = records.append
+        upd.log.addHandler(handler)
+        try:
+            for _ in range(5):
+                assert u.check_k8s_image() is None
+        finally:
+            upd.log.removeHandler(handler)
+        assert len(records) == 1 and "not pinned by digest" in records[0].getMessage()
+        assert calls == []
+    finally:
+        upd.subprocess.run = saved
+
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]
     failures = 0
