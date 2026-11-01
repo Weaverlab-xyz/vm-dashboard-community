@@ -3809,6 +3809,12 @@ _INTERNET_DESTS = {"internet", "*", "0.0.0.0/0", "any"}
 # anything else out stays as closed as it was. DNS and NTP go to Azure's own host, which is
 # not "Internet", so they need nothing here.
 EGRESS_PORTS = ("80", "443")
+# Windows activation: Azure's own KMS servers (azkms.core.windows.net), TCP 1688. They are
+# public addresses, so an NSG that denies the internet blocks activation; the allow is
+# scoped to exactly these two, not to the internet at large.
+# https://learn.microsoft.com/troubleshoot/azure/virtual-machines/windows/custom-routes-enable-kms-activation
+AZURE_KMS_ADDRESSES = ("20.118.99.224/32", "40.83.235.53/32")
+AZURE_KMS_PORT = "1688"
 
 
 def _arm_parts(rid: str, kind: str) -> tuple[str, str]:
@@ -3831,6 +3837,11 @@ _EGRESS_RULE_PREFIX = "dashboard-vm-egress-"
 def egress_rule_name(subnet: str) -> str:
     """One allow rule per subnet, so subnets that share an NSG are released apart."""
     return f"{_EGRESS_RULE_PREFIX}{subnet}"[:80]
+
+
+def egress_kms_rule_name(subnet: str) -> str:
+    """The subnet's Windows-activation allow. Same prefix, so the verdict ignores it."""
+    return f"{_EGRESS_RULE_PREFIX}kms-{subnet}"[:80]
 
 
 def _port_covers(rule, port: int) -> bool:
@@ -3960,6 +3971,20 @@ def _ensure_vm_egress_sync(cred, sub_id: str, subnet_id: str, nic_nsg_ids: list)
             description=("vm-dashboard: on-demand VM egress. Removed with the NAT gateway "
                          "once the subnet's last VM is gone."))).result()
         rules.append(f"{nsg.name}:{prio}")
+        # Just below the web allow, still above the deny.
+        kms_rule = egress_kms_rule_name(sub_name)
+        kms_prio = _free_priority_below(nsg, prio, kms_rule)
+        if kms_prio is None:
+            problems.append(f"no free priority for the KMS allow in NSG {nsg.name}")
+            continue
+        network.security_rules.begin_create_or_update(nrg, nsg.name, kms_rule, SecurityRule(
+            priority=kms_prio, direction="Outbound", access="Allow", protocol="Tcp",
+            source_address_prefixes=[p for p in prefixes if p], source_port_range="*",
+            destination_address_prefixes=list(AZURE_KMS_ADDRESSES),
+            destination_port_range=AZURE_KMS_PORT,
+            description=("vm-dashboard: Windows activation against Azure's KMS. Removed "
+                         "with the NAT gateway."))).result()
+        rules.append(f"{nsg.name}:{kms_prio}")
     return {"status": "ready", "nat_gateway": nat_name, "public_ip": pip.ip_address or "",
             "nsg_rules": rules, "problems": problems, "attached": created_nat}
 
@@ -4012,10 +4037,11 @@ def _release_vm_egress_sync(cred, sub_id: str, subnet_id: str, grace_s: int) -> 
         nsg_ids.append(subnet.network_security_group.id)
     for nid in {n.lower(): n for n in nsg_ids}.values():
         nrg, nname = _arm_parts(nid, "networkSecurityGroups")
-        try:
-            network.security_rules.begin_delete(nrg, nname, rule).result()
-        except ResourceNotFoundError:
-            pass
+        for name in (rule, egress_kms_rule_name(sub_name)):
+            try:
+                network.security_rules.begin_delete(nrg, nname, name).result()
+            except ResourceNotFoundError:
+                pass
     subnet.nat_gateway = None
     network.subnets.begin_create_or_update(srg, vnet_name, sub_name, subnet).result()
     nat = network.nat_gateways.get(srg, nat_name)

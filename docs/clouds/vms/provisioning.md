@@ -159,7 +159,9 @@ Portainer and Rancher nodes, deployed agents) first opens its subnet:
    VM's NIC NSG) whose rules deny HTTPS to the internet. It takes the highest free
    priority below that deny, so it outranks it and as little else as possible, and its
    source is the subnet's own range. It opens TCP 80 and 443 only, what package installs,
-   image pulls and playbooks need; every other port stays as the NSG left it.
+   image pulls and playbooks need; every other port stays as the NSG left it. A second
+   allow, `dashboard-vm-egress-kms-<subnet>`, opens TCP 1688 to Azure's two KMS addresses
+   only, so Windows VMs can activate.
 
 It acts **only where egress is closed**. A subnet that has its own NAT gateway, or whose
 NSGs let HTTPS out, is left alone: attaching a gateway there would change the address every

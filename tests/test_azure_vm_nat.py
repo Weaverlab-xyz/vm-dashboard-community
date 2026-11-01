@@ -283,6 +283,12 @@ def test_ensure_opens_the_sandbox_subnet_without_editing_its_rules():
     # Web traffic only: the sandbox's deny still closes every other port.
     assert allow.protocol == "Tcp" and list(allow.destination_port_ranges) == ["80", "443"]
     assert not getattr(allow, "destination_port_range", None)
+    # Windows activation: TCP 1688 to Azure's two KMS addresses only, just below the web allow.
+    kms = rules["dashboard-vm-egress-kms-vm-subnet"]
+    assert (kms.priority, kms.access, kms.protocol) == (198, "Allow", "Tcp")
+    assert kms.destination_port_range == "1688"
+    assert list(kms.destination_address_prefixes) == ["20.118.99.224/32", "40.83.235.53/32"]
+    assert kms.source_address_prefixes == ["10.99.2.0/24"]
     # The sandbox's own rules are exactly as they were.
     assert rules["deny-internet-out"].priority == 200 and rules["allow-vnet-out"].priority == 100
 
@@ -336,7 +342,7 @@ def test_a_nic_nsg_that_denies_is_opened_too():
     arm.add_nsg("nic-nsg", [_rule("deny-internet-out", 300, "Deny")])
     with _with(arm):
         res = _ensure(arm, nic_nsgs=[_nsg_id("nic-nsg")])
-    assert res["nsg_rules"] == ["nic-nsg:299"]
+    assert res["nsg_rules"] == ["nic-nsg:299", "nic-nsg:298"], "web, then KMS"
 
 
 # ── release ──────────────────────────────────────────────────────────────────
@@ -367,7 +373,7 @@ def test_release_closes_the_nsg_first_then_removes_gateway_and_address():
         arm.calls.clear()
         assert _release(arm) == "released"
     kinds = [c[0] for c in arm.calls]
-    assert kinds == ["rule-", "subnet", "nat-", "pip-"], kinds
+    assert kinds == ["rule-", "rule-", "subnet", "nat-", "pip-"], kinds  # web + KMS
     assert not arm.nats and not arm.pips
     assert arm.subnets["vm-subnet"].nat_gateway is None
     assert [r.name for r in arm.nsgs["vm-nsg"].security_rules] == [
@@ -380,12 +386,14 @@ def test_a_gateway_serving_another_subnet_survives_one_release():
     with _with(arm):
         _ensure(arm, "vm-subnet")
         # vm-subnet's allow is scoped to vm-subnet, so desktops still reads as closed.
-        assert _ensure(arm, "desktops")["nsg_rules"] == ["vm-nsg:198"]
+        assert _ensure(arm, "desktops")["nsg_rules"] == ["vm-nsg:197", "vm-nsg:196"]
         assert _release(arm, "vm-subnet").startswith("detached")
         # Only this subnet's rule went; the other subnet's is still there.
         names = [r.name for r in arm.nsgs["vm-nsg"].security_rules]
         assert "dashboard-vm-egress-desktops" in names
+        assert "dashboard-vm-egress-kms-desktops" in names
         assert "dashboard-vm-egress-vm-subnet" not in names
+        assert "dashboard-vm-egress-kms-vm-subnet" not in names
         assert _release(arm, "desktops") == "released"
     assert not arm.nats
 

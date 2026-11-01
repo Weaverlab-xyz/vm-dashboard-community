@@ -122,7 +122,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 # broker running the earlier one failed identically while reporting the same string as the
 # build that fixed it. A behaviour change the fleet cannot see is a behaviour change nobody
 # can confirm arrived, so bump this whenever the agent's behaviour moves.
-AGENT_VERSION = "2.15.0"
+AGENT_VERSION = "2.16.0"
 
 log = logging.getLogger("agent")
 
@@ -5087,12 +5087,15 @@ def _check_every_address(policy: "Policy", host: str, addresses: list, port: int
                                 f"policy refuses: {exc}")
 
 
-def _k8s_pin(kubeconfig: str, host: str, port: int, ip: str) -> Optional[tuple]:
-    """``(name, ip)`` to pin for a Kubernetes run (2.15), or None when the target is an
-    address already. Raises :class:`PolicyRefusal` unless every cluster the kubeconfig
-    names is the endpoint this job was signed for: kubectl connects to the kubeconfig's
-    ``server``, not to the envelope, so a kubeconfig naming another API server would send
-    a cluster-admin credential somewhere this agent never checked.
+def _k8s_scope(kubeconfig: str, host: str, port: int, ip: str) -> tuple:
+    """``(kubeconfig, pin)`` for a Kubernetes run: the kubeconfig cut down to its CURRENT
+    context alone, and the ``(name, ip)`` to pin (None when the endpoint is an address).
+
+    kubectl, helm and kubernetes.core connect to the current context's ``server``, not to
+    the envelope, so that server must be the endpoint this job was signed for or the run
+    is refused (2.15). Everything else in the file is dropped (2.16): a registered
+    cluster's kubeconfig is stored exactly as pasted, often with other clusters in it,
+    and keeping them would let a play's ``context:`` reach a server nobody checked.
 
     Pinned for the same reason a database run is: kubectl verifies the API server's
     certificate by NAME, so the checked address cannot replace the name in the
@@ -5101,20 +5104,41 @@ def _k8s_pin(kubeconfig: str, host: str, port: int, ip: str) -> Optional[tuple]:
         doc = yaml.safe_load(kubeconfig) or {}
     except yaml.YAMLError:
         raise PolicyRefusal("the dashboard's kubeconfig is not YAML.")
-    clusters = doc.get("clusters") if isinstance(doc, dict) else None
+    if not isinstance(doc, dict):
+        raise PolicyRefusal("the dashboard's kubeconfig is not a mapping.")
+
+    def _named(key):
+        return {str(e.get("name")): e for e in doc.get(key) or []
+                if isinstance(e, dict) and e.get("name") is not None}
+    contexts, clusters, users = _named("contexts"), _named("clusters"), _named("users")
+    current = str(doc.get("current-context") or "")
+    if not current and len(contexts) == 1:
+        current = next(iter(contexts))
+    context = contexts.get(current)
+    if context is None:
+        raise PolicyRefusal(
+            "the dashboard's kubeconfig names no current context this agent can use; "
+            "nothing was run.")
+    ctx = context.get("context") or {}
+    cluster = clusters.get(str(ctx.get("cluster") or ""))
+    user = users.get(str(ctx.get("user") or ""))
+    if cluster is None or user is None:
+        raise PolicyRefusal(
+            f"the dashboard's kubeconfig context {current!r} names a cluster or user it "
+            f"does not define; nothing was run.")
     want = (_norm_host(host), int(port))
-    if not isinstance(clusters, list) or not clusters:
-        raise PolicyRefusal("the dashboard's kubeconfig names no cluster.")
-    for entry in clusters:
-        server = ((entry or {}).get("cluster") or {}).get("server") \
-            if isinstance(entry, dict) else None
-        parsed = urlparse(str(server or ""))
-        got = (_norm_host(parsed.hostname or ""), parsed.port or 443)
-        if parsed.scheme != "https" or got != want:
-            raise PolicyRefusal(
-                f"the dashboard's kubeconfig points at {server!r}, not the API server this "
-                f"job was signed for ({want[0]}:{want[1]}); nothing was run.")
-    return None if _is_ip(want[0]) else (want[0], ip)
+    server = (cluster.get("cluster") or {}).get("server")
+    parsed = urlparse(str(server or ""))
+    got = (_norm_host(parsed.hostname or ""), parsed.port or 443)
+    if parsed.scheme != "https" or got != want:
+        raise PolicyRefusal(
+            f"the dashboard's kubeconfig points at {server!r}, not the API server this "
+            f"job was signed for ({want[0]}:{want[1]}); nothing was run.")
+    scoped = yaml.safe_dump({
+        "apiVersion": doc.get("apiVersion") or "v1", "kind": "Config",
+        "clusters": [cluster], "users": [user], "contexts": [context],
+        "current-context": current}, sort_keys=False)
+    return scoped, (None if _is_ip(want[0]) else (want[0], ip))
 
 
 def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
@@ -5205,10 +5229,10 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
         kubeconfig = str(bundle.get("kubeconfig") or "")
         if not kubeconfig.strip():
             raise PolicyRefusal("the dashboard sent no kubeconfig for this cluster run.")
-        pin = _k8s_pin(kubeconfig, host, port, ip)
+        scoped, pin = _k8s_scope(kubeconfig, host, port, ip)
         if pin:
             emit(f"pinned {pin[0]} to {ip} for this run")
-        files[f"{_JOB_DIR.strip('/')}/kubeconfig"] = kubeconfig.encode("utf-8")
+        files[f"{_JOB_DIR.strip('/')}/kubeconfig"] = scoped.encode("utf-8")
         # Set by the AGENT, after the env the dashboard sent: kubernetes.core reads
         # K8S_AUTH_KUBECONFIG, kubectl and helm read KUBECONFIG.
         run_env.update(_k8s_env())
@@ -5485,10 +5509,10 @@ def run_k8s(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
     kubeconfig = str(bundle.get("kubeconfig") or "")
     if not kubeconfig.strip():
         raise PolicyRefusal("the dashboard sent no kubeconfig for this cluster.")
-    pin = _k8s_pin(kubeconfig, host, port, ip)
+    scoped, pin = _k8s_scope(kubeconfig, host, port, ip)
     if pin:
         emit(f"pinned {pin[0]} to {ip} for this run")
-    files = {f"{_JOB_DIR.strip('/')}/kubeconfig": kubeconfig.encode("utf-8")}
+    files = {f"{_JOB_DIR.strip('/')}/kubeconfig": scoped.encode("utf-8")}
     command = k8s_command(steps, files)
 
     emit(f"running {len(steps)} Kubernetes step(s) against {ip}:{port}")
