@@ -145,9 +145,10 @@ locals {
     },
     {
       # The VPC's main route table: created by CreateVpc, untaggable until it exists.
-      # Its default route and its tag are the two calls that cannot be tag-conditioned.
+      # Its default route and its tag are the calls that cannot be tag-conditioned;
+      # ReplaceRoute repoints the image-build network's route at a recreated gateway.
       Sid      = "PovMainRouteTable"
-      Action   = ["ec2:CreateRoute", "ec2:CreateTags"]
+      Action   = ["ec2:CreateRoute", "ec2:ReplaceRoute", "ec2:CreateTags"]
       Resource = ["${local.ec2}:route-table/*"]
       Cond     = null
     },

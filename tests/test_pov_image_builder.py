@@ -234,6 +234,20 @@ def test_pov_templates_build_in_the_image_subnet_with_every_resource_tagged():
         assert '"povManagedBy" = "vm-dashboard"' in ami[:ami.index("}")]
 
 
+
+def test_named_source_cidrs_replace_packers_address_lookup():
+    for t in (ps.generate_aws_template(
+                  source_ami="ami-1", instance_type="t3.medium", ssh_username="ec2-user",
+                  image_name="pov-standard-linux", has_provisioner=False,
+                  subnet_id="subnet-0abc", run_tags=_RUN_TAGS,
+                  source_cidrs=["203.0.113.7/32", "198.51.100.0/28"]),
+              ps.generate_aws_windows_template(
+                  source_ami="ami-win", instance_type="t3.large",
+                  image_name="pov-standard-windows", subnet_id="subnet-0abc",
+                  run_tags=_RUN_TAGS, source_cidrs=["203.0.113.7/32"])):
+        assert "temporary_security_group_source_cidrs = [\"203.0.113.7/32\"" in t
+        assert "temporary_security_group_source_public_ip" not in t
+
 def test_pov_build_service_places_the_build():
     src = _read("web_dashboard", "services", "packer_build_service.py")
     body = src[src.index("async def _run_aws_build"):src.index("def _azure_build_credentials")]

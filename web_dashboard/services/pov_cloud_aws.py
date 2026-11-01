@@ -358,38 +358,76 @@ def _image_build_filters() -> list:
             {"Name": f"tag:{env.TAG_ROLE}", "Values": [IMAGE_BUILD_ROLE]}]
 
 
+def _aws_code(exc) -> str:
+    return str(getattr(exc, "response", {}).get("Error", {}).get("Code", ""))
+
+
+def _image_build_vpc(ec2, name: str) -> str:
+    """The image-build VPC: the lowest-id tagged one, created when there is none.
+
+    Converges rather than locks, because builds can start together on different worker
+    replicas: a racer that created a VPC re-lists, and if another tagged VPC sorts first
+    it deletes its own and uses that one, so the region ends up with exactly one."""
+    def _tagged():
+        return sorted(v["VpcId"] for v in
+                      ec2.describe_vpcs(Filters=_image_build_filters()).get("Vpcs") or [])
+    vpcs = _tagged()
+    if vpcs:
+        return vpcs[0]
+    mine = ec2.create_vpc(CidrBlock=_IMAGE_BUILD_CIDR,
+                          TagSpecifications=[_image_build_spec("vpc", name)])["Vpc"]["VpcId"]
+    winner = (_tagged() or [mine])[0]
+    if winner != mine:
+        try:
+            ec2.delete_vpc(VpcId=mine)
+        except Exception as exc:  # noqa: BLE001 — the next pass finds it as an extra
+            logger.warning("image-build network: could not remove duplicate VPC %s: %s",
+                           mine, exc)
+    return winner
+
+
 def _ensure_image_build_subnet_sync(region: str) -> str:
     """Find-or-create each piece of the image-build network, so a run that failed half
-    way (a VPC with no subnet, an internet gateway never attached, no default route) is
-    finished by the next one instead of leaving a VPC behind and starting another: an
-    account has five VPCs per region by default."""
+    way (a VPC with no subnet, an internet gateway never attached, no default route, or
+    one left pointing at a gateway since deleted) is finished by the next one instead of
+    leaving a VPC behind and starting another: an account has five VPCs per region by
+    default. Safe against a build starting at the same time on another worker replica:
+    each step tolerates the other having just done it."""
+    from botocore.exceptions import ClientError
     ec2 = aws_service._get_ec2_pinned(region)
     name = "vm-dashboard-image-build"
     filters = _image_build_filters()
-    subnets = [s for s in ec2.describe_subnets(Filters=filters).get("Subnets") or []
-               if s.get("State") == "available"]
+
+    def _subnets(vpc=None):
+        f = filters + ([{"Name": "vpc-id", "Values": [vpc]}] if vpc else [])
+        return sorted((s for s in ec2.describe_subnets(Filters=f).get("Subnets") or []
+                       if s.get("State") == "available"), key=lambda s: s["SubnetId"])
+
+    subnets = _subnets()
     if subnets:
         # The oldest-looking id wins, so two builds always pick the same one.
-        subnet = sorted(subnets, key=lambda s: s["SubnetId"])[0]
-        vpc_id, subnet_id = subnet["VpcId"], subnet["SubnetId"]
+        vpc_id, subnet_id = subnets[0]["VpcId"], subnets[0]["SubnetId"]
     else:
-        vpcs = sorted(v["VpcId"] for v in ec2.describe_vpcs(Filters=filters).get("Vpcs") or [])
-        if vpcs:
-            vpc_id = vpcs[0]
-        else:
-            vpc_id = ec2.create_vpc(
-                CidrBlock=_IMAGE_BUILD_CIDR,
-                TagSpecifications=[_image_build_spec("vpc", name)])["Vpc"]["VpcId"]
+        vpc_id = _image_build_vpc(ec2, name)
         ec2.modify_vpc_attribute(VpcId=vpc_id, EnableDnsHostnames={"Value": True})
-        subnet_id = ec2.create_subnet(
-            VpcId=vpc_id, CidrBlock=_IMAGE_BUILD_SUBNET_CIDR,
-            TagSpecifications=[_image_build_spec("subnet", f"{name}-subnet")]
-        )["Subnet"]["SubnetId"]
+        try:
+            subnet_id = ec2.create_subnet(
+                VpcId=vpc_id, CidrBlock=_IMAGE_BUILD_SUBNET_CIDR,
+                TagSpecifications=[_image_build_spec("subnet", f"{name}-subnet")]
+            )["Subnet"]["SubnetId"]
+        except ClientError as exc:
+            # Another build created it a moment ago: same VPC, same range.
+            if _aws_code(exc) != "InvalidSubnet.Conflict" or not _subnets(vpc_id):
+                raise
+            subnet_id = _subnets(vpc_id)[0]["SubnetId"]
         # Packer connects to the build instance over its public address.
         ec2.modify_subnet_attribute(SubnetId=subnet_id, MapPublicIpOnLaunch={"Value": True})
 
-    igws = ec2.describe_internet_gateways(
-        Filters=[{"Name": "attachment.vpc-id", "Values": [vpc_id]}]).get("InternetGateways") or []
+    def _attached():
+        return ec2.describe_internet_gateways(
+            Filters=[{"Name": "attachment.vpc-id", "Values": [vpc_id]}]
+        ).get("InternetGateways") or []
+    igws = _attached()
     if igws:
         igw_id = igws[0]["InternetGatewayId"]
     else:
@@ -398,22 +436,44 @@ def _ensure_image_build_subnet_sync(region: str) -> str:
         igw_id = (loose[0]["InternetGatewayId"] if loose else ec2.create_internet_gateway(
             TagSpecifications=[_image_build_spec("internet-gateway", f"{name}-igw")]
         )["InternetGateway"]["InternetGatewayId"])
-        ec2.attach_internet_gateway(InternetGatewayId=igw_id, VpcId=vpc_id)
+        try:
+            ec2.attach_internet_gateway(InternetGatewayId=igw_id, VpcId=vpc_id)
+        except ClientError as exc:
+            # Another build attached one first (a VPC takes one gateway): use that, and
+            # leave ours loose and tagged, for the next build that needs one.
+            if not _attached():
+                raise
+            logger.info("image-build network: %s already has a gateway (%s)", vpc_id,
+                        _aws_code(exc))
+            igw_id = _attached()[0]["InternetGatewayId"]
     rt = ec2.describe_route_tables(
         Filters=[{"Name": "vpc-id", "Values": [vpc_id]},
                  {"Name": "association.main", "Values": ["true"]}])["RouteTables"][0]
-    if not any(r.get("DestinationCidrBlock") == "0.0.0.0/0" for r in rt.get("Routes") or []):
-        ec2.create_route(RouteTableId=rt["RouteTableId"], DestinationCidrBlock="0.0.0.0/0",
-                         GatewayId=igw_id)
+    default = next((r for r in rt.get("Routes") or []
+                    if r.get("DestinationCidrBlock") == "0.0.0.0/0"), None)
+    if default is None:
+        try:
+            ec2.create_route(RouteTableId=rt["RouteTableId"], DestinationCidrBlock="0.0.0.0/0",
+                             GatewayId=igw_id)
+        except ClientError as exc:
+            if _aws_code(exc) != "RouteAlreadyExists":
+                raise
         ec2.create_tags(Resources=[rt["RouteTableId"]],
                         Tags=_image_build_spec("route-table", f"{name}-rt")["Tags"])
         logger.info("built the POV image-build network in %s: %s / %s",
                     region, vpc_id, subnet_id)
+    elif default.get("State") == "blackhole" or default.get("GatewayId") != igw_id:
+        # Left pointing at a gateway that is gone (or is not this VPC's): repoint it, or
+        # the build instance has no way out and Packer waits out its SSH timeout.
+        ec2.replace_route(RouteTableId=rt["RouteTableId"], DestinationCidrBlock="0.0.0.0/0",
+                          GatewayId=igw_id)
+        logger.info("image-build network in %s: repointed its default route to %s",
+                    region, igw_id)
     return subnet_id
 
 
-# One build per region prepares the network at a time, so two builds starting together
-# find one network rather than racing to create two.
+# One build per region prepares the network at a time within this process; across worker
+# replicas, _ensure_image_build_subnet_sync converges instead (see _image_build_vpc).
 _IMAGE_BUILD_LOCKS: dict = {}
 
 

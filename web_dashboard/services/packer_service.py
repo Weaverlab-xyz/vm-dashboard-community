@@ -156,6 +156,7 @@ def generate_aws_template(
     extra_tags: dict = None,
     subnet_id: str = "",
     run_tags: dict = None,
+    source_cidrs: list = None,
 ) -> str:
     """amazon-ebs over SSH. ``scripts`` names files in the build directory, run in
     order by one shell provisioner; unset, it is ``provision.sh`` alone when
@@ -186,7 +187,7 @@ def generate_aws_template(
         '  instance_type = "' + instance_type + '"\n'
         '  ssh_username  = "' + ssh_username + '"\n'
         '  ami_name      = "' + safe + '-{{timestamp}}"\n\n'
-        + _aws_placement_block(subnet_id, run_tags)
+        + _aws_placement_block(subnet_id, run_tags, source_cidrs)
         + _aws_tags_block(image_name, extra_tags, run_tags) +
         '}\n\n'
         'build {\n'
@@ -208,7 +209,8 @@ def _aws_tags_block(image_name: str, extra_tags: dict = None, run_tags: dict = N
     return '  tags = {\n' + "\n".join(lines) + '\n  }\n'
 
 
-def _aws_placement_block(subnet_id: str = "", run_tags: dict = None) -> str:
+def _aws_placement_block(subnet_id: str = "", run_tags: dict = None,
+                         source_cidrs: list = None) -> str:
     """Where a POV build runs, and the tags on everything it creates on the way.
 
     A POV install's provisioning role is tag-conditioned (terraform/pov_cloud_aws_policy):
@@ -222,10 +224,17 @@ def _aws_placement_block(subnet_id: str = "", run_tags: dict = None) -> str:
     if subnet_id:
         # A public address in a public subnet: Packer's temporary security group would
         # otherwise open SSH (or WinRM) to 0.0.0.0/0 for the whole build. This limits it
-        # to the address Packer itself calls from.
+        # to the address Packer itself calls from, which Packer looks up over HTTP; behind
+        # an egress proxy, or with several outbound addresses, that is not the address SSH
+        # leaves from, so ``source_cidrs`` (pov_image_build_source_cidrs) names it instead.
         out += ('  subnet_id                   = "' + _hcl_escape(subnet_id) + '"\n'
-                '  associate_public_ip_address = true\n'
-                '  temporary_security_group_source_public_ip = true\n\n')
+                '  associate_public_ip_address = true\n')
+        cidrs = [c for c in (source_cidrs or []) if c]
+        if cidrs:
+            out += ('  temporary_security_group_source_cidrs = ['
+                    + ", ".join('"' + _hcl_escape(c) + '"' for c in cidrs) + ']\n\n')
+        else:
+            out += '  temporary_security_group_source_public_ip = true\n\n'
     if run_tags:
         body = "\n".join(_hcl_tag_lines(run_tags))
         for block in ("run_tags", "run_volume_tags", "snapshot_tags"):
@@ -265,6 +274,7 @@ def generate_aws_windows_template(
     volume_size_gb: int = 0,
     subnet_id: str = "",
     run_tags: dict = None,
+    source_cidrs: list = None,
 ) -> str:
     """amazon-ebs over WinRM, for a Windows Server AMI.
 
@@ -335,7 +345,7 @@ def generate_aws_windows_template(
         '  winrm_timeout            = "30m"\n'
         '  windows_password_timeout = "30m"\n'
         + volume + '\n'
-        + _aws_placement_block(subnet_id, run_tags)
+        + _aws_placement_block(subnet_id, run_tags, source_cidrs)
         + _aws_tags_block(image_name, extra_tags, run_tags) +
         '}\n\n'
         'build {\n'

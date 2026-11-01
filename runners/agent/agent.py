@@ -122,7 +122,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 # broker running the earlier one failed identically while reporting the same string as the
 # build that fixed it. A behaviour change the fleet cannot see is a behaviour change nobody
 # can confirm arrived, so bump this whenever the agent's behaviour moves.
-AGENT_VERSION = "2.16.0"
+AGENT_VERSION = "2.17.0"
 
 log = logging.getLogger("agent")
 
@@ -5119,17 +5119,28 @@ def _k8s_scope(kubeconfig: str, host: str, port: int, ip: str) -> tuple:
         raise PolicyRefusal(
             "the dashboard's kubeconfig names no current context this agent can use; "
             "nothing was run.")
-    ctx = context.get("context") or {}
+    ctx = context.get("context")
+    ctx = ctx if isinstance(ctx, dict) else {}
     cluster = clusters.get(str(ctx.get("cluster") or ""))
     user = users.get(str(ctx.get("user") or ""))
-    if cluster is None or user is None:
+    body = cluster.get("cluster") if cluster is not None else None
+    if cluster is None or user is None or not isinstance(body, dict):
         raise PolicyRefusal(
             f"the dashboard's kubeconfig context {current!r} names a cluster or user it "
             f"does not define; nothing was run.")
+    # A proxy would carry the cluster-admin credential to an address this agent never
+    # resolved or checked, and the pin would not apply to it (2.17).
+    if body.get("proxy-url"):
+        raise PolicyRefusal(
+            "the dashboard's kubeconfig sends this cluster's traffic through a proxy "
+            "(proxy-url), which this agent cannot check; nothing was run.")
     want = (_norm_host(host), int(port))
-    server = (cluster.get("cluster") or {}).get("server")
+    server = body.get("server")
     parsed = urlparse(str(server or ""))
-    got = (_norm_host(parsed.hostname or ""), parsed.port or 443)
+    try:
+        got = (_norm_host(parsed.hostname or ""), parsed.port or 443)
+    except ValueError:
+        got = None                                   # a port that is not a port
     if parsed.scheme != "https" or got != want:
         raise PolicyRefusal(
             f"the dashboard's kubeconfig points at {server!r}, not the API server this "
@@ -5270,8 +5281,10 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
             pin = (login_host, ip)
             emit(f"pinned {login_host} to {ip} for this run")
     play_vars.update(db_vars)
-    if pin:
+    if run_kind == "database" and pin:
         # The exact spelling pinned (lower-case, no trailing dot), so the lookup hits it.
+        # A database run's only: a Kubernetes play's pin is the API server's name, and it
+        # must not appear in the play's variables.
         play_vars["db_login_host"] = pin[0]
     # dir_* bind vars for the LDAP / microsoft.ad modules. Only keys with that prefix: the
     # dict is the dashboard's, and this is the agent choosing which names it accepts.

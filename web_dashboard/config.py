@@ -1320,6 +1320,14 @@ class Settings(BaseSettings):
     # A subnet that already reaches the internet is never touched. Set by the sandbox
     # scripts. See services/azure_nat_service.py.
     azure_vm_nat_enabled: bool = False
+    # Extra TCP ports (CSV) a plain Azure VM deploy opens beyond 80/443 when the above adds
+    # its egress allow. 8000 is Portainer Edge's tunnel, for an Edge agent on the VM.
+    # Managed nodes name their own (a deployed agent: its SPIRE server port).
+    azure_vm_nat_extra_ports: str = "8000"
+    # Where Packer's SSH/WinRM to a POV image build comes from (CSV of CIDRs), for a worker
+    # behind an egress proxy or with several outbound addresses. Blank: Packer looks up its
+    # own public address. See packer_build_service._image_build_source_cidrs.
+    pov_image_build_source_cidrs: str = ""
     # ACI Jumpoint (mirrors bt_ecs_* settings)
     azure_aci_resource_group: str = ""            # defaults to azure_resource_group if empty
     azure_aci_subnet_id: str = ""                 # required for ACI VNet injection

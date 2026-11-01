@@ -205,6 +205,33 @@ async def _provisioner_env(req) -> tuple[dict, dict, dict]:
 
 # ── Background task runners ───────────────────────────────────────────────────
 
+def _image_build_source_cidrs() -> list:
+    """``pov_image_build_source_cidrs``: where Packer's SSH/WinRM to a POV build instance
+    comes from, when Packer's own lookup of its public address would be wrong (an egress
+    proxy, several outbound addresses). Each entry must be a CIDR; blank means "let
+    Packer look it up". Never raises: a bad entry is dropped and logged."""
+    import ipaddress
+    from ..config import settings
+    raw = getattr(settings, "pov_image_build_source_cidrs", "") or ""
+    try:
+        from . import config_service
+        stored = config_service.get("pov_image_build_source_cidrs")
+        if stored is not None:
+            raw = stored
+    except Exception:  # noqa: BLE001
+        pass
+    out = []
+    for item in str(raw).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            out.append(str(ipaddress.ip_network(item, strict=False)))
+        except ValueError:
+            logger.warning("pov_image_build_source_cidrs: %r is not a CIDR; ignored", item)
+    return out
+
+
 async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: str = "system") -> None:
     db = _get_db_session()
     build_dir = packer_service.BUILDS_DIR / job_id
@@ -280,7 +307,8 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
                 db, job_id, 5, f"Preparing the image-build network in {region}…")
             try:
                 placement = {"subnet_id": await pov_cloud_aws.ensure_image_build_subnet(region),
-                             "run_tags": pov_cloud_aws.image_build_tags()}
+                             "run_tags": pov_cloud_aws.image_build_tags(),
+                             "source_cidrs": _image_build_source_cidrs()}
             except Exception as exc:
                 raise PackerError(
                     f"could not prepare the image-build network in {region}: {exc}") from exc
