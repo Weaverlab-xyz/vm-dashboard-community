@@ -160,16 +160,24 @@ Portainer and Rancher nodes, deployed agents) first opens its subnet:
    priority below that deny, so it outranks it and as little else as possible, and its
    source is the subnet's own range. It opens TCP 80 and 443 only, what package installs,
    image pulls and playbooks need; every other port stays as the NSG left it. A second
-   allow, `dashboard-vm-egress-kms-<subnet>`, opens TCP 1688 to Azure's two KMS addresses
-   only, so Windows VMs can activate. A VM that needs more names its own ports, each its
-   own allow, `dashboard-vm-port<N>-<subnet>`: a deployed agent opens its SPIRE server's
-   port, and a plain VM deploy opens `azure_vm_nat_extra_ports` (default `8000`, the
-   Portainer Edge tunnel, for an Edge agent installed on the VM).
+   allow, `dashboard-vm-kms-<subnet>`, opens TCP 1688 to Azure's two KMS addresses
+   only, so Windows VMs can activate.
+3. **Port allows** `dashboard-vm-port<N>-<subnet>`, one per extra port a VM's caller names:
+   a deployed agent names its SPIRE server's port, and a plain VM deploy names
+   `azure_vm_nat_extra_ports` (default `8000`, the Portainer Edge tunnel, for an Edge agent
+   installed on the VM). Each port is judged on its own, so an NSG that lets HTTPS out but
+   denies everything else gets the port allow and no web allow. Like the web allow, its
+   source is the subnet's range: every VM in the subnet can use it until the subnet's last
+   VM is gone.
 
-It acts **only where egress is closed**. A subnet that has its own NAT gateway, or whose
-NSGs let HTTPS out, is left alone: attaching a gateway there would change the address every
-VM in it leaves from, and bill for it, without fixing anything. The sandbox's own rules
-are never edited.
+It acts **only where egress is closed** for HTTPS or for a port a VM asked for. A subnet
+that has its own NAT gateway, or whose NSGs let all of those out, is left alone: attaching
+a gateway there would change the address every VM in it leaves from, and bill for it,
+without fixing anything. The sandbox's own rules are never edited.
+
+An Azure agent host that was started before port allows existed (and is set to run
+always) has no allow for its SPIRE server: stop and start it once on the Agents page. A
+host that follows a change window gets it at its next start.
 
 Both halves go when the subnet holds no NIC any more, which is Azure's own count, so a VM
 removed by any path, or by hand, counts the same. The rules are removed first, so a failure

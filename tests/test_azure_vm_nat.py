@@ -534,6 +534,74 @@ def test_release_removes_a_legacy_kms_rule_but_not_a_web_allow_of_the_same_name(
         r.name for r in arm.nsgs["vm-nsg"].security_rules]
 
 
+def test_an_nsg_that_lets_https_out_but_denies_the_rest_gets_only_the_port_allow():
+    arm = FakeArm()
+    arm.add_nsg("lock-nsg", [_rule("allow-https-out", 150, "Allow", port="443"),
+                             _rule("deny-internet-out", 200, "Deny")])
+    arm.add_subnet("vm-subnet", "10.99.2.0/24", nsg="lock-nsg")
+    with _with(arm):
+        assert az._egress_verdict(arm.nsgs["lock-nsg"]) == ("allow", None)
+        assert az._egress_verdict(arm.nsgs["lock-nsg"], 8081) == ("deny", 200)
+        res = _ensure(arm, extra_ports=[8081])
+        names = {r.name: r for r in arm.nsgs["lock-nsg"].security_rules}
+        assert res["status"] == "ready" and res["nsg_rules"] == ["lock-nsg:199"]
+        assert names["dashboard-vm-port8081-vm-subnet"].priority == 199
+        assert "dashboard-vm-egress-vm-subnet" not in names
+        assert "dashboard-vm-kms-vm-subnet" not in names
+        # The NAT gateway anchors the release, so the rule goes with it.
+        assert arm.subnets["vm-subnet"].nat_gateway is not None
+        assert _release(arm) == "released"
+    assert not [r.name for r in arm.nsgs["lock-nsg"].security_rules
+                if r.name.startswith("dashboard-vm-")]
+
+
+def test_an_open_nsg_with_no_port_denied_is_still_left_alone():
+    arm = FakeArm()
+    arm.add_nsg("open-nsg", [_rule("allow-vnet-out", 100, "Allow", dest="VirtualNetwork")])
+    arm.add_subnet("vm-subnet", "10.99.2.0/24", nsg="open-nsg")
+    with _with(arm):
+        assert _ensure(arm, extra_ports=[8081])["status"] == "skipped"
+
+
+def test_a_port_allow_stays_above_its_own_deny_when_that_deny_comes_first():
+    # 8081 is denied at 120, HTTPS at 200: the port allow must outrank 120, not just 198.
+    arm = FakeArm()
+    arm.add_nsg("vm-nsg", [_rule("deny-8081", 120, "Deny", port="8081"),
+                           _rule("deny-internet-out", 200, "Deny")])
+    arm.add_subnet("vm-subnet", "10.99.2.0/24", nsg="vm-nsg")
+    with _with(arm):
+        res = _ensure(arm, extra_ports=[8081])
+    assert res["nsg_rules"] == ["vm-nsg:199", "vm-nsg:198", "vm-nsg:119"]
+
+
+def test_a_long_subnet_names_port_allow_is_removed_on_release():
+    long_name = "s" * 70
+    arm = FakeArm()
+    arm.add_nsg("vm-nsg", [_rule("deny-internet-out", 200, "Deny")])
+    arm.add_subnet(long_name, "10.99.2.0/24", nsg="vm-nsg")
+    with _with(arm):
+        _ensure(arm, subnet=long_name, extra_ports=[8081])
+        names = [r.name for r in arm.nsgs["vm-nsg"].security_rules]
+        assert az.egress_port_rule_name(8081, long_name) in names
+        assert len(az.egress_port_rule_name(8081, long_name)) == 80
+        assert _release(arm, subnet=long_name) == "released"
+    assert not [r.name for r in arm.nsgs["vm-nsg"].security_rules
+                if r.name.startswith("dashboard-vm-")]
+
+
+def test_a_port_that_is_not_a_port_is_dropped_and_logged():
+    import logging
+    records = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    az.logger.addHandler(handler)
+    try:
+        assert az._egress_extra_ports(["80o0", "70000", "8000"]) == [8000]
+    finally:
+        az.logger.removeHandler(handler)
+    assert len(records) == 2 and "80o0" in records[0].getMessage()
+
+
 def test_a_plain_vm_opens_portainer_edges_tunnel_by_default():
     with open(os.path.join(_ROOT, "web_dashboard", "config.py"), encoding="utf-8") as f:
         assert 'azure_vm_nat_extra_ports: str = "8000"' in f.read()

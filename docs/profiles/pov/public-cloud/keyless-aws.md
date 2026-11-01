@@ -58,7 +58,9 @@ exists before it can be tagged, and the AMI and network interface a `RunInstance
 The policy also covers the standard-image builds on **POV → Templates → Images**. Because
 the role cannot launch into the account's default VPC, the first build in a region creates
 a small network of its own, `vm-dashboard-image-build` (`10.254.0.0/16`, with an internet
-gateway and no NAT gateway), and every later build reuses it. Packer tags its temporary key
+gateway and no NAT gateway), and every later build reuses it. If two builds on different
+workers each create one, the network with the lowest VPC id is kept and the other is
+removed by the next build, unless an instance is still running in it. Packer tags its temporary key
 pair, security group, instance, volumes and the AMI with `povManagedBy`. That network has
 no `povEnvironment` tag, so it never appears as an orphaned POV. A policy applied before
 this change lacks `ec2:CreateKeyPair` and `ec2:CreateImage`, so re-apply

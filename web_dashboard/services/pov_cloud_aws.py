@@ -380,10 +380,47 @@ def _image_build_vpc(ec2, name: str) -> str:
     if winner != mine:
         try:
             ec2.delete_vpc(VpcId=mine)
-        except Exception as exc:  # noqa: BLE001 — the next pass finds it as an extra
+        except Exception as exc:  # noqa: BLE001 — _remove_extra_image_build_vpcs retries
             logger.warning("image-build network: could not remove duplicate VPC %s: %s",
                            mine, exc)
     return winner
+
+
+def _remove_extra_image_build_vpcs(ec2, keep: str) -> None:
+    """Delete every tagged image-build VPC that sorts after ``keep`` (the lowest id wins,
+    so a replica never deletes the one every other replica converges on), with its
+    gateways and subnets, unless something still runs in it. Two replicas that each saw only their own VPC (tag
+    filters can lag a create), or a delete that failed, would otherwise leave one behind
+    for good, against a quota of five per region. Never raises: this is housekeeping."""
+    try:
+        extras = [v["VpcId"] for v in
+                  ec2.describe_vpcs(Filters=_image_build_filters()).get("Vpcs") or []
+                  if v["VpcId"] > keep]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("image-build network: could not list VPCs to tidy: %s", exc)
+        return
+    for vpc in extras:
+        try:
+            live = [i for r in ec2.describe_instances(
+                        Filters=[{"Name": "vpc-id", "Values": [vpc]}]).get("Reservations") or []
+                    for i in r.get("Instances") or []
+                    if (i.get("State") or {}).get("Name") not in ("terminated", "shutting-down")]
+            if live:
+                logger.info("image-build network: leaving extra VPC %s, %d instance(s) in it",
+                            vpc, len(live))
+                continue
+            for g in ec2.describe_internet_gateways(
+                    Filters=[{"Name": "attachment.vpc-id", "Values": [vpc]}]
+            ).get("InternetGateways") or []:
+                ec2.detach_internet_gateway(InternetGatewayId=g["InternetGatewayId"], VpcId=vpc)
+                ec2.delete_internet_gateway(InternetGatewayId=g["InternetGatewayId"])
+            for sub in ec2.describe_subnets(
+                    Filters=[{"Name": "vpc-id", "Values": [vpc]}]).get("Subnets") or []:
+                ec2.delete_subnet(SubnetId=sub["SubnetId"])
+            ec2.delete_vpc(VpcId=vpc)
+            logger.info("image-build network: removed extra VPC %s (kept %s)", vpc, keep)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("image-build network: could not remove extra VPC %s: %s", vpc, exc)
 
 
 def _ensure_image_build_subnet_sync(region: str) -> str:
@@ -401,11 +438,13 @@ def _ensure_image_build_subnet_sync(region: str) -> str:
     def _subnets(vpc=None):
         f = filters + ([{"Name": "vpc-id", "Values": [vpc]}] if vpc else [])
         return sorted((s for s in ec2.describe_subnets(Filters=f).get("Subnets") or []
-                       if s.get("State") == "available"), key=lambda s: s["SubnetId"])
+                       if s.get("State") == "available"),
+                      key=lambda s: (s["VpcId"], s["SubnetId"]))
 
     subnets = _subnets()
     if subnets:
-        # The oldest-looking id wins, so two builds always pick the same one.
+        # The lowest VPC id wins (as _image_build_vpc), then the lowest subnet id, so
+        # two builds always pick the same one and the extras can be removed.
         vpc_id, subnet_id = subnets[0]["VpcId"], subnets[0]["SubnetId"]
     else:
         vpc_id = _image_build_vpc(ec2, name)
@@ -469,6 +508,7 @@ def _ensure_image_build_subnet_sync(region: str) -> str:
                           GatewayId=igw_id)
         logger.info("image-build network in %s: repointed its default route to %s",
                     region, igw_id)
+    _remove_extra_image_build_vpcs(ec2, vpc_id)
     return subnet_id
 
 

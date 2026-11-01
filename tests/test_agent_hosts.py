@@ -237,6 +237,30 @@ def test_identity_is_a_code_unless_spire_attestation_is_on_and_in_use():
         config_service.set("spire_attest_enabled", "false")
 
 
+def test_the_spire_port_is_read_from_the_address_or_falls_back():
+    assert ahs._port_of("spire.local:9000") == 9000
+    assert ahs._port_of("[fd00::1]:8081") == 8081
+    assert ahs._port_of("spire.local") is None and ahs._port_of("fd00::1") is None
+    config_service.set("spire_attest_enabled", "true")
+    saved = (dashboard_spire.server_in_use, dashboard_spire.server_address,
+             dashboard_spire.server_port)
+    try:
+        dashboard_spire.server_in_use = lambda: True
+        dashboard_spire.server_port = lambda: 8081
+        dashboard_spire.server_address = lambda: "spire.example.com:9081"
+        assert ahs._spire_ports() == (9081,)
+        dashboard_spire.server_address = lambda: "spire.example.com"
+        assert ahs._spire_ports() == (8081,)
+        dashboard_spire.server_address = lambda: "spire.example.com:x"
+        assert ahs._spire_ports() == (), "unreadable: no allow, never a failed start"
+        dashboard_spire.server_in_use = lambda: False
+        assert ahs._spire_ports() == ()
+    finally:
+        (dashboard_spire.server_in_use, dashboard_spire.server_address,
+         dashboard_spire.server_port) = saved
+        config_service.set("spire_attest_enabled", "false")
+
+
 def test_a_deployed_agent_is_granted_config_management_and_passes_the_version_gate():
     db = _fresh()
     _host_row, agent = _deploy(db)

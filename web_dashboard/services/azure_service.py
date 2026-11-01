@@ -3864,8 +3864,12 @@ def _egress_extra_ports(ports) -> list:
         try:
             n = int(str(p).strip())
         except ValueError:
+            n = 0
+        if not 1 <= n <= 65535:
+            logger.warning("azure-vm-nat: %r is not a TCP port (azure_vm_nat_extra_ports or "
+                           "the SPIRE server's address); no allow written for it", p)
             continue
-        if 1 <= n <= 65535 and str(n) not in EGRESS_PORTS:
+        if str(n) not in EGRESS_PORTS:
             out.add(n)
     return sorted(out)
 
@@ -3891,9 +3895,9 @@ def _port_covers(rule, port: int) -> bool:
     return False
 
 
-def _egress_verdict(nsg) -> tuple[str, Optional[int]]:
-    """("deny", priority) when this NSG's winning outbound rule for HTTPS to the
-    internet is a Deny, else ("allow", None). Every rule this feature wrote is ignored:
+def _egress_verdict(nsg, port: int = 443) -> tuple[str, Optional[int]]:
+    """("deny", priority) when this NSG's winning outbound rule for TCP ``port`` (HTTPS
+    unless told otherwise) to the internet is a Deny, else ("allow", None). Every rule this feature wrote is ignored:
     a second ensure must re-assert rather than read its own allow as proof the subnet
     was open, and another subnet's allow is scoped to THAT subnet's range, so it opens
     nothing here. With no matching custom rule Azure's default AllowInternetOutBound
@@ -3905,7 +3909,7 @@ def _egress_verdict(nsg) -> tuple[str, Optional[int]]:
         dests = [r.destination_address_prefix] + list(r.destination_address_prefixes or [])
         if not any((d or "").strip().lower() in _INTERNET_DESTS for d in dests):
             continue
-        if (r.protocol or "*").lower() not in ("*", "tcp") or not _port_covers(r, 443):
+        if (r.protocol or "*").lower() not in ("*", "tcp") or not _port_covers(r, port):
             continue
         return ("deny", r.priority) if (r.access or "").lower() == "deny" else ("allow", None)
     return "allow", None
@@ -3951,13 +3955,22 @@ def _ensure_vm_egress_sync(cred, sub_id: str, subnet_id: str, nic_nsg_ids: list,
             + list(nic_nsg_ids or []):
         if nid and nid.lower() not in {n.lower() for n in nsg_ids}:
             nsg_ids.append(nid)
-    closed = []                                  # [(nsg, deny_priority)]
+    # Each NSG is judged per port: an NSG that lets HTTPS out but denies everything else
+    # still blocks a SPIRE server or an Edge tunnel. [(nsg, web deny or None, {port: deny})]
+    ports = _egress_extra_ports(extra_ports)
+    closed = []
     for nid in nsg_ids:
         nrg, nname = _arm_parts(nid, "networkSecurityGroups")
         nsg = network.network_security_groups.get(nrg, nname)
         verdict, prio = _egress_verdict(nsg)
-        if verdict == "deny":
-            closed.append((nsg, prio))
+        web_deny = prio if verdict == "deny" else None
+        port_denies = {}
+        for port in ports:
+            pv, pp = _egress_verdict(nsg, port)
+            if pv == "deny":
+                port_denies[port] = pp
+        if web_deny is not None or port_denies:
+            closed.append((nsg, web_deny, port_denies))
     # An older SDK model has no such field; None there means "Azure's default".
     no_default = getattr(subnet, "default_outbound_access", None) is False
     if not current and not closed and not no_default:
@@ -3977,7 +3990,7 @@ def _ensure_vm_egress_sync(cred, sub_id: str, subnet_id: str, nic_nsg_ids: list,
         tags = {}
     tags.update(EGRESS_TAGS)
     tags[_EGRESS_ENSURED_TAG] = str(int(time.time()))
-    for nsg, _ in closed:
+    for nsg, _, _ in closed:
         tags[_EGRESS_NSG_TAG + hashlib.sha256(nsg.id.lower().encode()).hexdigest()[:8]] = nsg.id
     nat = network.nat_gateways.begin_create_or_update(srg, nat_name, NatGateway(
         location=location, sku=NatGatewaySku(name="Standard"),
@@ -3990,49 +4003,58 @@ def _ensure_vm_egress_sync(cred, sub_id: str, subnet_id: str, nic_nsg_ids: list,
 
     prefixes = list(subnet.address_prefixes or []) or [subnet.address_prefix]
     rules, problems = [], []
-    for nsg, deny_prio in closed:
-        prio = _free_priority_below(nsg, deny_prio, rule)
-        if prio is None:
-            problems.append(f"no free priority below {deny_prio} in NSG {nsg.name}")
-            continue
+    src = [p for p in prefixes if p]
+    for nsg, web_deny, port_denies in closed:
         nrg, _ = _arm_parts(nsg.id, "networkSecurityGroups")
-        network.security_rules.begin_create_or_update(nrg, nsg.name, rule, SecurityRule(
-            priority=prio, direction="Outbound", access="Allow", protocol="Tcp",
-            source_address_prefixes=[p for p in prefixes if p], source_port_range="*",
-            destination_address_prefix="Internet",
-            destination_port_ranges=list(EGRESS_PORTS),
-            description=("vm-dashboard: on-demand VM egress. Removed with the NAT gateway "
-                         "once the subnet's last VM is gone."))).result()
-        rules.append(f"{nsg.name}:{prio}")
-        # Just below the web allow, still above the deny.
-        kms_rule = egress_kms_rule_name(sub_name)
-        kms_prio = _free_priority_below(nsg, prio, kms_rule)
-        if kms_prio is None:
-            problems.append(f"no free priority for the KMS allow in NSG {nsg.name}")
-            continue
-        network.security_rules.begin_create_or_update(nrg, nsg.name, kms_rule, SecurityRule(
-            priority=kms_prio, direction="Outbound", access="Allow", protocol="Tcp",
-            source_address_prefixes=[p for p in prefixes if p], source_port_range="*",
-            destination_address_prefixes=list(AZURE_KMS_ADDRESSES),
-            destination_port_range=AZURE_KMS_PORT,
-            description=("vm-dashboard: Windows activation against Azure's KMS. Removed "
-                         "with the NAT gateway."))).result()
-        rules.append(f"{nsg.name}:{kms_prio}")
-        # The extra ports this VM's caller needs, each its own rule, each just below the
-        # last, all above the deny.
-        floor = kms_prio
-        for port in _egress_extra_ports(extra_ports):
+        # Our rules go just below one another, each above the deny it answers.
+        # _free_priority_below cannot see this pass's writes, hence the running floor.
+        floor = None
+        if web_deny is not None:
+            prio = _free_priority_below(nsg, web_deny, rule)
+            if prio is None:
+                problems.append(f"no free priority below {web_deny} in NSG {nsg.name}")
+            else:
+                network.security_rules.begin_create_or_update(nrg, nsg.name, rule, SecurityRule(
+                    priority=prio, direction="Outbound", access="Allow", protocol="Tcp",
+                    source_address_prefixes=src, source_port_range="*",
+                    destination_address_prefix="Internet",
+                    destination_port_ranges=list(EGRESS_PORTS),
+                    description=("vm-dashboard: on-demand VM egress. Removed with the NAT "
+                                 "gateway once the subnet's last VM is gone."))).result()
+                rules.append(f"{nsg.name}:{prio}")
+                floor = prio
+                # Just below the web allow, still above the deny.
+                kms_rule = egress_kms_rule_name(sub_name)
+                kms_prio = _free_priority_below(nsg, prio, kms_rule)
+                if kms_prio is None:
+                    problems.append(f"no free priority for the KMS allow in NSG {nsg.name}")
+                else:
+                    network.security_rules.begin_create_or_update(
+                        nrg, nsg.name, kms_rule, SecurityRule(
+                            priority=kms_prio, direction="Outbound", access="Allow",
+                            protocol="Tcp", source_address_prefixes=src,
+                            source_port_range="*",
+                            destination_address_prefixes=list(AZURE_KMS_ADDRESSES),
+                            destination_port_range=AZURE_KMS_PORT,
+                            description=("vm-dashboard: Windows activation against Azure's "
+                                         "KMS. Removed with the NAT gateway."))).result()
+                    rules.append(f"{nsg.name}:{kms_prio}")
+                    floor = kms_prio
+        # The extra ports a caller named, each its own rule, only where that port is denied.
+        for port in sorted(port_denies):
+            ceiling = port_denies[port] if floor is None else min(floor, port_denies[port])
             port_rule = egress_port_rule_name(port, sub_name)
-            port_prio = _free_priority_below(nsg, floor, port_rule)
+            port_prio = _free_priority_below(nsg, ceiling, port_rule)
             if port_prio is None:
                 problems.append(f"no free priority for the tcp/{port} allow in NSG {nsg.name}")
-                break
+                continue
             network.security_rules.begin_create_or_update(nrg, nsg.name, port_rule, SecurityRule(
                 priority=port_prio, direction="Outbound", access="Allow", protocol="Tcp",
-                source_address_prefixes=[p for p in prefixes if p], source_port_range="*",
+                source_address_prefixes=src, source_port_range="*",
                 destination_address_prefix="Internet", destination_port_range=str(port),
-                description=(f"vm-dashboard: tcp/{port} for the VM that asked for it. "
-                             f"Removed with the NAT gateway."))).result()
+                description=(f"vm-dashboard: tcp/{port} for every VM in subnet {sub_name}, "
+                             f"asked for by a deployed agent or a VM deploy. Removed with "
+                             f"the NAT gateway."))).result()
             rules.append(f"{nsg.name}:{port_prio}")
             floor = port_prio
     return {"status": "ready", "nat_gateway": nat_name, "public_ip": pip.ip_address or "",
@@ -4086,7 +4108,7 @@ def _release_vm_egress_sync(cred, sub_id: str, subnet_id: str, grace_s: int) -> 
     nsg_ids = [v for k, v in tags.items() if k.startswith(_EGRESS_NSG_TAG)]
     if subnet.network_security_group:
         nsg_ids.append(subnet.network_security_group.id)
-    port_rule = re.compile(r"^dashboard-vm-port\d+-" + re.escape(sub_name) + "$")
+    port_rule = re.compile(r"^dashboard-vm-port(\d+)-")
     legacy_kms = f"{_EGRESS_RULE_PREFIX}kms-{sub_name}"[:80]
     for nid in {n.lower(): n for n in nsg_ids}.values():
         nrg, nname = _arm_parts(nid, "networkSecurityGroups")
@@ -4096,7 +4118,12 @@ def _release_vm_egress_sync(cred, sub_id: str, subnet_id: str, grace_s: int) -> 
             continue
         names = {rule, egress_kms_rule_name(sub_name)}
         for r in present:
-            if port_rule.match(r.name or "") or (r.name == legacy_kms and _legacy_kms_rule(r)):
+            m = port_rule.match(r.name or "")
+            # Compared with the name ensure built, truncation and all, so a long subnet
+            # name's rules go too and another subnet's never match.
+            if m and r.name == egress_port_rule_name(int(m.group(1)), sub_name):
+                names.add(r.name)
+            elif r.name == legacy_kms and _legacy_kms_rule(r):
                 names.add(r.name)
         for name in names:
             try:
