@@ -251,7 +251,9 @@ policy and adds `agent_k8s` to its job types:
   server's name resolves to, and refuses a kubeconfig whose `server` is not the endpoint
   the job was signed for. It then pins that name to the address it checked with one hosts
   entry in the run's container. kubectl still verifies the certificate by name, but cannot
-  be sent anywhere the agent did not check.
+  be sent anywhere the agent did not check. From 2.16 the run gets only the kubeconfig's
+  current context: a registered cluster's pasted file may list other clusters, and those
+  never reach the container.
 - **Fallback.** While the agent is offline, and its host is not about to be up, the work
   runs on the remote worker, and the job's Live Output says so. So does anything that
   does not fit the step set, such as a Helm `--set` value with a newline: it stays on the
