@@ -43,7 +43,9 @@ you name another subnet. It has **no public address and no inbound rule**: the a
 dials out. On AWS and Google Cloud it reaches the dashboard through the same on-demand NAT
 that VMs use, and that NAT is not reclaimed while a deployed agent is up. On Azure it gets
 the same on-demand NAT gateway and NSG allow as a VM when `azure_vm_nat_enabled` is on and
-the subnet has no way out; with it off, the subnet must already reach the internet. A host
+the subnet has no way out, plus an allow for its SPIRE server's port wherever an NSG denies
+that port (an always-on host started before that allow existed needs one stop and start);
+with it off, the subnet must already reach the internet. A host
 that can't reach it never installs Docker, and the start fails after 15 minutes. See
 [On-demand VM egress on Azure](../../../clouds/vms/provisioning.md#on-demand-vm-egress-on-azure).
 

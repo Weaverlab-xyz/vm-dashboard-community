@@ -886,6 +886,20 @@ async def _release_egress(db, host) -> None:
         logger.warning("agent host %s: egress reclaim failed (non-fatal): %s", host.name, exc)
 
 
+def _port_of(address: str) -> Optional[int]:
+    """The port in ``host:port`` or ``[v6]:port``; None when the address names none (a
+    bare host, or an IPv6 literal without brackets)."""
+    address = (address or "").strip()
+    if address.startswith("["):
+        _, sep, rest = address.partition("]")
+        port = rest[1:] if sep and rest.startswith(":") else ""
+    elif address.count(":") == 1:
+        port = address.partition(":")[2]
+    else:
+        port = ""
+    return int(port) if port else None
+
+
 def _spire_ports() -> tuple:
     """The SPIRE server's port, when this host's agent attests through SPIRE: the one
     port beyond HTTPS a deployed agent dials out on. Empty otherwise, or if unreadable."""
@@ -894,9 +908,11 @@ def _spire_ports() -> tuple:
         if not (config_service.get_bool("spire_attest_enabled")
                 and dashboard_spire.server_in_use()):
             return ()
-        _, _, port = str(dashboard_spire.server_address() or "").partition(":")
-        return (int(port or dashboard_spire.server_port()),)
-    except Exception:  # noqa: BLE001 — a missing port only costs the allow, never the start
+        port = _port_of(str(dashboard_spire.server_address() or ""))
+        return (port if port is not None else int(dashboard_spire.server_port()),)
+    except Exception as exc:  # noqa: BLE001 — a missing port only costs the allow, never the start
+        logger.warning("agent host egress: the SPIRE server's port is unreadable, so no "
+                       "allow is written for it (the agent may not attest): %s", exc)
         return ()
 
 

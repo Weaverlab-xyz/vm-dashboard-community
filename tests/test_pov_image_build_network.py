@@ -49,7 +49,9 @@ class _Ec2:
         return True
 
     def describe_subnets(self, Filters=None):
-        return {"Subnets": [s for s in self.subnets if self._match(s["Tags"], Filters)]}
+        vpc = next((f["Values"][0] for f in Filters or [] if f["Name"] == "vpc-id"), None)
+        return {"Subnets": [s for s in self.subnets if self._match(s["Tags"], Filters)
+                            and (vpc is None or s["VpcId"] == vpc)]}
 
     def describe_vpcs(self, Filters=None):
         return {"Vpcs": [v for v in self.vpcs if self._match(v["Tags"], Filters)]}
@@ -113,6 +115,23 @@ class _Ec2:
         self.vpcs = [v for v in self.vpcs if v["VpcId"] != VpcId]
         self.rts = [r for r in self.rts if r["VpcId"] != VpcId]
         self.created.append("delete-vpc")
+
+    def describe_instances(self, Filters=None):
+        vpc = next(f["Values"][0] for f in Filters if f["Name"] == "vpc-id")
+        return {"Reservations": [{"Instances": [i for i in getattr(self, "instances", [])
+                                                if i["VpcId"] == vpc]}]}
+
+    def detach_internet_gateway(self, InternetGatewayId, VpcId):
+        g = next(g for g in self.igws if g["InternetGatewayId"] == InternetGatewayId)
+        g["Attachments"] = [a for a in g["Attachments"] if a["VpcId"] != VpcId]
+
+    def delete_internet_gateway(self, InternetGatewayId):
+        self.igws = [g for g in self.igws if g["InternetGatewayId"] != InternetGatewayId]
+        self.created.append("delete-igw")
+
+    def delete_subnet(self, SubnetId):
+        self.subnets = [s for s in self.subnets if s["SubnetId"] != SubnetId]
+        self.created.append("delete-subnet")
 
     def replace_route(self, RouteTableId, DestinationCidrBlock, GatewayId):
         rt = next(r for r in self.rts if r["RouteTableId"] == RouteTableId)
@@ -223,6 +242,58 @@ def test_a_default_route_to_a_deleted_gateway_is_repointed():
     route = ec2.rts[0]["Routes"][0]
     assert ec2.created == ["igw", "replace-route"]
     assert route["GatewayId"] == ec2.igws[0]["InternetGatewayId"] and route["State"] == "active"
+
+
+
+def _extra_network(ec2, vpc_id):
+    """A second complete image-build network, as two replicas that missed each other
+    would leave: VPC, subnet, attached gateway."""
+    tags = pov_cloud_aws._image_build_spec("vpc", "x")
+    ec2.vpcs.append({"VpcId": vpc_id, "Tags": _tagged([tags])})
+    ec2.rts.append({"RouteTableId": "rtb-" + vpc_id, "VpcId": vpc_id, "Routes": []})
+    ec2.subnets.append({"SubnetId": "subnet-" + vpc_id, "VpcId": vpc_id, "State": "available",
+                        "Tags": _tagged([pov_cloud_aws._image_build_spec("subnet", "x")])})
+    ec2.igws.append({"InternetGatewayId": "igw-" + vpc_id,
+                     "Attachments": [{"VpcId": vpc_id}], "Tags": {}})
+
+
+def test_an_extra_network_is_removed_and_the_lowest_kept():
+    ec2 = _Ec2()
+    restore = _with(ec2)
+    try:
+        sub = pov_cloud_aws._ensure_image_build_subnet_sync("us-east-2")
+        _extra_network(ec2, "vpc-9999")
+        assert pov_cloud_aws._ensure_image_build_subnet_sync("us-east-2") == sub
+    finally:
+        restore()
+    assert [v["VpcId"] for v in ec2.vpcs] == ["vpc-0001"]
+    assert all(s["VpcId"] == "vpc-0001" for s in ec2.subnets)
+    assert "igw-vpc-9999" not in [g["InternetGatewayId"] for g in ec2.igws]
+
+
+def test_an_extra_network_with_a_running_instance_is_left_alone():
+    ec2 = _Ec2()
+    restore = _with(ec2)
+    try:
+        pov_cloud_aws._ensure_image_build_subnet_sync("us-east-2")
+        _extra_network(ec2, "vpc-9999")
+        ec2.instances = [{"VpcId": "vpc-9999", "State": {"Name": "running"}}]
+        pov_cloud_aws._ensure_image_build_subnet_sync("us-east-2")
+    finally:
+        restore()
+    assert sorted(v["VpcId"] for v in ec2.vpcs) == ["vpc-0001", "vpc-9999"]
+
+
+def test_builds_pick_the_lowest_vpcs_subnet_even_when_another_subnet_id_sorts_first():
+    ec2 = _Ec2()
+    restore = _with(ec2)
+    try:
+        sub = pov_cloud_aws._ensure_image_build_subnet_sync("us-east-2")
+        _extra_network(ec2, "vpc-9999")
+        ec2.subnets[-1]["SubnetId"] = "subnet-0000"       # sorts before the winner's
+        assert pov_cloud_aws._ensure_image_build_subnet_sync("us-east-2") == sub
+    finally:
+        restore()
 
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]
