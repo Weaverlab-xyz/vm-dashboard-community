@@ -19,6 +19,13 @@
     docker-compose.hub.yml instead of building from source. Mutually
     exclusive with -Build.
 
+.PARAMETER Ingress
+    Publish the remote-agent endpoint through an outbound tunnel, for an
+    install behind NAT: 'cloudflare' (Cloudflare Tunnel) or 'ngrok'. Adds
+    docker-compose.ingress.yml plus the provider's overlay. Needs
+    AGENT_HOSTNAME and the provider token in .env; see
+    docs/platform/cloud-hosting/public-ingress.md.
+
 .PARAMETER NoBrowser
     Skip opening the browser when the stack comes up.
 
@@ -31,6 +38,9 @@
 .EXAMPLE
     .\scripts\Onboard-Dashboard.ps1 -Build
 
+.EXAMPLE
+    .\scripts\Onboard-Dashboard.ps1 -Hub -Ingress ngrok
+
 .NOTES
     Prerequisites (one-time, document these in docs/getting-started.md):
       - Docker Desktop installed and running
@@ -41,6 +51,8 @@
 param(
     [switch]$Build,
     [switch]$Hub,
+    [ValidateSet('cloudflare', 'ngrok')]
+    [string]$Ingress,
     [switch]$NoBrowser
 )
 
@@ -57,6 +69,15 @@ $repoRoot    = Split-Path -Parent $PSScriptRoot
 $envFile     = Join-Path $repoRoot ".env"
 $envExample  = Join-Path $repoRoot ".env.example"
 $composeFile = if ($Hub) { Join-Path $repoRoot "docker-compose.hub.yml" } else { Join-Path $repoRoot "docker-compose.yml" }
+# Every compose call goes through this list so overlays stack on the base file.
+$composeFileArgs = @("-f", $composeFile)
+if ($Ingress) {
+    # The shared gateway plus one tunnel provider. The provider file fails compose
+    # with a clear message if AGENT_HOSTNAME or the token is missing from .env.
+    $providerFile = if ($Ingress -eq 'ngrok') { "docker-compose.ngrok.yml" } else { "docker-compose.cloudflared.yml" }
+    $composeFileArgs += @("-f", (Join-Path $repoRoot "docker-compose.ingress.yml"),
+                          "-f", (Join-Path $repoRoot $providerFile))
+}
 $healthUrl   = "http://localhost:8001/api/health"
 $dashboardUrl = "http://localhost:8001"
 
@@ -275,7 +296,7 @@ if ($Hub) {
     Write-Step "Pulling prebuilt image and starting Docker Compose stack"
     # Pull the latest published image first so reruns pick up new releases
     # (compose only auto-pulls when the image is absent locally).
-    & docker compose -f $composeFile pull
+    & docker compose @composeFileArgs pull
     if ($LASTEXITCODE -ne 0) {
         Write-Fail "docker compose pull failed - could not fetch the prebuilt image."
         Write-Fail "Behind a TLS-inspecting proxy, ensure Docker trusts your corp CA for Docker Hub"
@@ -286,14 +307,14 @@ if ($Hub) {
     Write-Step "Starting Docker Compose stack"
 }
 
-$composeArgs = @("compose", "-f", $composeFile, "up", "-d")
+$composeArgs = @("compose") + $composeFileArgs + @("up", "-d")
 if ($Build) { $composeArgs += "--build" }
 
 & docker @composeArgs
 if ($LASTEXITCODE -ne 0) {
     Write-Fail "docker compose up failed (exit $LASTEXITCODE)."
     Write-Fail "Recent logs:"
-    & docker compose -f $composeFile logs --tail 50 app
+    & docker compose @composeFileArgs logs --tail 50 app
     exit $LASTEXITCODE
 }
 Write-Ok "Containers started"
@@ -318,7 +339,7 @@ for ($i = 1; $i -le 90; $i++) {
 if (-not $ready) {
     Write-Fail "Health endpoint did not respond within 90 seconds."
     Write-Fail "Recent app logs:"
-    & docker compose -f $composeFile logs --tail 50 app
+    & docker compose @composeFileArgs logs --tail 50 app
     Write-Host ""
     Write-Warn "Common causes:"
     Write-Warn "  - Invalid AWS or Azure credentials (app crashes at startup)"
@@ -342,4 +363,8 @@ Write-Host "  - Log in with username '$adminUser' — password is in .env as FIR
 Write-Host "    (Change it via Settings after first login; the env var is ignored once users exist.)"
 Write-Host "  - The setup wizard asks for the setup token: $($envVars.SETUP_TOKEN)  (SETUP_TOKEN in .env)"
 Write-Host "  - See docs/getting-started/feature-test.md for the feature-test checklist"
-Write-Host "  - Stop the stack with:  docker compose -f $(Split-Path -Leaf $composeFile) down"
+$stopFiles = ($composeFileArgs | Where-Object { $_ -ne "-f" } | ForEach-Object { "-f $(Split-Path -Leaf $_)" }) -join " "
+Write-Host "  - Stop the stack with:  docker compose $stopFiles down"
+if ($Ingress) {
+    Write-Host "  - Agents enrol at:      https://$($envVars.AGENT_HOSTNAME)  (only /api/agent/* and /spiffe/* are published)"
+}

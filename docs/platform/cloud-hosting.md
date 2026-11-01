@@ -12,6 +12,11 @@ Compose on a host you maintain.
 starting point. Come here when you want the dashboard reachable from outside
 your LAN, surviving a laptop reboot, or fronting remote agents.
 
+> **Staying on Compose, behind NAT?** If all you need is for remote agents to reach you,
+> you don't need a managed runtime: see
+> [Public Ingress Through a Tunnel](cloud-hosting/public-ingress.md) (Cloudflare Tunnel
+> or ngrok, no inbound ports).
+
 > **This is not the hosted SaaS edition.** What follows is the community
 > edition, single-tenant, with the JWT root key supplied as a platform secret.
 > The hosted edition's differences are narrower and more specific than "runs in
@@ -277,6 +282,13 @@ See [GCP Cloud Run](cloud-hosting/gcp-cloud-run.md).
 ## AWS ECS Fargate
 
 See [AWS ECS Fargate](cloud-hosting/aws-ecs.md).
+
+## Staying on Docker Compose, behind NAT
+
+If you only need remote agents (or a cloud STS) to reach a Compose install with no
+inbound ports open, you don't need a managed runtime. A Cloudflare Tunnel or ngrok
+overlay publishes just the agent endpoint: see
+[Public Ingress Through a Tunnel](cloud-hosting/public-ingress.md).
 
 ## Troubleshooting
 

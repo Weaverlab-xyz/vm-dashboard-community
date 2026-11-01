@@ -102,6 +102,9 @@ Docker Hub — no local image build required. The image is multi-arch, so
 This pulls `chrweav/infra-dashboard` and starts it alongside Postgres using
 `docker-compose.hub.yml`. Drop the `--hub` / `-Hub` flag to **build the image
 from source** instead (for contributors, or to customize the build).
+Behind NAT and want remote agents to reach you? Add `--ingress=ngrok` or
+`--ingress=cloudflare` (`-Ingress …` in PowerShell). An outbound tunnel then publishes
+only the agent endpoint; see Cloud Hosting in [Platform](docs/platform.md).
 
 Either way the script checks prerequisites, generates bootstrap secrets (JWT
 signing key + Postgres password), and brings up the Docker Compose stack. Your

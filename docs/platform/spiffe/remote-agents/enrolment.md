@@ -100,6 +100,30 @@ revocation. The root is generated on first start and lives in the `caddy_data` v
 it survives restarts but not `docker compose down -v`, and wiping it means re-issuing
 the root to every agent.
 
+#### No inbound ports? Use a tunnel
+
+Behind NAT, where nothing can reach 80/443, publish the same endpoint through an
+outbound **Cloudflare Tunnel** or **ngrok** instead of `docker-compose.agent.yml`. The
+provider's edge terminates TLS with a publicly trusted certificate, so agents need no
+`AGENT_CA_BUNDLE`. Put `AGENT_HOSTNAME` and the provider token in `.env`, then:
+
+```powershell
+# PowerShell (Windows)
+.\scripts\Onboard-Dashboard.ps1 -Hub -Ingress ngrok        # or -Ingress cloudflare
+```
+
+```bash
+# Bash (WSL / Linux / macOS)
+./scripts/onboard.sh --hub --ingress=ngrok                 # or --ingress=cloudflare
+```
+
+Agents see the same thing as with the Caddy overlay: only `/api/agent/*` and `/spiffe/*`
+are published (through the same route-checked Caddyfile), and `PUBLIC_BASE_URL`
+is set to `https://$AGENT_HOSTNAME`. `TRUSTED_PROXY_HOSTS` needs no setting, because
+everything is on loopback. With ngrok, use your **static** domain: the audience pins on
+first enrolment, and a URL that changes on restart means re-enrolling every agent.
+Provider setup and checks: [Public Ingress Through a Tunnel](../../cloud-hosting/public-ingress.md).
+
 
 ## 3. Register and enrol
 

@@ -281,6 +281,35 @@ To enable an integration, flip its flag in `Settings → Integrations`
 details. The matching page in [docs/integrations/](docs/README.md)
 has the field-by-field walkthrough for each hypervisor.
 
+#### Tunnel ingress (Cloudflare Tunnel / ngrok) — not yet verified live
+
+`docker-compose.ingress.yml` plus `docker-compose.cloudflared.yml` or
+`docker-compose.ngrok.yml` (`--ingress=` / `-Ingress` on the onboarding scripts)
+publishes the agent endpoint from a Compose install behind NAT. See
+[Public Ingress Through a Tunnel](docs/platform/cloud-hosting/public-ingress.md).
+
+**This has had no live run.** CI covers only the wiring: `tests/test_public_ingress_overlays.py`
+checks the overlays, and `tests/test_agent_vhost_surface.py` checks the Caddyfile they
+mount. The maintainer's deployment runs on Azure Container Apps, which uses the same
+Caddyfile as a platform sidecar rather than these overlays, so this path gets no
+day-to-day exercise either. If you run Compose behind NAT, a smoke-test report is the
+most useful thing you can send. For whichever provider you use, report:
+
+- `docker compose ... up -d` brings up `tunnel-gateway` and the connector, and their
+  logs show the tunnel connected.
+- From outside your network, `https://$AGENT_HOSTNAME/` and `/setup` return **404**, and
+  an unsigned `POST /api/agent/lease` returns **401**.
+- A remote agent enrols and runs a job through the tunnel.
+- The app log shows **no** `Ignoring X-Forwarded-*` warning. If one appears, the
+  loopback assumption has broken, so include the peer address it names.
+- For Cloudflare with `UI_HOSTNAME` behind Access: the UI loads and SSO callbacks work.
+- Recreate `app` (`up -d` after a `.env` change) and confirm the sidecars come back.
+  They share its network namespace.
+- Windows: `.\scripts\Onboard-Dashboard.ps1 -Ingress ngrok` runs cleanly. The script
+  change has never been executed under `pwsh`.
+
+Also mention the provider, the plan tier (free or paid), and the connector image tag you ran.
+
 When you report a finding, please mention:
 
 - Hypervisor product + version (e.g. `Proxmox VE 8.2.4`,

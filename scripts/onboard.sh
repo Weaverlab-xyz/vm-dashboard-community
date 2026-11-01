@@ -9,6 +9,7 @@
 #   ./scripts/onboard.sh            # normal run (build from source)
 #   ./scripts/onboard.sh --hub      # pull the prebuilt image from Docker Hub (no build)
 #   ./scripts/onboard.sh --hub --corp-ca  # + trust the host's corp CA inside the container
+#   ./scripts/onboard.sh --ingress=ngrok  # + public agent endpoint via a tunnel (cloudflare|ngrok)
 #   ./scripts/onboard.sh --build    # force image rebuild
 #   ./scripts/onboard.sh --no-open  # skip opening the browser
 
@@ -18,14 +19,16 @@ BUILD=0
 NO_OPEN=0
 HUB=0
 CORP_CA=0
+INGRESS=""
 for arg in "$@"; do
     case "$arg" in
         --hub|--pull) HUB=1 ;;
         --corp-ca) CORP_CA=1 ;;
+        --ingress=*) INGRESS="${arg#--ingress=}" ;;
         --build) BUILD=1 ;;
         --no-open) NO_OPEN=1 ;;
         -h|--help)
-            sed -n '2,14p' "$0"
+            sed -n '2,15p' "$0"
             exit 0
             ;;
         *) echo "unknown arg: $arg" >&2; exit 2 ;;
@@ -41,6 +44,11 @@ if (( CORP_CA && ! HUB )); then
     echo "error: --corp-ca only applies to --hub. The build-from-source path bakes corp-ca/ certs into the image at build time instead (see corp-ca/README.md)." >&2
     exit 2
 fi
+
+case "$INGRESS" in
+    ""|cloudflare|ngrok) ;;
+    *) echo "error: --ingress must be cloudflare or ngrok (got '$INGRESS')." >&2; exit 2 ;;
+esac
 
 # Repo root is the parent of the directory holding this script.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -65,6 +73,14 @@ if (( CORP_CA )); then
         exit 2
     fi
     COMPOSE_FILE_ARGS+=(-f "$REPO_ROOT/docker-compose.corp-ca.yml")
+fi
+# Public ingress: the shared gateway plus one tunnel provider. The provider files
+# fail compose with a clear message when AGENT_HOSTNAME or the token is missing from
+# .env. See docs/platform/cloud-hosting/public-ingress.md.
+if [[ -n "$INGRESS" ]]; then
+    _provider_file="docker-compose.cloudflared.yml"
+    [[ "$INGRESS" == ngrok ]] && _provider_file="docker-compose.ngrok.yml"
+    COMPOSE_FILE_ARGS+=(-f "$REPO_ROOT/docker-compose.ingress.yml" -f "$REPO_ROOT/$_provider_file")
 fi
 HEALTH_URL="http://localhost:8001/api/health"
 DASHBOARD_URL="http://localhost:8001"
@@ -328,4 +344,12 @@ echo "  - The browser setup wizard will open automatically on first launch."
 echo "    Complete it to create your admin account and enter cloud credentials."
 echo "    It asks for the setup token: $(read_env SETUP_TOKEN)  (SETUP_TOKEN in .env)"
 echo "  - See docs/getting-started/feature-test.md for the full feature-test checklist."
-echo "  - Stop the stack with:  $_compose_cmd -f $(basename "$COMPOSE_FILE") down"
+_stop_files=""
+for _a in "${COMPOSE_FILE_ARGS[@]}"; do
+    [[ "$_a" == -f ]] && continue
+    _stop_files+=" -f $(basename "$_a")"
+done
+echo "  - Stop the stack with:  $_compose_cmd$_stop_files down"
+if [[ -n "$INGRESS" ]]; then
+    echo "  - Agents enrol at:      https://$(read_env AGENT_HOSTNAME)  (only /api/agent/* and /spiffe/* are published)"
+fi

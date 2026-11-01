@@ -108,9 +108,11 @@ the next things queued for QA.
 
 ### Public webhook endpoint per tenant
 
-- **What community does:** none — operators behind NAT must stand up
-  their own reverse proxy (ngrok, Cloudflare Tunnel, etc.) for
-  inbound webhooks (Entitle approvals, EPM-L event callbacks).
+- **What community does:** ships Cloudflare Tunnel and ngrok overlays
+  ([public-ingress.md](../platform/cloud-hosting/public-ingress.md)) that
+  publish the **remote-agent and SPIFFE issuer endpoints** from behind NAT.
+  Inbound webhooks (Entitle approvals, EPM-L event callbacks) are still
+  not published through them; operators wire those up by hand.
 - **What SaaS adds:** a stable public HTTPS endpoint per tenant out
   of the box, scoped to that tenant's routes.
 - **Status:** In design.

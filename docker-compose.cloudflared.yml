@@ -1,0 +1,34 @@
+# Cloudflare Tunnel provider for the public-ingress overlay.
+#
+# Use WITH docker-compose.ingress.yml, never alone:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ingress.yml \
+#                  -f docker-compose.cloudflared.yml up -d
+#
+# One-time setup in the Cloudflare dashboard (Zero Trust → Networks → Tunnels):
+#   1. Create a tunnel (type: cloudflared) and copy its token into .env as
+#      CLOUDFLARE_TUNNEL_TOKEN.
+#   2. Add a public hostname = AGENT_HOSTNAME, service = HTTP, URL = localhost:80.
+#      localhost is right: this container shares the app's network namespace, and
+#      port 80 there is the gateway (docker-compose.ingress.yml), not the app.
+#   3. Optional: a second public hostname for the UI, set as UI_HOSTNAME, with a
+#      Cloudflare Access application in front of it. Never publish the UI hostname
+#      without Access — it carries the login form and the setup wizard.
+#
+# Do NOT put an Access application on AGENT_HOSTNAME. Agents authenticate every
+# request with an Ed25519 signature and cannot answer an Access login redirect.
+#
+# Guide: docs/platform/cloud-hosting/public-ingress.md
+
+services:
+  cloudflared:
+    # Exact version, not `latest`: --no-autoupdate below means the image IS the
+    # version, so bump this tag deliberately.
+    image: cloudflare/cloudflared:2026.10.0
+    restart: unless-stopped
+    network_mode: "service:app"
+    depends_on:
+      - tunnel-gateway
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN in .env (Zero Trust → Networks → Tunnels)}
