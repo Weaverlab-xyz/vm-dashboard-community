@@ -4,6 +4,12 @@
 
 Part of [Cloud Hosting](../cloud-hosting.md).
 
+> **Not yet verified live.** CI checks the compose wiring and the gateway's route
+> surface, but no one has yet run the overlays against a real tunnel. If you do, the
+> checklist is in
+> [CONTRIBUTING.md](../../../CONTRIBUTING.md#tunnel-ingress-cloudflare-tunnel--ngrok--not-yet-verified-live),
+> and a report on the PR or an issue is welcome.
+
 Remote agents dial in to `/api/agent/*`. When the dashboard uses its own
 [workload identity](../workload-identity.md), the clouds fetch its issuer documents from
 `/spiffe/*`. Both need a public HTTPS hostname. `docker-compose.agent.yml` provides one
