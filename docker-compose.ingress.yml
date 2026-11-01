@@ -1,0 +1,70 @@
+# Public ingress through an outbound tunnel — the shared half.
+#
+# For an install behind NAT with no inbound ports: remote agents still need to reach
+# /api/agent/*, and the cloud STSes still need the dashboard's /spiffe/* issuer
+# documents. docker-compose.agent.yml solves that by publishing 80/443 and fetching a
+# Let's Encrypt certificate, which needs exactly the inbound reachability you don't have.
+# A tunnel (Cloudflare Tunnel or ngrok) dials OUT instead and terminates TLS at its edge.
+#
+# This file is never used alone. Stack it with ONE provider overlay:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ingress.yml \
+#                  -f docker-compose.cloudflared.yml up -d
+#   docker compose -f docker-compose.yml -f docker-compose.ingress.yml \
+#                  -f docker-compose.ngrok.yml up -d
+#
+# (or docker-compose.hub.yml as the base; or `./scripts/onboard.sh --ingress=ngrok`,
+# `.\scripts\Onboard-Dashboard.ps1 -Ingress ngrok`). Guide:
+# docs/platform/cloud-hosting/public-ingress.md
+#
+# WHY A GATEWAY AND NOT "TUNNEL → APP:8000"
+#
+# The tunnel providers can filter by path, but each in its own syntax, some of it paid.
+# Put the filter in Caddy instead and it is the same filter whichever provider sits in
+# front of it — and it is the SAME FILE the managed-runtime sidecar already ships,
+# examples/cloud-gateway/Caddyfile. That file splits by hostname: AGENT_HOSTNAME serves
+# /api/agent/* and /spiffe/* only and 404s everything else; UI_HOSTNAME serves the UI
+# and is unset by default, so nothing but the agent protocol is published.
+# tests/test_agent_vhost_surface.py checks that file's matcher against the app's route
+# table, so it covers this path too.
+#
+# WHY network_mode: "service:app"
+#
+# The gateway and the tunnel join the app's network namespace, so every hop is
+# loopback: tunnel → 127.0.0.1:80 (Caddy) → 127.0.0.1:8000 (app). The app trusts
+# X-Forwarded-For only from TRUSTED_PROXY_HOSTS, which defaults to 127.0.0.1 — and
+# that is now exactly right, with no fixed subnet and no literal IP to keep in sync
+# (uvicorn 0.27 compares that setting as a plain string: no names, no CIDR). The
+# Caddyfile was written for this sidecar shape; see its header.
+#
+# One consequence: when `app` is recreated, these containers must be recreated with it
+# (compose does this when you `up -d` the same file set). A bare `docker restart` of
+# the app alone leaves them in a namespace that no longer exists.
+
+services:
+  tunnel-gateway:
+    # Same pinned Caddy as examples/cloud-gateway/Dockerfile. The Caddyfile is
+    # mounted rather than baked in, so a fix to it reaches this path without a build.
+    image: caddy:2-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
+    restart: unless-stopped
+    network_mode: "service:app"
+    depends_on:
+      - app
+    environment:
+      AGENT_HOSTNAME: ${AGENT_HOSTNAME:?set AGENT_HOSTNAME to the tunnel hostname, e.g. agents.example.com}
+      # Unset = the UI is NOT published through the tunnel (the Caddyfile's
+      # `.invalid` default matches nothing). Set it only for a hostname that has
+      # authentication in front of it at the edge, e.g. Cloudflare Access.
+      UI_HOSTNAME: ${UI_HOSTNAME:-ui.invalid}
+      UI_HOSTNAME_ALT: ${UI_HOSTNAME_ALT:-ui-alt.invalid}
+      UI_ALLOWED_CIDR: ${UI_ALLOWED_CIDR:-0.0.0.0/0 ::/0}
+    volumes:
+      - ./examples/cloud-gateway/Caddyfile:/etc/caddy/Caddyfile:ro
+
+  app:
+    environment:
+      # The origin agents reach this dashboard at. It is the signing audience the
+      # agents check and the base for any callback URL, so it must be the tunnel's
+      # hostname, not localhost:8001. TRUSTED_PROXY_HOSTS is deliberately NOT set:
+      # the loopback default is correct for this topology (see above).
+      - PUBLIC_BASE_URL=https://${AGENT_HOSTNAME}

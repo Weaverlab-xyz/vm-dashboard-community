@@ -278,6 +278,13 @@ See [GCP Cloud Run](cloud-hosting/gcp-cloud-run.md).
 
 See [AWS ECS Fargate](cloud-hosting/aws-ecs.md).
 
+## Staying on Docker Compose, behind NAT
+
+If you only need remote agents (or a cloud STS) to reach a Compose install with no
+inbound ports open, you don't need a managed runtime. A Cloudflare Tunnel or ngrok
+overlay publishes just the agent endpoint: see
+[Public Ingress Through a Tunnel](cloud-hosting/public-ingress.md).
+
 ## Troubleshooting
 
 **Everything looks configured but every cloud call fails to authenticate.** The

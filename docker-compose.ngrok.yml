@@ -1,0 +1,43 @@
+# ngrok provider for the public-ingress overlay.
+#
+# Use WITH docker-compose.ingress.yml, never alone:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ingress.yml \
+#                  -f docker-compose.ngrok.yml up -d
+#
+# One-time setup (dashboard.ngrok.com):
+#   1. Copy your authtoken into .env as NGROK_AUTHTOKEN.
+#   2. Claim a domain (Universal Gateway → Domains; the free plan includes one
+#      static *.ngrok-free.app domain) and set it as AGENT_HOSTNAME in .env.
+#      A STATIC domain matters: PUBLIC_BASE_URL is derived from it and agents
+#      enrol against it, so a random URL per restart would orphan every agent.
+#
+# What is published: only AGENT_HOSTNAME, and through the gateway only
+# /api/agent/* and /spiffe/*. One ngrok endpoint means no UI hostname here — use
+# Cloudflare Tunnel + Access if you want the UI reachable from outside.
+#
+# Free-plan browser interstitial: ngrok shows a warning page to browser
+# user-agents. Agents and cloud STS fetches are not browsers and pass straight
+# through, so the agent protocol is unaffected.
+#
+# Guide: docs/platform/cloud-hosting/public-ingress.md
+
+services:
+  ngrok:
+    image: ngrok/ngrok:3.39.11-alpine
+    restart: unless-stopped
+    network_mode: "service:app"
+    depends_on:
+      - tunnel-gateway
+    # 80 = the gateway in the app's namespace (docker-compose.ingress.yml), NOT
+    # the app's 8000: going straight to the app would skip the path filter.
+    # --inspect=false: the local inspector (127.0.0.1:4040, inside the app's
+    # namespace) records full request/response bodies, including job payloads.
+    command:
+      - "http"
+      - "80"
+      - "--url=https://${AGENT_HOSTNAME:?set AGENT_HOSTNAME to your static ngrok domain}"
+      - "--inspect=false"
+      - "--log=stdout"
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:?set NGROK_AUTHTOKEN in .env (dashboard.ngrok.com)}
