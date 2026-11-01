@@ -886,6 +886,20 @@ async def _release_egress(db, host) -> None:
         logger.warning("agent host %s: egress reclaim failed (non-fatal): %s", host.name, exc)
 
 
+def _spire_ports() -> tuple:
+    """The SPIRE server's port, when this host's agent attests through SPIRE: the one
+    port beyond HTTPS a deployed agent dials out on. Empty otherwise, or if unreadable."""
+    from . import config_service, dashboard_spire
+    try:
+        if not (config_service.get_bool("spire_attest_enabled")
+                and dashboard_spire.server_in_use()):
+            return ()
+        _, _, port = str(dashboard_spire.server_address() or "").partition(":")
+        return (int(port or dashboard_spire.server_port()),)
+    except Exception:  # noqa: BLE001 — a missing port only costs the allow, never the start
+        return ()
+
+
 async def launch(host, script: str) -> dict:
     """Start the host. Returns ``{"host_id", "zone", "network"}`` — ``network`` in the raw
     form its cloud reports it, normalised by the caller. Overridable in tests and the
@@ -907,7 +921,7 @@ async def launch(host, script: str) -> dict:
             p["resource_group"], host.region, subnet_id=p["subnet"], name=host.name,
             vm_size=size, admin_password=azure_service._azure_compliant_password(),
             cloud_init_b64=_azure_cloud_init(script), purpose=PURPOSE,
-            container_image=AGENT_IMAGE, public_ip=False)
+            container_image=AGENT_IMAGE, public_ip=False, egress_ports=_spire_ports())
         return {"host_id": res["name"], "zone": "", "network": p["subnet"]}
     from . import gcp_service
     res = await gcp_service.run_gce_startup_node(

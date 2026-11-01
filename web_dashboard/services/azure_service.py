@@ -1682,7 +1682,8 @@ async def deploy_vm(
 ) -> dict:
     # Before the VM exists, so cloud-init's first package install already has a way out.
     from . import azure_nat_service
-    egress = await azure_nat_service.ensure(subnet_id, list(nsg_ids or [])[:1])
+    egress = await azure_nat_service.ensure(subnet_id, list(nsg_ids or [])[:1],
+                                            azure_nat_service.vm_extra_ports())
     try:
         cred, sub_id = await _ensure_creds()
         result = await _to_thread(
@@ -3641,11 +3642,13 @@ async def run_vm_container_node(
     admin_password: str, cloud_init_b64: str, nsg_id: str = "", os_disk_gb: int = 0,
     data_disk_id: str = "", purpose: str = "", container_image: str = "",
     admin_username: str = "nodeadmin", public_ip: bool = True,
+    egress_ports: tuple = (),
 ) -> dict:
     """Ensure the managed node VM (idempotent on name). ``public_ip=False`` gives it none:
-    a node that only dials out, like a deployed remote agent."""
+    a node that only dials out, like a deployed remote agent. ``egress_ports`` are the
+    TCP ports beyond HTTP/HTTPS it must reach on the internet (azure_nat_service)."""
     from . import azure_nat_service
-    await azure_nat_service.ensure(subnet_id, [nsg_id] if nsg_id else [])
+    await azure_nat_service.ensure(subnet_id, [nsg_id] if nsg_id else [], list(egress_ports))
     try:
         cred, sub_id = await _ensure_creds()
         return await _to_thread(
@@ -3832,6 +3835,8 @@ def egress_nat_name(vnet: str) -> str:
 
 
 _EGRESS_RULE_PREFIX = "dashboard-vm-egress-"
+# Every NSG rule this feature writes starts with this, so _egress_verdict ignores them all.
+_OWN_RULE_PREFIX = "dashboard-vm-"
 
 
 def egress_rule_name(subnet: str) -> str:
@@ -3840,8 +3845,35 @@ def egress_rule_name(subnet: str) -> str:
 
 
 def egress_kms_rule_name(subnet: str) -> str:
-    """The subnet's Windows-activation allow. Same prefix, so the verdict ignores it."""
-    return f"{_EGRESS_RULE_PREFIX}kms-{subnet}"[:80]
+    """The subnet's Windows-activation allow. A prefix of its own, so no subnet name can
+    make it collide with another subnet's web allow."""
+    return f"dashboard-vm-kms-{subnet}"[:80]
+
+
+def egress_port_rule_name(port: int, subnet: str) -> str:
+    """One allow per extra port a caller needs (a SPIRE server, a Portainer Edge tunnel),
+    so two callers in one subnet never overwrite each other's."""
+    return f"dashboard-vm-port{int(port)}-{subnet}"[:80]
+
+
+def _egress_extra_ports(ports) -> list:
+    """The extra TCP ports a caller asked for, validated: whole numbers 1-65535, not the
+    web ports the main allow already opens, de-duplicated and sorted."""
+    out = set()
+    for p in ports or ():
+        try:
+            n = int(str(p).strip())
+        except ValueError:
+            continue
+        if 1 <= n <= 65535 and str(n) not in EGRESS_PORTS:
+            out.add(n)
+    return sorted(out)
+
+
+def _legacy_kms_rule(rule) -> bool:
+    """#1232's KMS allow was named dashboard-vm-egress-kms-<subnet>, which a subnet called
+    kms-<x> could share; it is recognised by its port before it is removed."""
+    return (getattr(rule, "destination_port_range", "") or "") == AZURE_KMS_PORT
 
 
 def _port_covers(rule, port: int) -> bool:
@@ -3868,7 +3900,7 @@ def _egress_verdict(nsg) -> tuple[str, Optional[int]]:
     decides, which is an allow."""
     rules = [r for r in (nsg.security_rules or [])
              if (r.direction or "").lower() == "outbound"
-             and not (r.name or "").startswith(_EGRESS_RULE_PREFIX)]
+             and not (r.name or "").startswith(_OWN_RULE_PREFIX)]
     for r in sorted(rules, key=lambda r: r.priority or 0):
         dests = [r.destination_address_prefix] + list(r.destination_address_prefixes or [])
         if not any((d or "").strip().lower() in _INTERNET_DESTS for d in dests):
@@ -3897,7 +3929,8 @@ def _free_priority_below(nsg, ceiling: int, own: str) -> Optional[int]:
     return None
 
 
-def _ensure_vm_egress_sync(cred, sub_id: str, subnet_id: str, nic_nsg_ids: list) -> dict:
+def _ensure_vm_egress_sync(cred, sub_id: str, subnet_id: str, nic_nsg_ids: list,
+                           extra_ports: Optional[list] = None) -> dict:
     """Give ``subnet_id`` a path to the internet if it has none. See azure_nat_service."""
     from azure.mgmt.network.models import (
         NatGateway, NatGatewaySku, SecurityRule, SubResource,
@@ -3985,18 +4018,36 @@ def _ensure_vm_egress_sync(cred, sub_id: str, subnet_id: str, nic_nsg_ids: list)
             description=("vm-dashboard: Windows activation against Azure's KMS. Removed "
                          "with the NAT gateway."))).result()
         rules.append(f"{nsg.name}:{kms_prio}")
+        # The extra ports this VM's caller needs, each its own rule, each just below the
+        # last, all above the deny.
+        floor = kms_prio
+        for port in _egress_extra_ports(extra_ports):
+            port_rule = egress_port_rule_name(port, sub_name)
+            port_prio = _free_priority_below(nsg, floor, port_rule)
+            if port_prio is None:
+                problems.append(f"no free priority for the tcp/{port} allow in NSG {nsg.name}")
+                break
+            network.security_rules.begin_create_or_update(nrg, nsg.name, port_rule, SecurityRule(
+                priority=port_prio, direction="Outbound", access="Allow", protocol="Tcp",
+                source_address_prefixes=[p for p in prefixes if p], source_port_range="*",
+                destination_address_prefix="Internet", destination_port_range=str(port),
+                description=(f"vm-dashboard: tcp/{port} for the VM that asked for it. "
+                             f"Removed with the NAT gateway."))).result()
+            rules.append(f"{nsg.name}:{port_prio}")
+            floor = port_prio
     return {"status": "ready", "nat_gateway": nat_name, "public_ip": pip.ip_address or "",
             "nsg_rules": rules, "problems": problems, "attached": created_nat}
 
 
-async def ensure_vm_egress(subnet_id: str, nic_nsg_ids: Optional[list] = None) -> dict:
+async def ensure_vm_egress(subnet_id: str, nic_nsg_ids: Optional[list] = None,
+                           extra_ports: Optional[list] = None) -> dict:
     """Find-or-create the VNet's on-demand NAT gateway, attach it to ``subnet_id``, and
     open each NSG whose rules deny the internet, when the subnet has no path out.
     Returns ``{"status": "ready"|"skipped", ...}``. Raises AzureError on ARM errors."""
     try:
         cred, sub_id = await _ensure_creds()
         return await _to_thread(_ensure_vm_egress_sync, cred, sub_id, subnet_id,
-                                list(nic_nsg_ids or []))
+                                list(nic_nsg_ids or []), list(extra_ports or []))
     except AzureError:
         raise
     except Exception as e:
@@ -4035,9 +4086,19 @@ def _release_vm_egress_sync(cred, sub_id: str, subnet_id: str, grace_s: int) -> 
     nsg_ids = [v for k, v in tags.items() if k.startswith(_EGRESS_NSG_TAG)]
     if subnet.network_security_group:
         nsg_ids.append(subnet.network_security_group.id)
+    port_rule = re.compile(r"^dashboard-vm-port\d+-" + re.escape(sub_name) + "$")
+    legacy_kms = f"{_EGRESS_RULE_PREFIX}kms-{sub_name}"[:80]
     for nid in {n.lower(): n for n in nsg_ids}.values():
         nrg, nname = _arm_parts(nid, "networkSecurityGroups")
-        for name in (rule, egress_kms_rule_name(sub_name)):
+        try:
+            present = network.network_security_groups.get(nrg, nname).security_rules or []
+        except ResourceNotFoundError:
+            continue
+        names = {rule, egress_kms_rule_name(sub_name)}
+        for r in present:
+            if port_rule.match(r.name or "") or (r.name == legacy_kms and _legacy_kms_rule(r)):
+                names.add(r.name)
+        for name in names:
             try:
                 network.security_rules.begin_delete(nrg, nname, name).result()
             except ResourceNotFoundError:

@@ -45,6 +45,24 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 ENABLED = "azure_vm_nat_enabled"
+# Extra TCP ports a plain VM deploy opens (CSV). Default: Portainer Edge's tunnel, so an
+# Edge agent installed on a dashboard VM can reach its Portainer server.
+VM_EXTRA_PORTS = "azure_vm_nat_extra_ports"
+
+
+def vm_extra_ports() -> list:
+    """The setting's ports, or its default when the setting cannot be read: a missing
+    port only costs that allow, never the deploy."""
+    from ..config import settings
+    raw = getattr(settings, VM_EXTRA_PORTS, "")
+    try:
+        from . import config_service
+        stored = config_service.get(VM_EXTRA_PORTS)
+        if stored is not None:
+            raw = stored
+    except Exception:  # noqa: BLE001
+        pass
+    return [p.strip() for p in str(raw or "").split(",") if p.strip()]
 
 # A release that lands between a deploy's ensure and the creation of its NIC would see
 # an empty subnet and remove egress from under the VM about to boot. The NIC follows the
@@ -63,16 +81,22 @@ def enabled() -> bool:
     return config_service.get_bool(ENABLED)
 
 
-async def ensure(subnet_id: str, nsg_ids: Optional[list] = None) -> Optional[dict]:
+async def ensure(subnet_id: str, nsg_ids: Optional[list] = None,
+                 extra_ports: Optional[list] = None) -> Optional[dict]:
     """Open egress for a VM about to be created in ``subnet_id``. Returns the
     azure_service.ensure_vm_egress result, or None when the feature is off or the
-    attempt failed (logged). Never raises: a VM without internet is a working VM."""
+    attempt failed (logged). Never raises: a VM without internet is a working VM.
+
+    ``extra_ports`` are TCP ports this VM needs to the internet beyond HTTP/HTTPS, named
+    by its caller: a deployed agent's SPIRE server, a Portainer Edge tunnel. Each gets
+    its own allow, removed with the rest."""
     if not (enabled() and subnet_id):
         return None
     from . import azure_service
     try:
         async with _LOCK:
-            res = await azure_service.ensure_vm_egress(subnet_id, [n for n in (nsg_ids or []) if n])
+            res = await azure_service.ensure_vm_egress(
+                subnet_id, [n for n in (nsg_ids or []) if n], list(extra_ports or []))
     except Exception as exc:  # noqa: BLE001
         logger.warning("azure-vm-nat: could not open egress for %s (the VM deploys "
                        "anyway, without internet): %s", subnet_id, exc)

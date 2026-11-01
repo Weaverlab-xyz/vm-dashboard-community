@@ -60,7 +60,8 @@ From 2.15 a Kubernetes run is pinned the same way: the kubeconfig's current cont
 the API server the job was signed for, and that name is pinned to the address the agent
 checked, so kubectl still verifies the certificate by name but reaches only that address.
 From 2.16 only the kubeconfig's current context reaches the run; any other clusters,
-users and contexts in the file are dropped.
+users and contexts in the file are dropped. From 2.17 a cluster entry with a `proxy-url`
+is refused.
 
 Probes never authenticate. Discovery is a TCP connect plus a pre-auth protocol banner
 (Postgres SSLRequest, MySQL greeting, TDS PRELOGIN, Oracle TNS, Kubernetes

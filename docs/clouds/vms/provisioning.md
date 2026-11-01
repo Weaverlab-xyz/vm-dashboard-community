@@ -161,7 +161,10 @@ Portainer and Rancher nodes, deployed agents) first opens its subnet:
    source is the subnet's own range. It opens TCP 80 and 443 only, what package installs,
    image pulls and playbooks need; every other port stays as the NSG left it. A second
    allow, `dashboard-vm-egress-kms-<subnet>`, opens TCP 1688 to Azure's two KMS addresses
-   only, so Windows VMs can activate.
+   only, so Windows VMs can activate. A VM that needs more names its own ports, each its
+   own allow, `dashboard-vm-port<N>-<subnet>`: a deployed agent opens its SPIRE server's
+   port, and a plain VM deploy opens `azure_vm_nat_extra_ports` (default `8000`, the
+   Portainer Edge tunnel, for an Edge agent installed on the VM).
 
 It acts **only where egress is closed**. A subnet that has its own NAT gateway, or whose
 NSGs let HTTPS out, is left alone: attaching a gateway there would change the address every

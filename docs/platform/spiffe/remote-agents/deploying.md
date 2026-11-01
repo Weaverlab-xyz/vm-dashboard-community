@@ -253,7 +253,8 @@ policy and adds `agent_k8s` to its job types:
   entry in the run's container. kubectl still verifies the certificate by name, but cannot
   be sent anywhere the agent did not check. From 2.16 the run gets only the kubeconfig's
   current context: a registered cluster's pasted file may list other clusters, and those
-  never reach the container.
+  never reach the container. From 2.17 a cluster entry with a `proxy-url` is refused, since
+  a proxy would carry the credential to an address the agent never checked.
 - **Fallback.** While the agent is offline, and its host is not about to be up, the work
   runs on the remote worker, and the job's Live Output says so. So does anything that
   does not fit the step set, such as a Helm `--set` value with a newline: it stays on the

@@ -210,8 +210,9 @@ def _sandbox():
     return arm
 
 
-def _ensure(arm, subnet="vm-subnet", nic_nsgs=()):
-    return az._ensure_vm_egress_sync(None, SUB, _sid(subnet), list(nic_nsgs))
+def _ensure(arm, subnet="vm-subnet", nic_nsgs=(), extra_ports=()):
+    return az._ensure_vm_egress_sync(None, SUB, _sid(subnet), list(nic_nsgs),
+                                     list(extra_ports))
 
 
 def _release(arm, subnet="vm-subnet", grace_s=0):
@@ -284,7 +285,7 @@ def test_ensure_opens_the_sandbox_subnet_without_editing_its_rules():
     assert allow.protocol == "Tcp" and list(allow.destination_port_ranges) == ["80", "443"]
     assert not getattr(allow, "destination_port_range", None)
     # Windows activation: TCP 1688 to Azure's two KMS addresses only, just below the web allow.
-    kms = rules["dashboard-vm-egress-kms-vm-subnet"]
+    kms = rules["dashboard-vm-kms-vm-subnet"]
     assert (kms.priority, kms.access, kms.protocol) == (198, "Allow", "Tcp")
     assert kms.destination_port_range == "1688"
     assert list(kms.destination_address_prefixes) == ["20.118.99.224/32", "40.83.235.53/32"]
@@ -391,9 +392,9 @@ def test_a_gateway_serving_another_subnet_survives_one_release():
         # Only this subnet's rule went; the other subnet's is still there.
         names = [r.name for r in arm.nsgs["vm-nsg"].security_rules]
         assert "dashboard-vm-egress-desktops" in names
-        assert "dashboard-vm-egress-kms-desktops" in names
+        assert "dashboard-vm-kms-desktops" in names
         assert "dashboard-vm-egress-vm-subnet" not in names
-        assert "dashboard-vm-egress-kms-vm-subnet" not in names
+        assert "dashboard-vm-kms-vm-subnet" not in names
         assert _release(arm, "desktops") == "released"
     assert not arm.nats
 
@@ -435,8 +436,8 @@ def test_a_failed_ensure_never_fails_the_deploy():
 def test_deploy_opens_egress_before_the_vm_and_delete_releases_after():
     order = []
 
-    async def ensure(subnet_id, nsg_ids=None):
-        order.append(("ensure", subnet_id, list(nsg_ids or [])))
+    async def ensure(subnet_id, nsg_ids=None, extra_ports=None):
+        order.append(("ensure", subnet_id, list(nsg_ids or []), list(extra_ports or [])))
         return {"status": "ready", "nat_gateway": "dashboard-vm-nat-x"}
 
     async def release(subnet_id, *, grace_s=600):
@@ -458,6 +459,7 @@ def test_deploy_opens_egress_before_the_vm_and_delete_releases_after():
 
     with _Patch((azure_nat_service, "ensure", ensure), (azure_nat_service, "release", release),
                 (azure_nat_service, "enabled", lambda: True),
+                (azure_nat_service, "vm_extra_ports", lambda: ["8000"]),
                 (az, "_ensure_creds", creds), (az, "_deploy_vm_sync", deploy_sync),
                 (az, "_terminate_vm_sync", terminate_sync), (az, "vm_subnet", vm_subnet)):
         out = _run(az.deploy_vm("rg", "centralus", "v", "Standard_B2s", "", _sid("vm-subnet"),
@@ -465,15 +467,16 @@ def test_deploy_opens_egress_before_the_vm_and_delete_releases_after():
         _run(az.terminate_vm("rg", "v"))
     assert out["egress_nat_gateway"] == "dashboard-vm-nat-x"
     # Only the NIC's NSG (the first) is applied to the NIC, so only it is considered.
-    assert order == [("ensure", _sid("vm-subnet"), [_nsg_id("a")]), ("create",),
+    # A plain VM opens the setting's extra ports: by default Portainer Edge's tunnel.
+    assert order == [("ensure", _sid("vm-subnet"), [_nsg_id("a")], ["8000"]), ("create",),
                      ("delete",), ("release", _sid("vm-subnet"))]
 
 
 def test_a_container_node_opens_and_releases_its_subnet():
     order = []
 
-    async def ensure(subnet_id, nsg_ids=None):
-        order.append("ensure")
+    async def ensure(subnet_id, nsg_ids=None, extra_ports=None):
+        order.append(("ensure", list(extra_ports or [])))
 
     async def release(subnet_id, *, grace_s=600):
         order.append(("release", subnet_id))
@@ -489,10 +492,51 @@ def test_a_container_node_opens_and_releases_its_subnet():
                 (az, "_subnet_of_nic_sync", lambda net, rg, nic: _sid("vm-subnet"))):
         _run(az.run_vm_container_node("rg", "centralus", subnet_id=_sid("vm-subnet"),
                                       name="agent", vm_size="Standard_B2s",
-                                      admin_password="p", cloud_init_b64="", public_ip=False))
+                                      admin_password="p", cloud_init_b64="", public_ip=False,
+                                      egress_ports=(8081,)))
         _run(az.stop_vm_container_node("rg", "agent"))
-    assert order == ["ensure", "create", "delete", ("release", _sid("vm-subnet"))]
+    # The caller's own port (a deployed agent's SPIRE server) reaches the egress allow.
+    assert order == [("ensure", [8081]), "create", "delete", ("release", _sid("vm-subnet"))]
 
+
+
+def test_a_callers_extra_ports_each_get_an_allow_and_go_on_release():
+    arm = _sandbox()
+    with _with(arm):
+        res = _ensure(arm, extra_ports=[8081, "8000", 443, "x", 8081])
+        rules = {r.name: r for r in arm.nsgs["vm-nsg"].security_rules}
+        # Web 199, KMS 198, then one per extra port (sorted, de-duplicated, 443 dropped).
+        assert res["nsg_rules"] == ["vm-nsg:199", "vm-nsg:198", "vm-nsg:197", "vm-nsg:196"]
+        for port, prio in ((8000, 197), (8081, 196)):
+            r = rules[f"dashboard-vm-port{port}-vm-subnet"]
+            assert (r.priority, r.protocol, r.destination_port_range,
+                    r.destination_address_prefix) == (prio, "Tcp", str(port), "Internet")
+        assert "dashboard-vm-port443-vm-subnet" not in rules
+        assert _release(arm) == "released"
+    left = [r.name for r in arm.nsgs["vm-nsg"].security_rules]
+    assert not [n for n in left if n.startswith("dashboard-vm-")], left
+
+
+def test_a_kms_rule_cannot_take_another_subnets_web_allow():
+    # A subnet named kms-app: its web allow and app's KMS allow must not share a name.
+    assert az.egress_rule_name("kms-app") != az.egress_kms_rule_name("app")
+
+
+def test_release_removes_a_legacy_kms_rule_but_not_a_web_allow_of_the_same_name():
+    arm = _sandbox()
+    with _with(arm):
+        _ensure(arm)
+        nsg = arm.nsgs["vm-nsg"]
+        legacy = _rule("dashboard-vm-egress-kms-vm-subnet", 150, "Allow", port="1688")
+        nsg.security_rules = list(nsg.security_rules) + [legacy]
+        assert _release(arm) == "released"
+    assert "dashboard-vm-egress-kms-vm-subnet" not in [
+        r.name for r in arm.nsgs["vm-nsg"].security_rules]
+
+
+def test_a_plain_vm_opens_portainer_edges_tunnel_by_default():
+    with open(os.path.join(_ROOT, "web_dashboard", "config.py"), encoding="utf-8") as f:
+        assert 'azure_vm_nat_extra_ports: str = "8000"' in f.read()
 
 def test_the_worker_runs_the_reclaim_loop():
     with open(os.path.join(_ROOT, "web_dashboard", "jobs_worker.py"), encoding="utf-8") as f:

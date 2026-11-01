@@ -109,6 +109,18 @@ class _Ec2:
     def create_tags(self, **kw):
         return {}
 
+    def delete_vpc(self, VpcId):
+        self.vpcs = [v for v in self.vpcs if v["VpcId"] != VpcId]
+        self.rts = [r for r in self.rts if r["VpcId"] != VpcId]
+        self.created.append("delete-vpc")
+
+    def replace_route(self, RouteTableId, DestinationCidrBlock, GatewayId):
+        rt = next(r for r in self.rts if r["RouteTableId"] == RouteTableId)
+        rt["Routes"] = [r for r in rt["Routes"] if r["DestinationCidrBlock"] != DestinationCidrBlock]
+        rt["Routes"].append({"DestinationCidrBlock": DestinationCidrBlock,
+                             "GatewayId": GatewayId, "State": "active"})
+        self.created.append("replace-route")
+
 
 def _with(ec2):
     saved = aws_service._get_ec2_pinned
@@ -173,6 +185,44 @@ def test_builds_starting_together_find_one_network():
         restore()
     assert first == second and len(ec2.vpcs) == 1
 
+
+
+def test_a_replica_that_lost_the_vpc_race_removes_its_own():
+    ec2 = _Ec2()
+    real_create = ec2.create_vpc
+
+    def racing_create(**kw):
+        # Another replica's VPC lands between this one's look and its create, and sorts first.
+        ec2.vpcs.append({"VpcId": "vpc-0000", "Tags": _tagged(kw["TagSpecifications"])})
+        ec2.rts.append({"RouteTableId": "rtb-0000", "VpcId": "vpc-0000", "Routes": []})
+        return real_create(**kw)
+    ec2.create_vpc = racing_create
+    restore = _with(ec2)
+    try:
+        pov_cloud_aws._ensure_image_build_subnet_sync("us-east-2")
+    finally:
+        restore()
+    assert [v["VpcId"] for v in ec2.vpcs] == ["vpc-0000"], "one VPC left: the winner's"
+    assert "delete-vpc" in ec2.created
+    assert ec2.subnets[0]["VpcId"] == "vpc-0000"
+
+
+def test_a_default_route_to_a_deleted_gateway_is_repointed():
+    ec2 = _Ec2()
+    restore = _with(ec2)
+    try:
+        sub = pov_cloud_aws._ensure_image_build_subnet_sync("us-east-2")
+        # Someone deleted the gateway: the route is a blackhole and nothing is attached.
+        ec2.igws.clear()
+        ec2.rts[0]["Routes"] = [{"DestinationCidrBlock": "0.0.0.0/0", "GatewayId": "igw-gone",
+                                 "State": "blackhole"}]
+        ec2.created.clear()
+        assert pov_cloud_aws._ensure_image_build_subnet_sync("us-east-2") == sub
+    finally:
+        restore()
+    route = ec2.rts[0]["Routes"][0]
+    assert ec2.created == ["igw", "replace-route"]
+    assert route["GatewayId"] == ec2.igws[0]["InternetGatewayId"] and route["State"] == "active"
 
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]

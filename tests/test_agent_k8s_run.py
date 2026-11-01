@@ -335,7 +335,12 @@ def test_a_kubeconfig_whose_current_context_is_another_server_is_refused():
                _KC_TWO.replace("current-context: x\n", ""),    # two contexts, none current
                _KC.replace("{cluster: c,", "{cluster: missing,"),
                _KC.replace("user: u}", "user: missing}"),
-               "users: []\n", "{not yaml", "- a list\n"):
+               "users: []\n", "{not yaml", "- a list\n",
+               _KC.replace("amazonaws.com\n", "amazonaws.com:99999\n", 1),   # not a port
+               _KC.replace("context: {cluster: c, user: u}", "context: a-string"),
+               # 2.17: a proxy would carry the credential somewhere unchecked.
+               _KC.replace("    server: https://ABC", "    proxy-url: http://p.example:3128\n"
+                                                      "    server: https://ABC", 1)):
         _refused(agent._k8s_scope, kc, "abc.eks.amazonaws.com", 443, "52.1.2.3")
 
 
@@ -347,6 +352,33 @@ def test_run_k8s_passes_the_pin_to_the_sibling():
     assert seen["pin"] == ("abc.eks.amazonaws.com", "52.1.2.3")
     written = seen["files"]["opt/job/kubeconfig"].decode()
     assert "other.example.com" not in written, "only the current context reaches the run"
+
+
+def test_a_k8s_play_gets_no_db_login_host():
+    """The Kubernetes pin is the API server's name; only a database run's pin becomes
+    db_login_host (it reached k8s plays in 2.15 and 2.16)."""
+    import json as _json
+
+    class Dash:
+        def ansible_bundle(self, job_id, **kw):
+            return {"playbook": "- hosts: localhost\n", "kubeconfig": KUBECONFIG}, []
+    seen = {}
+    saved = agent._run_ansible_sibling, agent._resolve_all
+
+    def sibling(policy, **kw):
+        seen.update(kw)
+        return 0
+    agent._run_ansible_sibling = sibling
+    agent._resolve_all = lambda host: ["52.1.2.3"]
+    try:
+        agent.run_ansible({"run_kind": "k8s", "transport": "local",
+                           "target_host": "abc.eks.amazonaws.com", "target_port": 443},
+                          _policy(_K8S), print, lambda: False, "job-4", Dash())
+    finally:
+        agent._run_ansible_sibling, agent._resolve_all = saved
+    assert seen["pin"] == ("abc.eks.amazonaws.com", "52.1.2.3")
+    raw = seen["files"].get("opt/job/secret_vars.json")
+    assert raw is None or "db_login_host" not in _json.loads(raw)
 
 if __name__ == "__main__":
     fns = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
