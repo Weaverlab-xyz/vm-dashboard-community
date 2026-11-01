@@ -179,6 +179,16 @@ uvicorn 0.27 compares strings and understands neither hostnames nor CIDR (CIDR a
 in 0.31), so a service name or a subnet silently never matches. `docker-compose.agent.yml`
 shows the pattern — a fixed subnet and a static address on the proxy container.
 
+**The tunnel overlay is the exception, by design.** `docker-compose.ingress.yml` (with
+`docker-compose.cloudflared.yml` or `docker-compose.ngrok.yml`) runs its Caddy gateway
+and the tunnel connector inside the app container's network namespace. Every hop is
+loopback, so the `127.0.0.1` default is already correct. Don't widen it for this
+topology. Through the tunnel, the internet reaches only `/api/agent/*` and `/spiffe/*`
+via `examples/cloud-gateway/Caddyfile`, which `tests/test_agent_vhost_surface.py` checks
+against the route table. The UI is published only if `UI_HOSTNAME` is set, which should
+only be done behind edge authentication such as Cloudflare Access. See
+[docs/platform/cloud-hosting/public-ingress.md](docs/platform/cloud-hosting/public-ingress.md).
+
 Getting it wrong is **not silent**. When a forwarded header arrives from an untrusted
 peer the dashboard logs, once per peer:
 

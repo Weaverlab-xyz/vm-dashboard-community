@@ -199,6 +199,12 @@ The script:
 > `--corp-ca` so the published image trusts your proxy's CA at runtime —
 > step 5 of the same section.
 
+> **Behind NAT and planning to use remote agents?** Add `--ingress=ngrok` /
+> `--ingress=cloudflare` (bash) or `-Ingress ngrok` / `-Ingress cloudflare`
+> (PowerShell). An outbound tunnel then publishes only the agent endpoint, with no
+> inbound ports opened. Set `AGENT_HOSTNAME` and the provider token in `.env` first.
+> See [Public Ingress Through a Tunnel](platform/cloud-hosting/public-ingress.md).
+
 ### 2. Complete the setup wizard
 
 Your browser opens to the **setup wizard**. It appears automatically on

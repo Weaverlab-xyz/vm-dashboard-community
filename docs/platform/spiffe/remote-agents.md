@@ -168,8 +168,8 @@ usually different people, often at different companies.
 
 | Requirement | Details |
 |---|---|
-| TLS in front of the dashboard | Not optional. Signing gives integrity, not confidentiality. Use `docker-compose.agent.yml`. |
-| A hostname agents can resolve | Pinned as the signing *audience* on first use. Changing it later means re-enrolling. |
+| TLS in front of the dashboard | Not optional. Signing gives integrity, not confidentiality. Use `docker-compose.agent.yml`, or, behind NAT with no inbound ports, a [Cloudflare Tunnel or ngrok](../cloud-hosting/public-ingress.md) overlay. |
+| A hostname agents can resolve | Pinned as the signing *audience* on first use. Changing it later means re-enrolling, so an ngrok domain must be a static one. |
 | `remote_agents_enabled` | **Settings → Integrations → Remote Agents**, or the setup wizard. Off by default — the nav link and the whole `/api/agent` router are hidden until you turn it on. |
 | Docker on the agent host | Or any OCI runtime — Docker Engine, Docker Desktop or Podman. The image is Linux (`linux/amd64`, `linux/arm64`); on a Windows host it runs in Docker Desktop's Linux VM, which is supported and ordinary — see [Running on Windows](remote-agents/agent-host.md#running-on-windows). ~80 MB image, no privileges. |
 | Outbound 443 from the agent | One FQDN. Nothing else. |
