@@ -33,7 +33,7 @@ sys.path.insert(0, _ROOT)
 from web_dashboard.api.auth import (  # noqa: E402
     PERMISSION_LEVELS, PERMISSION_SCOPE_GROUPS, PERMISSION_SCOPE_LEVELS, PERMISSION_SCOPES,
     grouped_permission_scopes, levels_for_scope)
-from _database_src import database_source
+from _database_src import database_module_source, database_source
 
 
 def _read(*parts):
@@ -295,8 +295,7 @@ def test_the_backfill_grants_only_levels_its_scope_offers():
 def test_the_backfill_does_not_import_the_live_catalog():
     """It is a migration: it must describe what v1 did forever. Deriving it from
     PERMISSION_SCOPE_LEVELS would retroactively grant a scope added next year."""
-    src = database_source()
-    body = src.split("_BACKFILL_V1_SCOPES")[1].split("def init_db")[0]
+    body = database_module_source("rbac_backfills").split("_BACKFILL_V1_SCOPES")[1]
     assert "PERMISSION_SCOPE_LEVELS" not in body, (
         "the v1 backfill reads the live catalog — freeze the list instead")
 

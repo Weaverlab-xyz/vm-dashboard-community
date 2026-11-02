@@ -75,7 +75,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover — bare interpreter
 from web_dashboard.database import Base, Job, SessionLocal, engine  # noqa: E402
 from web_dashboard.services import agent_hypervisor_meta as ahm     # noqa: E402
 from web_dashboard.services import job_service                      # noqa: E402
-from _database_src import database_source
+from _database_src import database_module_source, database_source
 
 Base.metadata.create_all(bind=engine)
 
@@ -305,12 +305,12 @@ def test_the_backfill_runs_outside_the_advisory_locked_transaction():
     """It is data, not DDL. Run inside init_db's advisory-locked transaction it would
     hold that lock across a batched write over every hypervisor job in the table — the
     shape of the startup deadlock this tree has already had once."""
-    src = database_source()
+    src = database_module_source("bootstrap")
     call = src.index("backfill_job_checkins")
-    lock_block = src.index("Base.metadata.create_all(bind=conn)")
+    lock_block = src.index("create_all(bind=conn)")
     assert call > lock_block, "the check-in backfill moved inside the locked block"
     # Same structural marker the other two backfills carry: its own short session.
-    assert "with SessionLocal() as _checkin_db:" in src, (
+    assert "with _pkg.SessionLocal() as _checkin_db:" in src, (
         "the backfill no longer opens its own session outside the lock")
 
 

@@ -25,7 +25,7 @@ import re
 import sqlite3
 import sys
 import tempfile
-from _database_src import database_source
+from _database_src import database_module_source, database_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -282,9 +282,9 @@ def test_the_migration_applies_to_a_table_that_predates_it_and_is_idempotent():
 def test_the_seed_runs_outside_the_advisory_locked_transaction():
     """A data seed inside that transaction is the QueuePool leak that hung cold app+worker
     co-deploys, which the comments around the seed block already record."""
-    src = _read_database_py()
+    src = database_module_source("bootstrap")
     body = src.split("def init_db(", 1)[1]
-    ddl, _, after = body.partition("with SessionLocal() as _seed_db:")
+    ddl, _, after = body.partition("with _pkg.SessionLocal() as _seed_db:")
     assert after, "init_db no longer has a post-lock seed block"
     assert "role_service.seed_builtins(" in after, (
         "the role seed is not in the post-lock block")
@@ -302,8 +302,8 @@ def test_the_seed_runs_outside_the_advisory_locked_transaction():
 
 def test_the_seed_cannot_stop_the_app_booting():
     """House rule, stated in the comments beside every other seed there."""
-    src = _read_database_py()
-    after = src.split("with SessionLocal() as _seed_db:", 1)[1]
+    src = database_module_source("bootstrap")
+    after = src.split("with _pkg.SessionLocal() as _seed_db:", 1)[1]
     block = after.split("role_service.seed_builtins", 1)[0]
     assert "try:" in block.rsplit("\n", 6)[-1] or "try:" in block[-300:], (
         "the role seed is not wrapped in a try/except, so a seed failure would stop boot")
@@ -314,7 +314,7 @@ def test_the_backfill_note_names_the_third_table():
     oauth_group_mappings.default_permissions, and the BUILT-IN rows in access_roles -- whose
     definitions are frozen literals that do not track the catalog. The third is the one that
     will be missed, and it has the widest blast radius of the three."""
-    src = _read_database_py()
+    src = database_module_source("rbac_backfills")
     note = src.split("_BACKFILL_V1_MARKER", 1)[0][-2000:]
     assert "access_roles" in note, (
         "nothing beside the frozen backfill list tells the next author that a new scope "
