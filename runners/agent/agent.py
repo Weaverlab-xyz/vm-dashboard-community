@@ -4790,8 +4790,10 @@ def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict
         # The files go in BEFORE start, into the job-dir volume: the tmpfs is mounted over
         # /tmp at start, and the Engine refuses an extract anywhere but a mount on a
         # container whose rootfs is read-only — created or running, it reads HostConfig.
-        _archive_put(container, _JOB_DIR, files,
-                     owner=(_UI_ROBOT_UID, _UI_ROBOT_UID) if robot else None)
+        if robot:
+            _archive_put(container, _JOB_DIR, files, owner=(_UI_ROBOT_UID, _UI_ROBOT_UID))
+        else:
+            _archive_put(container, _JOB_DIR, files)
 
         status, start_body = _engine("POST", f"/containers/{container}/start")
         if status not in (204, 304):

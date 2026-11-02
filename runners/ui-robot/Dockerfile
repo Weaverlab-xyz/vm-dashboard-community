@@ -3,6 +3,11 @@
 # playwright version in requirements.txt or the browser build will not match.
 FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
 
+# The base image lags on OS and Python package fixes, and the image scan blocks a fixable HIGH
+# or CRITICAL. Take the distro's security updates, and a virtualenv new enough to carry its
+# fixes (the base ships 20.27.1). Both are re-evaluated on every rebuild.
+RUN apt-get update  && apt-get -y --no-install-recommends upgrade  && rm -rf /var/lib/apt/lists/*  && pip install --no-cache-dir --upgrade "virtualenv>=21.14.9"
+
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
