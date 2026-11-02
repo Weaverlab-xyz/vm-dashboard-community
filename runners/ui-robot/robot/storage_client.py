@@ -4,8 +4,13 @@ The robot never talks to S3 (or Azure, GCS, OCI) itself: it uses the chunked-upl
 documented in docs/operations/storage-management/uploading.md, so whichever backend is
 active receives the file and the container needs no cloud credentials.
 
-Auth is a dashboard personal access token, sent as a bearer header. The dashboard sets no
+Auth is a service account's OAuth access token, sent as a bearer header. A service
+account cannot use a personal access token (the dashboard refuses it at use), so the token
+comes from POST /api/oauth/token with grant_type=client_credentials. The dashboard sets no
 auth cookie, so an unauthenticated request is anonymous and will 401.
+
+This client is the standalone path. On the POV control node the design has the agent
+upload instead, with its own signed identity: docs/profiles/pov/design/ui-robot.md.
 """
 import os
 
@@ -24,6 +29,16 @@ class DashboardStorage:
         self.session = requests.Session()
         self.session.headers["Authorization"] = f"Bearer {token}"
         self.session.verify = verify
+
+    @classmethod
+    def from_client_credentials(cls, base_url: str, client_id: str, client_secret: str,
+                                verify: bool | str = True) -> "DashboardStorage":
+        resp = requests.post(f"{base_url.rstrip('/')}/api/oauth/token",
+                             data={"grant_type": "client_credentials"},
+                             auth=(client_id, client_secret), verify=verify)
+        if not resp.ok:
+            raise StorageUploadError(f"OAuth token: HTTP {resp.status_code}: {resp.text[:300]}")
+        return cls(base_url, resp.json()["access_token"], verify)
 
     def _check(self, resp: requests.Response, what: str) -> dict:
         if not resp.ok:

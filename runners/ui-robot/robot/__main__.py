@@ -29,8 +29,9 @@ def _page(p):
 
 def run_installer():
     # Fail on the cheap checks before driving a browser for ten minutes.
-    storage = DashboardStorage(env("DASHBOARD_URL"), env("DASHBOARD_TOKEN"),
-                               verify=os.environ.get("DASHBOARD_CA_BUNDLE") or True)
+    storage = DashboardStorage.from_client_credentials(
+        env("DASHBOARD_URL"), env("DASHBOARD_CLIENT_ID"), env("DASHBOARD_CLIENT_SECRET"),
+        verify=os.environ.get("DASHBOARD_CA_BUNDLE") or True)
     backend = storage.active_backend()
     print(f"Active storage backend: {backend['label']}")
     key_file = env("INSTALLER_KEY_FILE")

@@ -41,9 +41,18 @@ dashboard ── agent_ui_robot job ──▶ agent ── Docker Engine API ─
     └─────────────────────────────────┘                          Password Safe / PRA UI
 ```
 
-Rejected: a robot that holds a dashboard PAT and calls `/api/storage/upload/*` itself. That
-works (it is what the first scaffold does), but it puts a long-lived dashboard credential in
+Rejected: a robot that holds a dashboard credential and calls `/api/storage/upload/*`
+itself. That works (the standalone scaffold does it), but it puts a dashboard credential in
 a container whose whole job is to drive a browser against third-party pages.
+
+**No PAT anywhere.** Every dashboard call on the control node is the agent's own, signed with
+its enrolled identity (`signed_agent`, `api/agent.py:382`), which is the SPIFFE-attested
+identity for an agent registered that way. And a PAT would not work for a service account
+regardless: the dashboard refuses one at use (`api/auth.py:73-77`) and a service account
+authenticates with an OAuth client (`POST /api/oauth/token`, `client_credentials`). The
+standalone scaffold therefore uses a service account's client credentials. The dashboard also
+has a SPIFFE assertion path for service accounts (`services/spiffe_assertion`); this page has
+not read it, so a keyless standalone robot is not claimed.
 
 ## The pieces
 
