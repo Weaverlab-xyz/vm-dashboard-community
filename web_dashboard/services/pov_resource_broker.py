@@ -455,6 +455,18 @@ def preflight(db: Session, env: PovEnvironment) -> tuple:
             "and the run hangs until it times out.")
 
     vm = select_rb_vm(db, env)
+    # Here and not in `select_rb_vm`: `windows_targets` calls that to write the broker's
+    # policy, where a powered-off RB host must still be granted -- it will be on again.
+    #
+    # A guest that is off still has its address, so every check above passes and the run
+    # dies on the first WinRM connect as `Errno 113 Host is unreachable` with
+    # `unreachable=1`, which reads as a firewall or a wrong address.
+    state = (vm.runstate or "").strip().lower()
+    if state in ("stopped", "suspended", "paused", "halted"):
+        raise ResourceBrokerError(
+            f"{vm.name!r} is {state}, so the broker cannot reach it over WinRM and the "
+            f"install would fail as 'Host is unreachable'. Power it on, wait for Windows "
+            f"to finish booting, then refresh the POV and try again.")
     # Checked here rather than left to the bundle fetch: there it fails only once the
     # agent has leased the job, as a failed run rather than a refusal with a remedy.
     problem = login_problem(env, vm)

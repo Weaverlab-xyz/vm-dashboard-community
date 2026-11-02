@@ -452,6 +452,27 @@ def test_a_missing_zone_is_refused_with_why_it_matters():
         db.close()
 
 
+def test_a_powered_off_rb_host_is_refused_with_the_remedy():
+    """A stopped guest keeps its address, so without this the install ran, hit
+    `Errno 113 Host is unreachable` and read as a network fault."""
+    db = d.SessionLocal()
+    env, _a, vm = _ready(db)
+    for state in ("stopped", "suspended"):
+        vm.runstate = state
+        db.commit()
+        try:
+            rb.preflight(db, env)
+            raise AssertionError(f"a {state} RB host was accepted")
+        except rb.ResourceBrokerError as exc:
+            assert state in str(exc) and "Power it on" in str(exc)
+    vm.runstate = "running"
+    db.commit()
+    try:
+        assert rb.preflight(db, env)[1].id == vm.id
+    finally:
+        db.close()
+
+
 def test_a_missing_installer_key_is_refused():
     db = d.SessionLocal()
     env, _a, _v = _ready(db)
