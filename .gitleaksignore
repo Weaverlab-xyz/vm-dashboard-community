@@ -34,3 +34,8 @@ a6b5400d5534ab9c56da1b346cc8e96444fe0abf:docs/integrations/vmware.md:curl-auth-u
 # Checked 2026-10-26: a made-up kubeconfig fixture in the agent's redaction test —
 # `client-key-data` is base64 of the literal "KEYDATA12345678". No key material.
 5b470f769042a392162f576923b91fc4112a982a:tests/test_agent_k8s_run.py:generic-api-key:37
+# Checked 2026-11-02: made-up logins, TOTP seed and API key in the UI robot's unit tests
+# (tests/test_pov_ui_robot.py), written to be asserted on and then scrubbed. No real credential.
+49d3ddf1384c8e8558eb2ac8fd96238a5918c997:tests/test_pov_ui_robot.py:generic-api-key:82
+49d3ddf1384c8e8558eb2ac8fd96238a5918c997:tests/test_pov_ui_robot.py:generic-api-key:237
+49d3ddf1384c8e8558eb2ac8fd96238a5918c997:tests/test_pov_ui_robot.py:generic-api-key:278

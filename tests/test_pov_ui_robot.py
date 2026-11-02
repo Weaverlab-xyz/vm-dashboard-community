@@ -223,7 +223,9 @@ def test_the_installer_bundle_holds_ps_logins_only():
     assert bundle["PS_PASSWORD"] == "ps-pw-123456"
     assert bundle["DASHBOARD_URL"] == "https://dash.example.com"
     assert bundle["POV_ENV_ID"] == env.id
-    assert bundle["PS_URL"].startswith("https://pas.example.com")
+    from urllib.parse import urlsplit
+    assert urlsplit(bundle["PS_URL"]).hostname == "pas.example.com"
+    assert urlsplit(bundle["PS_URL"]).scheme == "https"
     assert "/BeyondTrust" not in bundle["PS_URL"]
     assert not any(k.startswith("PRA_") for k in bundle)
     assert "ps-pw-123456" in scrub and "TOTPSECRET234567" in scrub
