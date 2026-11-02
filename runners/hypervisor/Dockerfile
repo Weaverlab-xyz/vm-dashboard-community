@@ -23,7 +23,7 @@
 # Build + push:
 #   docker build -t chrweav/hypervisor-runner:latest runners/hypervisor
 #   docker push  chrweav/hypervisor-runner:latest
-FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+FROM python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159
 
 # pywinrm[kerberos] is deliberately NOT installed: Kerberos needs a system krb5 stack
 # and the dashboard's own Hyper-V integration defaults to NTLM.
