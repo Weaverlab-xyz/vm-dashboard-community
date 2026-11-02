@@ -9,7 +9,7 @@ FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
 RUN apt-get update \
  && apt-get -y --no-install-recommends upgrade \
  && rm -rf /var/lib/apt/lists/* \
- && pip install --no-cache-dir --upgrade "virtualenv>=21.14.9"
+ && pip install --no-cache-dir --break-system-packages --ignore-installed "virtualenv>=21.14.9"
 
 WORKDIR /app
 COPY requirements.txt .
