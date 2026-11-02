@@ -9,73 +9,18 @@ from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import NullPool, QueuePool
-import bcrypt as _bcrypt
 
 from ..config import settings
 from ..utils.clock import utcnow
-
-# Create database engine.
-#
-# SQLite → NullPool: connections are just file handles so pooling adds no benefit, and
-# a bounded pool is exhausted when several long-running background jobs hold sessions
-# open simultaneously (each job + each broadcast_progress call takes one slot). NullPool
-# creates and closes a fresh connection per Session, eliminating the timeout entirely.
-#
-# Postgres → QueuePool, EXPLICITLY sized. The library defaults (pool_size=5,
-# max_overflow=10 = 15 max) were adequate only while the job worker ran ONE job at a time
-# and the concurrency lived in `replicas`, each replica being its own process with its own
-# pool. jobs_worker now runs several jobs in ONE pool, and a job is not one connection:
-# _dispatch holds a session for the job's whole duration, several services open their own
-# (aws_vm_service, azure_vm_service, gcp_vm_service, oci_vm_service, packer_build_service,
-# ansible_local_run_service, vdesktop_service, image_promote_service), and every heartbeat
-# beat, every job_service.cancel_check and every streamed terraform output line via
-# api.websocket.broadcast_progress opens a transient one.
-#
-# pool_pre_ping / pool_recycle are not about concurrency and are worth having on their own:
-# Azure Postgres Flexible Server and the load balancer in front of it close idle
-# connections after minutes, and a pooled-but-dead connection surfaces as an InterfaceError
-# in the middle of a job rather than at checkout. A two-hour image-export poller is exposed
-# to that at concurrency 1.
-#
-# Budget, per PROCESS: pool_size + max_overflow. The app runs `gunicorn -w 2` → 2 pools;
-# the worker → 1 per replica. So one deployment can hold 3 x (size + overflow) — 30 at the
-# defaults — and that whole figure multiplies by the replica count. Keep it under
-# (max_connections - 20), the 20 covering the server's management sessions plus
-# superuser_reserved_connections. Verify with `SHOW max_connections;`: Azure Burstable
-# B1ms is 50, which is why the defaults are 5 + 5 and jobs_worker._limits clamps
-# concurrency to 3 there; B2s and every General Purpose tier are 429+.
-_is_sqlite = "sqlite" in settings.database_url
-
-
-def engine_url(raw: str):
-    """``raw`` with a bare ``postgresql://`` pinned to the psycopg2 driver.
-
-    psycopg2 is the driver this app ships (requirements.txt), but a URL with no driver
-    named leaves the choice to SQLAlchemy, and 2.1 changed its default to psycopg 3.
-    Every documented URL is the bare form (the compose files, the CI job, the docs), so
-    without this, upgrading SQLAlchemy fails every Postgres install at boot with
-    ``No module named 'psycopg'``. A URL that names its driver is left as it is.
-    """
-    from sqlalchemy.engine import make_url
-    url = make_url(raw)
-    if url.drivername == "postgresql":
-        url = url.set(drivername="postgresql+psycopg2")
-    return url
-
-
-_pool_kwargs = {} if _is_sqlite else {
-    "pool_size":     settings.db_pool_size,
-    "max_overflow":  settings.db_max_overflow,
-    "pool_timeout":  settings.db_pool_timeout_s,
-    "pool_pre_ping": True,
-    "pool_recycle":  settings.db_pool_recycle_s,
-}
-engine = create_engine(
-    engine_url(settings.database_url),
-    connect_args={"check_same_thread": False} if _is_sqlite else {},
-    poolclass=NullPool if _is_sqlite else QueuePool,
-    echo=False,
-    **_pool_kwargs,
+from ._engine import (  # noqa: F401  (re-exported: callers import these from web_dashboard.database)
+    Base, SessionLocal, _is_sqlite, _pool_kwargs, engine, engine_url,
+)
+from .passwords import (  # noqa: F401  (re-exported: callers import these from web_dashboard.database)
+    BCRYPT_MAX_BYTES, bcrypt_input, check_password_length, get_password_hash,
+    password_length_error, verify_password,
+)
+from .rbac import (  # noqa: F401  (re-exported: callers import these from web_dashboard.database)
+    _ROLE_UNRESOLVED, merge_permission_maps, narrow_to_token_scope,
 )
 
 # How long init_db's DDL transaction may wait for a table lock before giving up on one
@@ -95,74 +40,9 @@ def pool_capacity() -> int:
         return 0
     return settings.db_pool_size + settings.db_max_overflow
 
-# Session factory
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# Base class for models
-Base = declarative_base()
 
 
 # ========== DATABASE MODELS ==========
-
-# What `effective_permissions_dict` returns for a principal that HOLDS a role but whose
-# materialised copy of that role's map is missing (`role_id` set, `role_permissions` NULL).
-#
-# It has to be non-empty, and that is the whole point. `api/auth.has_permission` treats an
-# empty map as UNRESTRICTED -- so returning `{}` for an unresolvable role would promote that
-# user to every permission in the dashboard rather than refusing them. A map with one key
-# nobody can enforce takes the strict-allowlist branch instead and grants exactly nothing.
-#
-# The key is deliberately not a real scope: `tests/test_rbac_roles.py` asserts it is absent
-# from `PERMISSION_SCOPE_LEVELS`, so it can never grant even if some route were gated on it.
-# `api/auth.me` strips it from its response -- cosmetic, but an unexplained key in a JSON
-# body is a support call.
-#
-# Read `role_id` and never a relationship when deciding this: `api/mcp_server._validate_pat`
-# closes its session and keeps the User in a ContextVar for the whole MCP session, so that
-# instance is DETACHED. A loaded column still reads there; an unloaded relationship raises,
-# and the obvious `except: return {}` around it is the fail-open this constant exists to
-# make unwritable.
-_ROLE_UNRESOLVED = {"__role_unresolved__": []}
-
-
-def merge_permission_maps(*maps) -> dict:
-    """Union permission maps left to right. THE definition of how sources combine.
-
-    Three call sites had their own copy of this before a role made it four: this property
-    below, and twice inside `api/auth._complete_oauth_login` (a matched group's
-    `default_permissions`, and now the role that group confers). They agreed, which is the
-    only reason nobody noticed -- and a permission-merge rule that exists four times is one
-    that will eventually be four different rules, silently, in whichever direction the copy
-    someone edited happens to point.
-
-    Three kinds of value, and the asymmetry is deliberate:
-
-      ``is_admin``   OR'd. Any source granting admin grants admin.
-      a list        set-union, then sorted -- so the result is order-independent and
-                    comparable, which is what lets `reconcile` detect drift by equality.
-      anything else last write wins. Not a real case today; kept so an unexpected value
-                    survives a merge instead of vanishing, because a key that disappears
-                    here is a grant nobody can see to remove.
-
-    Earlier arguments are the lower-precedence ones for that last case. Callers pass the
-    role first, then the admin baseline, so a hand edit outranks a stored copy.
-    """
-    out: dict = {}
-    for src in maps:
-        for key, val in (src or {}).items():
-            if key == "is_admin":
-                out[key] = out.get(key, False) or bool(val)
-            elif isinstance(val, list):
-                existing = out.get(key)
-                if isinstance(existing, list):
-                    out[key] = sorted(set(existing) | set(val))
-                else:
-                    out[key] = sorted(set(val))
-            else:
-                out[key] = val
-    return out
-
-
 
 class User(Base):
     """User model for authentication and authorization"""
@@ -876,30 +756,6 @@ class RemoteAgent(Base):
     @property
     def reported_job_types_list(self) -> list:
         return _json_list(self.reported_job_types)
-
-
-def narrow_to_token_scope(perms: dict, token_scope) -> dict:
-    """Intersect a permission map with the ``scope`` an OAuth access token was issued for.
-
-    ``token_scope`` is None for every credential that carries no scope -- a human's login
-    JWT, a PAT, a workload token requested without one -- and then this is the identity.
-    Otherwise it is ``{scope: [levels]}`` from ``services/service_accounts.parse_scope``
-    and the result is the per-scope INTERSECTION: a token can only ever narrow what its
-    principal holds, never widen it.
-
-    ``is_admin`` never survives, and an intersection that leaves nothing at all answers
-    ``_ROLE_UNRESOLVED`` rather than ``{}`` -- the empty map is UNRESTRICTED, and a token
-    that asked for less must not be read as one that asked for everything.
-    """
-    if token_scope is None:
-        return perms
-    out = {}
-    for key, val in (perms or {}).items():
-        if key == "is_admin" or not isinstance(val, list):
-            continue
-        allowed = token_scope.get(key, [])
-        out[key] = [lvl for lvl in sorted(val) if lvl in allowed]
-    return out or dict(_ROLE_UNRESOLVED)
 
 
 def _json_list(raw) -> list:
@@ -5562,52 +5418,3 @@ def create_admin_user(username: str, password: str, workgroups: List[str] = None
         return user
     finally:
         db.close()
-
-
-# bcrypt only ever reads the first 72 bytes of a password. bcrypt 4 dropped the rest
-# silently; bcrypt 5 raises ValueError instead. Every stored hash of a longer password was
-# made from its first 72 bytes, so cutting there keeps those users able to sign in, and
-# keeps a long password at the login form a wrong-password answer rather than a 500.
-BCRYPT_MAX_BYTES = 72
-
-
-def password_length_error(password: str) -> str:
-    """Why ``password`` is too long to set, or ``""`` when it is fine.
-
-    For a password being SET. Verifying keeps cutting at 72 instead (bcrypt_input), so a
-    long password hashed by bcrypt 4 still works; a new one is refused rather than having
-    its tail ignored without anyone knowing. Counts bytes: é is two, an emoji four.
-    """
-    size = len((password or "").encode("utf-8"))
-    if size > BCRYPT_MAX_BYTES:
-        return (f"Passwords can be at most {BCRYPT_MAX_BYTES} bytes (bcrypt reads no "
-                f"further); this one is {size} bytes.")
-    return ""
-
-
-def check_password_length(password: str) -> str:
-    """:func:`password_length_error` as a ValueError, for callers outside a request."""
-    error = password_length_error(password)
-    if error:
-        raise ValueError(error)
-    return password
-
-
-def bcrypt_input(password: str) -> bytes:
-    """The bytes bcrypt actually hashes: the UTF-8 password, cut at 72 bytes."""
-    return password.encode("utf-8")[:BCRYPT_MAX_BYTES]
-
-
-def verify_password(plain_password: str, hashed_password: Optional[str]) -> bool:
-    """Verify password against bcrypt hash. Returns False for OAuth-only users (no hash)."""
-    if not hashed_password:
-        return False
-    return _bcrypt.checkpw(
-        bcrypt_input(plain_password),
-        hashed_password.encode("utf-8") if isinstance(hashed_password, str) else hashed_password,
-    )
-
-
-def get_password_hash(password: str) -> str:
-    """Hash a password with bcrypt"""
-    return _bcrypt.hashpw(bcrypt_input(password), _bcrypt.gensalt()).decode("utf-8")
