@@ -97,16 +97,14 @@ Per-engine tunnel resource (`beyondtrust/sra` provider, in
 | postgres | `sra_postgresql_tunnel_jump` | proxies cleartext wire protocol |
 | mysql | `sra_my_sql_tunnel_jump` | proxies cleartext wire protocol |
 | sqlserver | `sra_protocol_tunnel_jump` (`tunnel_type=mssql`) | TDS-aware; does its own backend TLS |
-| oracle | `sra_protocol_tunnel_jump` (`tunnel_type=tcp`) | raw TCP port forward to the SQL*Net listener |
-| mongodb | `sra_protocol_tunnel_jump` (`tunnel_type=tcp`) | raw TCP port forward to one `mongod` |
+| oracle | `sra_oracle_tunnel_jump` | dedicated Oracle tunnel (provider 1.5.0+, PRA 26.3) |
+| mongodb | `sra_mongodb_tunnel_jump` | dedicated MongoDB tunnel (provider 1.5.0+); optional `auth_database` needs PRA 26.3.1+ |
 
-A `tcp` tunnel is a **port forward**, not a protocol-aware tunnel: the dashboard sends
-`tunnel_definitions = "<port>;<port>"` and `tunnel_listen_address = "127.0.0.1"`, so the
-client connects to `127.0.0.1` on the database's own port, and no username or database is
-attached to the jump. PRA 26.3 adds dedicated Oracle and MongoDB tunnels (PRA already has a
-MongoDB tunnel with an **Auth Source** field); the dashboard moves to them once the
-`beyondtrust/sra` provider ships resources — its `tunnel_type` validator accepts only `tcp`
-and `mssql` today. For MongoDB, connect with `directConnection=true` (the tunnel reaches one
+Oracle and MongoDB used a raw `tcp` port forward (`sra_protocol_tunnel_jump`,
+`tunnel_type=tcp`) until `beyondtrust/sra` v1.5.0 shipped their dedicated resources; they
+now carry the admin username and database like Postgres and MySQL. Tunnels brokered before
+the switch keep their old resource in stored state and still decommission cleanly; moving
+one to the new resource is a destroy and re-broker. For MongoDB, connect with `directConnection=true` (the tunnel reaches one
 server, not the replica set's SRV name) and `tlsAllowInvalidHostnames=true` (127.0.0.1 is
 never the name on the server's certificate).
 

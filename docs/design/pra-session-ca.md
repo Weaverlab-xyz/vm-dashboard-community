@@ -413,7 +413,7 @@ excluded for now; neither is a gap to close later:
 |---|---|---|---|
 | postgres | `sra_postgresql_tunnel_jump` | **cleartext** | yes |
 | mysql | `sra_my_sql_tunnel_jump` | **cleartext** | yes |
-| mongodb | PRA has one; **no `sra` provider resource** | required by the auth mechanism | **native — the subject DN *is* the identity** |
+| mongodb | PRA has one; `sra_mongodb_tunnel_jump` (provider 1.5.0+) | required by the auth mechanism | **native — the subject DN *is* the identity** |
 | sqlserver | `sra_protocol_tunnel_jump` (`mssql`) | TDS-aware, does its own | **none — no client-cert login type** |
 | oracle | `sra_protocol_tunnel_jump` (`tcp`) | raw TCP | only via an Oracle Wallet |
 

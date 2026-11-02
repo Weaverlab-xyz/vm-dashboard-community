@@ -430,7 +430,7 @@ RUN export TF_PLUGIN_CACHE_DIR="${TF_PROVIDER_MIRROR_DIR}" \
     && rm /tmp/terraform.zip \
     && mkdir -p "${TF_PLUGIN_CACHE_DIR}" \
     && mkdir -p /tmp/tf_provider_init \
-    && printf 'terraform {\n  required_providers {\n    sra = { source = "beyondtrust/sra", version = "~> 1.0" }\n    passwordsafe = { source = "BeyondTrust/passwordsafe", version = "~> 1.0" }\n    entitle = { source = "entitleio/entitle", version = "~> 3.0" }\n    aws = { source = "hashicorp/aws", version = "~> 5.0" }\n    azurerm = { source = "hashicorp/azurerm", version = "~> 3.0" }\n    google = { source = "hashicorp/google", version = "~> 5.0" }\n    oci = { source = "oracle/oci", version = "~> 5.0" }\n    mongodbatlas = { source = "mongodb/mongodbatlas", version = "~> 2.19" }\n  }\n}\n' \
+    && printf 'terraform {\n  required_providers {\n    sra = { source = "beyondtrust/sra", version = ">= 1.5.0, < 2.0" }\n    passwordsafe = { source = "BeyondTrust/passwordsafe", version = "~> 1.0" }\n    entitle = { source = "entitleio/entitle", version = "~> 3.0" }\n    aws = { source = "hashicorp/aws", version = "~> 5.0" }\n    azurerm = { source = "hashicorp/azurerm", version = "~> 3.0" }\n    google = { source = "hashicorp/google", version = "~> 5.0" }\n    oci = { source = "oracle/oci", version = "~> 5.0" }\n    mongodbatlas = { source = "mongodb/mongodbatlas", version = "~> 2.19" }\n  }\n}\n' \
        > /tmp/tf_provider_init/main.tf \
     && for attempt in 1 2 3 4 5 6 7 8; do \
            TF_REGISTRY_CLIENT_TIMEOUT=30 terraform -chdir=/tmp/tf_provider_init init && break; \
@@ -520,7 +520,7 @@ RUN set -eu; \
         rm -rf /tmp/tfverify; mkdir -p /tmp/tfverify; cp "$dir"/*.tf /tmp/tfverify/; \
         check "$dir"; \
     done; \
-    for spec in 'beyondtrust/sra|~> 1.0' 'BeyondTrust/passwordsafe|~> 1.0' 'entitleio/entitle|~> 3.0'; do \
+    for spec in 'beyondtrust/sra|>= 1.5.0, < 2.0' 'BeyondTrust/passwordsafe|~> 1.0' 'entitleio/entitle|~> 3.0'; do \
         rm -rf /tmp/tfverify; mkdir -p /tmp/tfverify; \
         printf 'terraform {\n  required_providers {\n    p = { source = "%s", version = "%s" }\n  }\n}\n' \
             "${spec%%|*}" "${spec#*|}" > /tmp/tfverify/main.tf; \

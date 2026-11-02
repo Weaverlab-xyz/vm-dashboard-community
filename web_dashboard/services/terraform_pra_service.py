@@ -559,24 +559,27 @@ _DB_TUNNEL_RESOURCE = {
     "postgres": "sra_postgresql_tunnel_jump",
     "mysql": "sra_my_sql_tunnel_jump",   # schema-identical to the postgres jump (verified vs cached provider)
     "sqlserver": "sra_protocol_tunnel_jump",   # generic protocol tunnel; needs tunnel_type (emitted below)
-    "oracle": "sra_protocol_tunnel_jump",       # generic TCP tunnel to the SQL*Net listener
-    "mongodb": "sra_protocol_tunnel_jump",      # generic TCP tunnel to one mongod (directConnection)
+    "oracle": "sra_oracle_tunnel_jump",         # dedicated resource, sra provider >= 1.5.0
+    "mongodb": "sra_mongodb_tunnel_jump",       # dedicated resource, sra provider >= 1.5.0
 }
+# Provider constraint for the DB tunnel HCL: the oracle/mongodb resources first shipped
+# in v1.5.0.
+_DB_PROVIDER_VERSION = ">= 1.5.0, < 2.0"
+# Jobs brokered before v1.5.0 hold a generic tcp tunnel in their stored state; the
+# destroy path regenerates it under this resource type so the state address matches.
+_LEGACY_TCP_RESOURCE = "sra_protocol_tunnel_jump"
 # Several engines share the generic resource, so the resource type alone cannot name
 # the engine back — the destroy path disambiguates by the state's tunnel_type
 # (_engine_from_tunnel_state). This map only resolves the dedicated resources.
 _DB_RESOURCE_ENGINE = {v: k for k, v in _DB_TUNNEL_RESOURCE.items()
                        if v != "sra_protocol_tunnel_jump"}
 
-# tunnel_type for the GENERIC sra_protocol_tunnel_jump (the dedicated postgres/
-# mysql resources don't take one). SQL Server is TDS-aware ("mssql"). Oracle and
-# MongoDB have no PRA type the sra provider accepts yet — its validator is
-# OneOf("tcp","mssql"), see docs/notes/sra-provider-k8s-tunnel-bug.md — so they ride
-# a raw TCP tunnel. PRA 26.3 ships dedicated Oracle/MongoDB tunnels; when the
-# provider grows resources for them, THIS table and _DB_TUNNEL_RESOURCE are the
-# whole swap.
-_DB_TUNNEL_TYPE = {"sqlserver": "mssql", "oracle": "tcp", "mongodb": "tcp"}
-# Listener fallback for a tcp tunnel whose caller passed no port. A copy of the tcp
+# tunnel_type for the GENERIC sra_protocol_tunnel_jump (the dedicated resources don't
+# take one). Only SQL Server rides it now, TDS-aware ("mssql"). Oracle and MongoDB used
+# a raw "tcp" tunnel until the provider shipped their dedicated resources (v1.5.0);
+# that shape survives only for the destroy of old state (legacy_tcp).
+_DB_TUNNEL_TYPE = {"sqlserver": "mssql"}
+# Listener fallback for a LEGACY tcp tunnel whose state held no port. A copy of the tcp
 # engines' entries in cloud_database_service._DEFAULT_PORTS — this module stays
 # importable without the app (its tests stub web_dashboard.config only).
 _DB_DEFAULT_PORTS = {"oracle": 1521, "mongodb": 27017}
@@ -611,13 +614,21 @@ def _generate_db_tunnel_hcl(
     vault_username: str = "",
     vault_account_group_id: Optional[int] = None,
     port: int = 0,
+    legacy_tcp: bool = False,
+    auth_database: str = "",
 ) -> str:
     """Return the Terraform HCL for one DB protocol-tunnel jump.
 
     Required resource fields: name, hostname, jump_group_id, jumpoint_id.
     username / database are optional and emitted only when provided.
 
-    A raw ``tcp`` tunnel (Oracle, MongoDB) is a port forward, not a protocol-aware
+    Oracle and MongoDB use their dedicated resources (provider >= 1.5.0) and take
+    username/database like the other engines; ``auth_database`` (MongoDB only, PRA
+    26.3.1+) is emitted only when given.
+
+    ``legacy_tcp`` regenerates the pre-1.5.0 shape — a raw ``tcp`` tunnel on the generic
+    resource — and exists solely so the destroy of old state matches its address. A
+    raw ``tcp`` tunnel is a port forward, not a protocol-aware
     tunnel: PRA needs ``tunnel_definitions`` ("local;remote") and a loopback
     ``tunnel_listen_address`` — the same shape the k8s API tunnel uses
     (:func:`_generate_api_tunnel_hcl`) — and has no use for username/database, which
@@ -636,14 +647,15 @@ def _generate_db_tunnel_hcl(
     With ``vault_account_name=""`` the output is byte-identical to the pre-vault
     template, which the state-driven destroy path relies on.
     """
-    resource_type = _DB_TUNNEL_RESOURCE.get(engine)
+    resource_type = (_LEGACY_TCP_RESOURCE if legacy_tcp
+                     else _DB_TUNNEL_RESOURCE.get(engine))
     if not resource_type:
         raise TerraformPRAError(
             f"DB tunnel for engine {engine!r} not implemented "
             f"(supported: {', '.join(sorted(_DB_TUNNEL_RESOURCE))})"
         )
     safe_name = re.sub(r"[^a-z0-9_]", "_", name.lower())
-    tunnel_type = (_DB_TUNNEL_TYPE.get(engine, "tcp")
+    tunnel_type = (("tcp" if legacy_tcp else _DB_TUNNEL_TYPE.get(engine, "tcp"))
                    if resource_type == "sra_protocol_tunnel_jump" else "")
     extra = ""
     if tunnel_type != "tcp":
@@ -651,6 +663,8 @@ def _generate_db_tunnel_hcl(
             extra += f"  username      = {json.dumps(username)}\n"
         if database:
             extra += f"  database      = {json.dumps(database)}\n"
+        if auth_database and engine == "mongodb":
+            extra += f"  auth_database = {json.dumps(auth_database)}\n"
     # The generic sra_protocol_tunnel_jump (sqlserver / oracle / mongodb) requires an
     # explicit tunnel_type; the dedicated postgres/mysql resources don't take one.
     if tunnel_type:
@@ -710,7 +724,7 @@ terraform {{
   required_providers {{
     sra = {{
       source  = "beyondtrust/sra"
-      version = "~> 1.0"
+      version = "{_DB_PROVIDER_VERSION}"
     }}
   }}
 }}
@@ -918,6 +932,8 @@ def _remove_db_tunnel_sync(tf_state_json: str) -> None:
     instances = res.get("instances", [])
     attrs = instances[0].get("attributes", {})
     engine = _engine_from_tunnel_state(res["type"], attrs)
+    legacy_tcp = (res["type"] == _LEGACY_TCP_RESOURCE
+                  and (attrs.get("tunnel_type") or "") != "mssql")
     name     = attrs.get("name", "unknown")
     hostname = attrs.get("hostname", "")
     username = attrs.get("username", "") or ""
@@ -933,7 +949,7 @@ def _remove_db_tunnel_sync(tf_state_json: str) -> None:
         Path(work_dir, "main.tf").write_text(
             _generate_db_tunnel_hcl(engine, name, hostname, jump_group_name,
                                     jumpoint_name, username, database, tag,
-                                    port=tcp_port)
+                                    port=tcp_port, legacy_tcp=legacy_tcp)
         )
         Path(work_dir, "terraform.tfstate").write_text(tf_state_json)
         init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)

@@ -49,8 +49,8 @@ from ..utils.clock import utcnow
 logger = logging.getLogger(__name__)
 
 # Every engine here can be registered and tunnelled; which (engine, cloud) pairs can
-# also be PROVISIONED is _IMPLEMENTED. Oracle and MongoDB tunnel over the sra
-# provider's generic tcp type (terraform_pra_service._DB_TUNNEL_TYPE).
+# also be PROVISIONED is _IMPLEMENTED. Every engine tunnels over its own sra provider
+# resource (terraform_pra_service._DB_TUNNEL_RESOURCE; Oracle/MongoDB need >= 1.5.0).
 # ps_database_catalog keeps a literal copy of this set and _DEFAULT_PORTS, pinned to
 # these by test_ps_database_catalog — change both together.
 VALID_ENGINES = {"postgres", "mysql", "sqlserver", "oracle", "mongodb"}
