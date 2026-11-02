@@ -135,7 +135,7 @@ aiohttp>=3.9.0
 # SSH client (direct VM access)
 # asyncssh is used instead of paramiko because paramiko 3+ dropped DSA key support,
 # and BeyondTrust Password Safe releases DSS private keys for managed SSH accounts.
-asyncssh>=2.14.0
+asyncssh>=2.24.1
 
 # SMB / CIFS client — pure-Python, no system deps. Backs the local-storage
 # UNC option on /storage so contributors can host playbooks on a corporate
