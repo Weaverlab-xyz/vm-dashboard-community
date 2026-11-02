@@ -45,6 +45,19 @@ def database_source():
     return "\n\n".join(parts)
 
 
+def database_module_source(name):
+    """Source of ``name`` (a module of the layer, without ``.py``), or all of it for a monolith.
+
+    For a test that slices one piece's text (the backfills, ``init_db``) and must not be
+    answered by a re-export line in ``__init__.py`` that happens to mention the same name.
+    """
+    for path in database_files():
+        if os.path.splitext(os.path.basename(path))[0] == name:
+            with open(path, encoding="utf-8") as fh:
+                return fh.read()
+    return database_source()
+
+
 def database_trees():
     """``[(path, ast.Module), ...]`` for every file of the layer."""
     out = []
