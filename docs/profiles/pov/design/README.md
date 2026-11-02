@@ -2,7 +2,7 @@
 
 > **Audience:** contributor · **Profile:** `pov` · **Read this when:** you are changing one of the POV subsystems whose shape is not obvious from its code.
 
-The same kind of page as [design/](../../../design/README.md), for three POV-specific
+The same kind of page as [design/](../../../design/README.md), for four POV-specific
 subsystems. They live here rather than in `docs/design/` so that everything a POV touches
 is in one place — and, like the rest of `design/`, they are kept off the `/docs` index in
 the app, because an operator following an instruction should land on a guide.
@@ -10,6 +10,7 @@ the app, because an operator following an instruction should land on a guide.
 | Page | Read this when |
 |---|---|
 | [Password Safe Resource Broker in a POV](resource-broker.md) | you are changing how a POV installs its Password Safe Resource Broker. |
+| [The UI robot on the POV control node](ui-robot.md) | you are building or changing the browser robot that fetches the Resource Broker installer and creates the PRA to Password Safe integration. |
 | [Use cases per POV, and the accessor](use-cases.md) | you are changing the per-POV use-case checklist or who may tick it off. |
 | [The home page on a POV instance](home-page.md) | you are changing what the dashboard's landing page shows, on either profile. |
 
