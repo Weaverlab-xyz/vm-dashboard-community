@@ -21,7 +21,7 @@ file goes wherever the dashboard's active backend points (S3 on pov.weaverlab.ap
 ```bash
 docker build -t ui-robot runners/ui-robot
 docker run --rm -v "$PWD/work:/work" \
-  -e DASHBOARD_URL -e DASHBOARD_CLIENT_ID -e DASHBOARD_CLIENT_SECRET \
+  -e DASHBOARD_URL -e DASHBOARD_SPIFFE_JWT_FILE \
   -e PS_URL -e PS_USER -e PS_PASSWORD -e PS_TOTP_SECRET \
   -e INSTALLER_KEY_FILE=/work/rb_installer_key \
   ui-robot installer
@@ -29,7 +29,12 @@ docker run --rm -v "$PWD/work:/work" \
 
 `integration` additionally needs `PRA_URL`, `PRA_USER`, `PRA_PASSWORD`,
 `PRA_TOTP_SECRET` (optional), `PS_API_KEY`, `PS_RUNAS_USER`.
-`DASHBOARD_CLIENT_ID` / `DASHBOARD_CLIENT_SECRET` are a dashboard **service account's** OAuth client (a service account cannot use a PAT). On the control node the design has the agent upload instead, with no dashboard credential in the robot.
+Dashboard auth is a **service account**, never a PAT (the dashboard refuses one at use).
+Preferred: set `DASHBOARD_SPIFFE_JWT_FILE` to a JWT-SVID file whose audience is
+`<dashboard>/api/oauth/token`, and the robot stores no secret (see
+[Authenticating with a SPIFFE assertion](../../docs/profiles/pov/design/ui-robot.md#authenticating-with-a-spiffe-assertion)).
+Otherwise set `DASHBOARD_CLIENT_ID` and `DASHBOARD_CLIENT_SECRET`. `DASHBOARD_SCOPE`
+optionally narrows the token.
 Set `DASHBOARD_CA_BUNDLE` for a corporate CA and `ROBOT_HEADED=1` to watch locally.
 
 ## Recording the selectors

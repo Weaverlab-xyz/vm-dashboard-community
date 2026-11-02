@@ -6,8 +6,9 @@ active receives the file and the container needs no cloud credentials.
 
 Auth is a service account's OAuth access token, sent as a bearer header. A service
 account cannot use a personal access token (the dashboard refuses it at use), so the token
-comes from POST /api/oauth/token with grant_type=client_credentials. The dashboard sets no
-auth cookie, so an unauthenticated request is anonymous and will 401.
+comes from POST /api/oauth/token with grant_type=client_credentials, authenticated either
+by a SPIFFE JWT-SVID (the robot then stores no secret) or by a client id and secret. The
+dashboard sets no auth cookie, so an unauthenticated request is anonymous and will 401.
 
 This client is the standalone path. On the POV control node the design has the agent
 upload instead, with its own signed identity: docs/profiles/pov/design/ui-robot.md.
@@ -24,21 +25,53 @@ class StorageUploadError(RuntimeError):
 
 
 class DashboardStorage:
-    def __init__(self, base_url: str, token: str, verify: bool | str = True):
+    def __init__(self, base_url: str, token_factory, verify: bool | str = True):
+        """`token_factory()` returns a fresh access token. It is called again after a 401,
+        because a token outlives neither a slow 300 MB upload nor its own TTL."""
         self.base = base_url.rstrip("/")
+        self._token_factory = token_factory
         self.session = requests.Session()
-        self.session.headers["Authorization"] = f"Bearer {token}"
         self.session.verify = verify
+        self._refresh_token()
+
+    def _refresh_token(self) -> None:
+        self.session.headers["Authorization"] = f"Bearer {self._token_factory()}"
+
+    @staticmethod
+    def _exchange(base_url: str, data: dict, auth, verify, scope: str) -> str:
+        if scope:
+            data = {**data, "scope": scope}
+        resp = requests.post(f"{base_url.rstrip('/')}/api/oauth/token", data=data,
+                             auth=auth, verify=verify)
+        if not resp.ok:
+            raise StorageUploadError(f"OAuth token: HTTP {resp.status_code}: {resp.text[:300]}")
+        return resp.json()["access_token"]
 
     @classmethod
     def from_client_credentials(cls, base_url: str, client_id: str, client_secret: str,
-                                verify: bool | str = True) -> "DashboardStorage":
-        resp = requests.post(f"{base_url.rstrip('/')}/api/oauth/token",
-                             data={"grant_type": "client_credentials"},
-                             auth=(client_id, client_secret), verify=verify)
-        if not resp.ok:
-            raise StorageUploadError(f"OAuth token: HTTP {resp.status_code}: {resp.text[:300]}")
-        return cls(base_url, resp.json()["access_token"], verify)
+                                verify: bool | str = True, scope: str = "") -> "DashboardStorage":
+        return cls(base_url, lambda: cls._exchange(
+            base_url, {"grant_type": "client_credentials"}, (client_id, client_secret),
+            verify, scope), verify)
+
+    @classmethod
+    def from_spiffe_svid(cls, base_url: str, svid_file: str, client_id: str = "",
+                         verify: bool | str = True, scope: str = "") -> "DashboardStorage":
+        """Authenticate with a JWT-SVID read from `svid_file` (spiffe-helper keeps it
+        current). The audience must be this dashboard's /api/oauth/token. The dashboard
+        accepts each assertion once, so the file is re-read on every exchange."""
+        def factory() -> str:
+            with open(svid_file, encoding="utf-8") as fh:
+                svid = fh.read().strip()
+            if not svid:
+                raise StorageUploadError(f"{svid_file} is empty; is spiffe-helper running?")
+            data = {"grant_type": "client_credentials", "client_assertion": svid,
+                    "client_assertion_type":
+                        "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe"}
+            if client_id:
+                data["client_id"] = client_id
+            return cls._exchange(base_url, data, None, verify, scope)
+        return cls(base_url, factory, verify)
 
     def _check(self, resp: requests.Response, what: str) -> dict:
         if not resp.ok:
@@ -96,7 +129,8 @@ class DashboardStorage:
 
     def _put_part(self, n: int, chunk: bytes, headers: dict) -> dict:
         last = ""
-        for _ in range(MAX_RETRIES):
+        refreshed = False
+        for _ in range(MAX_RETRIES + 1):
             resp = self.session.put(f"{self.base}/api/storage/upload/part/{n}",
                                     data=chunk, headers=headers)
             if resp.ok:
@@ -105,6 +139,11 @@ class DashboardStorage:
                 if body.get("secret_findings"):
                     print(f"warning: secret scan flagged part {n}")
                 return {"part": body["part"], "ref": body.get("ref", "")}
+            if resp.status_code == 401 and not refreshed:
+                refreshed = True
+                self._refresh_token()
+                headers = {**headers}
+                continue
             if resp.status_code < 500:
                 break
             last = resp.text[:300]

@@ -27,11 +27,22 @@ def _page(p):
     return browser, browser.new_context(accept_downloads=True).new_page()
 
 
+def _dashboard() -> DashboardStorage:
+    """SPIFFE JWT-SVID when a file is given (no secret stored), else client credentials."""
+    url = env("DASHBOARD_URL")
+    verify = os.environ.get("DASHBOARD_CA_BUNDLE") or True
+    scope = os.environ.get("DASHBOARD_SCOPE", "")
+    svid_file = os.environ.get("DASHBOARD_SPIFFE_JWT_FILE", "")
+    if svid_file:
+        return DashboardStorage.from_spiffe_svid(
+            url, svid_file, os.environ.get("DASHBOARD_CLIENT_ID", ""), verify, scope)
+    return DashboardStorage.from_client_credentials(
+        url, env("DASHBOARD_CLIENT_ID"), env("DASHBOARD_CLIENT_SECRET"), verify, scope)
+
+
 def run_installer():
     # Fail on the cheap checks before driving a browser for ten minutes.
-    storage = DashboardStorage.from_client_credentials(
-        env("DASHBOARD_URL"), env("DASHBOARD_CLIENT_ID"), env("DASHBOARD_CLIENT_SECRET"),
-        verify=os.environ.get("DASHBOARD_CA_BUNDLE") or True)
+    storage = _dashboard()
     backend = storage.active_backend()
     print(f"Active storage backend: {backend['label']}")
     key_file = env("INSTALLER_KEY_FILE")

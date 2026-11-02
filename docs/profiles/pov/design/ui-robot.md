@@ -45,14 +45,11 @@ Rejected: a robot that holds a dashboard credential and calls `/api/storage/uplo
 itself. That works (the standalone scaffold does it), but it puts a dashboard credential in
 a container whose whole job is to drive a browser against third-party pages.
 
-**No PAT anywhere.** Every dashboard call on the control node is the agent's own, signed with
-its enrolled identity (`signed_agent`, `api/agent.py:382`), which is the SPIFFE-attested
-identity for an agent registered that way. And a PAT would not work for a service account
-regardless: the dashboard refuses one at use (`api/auth.py:73-77`) and a service account
-authenticates with an OAuth client (`POST /api/oauth/token`, `client_credentials`). The
-standalone scaffold therefore uses a service account's client credentials. The dashboard also
-has a SPIFFE assertion path for service accounts (`services/spiffe_assertion`); this page has
-not read it, so a keyless standalone robot is not claimed.
+**No PAT anywhere.** The agent's own calls are signed with its enrolled identity
+(`signed_agent`, `api/agent.py:382`). Anything else that calls the dashboard is a **service
+account**, because the dashboard refuses a PAT for one at use (`api/auth.py:73-77`). A
+service account authenticates at `POST /api/oauth/token`, and with a SPIFFE JWT-SVID it
+stores no secret at all: see [Authenticating with a SPIFFE assertion](#authenticating-with-a-spiffe-assertion).
 
 ## The pieces
 
@@ -127,6 +124,60 @@ the robot prints base64-encoded, URL-encoded or split across lines reaches Live 
 robot must therefore never echo a credential in any form, and the page's selectors file must
 never be recorded against a real password (the recorder writes what you type into its
 output).
+
+### Authenticating with a SPIFFE assertion
+
+`services/spiffe_assertion.py` lets a workload that holds a JWT-SVID exchange it for a
+short-lived dashboard token as a service account, with no stored secret
+(`api/oauth.py`, `POST /api/oauth/token`):
+
+```
+grant_type=client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-spiffe
+client_assertion=<JWT-SVID>
+```
+
+What the dashboard checks, and so what the robot's side must satisfy:
+
+| Check | Consequence for the robot |
+|---|---|
+| signature against the registered trust domain's JWT-SVID keys | the dashboard's own trust domain is registered when SPIRE is on; a Workload Lab's must be added |
+| **audience** is the dashboard's issuer URL or its `/api/oauth/token` | the robot needs its own SVID. The agent's is minted for `/api/agent/attest` and is refused here, by design |
+| lifetime at most 3600 s | SPIRE's default is 5 minutes, fine |
+| **single use**: the assertion's hash is recorded until it expires | one exchange per SVID; re-read the file for each exchange, and after a 401 |
+| `sub` names an OAuth client created with `auth_method="spiffe_jwt"` | one SPIFFE ID binds one active client, bound to one service account |
+| throttled by source address only | many failed exchanges from one NAT lock out its agents |
+
+On a control node that attests through SPIRE, `pov_broker` already starts `spire-agent`
+and `spiffe-helper`, and the helper's config (`jwt_svids = [{jwt_audience=…,
+jwt_svid_file_name="attest.jwt"}]`, `pov_broker.py`'s `_render_spire_block`) is where a
+second entry, audience `<dashboard>/api/oauth/token` and file `oauth.jwt`, would go. The
+robot container then mounts that volume read-only and `DASHBOARD_SPIFFE_JWT_FILE` points at
+the file. The standalone scaffold already does this (`DashboardStorage.from_spiffe_svid`),
+and falls back to a client id and secret when no file is given.
+
+**This changes the transport decision.** With it, the robot can call the existing
+`/api/storage/upload/*` routes and the existing Resource Broker route as a service account,
+and the [new agent upload route](#5-the-installer-reaches-storage-through-a-new-job-bound-upload-route)
+and the key-handoff route in [6](#6-the-installer-key-goes-to-the-config-store-not-the-job-result)
+are no longer needed. The trade is what the robot holds. The agent route leaves the robot
+with no dashboard credential. This one leaves it with a token that lives for the service
+account's `token_ttl_seconds`, in a container that renders third-party pages, so the service
+account must hold **only** what the robot needs (storage write, and write on the one POV
+resource), and the request should narrow it further with `scope`. Pick one deliberately.
+
+Caveats that decide whether it is usable at all:
+
+- **SPIRE has to be up on that node.** A control node that could not reach the SPIRE server
+  falls back to an Ed25519 agent (`SPIRE_WAIT_SECONDS`, `pov_broker.py`) and has no SVID, so
+  the robot could not authenticate there.
+- **The SPIFFE ID.** An SVID's SPIFFE ID comes from the SPIRE registration entry that matches
+  the workload. Whether the robot container can have its own entry, or shares the helper's,
+  is not established here, and a shared ID would make the robot's service account the
+  agent's.
+- A service account's `pov:write` must resolve against the POV (`pov_gates.require_write_on_env`
+  accepts a service account's permission; `pov_own` ownership for one was not checked).
+- A 300 MB upload outlasts a short token TTL; the scaffold re-exchanges after a 401, which
+  needs a fresh SVID from the helper in time.
 
 ### 5. The installer reaches storage through a new, job-bound upload route
 
@@ -245,4 +296,6 @@ on some of that wording.
 - That the PRA account and PRA's MFA can be driven unattended. A service account with TOTP
   is assumed; SSO is not supported.
 - That the Password Safe page exposes the zone.
+- That the SPIFFE assertion path works for the robot at all: no SVID client has been created
+  for it, and the helper has no second `jwt_svids` entry.
 - Anything about a control node that already exists (it needs a re-broker first).
