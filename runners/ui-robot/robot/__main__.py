@@ -45,7 +45,8 @@ def run_installer():
     storage = _dashboard()
     backend = storage.active_backend()
     print(f"Active storage backend: {backend['label']}")
-    key_file = env("INSTALLER_KEY_FILE")
+    env_id = os.environ.get("POV_ENV_ID", "")
+    key_file = "" if env_id else env("INSTALLER_KEY_FILE")
     with sync_playwright() as p:
         browser, page = _page(p)
         try:
@@ -54,13 +55,19 @@ def run_installer():
                 env("PS_TOTP_SECRET", required=False), env("ROBOT_DOWNLOAD_DIR"))
         finally:
             browser.close()
-    # Owner-only, never printed. The caller (or the dashboard) moves it to a secret store.
-    fd = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
-    with os.fdopen(fd, "w") as fh:
-        fh.write(key)
-    print(f"Installer key written to {key_file}")
     name = storage.upload(path)
     print(f"Uploaded {name} to the active storage backend")
+    if env_id:
+        # Straight to the POV's config store; the key is never printed or written to disk.
+        storage.stage_resource_broker(env_id, name, key)
+        print(f"Staged {name} and the installer key on POV {env_id}")
+    else:
+        # Standalone: owner-only file, never printed.
+        fd = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                     stat.S_IRUSR | stat.S_IWUSR)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(key)
+        print(f"Installer key written to {key_file}")
 
 
 def run_integration():

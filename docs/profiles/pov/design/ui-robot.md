@@ -29,27 +29,30 @@ runs and how it reaches the dashboard.
 ## The decision
 
 **The robot is a sibling container on the POV control node, started by the dashboard agent,
-and it never talks to the dashboard.** The control node already runs the agent, the Gateway
-and the Resource Broker, and the agent already starts sibling containers over the Docker
-socket (`_run_ansible_sibling`, `agent.py:4601`). The agent is the one component that holds
-a dashboard identity, so it is the one that moves data in and out.
+and it calls the dashboard as a service account that authenticates with a SPIFFE JWT-SVID.**
+The control node already runs the agent, the Gateway and the Resource Broker, and the agent
+already starts sibling containers over the Docker socket (`_run_ansible_sibling`,
+`agent.py:4601`). The agent starts and supervises the robot and hands it its logins; the
+robot talks to the dashboard's *existing* storage and POV routes for the rest.
 
 ```
 dashboard ── agent_ui_robot job ──▶ agent ── Docker Engine API ──▶ ui-robot container
-    ▲                                 │                                  │ browser
-    │  job-bound upload + result      │ archive GET (installer)          ▼
-    └─────────────────────────────────┘                          Password Safe / PRA UI
+    ▲                                                                  │        │ browser
+    │   existing /api/storage/upload/* and                             │        ▼
+    └── /api/pov/managed/{env}/resource-broker  ◀── service-account ───┘  Password Safe / PRA UI
+                                                    token (JWT-SVID)
 ```
 
-Rejected: a robot that holds a dashboard credential and calls `/api/storage/upload/*`
-itself. That works (the standalone scaffold does it), but it puts a dashboard credential in
-a container whose whole job is to drive a browser against third-party pages.
+Rejected: a new agent-authenticated upload route, so the robot would hold no dashboard
+credential at all. It was the first design here and was dropped: it is the largest piece of
+new code (a route that does not exist, a tar stream read in the agent, a key-handoff route),
+and the SPIFFE service-account path reaches the same end with routes that already exist.
+The cost is stated below, under what the robot holds.
 
-**No PAT anywhere.** The agent's own calls are signed with its enrolled identity
-(`signed_agent`, `api/agent.py:382`). Anything else that calls the dashboard is a **service
-account**, because the dashboard refuses a PAT for one at use (`api/auth.py:73-77`). A
-service account authenticates at `POST /api/oauth/token`, and with a SPIFFE JWT-SVID it
-stores no secret at all: see [Authenticating with a SPIFFE assertion](#authenticating-with-a-spiffe-assertion).
+**No PAT anywhere.** The dashboard refuses a PAT for a service account at use
+(`api/auth.py:73-77`). A service account authenticates at `POST /api/oauth/token`, and with a
+SPIFFE JWT-SVID it stores no secret at all: see
+[Authenticating with a SPIFFE assertion](#5-authenticating-with-a-spiffe-assertion).
 
 ## The pieces
 
@@ -125,7 +128,7 @@ robot must therefore never echo a credential in any form, and the page's selecto
 never be recorded against a real password (the recorder writes what you type into its
 output).
 
-### Authenticating with a SPIFFE assertion
+### 5. Authenticating with a SPIFFE assertion
 
 `services/spiffe_assertion.py` lets a workload that holds a JWT-SVID exchange it for a
 short-lived dashboard token as a service account, with no stored secret
@@ -155,15 +158,10 @@ robot container then mounts that volume read-only and `DASHBOARD_SPIFFE_JWT_FILE
 the file. The standalone scaffold already does this (`DashboardStorage.from_spiffe_svid`),
 and falls back to a client id and secret when no file is given.
 
-**This changes the transport decision.** With it, the robot can call the existing
-`/api/storage/upload/*` routes and the existing Resource Broker route as a service account,
-and the [new agent upload route](#5-the-installer-reaches-storage-through-a-new-job-bound-upload-route)
-and the key-handoff route in [6](#6-the-installer-key-goes-to-the-config-store-not-the-job-result)
-are no longer needed. The trade is what the robot holds. The agent route leaves the robot
-with no dashboard credential. This one leaves it with a token that lives for the service
-account's `token_ttl_seconds`, in a container that renders third-party pages, so the service
-account must hold **only** what the robot needs (storage write, and write on the one POV
-resource), and the request should narrow it further with `scope`. Pick one deliberately.
+**What the robot holds.** A token that lives for the service account's `token_ttl_seconds`,
+in a container that renders third-party pages. So the service account must hold **only** what
+the robot needs (storage write, and write on the one POV), and the token request should narrow
+it further with `scope`. This is the price of dropping the agent upload route.
 
 Caveats that decide whether it is usable at all:
 
@@ -178,53 +176,32 @@ Caveats that decide whether it is usable at all:
   accepts a service account's permission; `pov_own` ownership for one was not checked).
 - A 300 MB upload outlasts a short token TTL; the scaffold re-exchanges after a 401, which
   needs a fresh SVID from the helper in time.
+- A token is not scoped to one POV. The `pov:write` it holds applies to every POV the service
+  account may write, so a compromised robot could stage a key on a different POV.
 
-### 5. The installer reaches storage through a new, job-bound upload route
+### 6. What the robot sends
 
-This is the part that does not exist. **An agent cannot put a file in the dashboard's
-storage today**: results are capped at 256 KB (`MAX_RESULT_BYTES`, `agent_service.py:85`),
-the agent-brokered backend tops out near 190 KB, and the chunked upload API
-(`storage_chunked.py`, `_decode_handle(token, username)` at `:110`) belongs to a user
-session, not an agent.
+Both calls are existing routes, made with the service-account token.
 
-Add `/api/agent/jobs/{id}/upload/{begin,part/{n},commit,abort}`, the same four verbs as the
-browser lane and built on the same `storage_chunked` functions, with these differences:
+- **The installer** goes through the chunked upload lane, `/api/storage/upload/begin`,
+  `part/{n}`, `commit` and `abort` (see
+  [Uploading assets](../../../operations/storage-management/uploading.md)). It lands on
+  whichever backend is active. The wire-up hands it to the Windows VM by signed URL above
+  128 KB and the agent-brokered backend cannot do that, so the POV needs S3, Azure Blob or GCS
+  active, as today. A failed part aborts, so no staged parts keep billing.
+- **The key and the asset name** go in one call to
+  `POST /api/pov/managed/{env}/resource-broker` with `install: false`
+  (`pov_wiring.py:277`). That route stores the key at `pov/<env>/rb_installer_key` under
+  Fernet (`set_installer_key`, `pov_resource_broker.py:105`) and records the asset. **`install`
+  must be false**: its default queues a Resource Broker install as a side effect, and the
+  robot only stages. The key is sent once, never printed, never put in the job result (a
+  result is merged into the job's metadata and shown).
 
-- **Signed by the agent, and bound to the job.** The route derives who may upload, which
-  filename and how large from the *job row* and the environment — never from the request
-  body. This is how every sealed route in `api/agent.py` already works.
-- **Only while the job is `running`**, as the gateway-key route requires
-  (`statuses=("running",)`), and an abort on any failure so no staged parts keep billing.
-- **The uploader identity** passed to `storage_chunked` is the job's creator, so the
-  asset's ownership and workgroup scoping come out as if that person had uploaded it.
+The agent's job result carries only status: which task ran and whether it succeeded.
 
-The agent gets the file out of the stopped container with the Engine's
-`GET /containers/{id}/archive` and reads the tar stream with the standard library's
-`tarfile`, in 8 MiB parts. **The agent has no dependencies beyond the standard library, and
-a test enforces it**, so this cannot use a client library. The container must still exist
-when this happens: removal is in the handler's `finally`, so the upload goes before it.
-
-On commit the dashboard calls `pov_resource_broker.configure(asset=…)`, so the environment
-row names the installer and `rb_ready`'s "installer staged" condition comes true on its own.
-
-Active backend matters. The wire-up hands the installer to the Windows VM by signed URL
-above 128 KB, and the agent-brokered backend cannot do that, so the POV needs S3, Azure
-Blob or GCS active — the same requirement as today.
-
-### 6. The installer key goes to the config store, not the job result
-
-The key is small, so it would fit in the 256 KB result — and that is exactly the wrong place
-for it, because a result is merged into the job's metadata (`set_completed`) and shown. The
-agent posts it to a job-bound completion route and the dashboard calls
-`pov_resource_broker.set_installer_key` directly (`:105`), which stores it at
-`pov/<env>/rb_installer_key` under Fernet. Calling the service and not
-`POST /api/pov/managed/{env}/resource-broker` matters: that route queues a Resource Broker
-install unless the body says `install: false`, and the robot must not trigger one as a side
-effect.
-
-The **zone** is still an operator input (`rb_zone`), and `rb_ready` needs it. If the
-Password Safe page shows it, the robot could capture it, but that is a selector nobody has
-recorded; until then the preflight refuses with a message that says so.
+The **zone** is still an operator input (`rb_zone`), and `rb_ready` needs it. If the Password
+Safe page shows it, the robot could capture it, but that is a selector nobody has recorded;
+until then the preflight refuses with a message that says so.
 
 ### 7. Where it sits in the setup ladder
 
@@ -256,8 +233,9 @@ The Trivy step fails on a fixable HIGH or CRITICAL in OS or Python packages
 (`scripts/ci/trivy_image.sh`), and a browser base image is the likeliest thing to trip it.
 The first build will show.
 
-The scaffold's `storage_client.py` (a PAT-based uploader) stops being the main path. Keep it
-for running the robot by hand from a laptop, which is also how selectors get recorded.
+`storage_client.py` in the scaffold is the robot's dashboard client on the control node too,
+not just a fallback. It also serves running the robot by hand from a laptop, which is how
+selectors get recorded.
 
 ## Network reach
 
@@ -274,7 +252,8 @@ new type, and the type is disjoint from `HANDLED_TYPES`), the HostConfig-from-jo
 bootstrap fit test (`test_pov_bootstrap_fit.py` — the 16,384-character limit and the images
 list are asserted there), a preflight test in the `_ready()` fixture style of
 `test_pov_resource_broker.py`, a ladder test with the new rows added to the `_row()` fixture,
-and a test that the installer key never appears in a job's metadata.
+and a test that the installer key never appears in a job's metadata. The agent upload
+route is gone, so there is no new dashboard route to test.
 
 ## When this ships, fix the text that says it cannot
 
@@ -290,8 +269,8 @@ on some of that wording.
   PRA. None are recorded; `selectors.py` is all `TODO`.
 - That Chromium runs under the proposed HostConfig, and what its memory and `/dev/shm`
   needs are.
-- That `GET /containers/{id}/archive` streams a 300 MB file through the agent without
-  buffering it, and what that does on a small control node VM.
+- That a 300 MB upload from the control node's network to the dashboard completes within a
+  token's lifetime, and what it does to a small control node VM.
 - That each platform's network lets the container reach both tenants.
 - That the PRA account and PRA's MFA can be driven unattended. A service account with TOTP
   is assumed; SSO is not supported.

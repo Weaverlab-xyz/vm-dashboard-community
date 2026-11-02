@@ -86,6 +86,18 @@ class DashboardStorage:
                 return b
         raise StorageUploadError("No active storage backend is configured on the dashboard.")
 
+    def stage_resource_broker(self, env_id: str, asset: str, installer_key: str) -> None:
+        """Record the uploaded installer and its key on the POV.
+
+        `install` is False on purpose: the route's default queues a Resource Broker install
+        as a side effect, and this robot only stages. The key is sent once and never printed.
+        """
+        self._check(
+            self.session.post(f"{self.base}/api/pov/managed/{env_id}/resource-broker",
+                              json={"asset": asset, "installer_key": installer_key,
+                                    "install": False}),
+            "stage resource broker")
+
     def upload(self, path: str) -> str:
         """Chunked upload of `path`; returns the asset name. Aborts the upload on failure."""
         size = os.path.getsize(path)

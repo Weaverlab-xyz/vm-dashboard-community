@@ -16,6 +16,10 @@ The robot has no cloud credentials. It uses the dashboard's chunked upload API
 (`/api/storage/upload/*`, see `docs/operations/storage-management/uploading.md`), so the
 file goes wherever the dashboard's active backend points (S3 on pov.weaverlab.app).
 
+With `POV_ENV_ID` set, the robot records the installer and its key on that POV through the
+dashboard (`install: false`, so it only stages). Without it, the key goes to the file named
+by `INSTALLER_KEY_FILE`.
+
 ## Run
 
 ```bash
@@ -23,7 +27,7 @@ docker build -t ui-robot runners/ui-robot
 docker run --rm -v "$PWD/work:/work" \
   -e DASHBOARD_URL -e DASHBOARD_SPIFFE_JWT_FILE \
   -e PS_URL -e PS_USER -e PS_PASSWORD -e PS_TOTP_SECRET \
-  -e INSTALLER_KEY_FILE=/work/rb_installer_key \
+  -e POV_ENV_ID \
   ui-robot installer
 ```
 
@@ -32,7 +36,7 @@ docker run --rm -v "$PWD/work:/work" \
 Dashboard auth is a **service account**, never a PAT (the dashboard refuses one at use).
 Preferred: set `DASHBOARD_SPIFFE_JWT_FILE` to a JWT-SVID file whose audience is
 `<dashboard>/api/oauth/token`, and the robot stores no secret (see
-[Authenticating with a SPIFFE assertion](../../docs/profiles/pov/design/ui-robot.md#authenticating-with-a-spiffe-assertion)).
+[Authenticating with a SPIFFE assertion](../../docs/profiles/pov/design/ui-robot.md#5-authenticating-with-a-spiffe-assertion)).
 Otherwise set `DASHBOARD_CLIENT_ID` and `DASHBOARD_CLIENT_SECRET`. `DASHBOARD_SCOPE`
 optionally narrows the token.
 Set `DASHBOARD_CA_BUNDLE` for a corporate CA and `ROBOT_HEADED=1` to watch locally.
