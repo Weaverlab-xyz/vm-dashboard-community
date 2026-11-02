@@ -127,7 +127,7 @@ requests>=2.31.0
 pyVmomi>=9.1.1.0
 
 # Microsoft Hyper-V (WinRM remote PowerShell)
-pywinrm>=0.4.3
+pywinrm>=0.5.0
 
 # Required by Azure SDK async clients (azure-mgmt-automation.aio, azure-identity.aio)
 aiohttp>=3.9.0
