@@ -10,6 +10,8 @@ COPY robot ./robot
 
 # Downloads land here; mount a volume if you want to keep them.
 ENV ROBOT_DOWNLOAD_DIR=/work
-RUN mkdir -p /work
-USER pwuser
+# 10001 is the uid of the control node's SPIFFE helper, which owns the SVID volume the agent
+# mounts here read-only (mode 0700). /opt/job is where the agent extracts the sealed bundle.
+RUN mkdir -p /work /opt/job && chown 10001:10001 /work /opt/job
+USER 10001
 ENTRYPOINT ["python", "-m", "robot"]

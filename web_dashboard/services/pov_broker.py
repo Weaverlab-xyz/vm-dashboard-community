@@ -165,6 +165,12 @@ GATEWAY_IMAGE = "beyondtrust/sra-jumpoint:latest"
 # Resource Broker install is a WinRM run — which is exactly what this image is for.
 ANSIBLE_VM_IMAGE = "chrweav/ansible-winrm:latest"
 
+# The browser robot (design/ui-robot.md). Its job type is NOT in BROKER_JOB_TYPES: it is
+# granted, with its `ui_robot:` block and its image pull, only on a POV that has a Password
+# Safe tenant to drive, so a control node with nothing for it to do does not pull a browser.
+UI_ROBOT_IMAGE = "chrweav/ui-robot:latest"
+UI_ROBOT_JOB_TYPE = "agent_ui_robot"
+
 # The ports an RB install needs on its target. 5985 is WinRM over HTTP and 5986 over HTTPS;
 # both are named because which one a template's guest has enabled is the template's
 # choice, and a run refused for the port would read as a firewall.
@@ -503,7 +509,8 @@ def _broker_targets(db: Session, env: PovEnvironment) -> list[str]:
 # ── rendering ────────────────────────────────────────────────────────────────
 
 def render_policy(targets: list[str], ansible_targets: list[str] | None = None,
-                  ansible_ssh_targets: list[str] | None = None) -> str:
+                  ansible_ssh_targets: list[str] | None = None,
+                  ui_robot: bool = False) -> str:
     """The agent's ``policy.yaml``, generated from this POV's addresses.
 
     Generated files here are held to a higher bar than usual because **this file fails
@@ -539,6 +546,8 @@ def render_policy(targets: list[str], ansible_targets: list[str] | None = None,
         "job_types:",
     ]
     lines += [f"  - {t}" for t in BROKER_JOB_TYPES]
+    if ui_robot:
+        lines.append(f"  - {UI_ROBOT_JOB_TYPE}")
     lines += [
         "limits:",
         f"  max_hosts: {max(len(targets), 1)}",
@@ -578,6 +587,17 @@ def render_policy(targets: list[str], ansible_targets: list[str] | None = None,
         lines += [
             "  enabled: false",
             "  # No VM in this POV may have a playbook applied to it.",
+        ]
+
+    if ui_robot:
+        # The browser robot. `svid_volume` is the volume the SPIFFE helper writes `oauth.jwt`
+        # into; the agent mounts it into the robot read-only. A customer-style grant, written
+        # here and never by a job.
+        lines += [
+            "ui_robot:",
+            "  enabled: true",
+            f"  image: {UI_ROBOT_IMAGE}",
+            f"  svid_volume: {GUEST_JWT_VOLUME}",
         ]
 
     lines.append("")
@@ -655,6 +675,7 @@ def _render_spire_block(spire: dict | None, dashboard_url: str) -> str:
         return cleanup + "\n"
     s = check_spire_offer(spire)
     audience = dashboard_url.rstrip("/") + "/api/agent/attest"
+    token_audience = dashboard_url.rstrip("/") + "/api/oauth/token"
     agent_conf = (
         "agent {\n"
         '    data_dir          = "/opt/spire/data"\n'
@@ -675,7 +696,11 @@ def _render_spire_block(spire: dict | None, dashboard_url: str) -> str:
         'agent_address = "/run/spire/sockets/agent.sock"\n'
         'cert_dir = "/run/spiffe/jwt"\n'
         "daemon_mode = true\n"
-        f'jwt_svids = [{{jwt_audience="{audience}", jwt_svid_file_name="attest.jwt"}}]\n'
+        # Two SVIDs, one per audience: the agent's own, and the UI robot's, which the dashboard's
+        # token endpoint accepts and its attest endpoint does not (and the reverse). A second
+        # file for a second audience is what keeps the robot from holding the agent's token.
+        f'jwt_svids = [{{jwt_audience="{audience}", jwt_svid_file_name="attest.jwt"}}, '
+        f'{{jwt_audience="{token_audience}", jwt_svid_file_name="oauth.jwt"}}]\n'
         # Owner-writable: spiffe-helper renews with os.WriteFile, which applies the mode
         # only on create, so 0400 is written once and every renewal is refused.
         "jwt_svid_file_mode = 0600\n")
@@ -1282,10 +1307,16 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
     images = [GATEWAY_IMAGE]
     if win_targets or ssh_targets:
         images.append(ANSIBLE_VM_IMAGE)
+    # The robot follows the same rule for the same reason: it is granted, and its image is
+    # pulled, only when the POV has a Password Safe tenant for it to drive.
+    from . import pov_ui_robot
+    robot = pov_ui_robot.wanted(db, env)
+    if robot:
+        images.append(UI_ROBOT_IMAGE)
 
     payload = render_bootstrap(
         env_name=env.name, dashboard_url=dashboard_url, enroll_code=code,
-        policy_yaml=render_policy(targets, win_targets, ssh_targets),
+        policy_yaml=render_policy(targets, win_targets, ssh_targets, ui_robot=robot),
         images=tuple(images), spire=spire)
     # Fitted before the platform sees it. Skytap answers an oversized user_data with a 422
     # that names neither the payload nor its size, and the policy grows with every VM.

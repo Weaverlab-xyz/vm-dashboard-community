@@ -4,11 +4,37 @@
 
 Part of [POV design notes](README.md).
 
-**Status: a design. Nothing here is built, and none of it has been run against a live
-Password Safe, PRA or control node.** Every statement about the code was checked by reading
-it; every statement about a live system is listed under [Not verified](#not-verified). The
-code references are to the tree this page was written against, so re-check a line number
-before relying on it.
+**Status: the dashboard and agent sides are built and unit-tested; the robot's selectors
+are not recorded, the setup ladder has no row for it yet, and none of it has been run against
+a live Password Safe, PRA or control node.** What was built is in
+[What was built, and how it differs from the plan](#what-was-built-and-how-it-differs-from-the-plan);
+every statement about a live system is listed under [Not verified](#not-verified). The code
+references are to the tree this page was written against, so re-check a line number before
+relying on it.
+
+## What was built, and how it differs from the plan
+
+Built: the `agent_ui_robot` job type (`agent_ui_robot_meta.py`, an envelope branch, the version
+gate `MIN_UI_ROBOT_VERSION`), the agent handler `run_ui_robot` with its own HostConfig constant,
+SVID volume mount and job slot, the sealed `/jobs/{id}/ui-robot-bundle` route, `pov_ui_robot.py`
+(preflight, write-only logins, bundle), two POV routes
+(`PUT /api/pov/managed/{env}/ui-robot/credentials`, `POST /api/pov/managed/{env}/ui-robot`),
+the broker's `ui_robot:` policy block, image pull and second `jwt_svids` entry, and the
+`chrweav/ui-robot` publish-matrix entry. Tests: `tests/test_pov_ui_robot.py`.
+
+Where it differs from the sections below, which were written first:
+
+- **The job type is not in `BROKER_JOB_TYPES`.** It is granted, with its `ui_robot:` block and
+  its image pull, only on a POV that resolves a Password Safe tenant
+  (`pov_ui_robot.wanted`), so a control node with nothing to drive does not pull a browser.
+- **The robot reads its logins from a file** (`ROBOT_BUNDLE_FILE`, a JSON map of the robot's own
+  environment variable names), not from `Env`.
+- **The preflight does not refuse for a missing zone.** Staging the installer is useful without
+  it, and `rb_ready` still refuses the install until the zone is set.
+- **Two extra login fields**, `ps_api_key` and `ps_runas_user`, for the integration form. They
+  are separate from the tenant's own secret on purpose.
+- **Not built:** a setup-ladder row and its UI buttons (section 7), the Rebuild-time check that
+  an OAuth client exists for the control node's SPIFFE ID, and any selector.
 
 ## The problem
 
@@ -275,6 +301,9 @@ on some of that wording.
 - That the PRA account and PRA's MFA can be driven unattended. A service account with TOTP
   is assumed; SSO is not supported.
 - That the Password Safe page exposes the zone.
-- That the SPIFFE assertion path works for the robot at all: no SVID client has been created
-  for it, and the helper has no second `jwt_svids` entry.
+- That the SPIFFE assertion path works for the robot at all: the helper now writes a second
+  SVID (`oauth.jwt`), but no OAuth client has been created for the control node's SPIFFE ID, and
+  both SVIDs carry the same SPIFFE ID, so the robot's service account is bound to the agent's.
+- That the SVID volume's uid (10001, the helper's) is readable by the robot as built, and that
+  Chromium runs as that uid on a read-only root filesystem.
 - Anything about a control node that already exists (it needs a re-broker first).

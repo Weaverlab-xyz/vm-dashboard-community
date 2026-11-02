@@ -122,7 +122,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 # broker running the earlier one failed identically while reporting the same string as the
 # build that fixed it. A behaviour change the fleet cannot see is a behaviour change nobody
 # can confirm arrived, so bump this whenever the agent's behaviour moves.
-AGENT_VERSION = "2.17.0"
+AGENT_VERSION = "2.18.0"
 
 log = logging.getLogger("agent")
 
@@ -1046,6 +1046,9 @@ ANSIBLE_MAX_CONCURRENT_CEILING = 8
 # The job type that runs in the concurrent slots. Everything else runs one at a time.
 CONCURRENT_JOB_TYPE = "agent_ansible"
 
+# The browser robot's own slot (2.18), one at a time, on a worker thread.
+ROBOT_JOB_TYPE = "agent_ui_robot"
+
 
 class Policy:
     """The customer's allow-list. Fails closed, always.
@@ -1066,6 +1069,12 @@ class Policy:
     k8s_allow: list = []
     k8s_network = "bridge"
     k8s_max_runtime_minutes = 20
+    # The browser robot (2.18), off unless a `ui_robot:` block turns it on. See parse_ui_robot.
+    ui_robot_enabled = False
+    ui_robot_image_name = ""
+    ui_robot_svid_volume = ""
+    ui_robot_network = "bridge"
+    ui_robot_max_runtime_minutes = 30
 
     def __init__(self, allow: list, deny: list, job_types: set, limits: dict,
                  digest: str, connection_verbs: dict = None, sibling: dict = None,
@@ -1303,6 +1312,19 @@ class Policy:
         raise PolicyRefusal(f"policy.yaml does not allow a Kubernetes API at {ip}:{port} "
                             f"(`k8s.targets`).")
 
+    def ui_robot_image(self) -> str:
+        """The UI robot image, or raise :class:`PolicyRefusal` naming what is missing."""
+        if not self.ui_robot_enabled:
+            raise PolicyRefusal(
+                "this agent's policy.yaml does not enable the UI robot. Add a `ui_robot:` "
+                "block with `enabled: true` and the image. On a POV control node, press "
+                "Rebuild control node on the POV: the dashboard writes that file.")
+        if not self.ui_robot_image_name:
+            raise PolicyRefusal(
+                "policy.yaml enables the UI robot but names no `ui_robot.image`. Add it and "
+                "pull it; the agent will not pull an image for you.")
+        return self.ui_robot_image_name
+
     def gateway_image(self) -> str:
         """The Gateway image, or raise :class:`PolicyRefusal` naming what is missing.
 
@@ -1491,6 +1513,7 @@ class Policy:
                   ansible, ansible_allow, gateway, storage)
         pol.upgrades = parse_upgrades(doc.get("upgrades"))
         parse_k8s(pol, doc.get("k8s"), cls._parse_targets)
+        parse_ui_robot(pol, doc.get("ui_robot"))
         return pol
 
     @staticmethod
@@ -2093,6 +2116,16 @@ class Dashboard:
         kubeconfig's credentials are held for redaction before anything can emit."""
         bundle, _scrub = self._sealed_bundle(
             f"/api/agent/jobs/{job_id}/k8s-bundle", job_id, k8s_ref(host=host, port=port))
+        return bundle
+
+    def ui_robot_bundle(self, job_id: str) -> dict:
+        """Fetch an ``agent_ui_robot`` job's logins and endpoints, sealed to this agent and
+        this job. Every secret in it is held for redaction before anything can emit."""
+        bundle, _scrub = self._sealed_bundle(
+            f"/api/agent/jobs/{job_id}/ui-robot-bundle", job_id, UI_ROBOT_SEAL_REF)
+        for key, value in bundle.items():
+            if ("PASSWORD" in key or "TOTP" in key) and value:
+                self.hold_secret(str(value))
         return bundle
 
     def _sealed_bundle(self, path: str, job_id: str, ref: str) -> tuple:
@@ -4359,6 +4392,31 @@ _ANSIBLE_HOSTCONFIG = {
                   "Config": {"max-size": "16m", "max-file": "2"}},
 }
 
+# The UI robot's own HostConfig (2.18), a constant like the Ansible one and for the same
+# reason: no field of it may come from the job. A browser needs what a playbook does not:
+# shared memory (Chromium crashes on Docker's 64 MB /dev/shm default), more memory and /tmp,
+# and a read-only mount of the SPIFFE SVID volume. `Mounts` is completed per run with that
+# volume, whose NAME comes from policy.yaml and is validated at load, never from the job.
+_UI_ROBOT_MEMORY = 2 * 1024 * 1024 * 1024
+_UI_ROBOT_UID = 10001  # the SPIFFE helper's uid: the SVID volume is owned by it, mode 0700
+_UI_ROBOT_SVID_DIR = "/run/spiffe/jwt"
+_UI_ROBOT_HOSTCONFIG = {
+    "AutoRemove": False,
+    "Binds": [],
+    "Mounts": [{"Type": "volume", "Target": _JOB_DIR}],
+    "Privileged": False,
+    "CapDrop": ["ALL"],
+    "ReadonlyRootfs": True,
+    "Tmpfs": {"/tmp": "rw,nosuid,nodev,size=512m,mode=1777"},
+    "ShmSize": 1024 * 1024 * 1024,
+    "PidsLimit": 1024,
+    "Memory": _UI_ROBOT_MEMORY,
+    "MemorySwap": _UI_ROBOT_MEMORY,
+    "SecurityOpt": ["no-new-privileges:true"],
+    "LogConfig": {"Type": "json-file",
+                  "Config": {"max-size": "16m", "max-file": "2"}},
+}
+
 # What a run may have when the host can spare it. A ceiling, never a reservation.
 _ANSIBLE_CPUS = 2.0
 
@@ -4441,7 +4499,7 @@ _ANSIBLE_ENV = {
 _MAX_STREAM_LINE = 8192
 
 
-def _archive_put(container: str, dest: str, files: dict) -> None:
+def _archive_put(container: str, dest: str, files: dict, owner: Optional[tuple] = None) -> None:
     """Write ``{absolute path: bytes}`` into a created-but-not-started container as a tar.
 
     This is how the playbook, the inventory and the SSH key get in. The alternative —
@@ -4491,10 +4549,16 @@ def _archive_put(container: str, dest: str, files: dict) -> None:
                 info = tarfile.TarInfo(d)
                 info.type = tarfile.DIRTYPE
                 info.mode = 0o700
+                if owner:
+                    info.uid, info.gid = owner
                 tar.addfile(info)
             info = tarfile.TarInfo(rel)
             info.size = len(content)
             info.mode = 0o600
+            if owner:
+                # The robot runs as a non-root uid so it can read the SVID volume; a root-owned
+                # 0600 file would be unreadable to it.
+                info.uid, info.gid = owner
             tar.addfile(info, io.BytesIO(content))
     payload = blob.getvalue()
 
@@ -4600,7 +4664,8 @@ def _stream_logs(container: str, on_line, deadline: float) -> None:
 
 def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict,
                          command: str, emit, cancelled, kind: str = "ansible",
-                         pin: Optional[tuple] = None) -> int:
+                         pin: Optional[tuple] = None,
+                         timeout_s: Optional[float] = None) -> int:
     """Run one playbook in a throwaway container, streaming its output. Returns the exit code.
 
     Same guarantees as :func:`_run_sibling` — the image comes from policy, every HostConfig
@@ -4618,7 +4683,11 @@ def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict
     again, in another namespace, after the check. Re-validated here (:func:`_pin_entry`), so
     no caller can widen it into anything but one hostname mapped to one address.
     """
-    if kind == "k8s":
+    if kind == "ui_robot":
+        if not policy.ui_robot_enabled:
+            raise PolicyRefusal("this agent's policy.yaml does not enable the UI robot.")
+        network, runtime = policy.ui_robot_network, policy.ui_robot_max_runtime_minutes
+    elif kind == "k8s":
         if not policy.k8s_enabled:
             raise PolicyRefusal("this agent's policy.yaml does not enable Kubernetes work.")
         network, runtime = policy.k8s_network, policy.k8s_max_runtime_minutes
@@ -4636,9 +4705,23 @@ def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict
             "every task would fail as unreachable. Use `bridge`, or a network that can "
             "reach the target.")
 
+    robot = kind == "ui_robot"
+    if robot:
+        hostconfig = {**_UI_ROBOT_HOSTCONFIG, "NetworkMode": network,
+                      "NanoCpus": _ansible_nano_cpus()}
+        if policy.ui_robot_svid_volume:
+            hostconfig["Mounts"] = list(_UI_ROBOT_HOSTCONFIG["Mounts"]) + [
+                {"Type": "volume", "Source": policy.ui_robot_svid_volume,
+                 "Target": _UI_ROBOT_SVID_DIR, "ReadOnly": True}]
+        base_env = {"PYTHONUNBUFFERED": "1", "HOME": _JOB_DIR}
+    else:
+        hostconfig = {**_ANSIBLE_HOSTCONFIG, "NetworkMode": network,
+                      "NanoCpus": _ansible_nano_cpus(),
+                      **({"ExtraHosts": [_pin_entry(*pin)]} if pin else {})}
+        base_env = _ANSIBLE_ENV
     spec = {
         "Image": image,
-        "Env": [f"{k}={v}" for k, v in {**_ANSIBLE_ENV, **env}.items()],
+        "Env": [f"{k}={v}" for k, v in {**base_env, **env}.items()],
         # A LIST, because the Engine API's Cmd is an array of strings — a bare string is not
         # shell-parsed for you, it is taken as argv[0]. `caller` already prefixed `exec`, so
         # the container's PID 1 becomes ansible-playbook itself: without that, `sh` is PID 1
@@ -4653,9 +4736,8 @@ def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict
         "WorkingDir": _JOB_DIR,
         "Tty": False,              # the deframer's precondition, stated rather than assumed
         "Labels": {SIBLING_LABEL: "1"},
-        "HostConfig": {**_ANSIBLE_HOSTCONFIG, "NetworkMode": network,
-                       "NanoCpus": _ansible_nano_cpus(),
-                       **({"ExtraHosts": [_pin_entry(*pin)]} if pin else {})},
+        "HostConfig": hostconfig,
+        **({"User": f"{_UI_ROBOT_UID}:{_UI_ROBOT_UID}"} if robot else {}),
     }
     status, body = _engine("POST", "/containers/create", spec)
     if status == 404:
@@ -4670,6 +4752,9 @@ def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict
     container = body.get("Id")
 
     timeout = max(60.0, runtime * 60.0)
+    if timeout_s:
+        # The envelope's own limit may only SHORTEN the policy ceiling, never extend it.
+        timeout = max(60.0, min(timeout, float(timeout_s)))
     deadline = time.monotonic() + timeout
     done = threading.Event()
     killed = threading.Event()
@@ -4705,7 +4790,8 @@ def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict
         # The files go in BEFORE start, into the job-dir volume: the tmpfs is mounted over
         # /tmp at start, and the Engine refuses an extract anywhere but a mount on a
         # container whose rootfs is read-only — created or running, it reads HostConfig.
-        _archive_put(container, _JOB_DIR, files)
+        _archive_put(container, _JOB_DIR, files,
+                     owner=(_UI_ROBOT_UID, _UI_ROBOT_UID) if robot else None)
 
         status, start_body = _engine("POST", f"/containers/{container}/start")
         if status not in (204, 304):
@@ -4729,10 +4815,9 @@ def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict
 
         if expired.is_set():
             raise PolicyRefusal(
-                f"the run exceeded this agent's ceiling of "
-                f"{policy.ansible_max_runtime_minutes} minutes and was stopped. Raise "
-                f"`ansible.max_runtime_minutes` in policy.yaml if the playbook is "
-                f"legitimately this slow.")
+                f"the run exceeded its time limit of {int(timeout // 60)} minutes and was "
+                f"stopped. Raise `{'ui_robot' if robot else 'ansible'}.max_runtime_minutes` "
+                f"in policy.yaml if it is legitimately this slow.")
         if killed.is_set():
             # An operator cancel, and it RETURNS rather than raising. `execute` checks
             # `reporter.cancelled` before it looks at the result and reports "Cancelled by
@@ -4744,7 +4829,7 @@ def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict
         if code == 137 and _oom_killed(container):
             raise PolicyRefusal(
                 f"the runner was killed for exceeding its "
-                f"{_ANSIBLE_MEMORY // (1024 * 1024)} MB memory limit. That is a fixed limit "
+                f"{(_UI_ROBOT_MEMORY if robot else _ANSIBLE_MEMORY) // (1024 * 1024)} MB memory limit. That is a fixed limit "
                 f"in this agent, not a setting — a playbook this heavy should do its work "
                 f"on the target rather than on the controller.")
         if code < 0 and wait_error:
@@ -5372,6 +5457,32 @@ _K8S_SET_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\[\]\\-]{0,127}=[^\r\n]{0,10
 _K8S_TIMEOUT_RE = re.compile(r"^[0-9]{1,4}[sm]$")
 
 
+_UI_ROBOT_VOLUME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+def parse_ui_robot(policy: "Policy", value) -> None:
+    """The ``ui_robot:`` policy block. Absent leaves the robot off. A bad shape is fatal, like
+    every block here: a silently ignored key is how an operator believes a grant is narrower
+    than it is. ``svid_volume`` is a volume NAME, mounted read-only into the robot; it is
+    checked here so no path or option can ride in on it."""
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise AgentFatal("policy.yaml: `ui_robot:` must be a mapping.")
+    volume = str(value.get("svid_volume") or "")
+    if volume and not _UI_ROBOT_VOLUME.match(volume):
+        raise AgentFatal("policy.yaml: `ui_robot.svid_volume` must be a Docker volume name.")
+    try:
+        runtime = int(value.get("max_runtime_minutes") or 30)
+    except (TypeError, ValueError):
+        raise AgentFatal("policy.yaml: `ui_robot.max_runtime_minutes` must be a whole number.")
+    policy.ui_robot_enabled = bool(value.get("enabled"))
+    policy.ui_robot_image_name = str(value.get("image") or "")
+    policy.ui_robot_svid_volume = volume
+    policy.ui_robot_network = str(value.get("network") or "bridge")
+    policy.ui_robot_max_runtime_minutes = max(1, runtime)
+
+
 def parse_k8s(policy: "Policy", value, parse_targets) -> None:
     """The ``k8s:`` policy block. Absent leaves Kubernetes work off. Any bad shape is fatal:
     a silently ignored key is how an operator believes a grant is narrower than it is."""
@@ -5541,6 +5652,60 @@ def run_k8s(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
     return {"exit_code": 0, "steps": len(steps)}
 
 
+def run_ui_robot(payload: dict, policy: "Policy", emit, cancelled, job_id: str = "",
+                 dashboard=None) -> dict:
+    """Run one ``agent_ui_robot`` task in a throwaway browser container.
+
+    The order is run_k8s's: the envelope's scalars, the image from policy, audit mode
+    returning before anything is fetched, and only then the sealed bundle. The bundle (the
+    Password Safe and PRA logins) is written into the container as a FILE, never into `Env`,
+    where `docker inspect` would show it for the container's life.
+
+    The robot talks to the dashboard itself, as a SPIFFE-authenticated service account, so
+    nothing is returned here but status. A secret reaches Live Output only if the robot prints
+    it in a form other than the exact string, which redaction cannot catch; the robot never
+    echoes a credential.
+    """
+    task = str(payload.get("task") or "")
+    if task not in ("installer", "integration"):
+        raise PolicyRefusal(f"{task!r} is not a UI robot task this agent runs.")
+    try:
+        timeout_s = float(payload.get("timeout_s") or 0)
+    except (TypeError, ValueError):
+        timeout_s = 0.0
+    image = policy.ui_robot_image()
+    if MODE == "audit":
+        emit(f"AUDIT MODE: would run the UI robot task {task!r} using {image}; nothing was "
+             f"fetched and nothing was started")
+        return {"task": task, "audit": True}
+    if dashboard is None:
+        raise PolicyRefusal("no dashboard channel, so the robot's logins cannot be fetched")
+
+    bundle = dashboard.ui_robot_bundle(job_id)
+    if str(bundle.get("ROBOT_TASK") or "") != task:
+        raise PolicyRefusal("the sealed bundle is not for the task the signed job named.")
+    robot_dir = _JOB_DIR.strip("/")
+    files = {f"{robot_dir}/bundle.json": json.dumps(bundle).encode("utf-8")}
+    env = {"ROBOT_BUNDLE_FILE": f"{_JOB_DIR}/bundle.json",
+           "ROBOT_DOWNLOAD_DIR": f"{_JOB_DIR}/dl",
+           "DASHBOARD_SPIFFE_JWT_FILE": f"{_UI_ROBOT_SVID_DIR}/oauth.jwt"}
+    if cancelled():
+        raise PolicyRefusal("cancelled before the robot was started")
+
+    emit(f"running the UI robot task {task!r}")
+    code = _run_ansible_sibling(policy, image=image, files=files, env=env,
+                                command=f"exec python -m robot {task}", emit=emit,
+                                cancelled=cancelled, kind="ui_robot",
+                                timeout_s=timeout_s or None)
+    if code < 0:
+        return {"task": task, "cancelled": True}
+    if code != 0:
+        raise RunFailure(f"the UI robot task {task!r} exited {code}. The reason is in this "
+                         f"job's output.")
+    emit(f"the UI robot task {task!r} completed")
+    return {"task": task, "ok": True}
+
+
 def _shell_quote(value: str) -> str:
     """``shlex.quote`` without importing shlex — POSIX single-quote escaping.
 
@@ -5557,6 +5722,9 @@ def _shell_quote(value: str) -> str:
 # `web_dashboard/services/pov_gateway.SEAL_REF` exactly: it is part of the sealed
 # envelope's AAD, so a mismatch fails as "did not authenticate" rather than as a typo.
 GATEWAY_SEAL_REF = "pov-gateway-deploy-key"
+
+# The AAD `ref` of the UI robot's sealed bundle. Must match pov_ui_robot.SEAL_REF.
+UI_ROBOT_SEAL_REF = "pov-ui-robot-bundle"
 
 # What the Gateway container is called on this host. GENERATED, never supplied — there is
 # no field in the agent_gateway protocol through which a dashboard string could name
@@ -5948,7 +6116,8 @@ HANDLERS = {"agent_discover": run_discovery,
             "agent_ansible": run_ansible,
             "agent_gateway": run_gateway,
             "agent_storage": run_storage,
-            "agent_k8s": run_k8s}
+            "agent_k8s": run_k8s,
+            "agent_ui_robot": run_ui_robot}
 
 
 # ── Lifecycle control: upgrade and restart (agent 2.10) ──────────────────────
@@ -6641,31 +6810,39 @@ class JobSlots:
     its own and runs in order.
     """
 
-    def __init__(self, ansible: int):
+    def __init__(self, ansible: int, robot: Optional[bool] = None):
         self.ansible = max(1, int(ansible))
-        self.serial = self.ansible == 1
+        # A robot run is minutes long. With its own slot it must not hold up discovery or
+        # gateway jobs, so an agent that grants it is never serial. Read from the policy
+        # unless a caller says otherwise.
+        self.robot = bool(getattr(POLICY, "ui_robot_enabled", False)
+                          if robot is None else robot)
+        self.serial = self.ansible == 1 and not self.robot
         self.draining = False
         # Set by a control job: lease nothing new while it waits for the rest to finish.
         self.hold = False
         self._lock = threading.Condition()
-        self._running = {"ansible": 0, "other": 0}
+        self._running = {"ansible": 0, "other": 0, "robot": 0}
         self._threads: list = []
 
     def _kind(self, job_type: str) -> str:
-        return "ansible" if job_type == CONCURRENT_JOB_TYPE else "other"
+        if job_type == CONCURRENT_JOB_TYPE:
+            return "ansible"
+        return "robot" if job_type == ROBOT_JOB_TYPE else "other"
 
     def wanted(self) -> Optional[set]:
         """The job types there is a free slot for, or an empty set when there is none."""
         with self._lock:
             free_ansible = self._running["ansible"] < self.ansible
             free_other = self._running["other"] < 1
+            free_robot = self._running["robot"] < 1
         types = set(HANDLERS) & POLICY.job_types
         if getattr(POLICY, "upgrades", None):
             # Control jobs take the serial slot (and quiesce the rest themselves). Left
             # out, an agent running several jobs at once could never be upgraded.
             types |= set(CONTROL_JOB_TYPES)
-        return {t for t in types
-                if (free_ansible if self._kind(t) == "ansible" else free_other)}
+        free = {"ansible": free_ansible, "other": free_other, "robot": free_robot}
+        return {t for t in types if free[self._kind(t)]}
 
     def run(self, fn, job_type: str) -> None:
         if self.serial:
@@ -6694,7 +6871,8 @@ class JobSlots:
         deadline = time.time() + timeout
         with self._lock:
             while True:
-                others = self._running["ansible"] + max(0, self._running["other"] - 1)
+                others = (self._running["ansible"] + self._running["robot"]
+                          + max(0, self._running["other"] - 1))
                 if self.serial or others <= 0:
                     return True
                 left = deadline - time.time()

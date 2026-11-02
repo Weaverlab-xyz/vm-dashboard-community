@@ -17,7 +17,8 @@ from ..database import User, get_db
 from ..services import (bt_tenant_service, job_service, lab_platforms, pov_broker,
                         pov_entitle_agent, pov_env_service, pov_gateway, pov_guest_step,
                         pov_ot_adapter, pov_pra_ps_link, pov_ps_config,
-                        pov_resource_broker, pov_vendor_access, pov_wireup)
+                        pov_resource_broker, pov_ui_robot, pov_vendor_access,
+                        pov_wireup)
 from .auth import get_current_user
 from .pov import _POV_WRITE_OWN, _serialize, router
 
@@ -308,6 +309,62 @@ def resource_broker(env_id: str, payload: ResourceBrokerRequest,
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"job_id": job.id,
             "environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+
+class UiRobotCredentials(BaseModel):
+    """The robot's Password Safe and PRA UI logins. Write-only: nothing returns them.
+
+    A field left out is kept; a blank one clears it. These are UI accounts (an API key does
+    not log a browser in), ideally service users with only what the robot needs.
+    """
+    ps_user: str | None = None
+    ps_password: str | None = None
+    ps_totp_secret: str | None = None
+    pra_user: str | None = None
+    pra_password: str | None = None
+    pra_totp_secret: str | None = None
+    ps_api_key: str | None = None
+    ps_runas_user: str | None = None
+
+
+class UiRobotRun(BaseModel):
+    task: str
+
+
+def _ui_robot_env(db: Session, env_id: str):
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    ok, why = pov_env_service.may_act_on(env)
+    if not ok:
+        raise HTTPException(status_code=409, detail=why)
+    return env
+
+
+@router.put("/managed/{env_id}/ui-robot/credentials", dependencies=_POV_WRITE_OWN)
+def ui_robot_credentials(env_id: str, payload: UiRobotCredentials,
+                         db: Session = Depends(get_db)):
+    """Store the UI robot's logins for this POV. Returns which are set, never their values."""
+    env = _ui_robot_env(db, env_id)
+    try:
+        pov_ui_robot.set_credentials(env, payload.model_dump(exclude_none=True))
+    except pov_ui_robot.UiRobotError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"stored": pov_ui_robot.credential_state(env)}
+
+
+@router.post("/managed/{env_id}/ui-robot", status_code=202, dependencies=_POV_WRITE_OWN)
+def ui_robot_run(env_id: str, payload: UiRobotRun, db: Session = Depends(get_db),
+                 current_user: User = Depends(get_current_user)):
+    """Queue one UI robot task (``installer`` or ``integration``) on the control node."""
+    env = _ui_robot_env(db, env_id)
+    try:
+        job = pov_ui_robot.queue(db, env, task=payload.task,
+                                 created_by=getattr(current_user, "username", None))
+    except pov_ui_robot.UiRobotError as exc:
+        # 409 with the remedy passed through; every refusal is something the operator does next.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"job_id": job.id}
 
 
 class GuestStepRequest(BaseModel):

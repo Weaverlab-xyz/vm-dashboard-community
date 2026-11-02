@@ -224,6 +224,10 @@ def test_the_operator_half_is_admin_only():
     # deploy key and no playbook. What is genuinely different is the secret's lifetime — a
     # PRA deploy key is neither single-use nor short-lived — which is an argument for the
     # sealed channel it uses, not against this route.
+    # `job_ui_robot_bundle` is the fourth, with the same gates as `job_gateway_key`: a signature,
+    # `owned_job`, `statuses=("running",)`, a reply key checked before anything is read, and
+    # the POV derived from the job row. It hands out the robot's UI logins, sealed under their
+    # own AAD ref, and nothing in the body selects them.
     # attest_agent is enroll_agent's SPIRE twin: unsigned (there is no key on file yet),
     # authenticated by a single-use JWT-SVID instead of a single-use code, and off unless
     # spire_attest_enabled is set.
@@ -239,7 +243,7 @@ def test_the_operator_half_is_admin_only():
     # selects the credential; the grant does. See services/runner_credential.
     agent_half = {"enroll_agent", "attest_agent", "lease_job", "heartbeat", "push_logs",
                   "complete", "job_secret", "job_ansible_bundle", "job_gateway_key",
-                  "job_k8s_bundle", "runner_credential"}
+                  "job_k8s_bundle", "job_ui_robot_bundle", "runner_credential"}
 
     # The list above and the router each function is decorated with are two spellings of
     # the same membership, and the second one is the one that decides what the agent
