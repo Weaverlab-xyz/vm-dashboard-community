@@ -61,7 +61,7 @@ boto3==1.43.122
 # untested SDK release. (azure-mgmt-resource 26.0.0 moved ResourceManagementClient out of
 # the top-level namespace, which silently disabled the whole Azure integration on rebuild —
 # see services/azure_service.py. Bump these deliberately when adopting a new major.)
-azure-identity>=1.15.0,<2
+azure-identity>=1.27.0,<2
 azure-mgmt-compute>=30.0.0,<39
 azure-mgmt-network>=25.0.0,<31
 azure-mgmt-resource>=23.0.0,<27
