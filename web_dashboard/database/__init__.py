@@ -11,8 +11,8 @@ from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import NullPool, QueuePool
 import bcrypt as _bcrypt
 
-from .config import settings
-from .utils.clock import utcnow
+from ..config import settings
+from ..utils.clock import utcnow
 
 # Create database engine.
 #
@@ -4953,7 +4953,7 @@ def _materialise_empty_permission_maps(db) -> int:
     """
     if db.query(SchemaMarker).filter(SchemaMarker.key == _EMPTY_MEANS_NOTHING_MARKER).first():
         return 0
-    from .api.auth import LEGACY_FULL_ACCESS_KEY, full_access_map
+    from ..api.auth import LEGACY_FULL_ACCESS_KEY, full_access_map
 
     mappings = db.query(OAuthGroupMapping).all()
     groups_decide = bool(mappings) or bool(getattr(settings, "azure_oauth_group_map", None))
@@ -5041,7 +5041,7 @@ def _retire_unenforced_levels(db) -> int:
     """
     if db.query(SchemaMarker).filter(SchemaMarker.key == _RETIRE_LEVELS_MARKER).first():
         return 0
-    from .api.auth import RETIRED_LEVELS
+    from ..api.auth import RETIRED_LEVELS
 
     changed = 0
 
@@ -5254,13 +5254,13 @@ def init_db():
 
         # Which schema changes this database has already recorded (schema_migrations).
         # create_all has just made `schema_markers` if this is a new install.
-        from . import schema_migrations as _schema
+        from .. import schema_migrations as _schema
         _done = _schema.applied(conn)
 
         # The legacy statement list, frozen in schema_legacy.py: once a database records
         # _schema.LEGACY_KEY it never reads the list again, so a new schema change is a
         # Migration in schema_migrations.MIGRATIONS instead.
-        from . import schema_legacy as _legacy
+        from .. import schema_legacy as _legacy
         # Migrations that never applied because of LOCK CONTENTION rather than because
         # the column was already there. Collected rather than raised: one contended
         # statement must not stop the other ~60 from applying. Each entry is
@@ -5347,7 +5347,7 @@ def init_db():
 
 # Seed workgroups table on first boot. Imported here (not at module top)
     # to avoid a circular import: workgroup_service imports from database.
-    from .services import workgroup_service
+    from ..services import workgroup_service
     with SessionLocal() as _seed_db:
         workgroup_service.seed_if_empty(_seed_db)
         # The built-in access roles, and then a repair pass over every user's
@@ -5386,7 +5386,7 @@ def init_db():
             _logging.getLogger(__name__).warning(
                 "POV Presenter own-only narrowing skipped", exc_info=True)
         try:
-            from .services import role_service
+            from ..services import role_service
             role_service.seed_builtins(_seed_db)
             role_service.reconcile(_seed_db)
         except Exception:  # noqa: BLE001 — a seed must never stop the app booting
@@ -5416,7 +5416,7 @@ def init_db():
         # Move stored secrets onto CONFIG_ENCRYPTION_KEY when one is set (a no-op otherwise).
         # Idempotent, so two processes booting together at worst both write a valid token.
         try:
-            from .services import config_service as _cs
+            from ..services import config_service as _cs
             _cs.reencrypt_stored_secrets(_seed_db)
         except Exception:  # noqa: BLE001 — a backfill must never stop the app booting
             _seed_db.rollback()
@@ -5430,7 +5430,7 @@ def init_db():
         # session-level lock around it is the QueuePool leak that hung cold
         # app+worker co-deploys. The unique constraint arbitrates the race instead.
         try:
-            from .services import hypervisor_connection_service
+            from ..services import hypervisor_connection_service
             hypervisor_connection_service.seed_from_settings(_seed_db)
         except Exception:  # noqa: BLE001 — a seed must never stop the app booting
             import logging as _logging
@@ -5443,7 +5443,7 @@ def init_db():
         # the POV profile finds its existing tenant already registered rather than an
         # empty page and three credentials to re-enter by hand.
         try:
-            from .services import bt_tenant_service
+            from ..services import bt_tenant_service
             bt_tenant_service.seed_from_settings(_seed_db)
         except Exception:  # noqa: BLE001 — a seed must never stop the app booting
             import logging as _logging
@@ -5454,7 +5454,7 @@ def init_db():
         # here because this is the block that runs after the schema is ready and outside
         # the advisory lock.
         try:
-            from .services import feature_flag_migration
+            from ..services import feature_flag_migration
             feature_flag_migration.seed_beyondtrust_split()
         except Exception:  # noqa: BLE001 — a seed must never stop the app booting
             import logging as _logging
@@ -5464,7 +5464,7 @@ def init_db():
     # One-time: chain any pre-existing (pre-upgrade) audit rows so the whole
     # history is tamper-evident, not just entries written after this upgrade.
     # Guarded + advisory-locked inside the service; a no-op once done.
-    from .services import job_service
+    from ..services import job_service
     with SessionLocal() as _audit_db:
         try:
             n = job_service.backfill_audit_chain(_audit_db)
@@ -5498,7 +5498,7 @@ def init_db():
             # Inside the try, unlike the audit chain above: cloud_database_service pulls
             # in terraform + region_config, and a heavy import that fails must not be
             # the thing that stops the app booting either.
-            from .services import cloud_database_service as _clouddb
+            from ..services import cloud_database_service as _clouddb
             n = _clouddb.backfill_provisioned_db_names(_dbname_db)
             if n:
                 print(f"Cloud databases: backfilled {n} database name(s).")
@@ -5611,33 +5611,3 @@ def verify_password(plain_password: str, hashed_password: Optional[str]) -> bool
 def get_password_hash(password: str) -> str:
     """Hash a password with bcrypt"""
     return _bcrypt.hashpw(bcrypt_input(password), _bcrypt.gensalt()).decode("utf-8")
-
-
-# ========== CLI UTILITIES ==========
-
-if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) < 2:
-        print("Usage:")
-        print("  python database.py init                          # Initialize database")
-        print("  python database.py create-user <username> <password> [workgroups]")
-        sys.exit(1)
-
-    command = sys.argv[1]
-
-    if command == "init":
-        init_db()
-    elif command == "create-user":
-        if len(sys.argv) < 4:
-            print("Usage: python database.py create-user <username> <password> [Hydra,Weaverlab]")
-            sys.exit(1)
-
-        username = sys.argv[2]
-        password = sys.argv[3]
-        workgroups = sys.argv[4].split(",") if len(sys.argv) > 4 else None
-
-        create_admin_user(username, password, workgroups)
-    else:
-        print(f"Unknown command: {command}")
-        sys.exit(1)
