@@ -27,6 +27,7 @@ import ast
 import os
 import sys
 import types
+from _database_src import database_top_level_nodes
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -36,15 +37,14 @@ CONF = {}
 
 
 def _db_model_names():
-    """Every top-level class in web_dashboard/database.py, read via ast.
+    """Every top-level class in the database layer, read via ast.
 
     Derived, not listed. The hand-maintained version of this list carried a comment
     telling the next person to keep it in sync -- and was then missed twice anyway
     (PovEnvironment, then WorkloadCloudCredential), each time skipping this whole file
     silently. A floor assertion keeps the walk honest."""
-    with open(os.path.join(_ROOT, "web_dashboard", "database.py"), encoding="utf-8") as fh:
-        names = [n.name for n in ast.parse(fh.read()).body if isinstance(n, ast.ClassDef)]
-    assert len(names) > 30, f"only found {len(names)} models -- did database.py move?"
+    names = [n.name for n in database_top_level_nodes() if isinstance(n, ast.ClassDef)]
+    assert len(names) > 30, f"only found {len(names)} models -- did the database layer move?"
     return names
 
 

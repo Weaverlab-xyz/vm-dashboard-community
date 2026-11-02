@@ -23,6 +23,7 @@ import ast
 import os
 import re
 import sys
+from _database_src import database_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -30,7 +31,6 @@ if _ROOT not in sys.path:
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-agentcell-api")
 
 _API = os.path.join(_ROOT, "web_dashboard", "api", "agentcell.py")
-_DB = os.path.join(_ROOT, "web_dashboard", "database.py")
 
 
 def _src(path=_API):
@@ -83,7 +83,7 @@ def test_the_row_never_stores_the_raw_token():
 
 
 def test_the_model_has_no_column_that_could_hold_a_token():
-    block = _src(_DB).split("class AgentCell(Base):", 1)[1].split("\nclass ", 1)[0]
+    block = database_source().split("class AgentCell(Base):", 1)[1].split("\nclass ", 1)[0]
     cols = set(re.findall(r"^\s{4}(\w+)\s*=\s*Column", block, re.M))
     for banned in ("token", "pat", "pat_token", "secret", "raw_token"):
         assert banned not in cols, \
@@ -255,7 +255,7 @@ def test_revoke_deactivates_the_oauth_client():
 
 
 def test_the_row_records_the_client_id_not_the_secret():
-    block = _src(_DB).split("class AgentCell(Base):", 1)[1].split("\nclass ", 1)[0]
+    block = database_source().split("class AgentCell(Base):", 1)[1].split("\nclass ", 1)[0]
     assert "oauth_client_id = Column" in block
     for banned in ("client_secret", "oauth_secret"):
         assert f"{banned} = Column" not in block, f"AgentCell stores {banned}"

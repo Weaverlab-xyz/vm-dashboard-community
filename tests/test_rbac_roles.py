@@ -557,7 +557,7 @@ def test_apply_role_to_user_is_the_only_writer_of_the_role_columns():
             rel = os.path.relpath(path, _ROOT).replace(os.sep, "/")
             if rel.endswith("services/role_service.py"):
                 continue
-            if rel.endswith("web_dashboard/database.py"):
+            if rel.endswith("web_dashboard/database.py") or rel.startswith("web_dashboard/database/"):
                 # The model's own `role_permissions_dict` setter -- the column ACCESSOR that
                 # role_service is written in terms of, not a second call site. Exempting the
                 # definition is not a hole: the point of this sweep is that no OTHER module
@@ -595,10 +595,13 @@ def test_the_merge_rule_has_exactly_one_definition():
                 continue
             rel = os.path.relpath(os.path.join(dirpath, name), _ROOT).replace(os.sep, "/")
             src = open(os.path.join(dirpath, name), encoding="utf-8").read()
-            if rel.endswith("web_dashboard/database.py"):
-                # The one definition lives here. Assert it is still the only merge in the
-                # file rather than exempting the whole module.
-                assert src.count("def merge_permission_maps(") == 1, (
+            in_layer = (rel.endswith("web_dashboard/database.py")
+                        or rel.startswith("web_dashboard/database/"))
+            if in_layer and "def merge_permission_maps(" in src:
+                # The one definition lives in the database layer. Assert it is still the
+                # only merge in its file rather than exempting the whole module.
+                from _database_src import database_source
+                assert database_source().count("def merge_permission_maps(") == 1, (
                     "merge_permission_maps is defined more than once")
                 body = src.split("def merge_permission_maps(", 1)[1]
                 body = body.split("\ndef ", 1)[0]

@@ -23,13 +23,13 @@ import ast
 import os
 import re
 import sys
+from _database_src import database_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MAIN = os.path.join(_ROOT, "web_dashboard", "main.py")
 _WORKER = os.path.join(_ROOT, "web_dashboard", "jobs_worker.py")
 _REAPER = os.path.join(_ROOT, "web_dashboard", "services", "expiry_reaper.py")
 _POLICY = os.path.join(_ROOT, "web_dashboard", "services", "expiry_policy.py")
-_DB = os.path.join(_ROOT, "web_dashboard", "database.py")
 _JOBSVC = os.path.join(_ROOT, "web_dashboard", "services", "job_service.py")
 
 
@@ -200,9 +200,13 @@ def test_the_hidden_set_and_the_pruned_set_cannot_diverge():
 
 # ── advisory-lock id collision ────────────────────────────────────────────────
 
+def _lock_ids_in(text):
+    return set(re.findall(r"pg_advisory_xact_lock\((\d+)\)", text)) | set(
+        re.findall(r"_LOCK_ID\s*=\s*(\d+)", text))
+
+
 def _lock_ids(path):
-    return set(re.findall(r"pg_advisory_xact_lock\((\d+)\)", _src(path))) | set(
-        re.findall(r"_LOCK_ID\s*=\s*(\d+)", _src(path)))
+    return _lock_ids_in(_src(path))
 
 
 def test_the_enqueue_lock_id_is_unique():
@@ -211,7 +215,7 @@ def test_the_enqueue_lock_id_is_unique():
     shows up under concurrency."""
     reaper_ids = _lock_ids(_REAPER)
     assert reaper_ids, "expiry_reaper declares no advisory-lock id"
-    taken = _lock_ids(_DB) | _lock_ids(_JOBSVC)
+    taken = _lock_ids_in(database_source()) | _lock_ids(_JOBSVC)
     assert taken, "could not read the existing lock ids — the regex may have drifted"
     clash = reaper_ids & taken
     assert not clash, f"expiry_reaper reuses an advisory-lock id already in use: {clash}"

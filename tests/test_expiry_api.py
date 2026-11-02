@@ -25,6 +25,7 @@ import re
 import sys
 import types
 from datetime import datetime, timedelta
+from _database_src import database_top_level_nodes
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -34,15 +35,14 @@ CONF = {"resource_expiry_enabled": "1", "resource_expiry_max_total_hours": "720"
 
 
 def _db_model_names():
-    """Every top-level class in web_dashboard/database.py, read via ast.
+    """Every top-level class in the database layer, read via ast.
 
     Deliberately NOT a hardcoded list. The previous one named nine models while the real
     module has ~49, so the day an import in this chain reached one that wasn't listed
     (CertLab, via inventory_service) the whole file skipped and tested nothing. Deriving
     the names means a new model can never silently disable these tests."""
-    with open(os.path.join(_ROOT, "web_dashboard", "database.py"), encoding="utf-8") as fh:
-        names = [n.name for n in ast.parse(fh.read()).body if isinstance(n, ast.ClassDef)]
-    assert len(names) > 30, f"only found {len(names)} models -- did database.py move?"
+    names = [n.name for n in database_top_level_nodes() if isinstance(n, ast.ClassDef)]
+    assert len(names) > 30, f"only found {len(names)} models -- did the database layer move?"
     return names
 
 

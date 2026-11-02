@@ -10,6 +10,7 @@ Runs under pytest or standalone:  python tests/test_workload_k8s_wiring.py
 """
 import os
 import sys
+from _database_src import database_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -250,7 +251,7 @@ def test_the_model_stores_no_credential_and_no_kubeconfig():
     """The rule both sibling models state. A kubeconfig column is the specific temptation
     here: it would be a copy of the credential with no expiry and no audit trail, which is
     the artefact this whole feature exists to remove."""
-    db = _read("web_dashboard", "database.py")
+    db = database_source()
     start = db.index("class WorkloadK8sToken(Base):")
     # The next TOP-LEVEL class, anchored at column 0. Searching for a bare "class " cut the
     # slice short at the phrase "the class docstring" inside a column comment, which

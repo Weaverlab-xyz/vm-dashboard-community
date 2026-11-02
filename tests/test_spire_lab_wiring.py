@@ -11,6 +11,7 @@ Runs under pytest or standalone:  python tests/test_spire_lab_wiring.py
 import os
 import re
 import sys
+from _database_src import database_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -606,7 +607,7 @@ def test_the_new_columns_are_text_and_every_one_has_a_migration():
     via create_all -- without these, an existing install gets the model attributes and
     not the columns. Text for the refs because a bt_safe:// ref has no bounded length
     (issue #830: SQLite enforces no VARCHAR width and PostgreSQL does)."""
-    db = _read("web_dashboard", "database.py")
+    db = database_source()
     legacy = _read("web_dashboard", "schema_legacy.py")
     cls = db.split("class SpireLab(Base):")[1].split("\nclass ")[0]
     for col in ("ansible_secret_ssh_key_source", "ansible_managed_account"):

@@ -18,6 +18,7 @@ import os
 import sys
 from datetime import datetime, timedelta
 from _settings_src import settings_source
+from _database_src import database_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PATH = os.path.join(_ROOT, "web_dashboard", "services",
@@ -698,7 +699,7 @@ def test_the_boto_kwargs_path_fails_closed():
 
 
 def test_the_model_exists_with_the_documented_key():
-    src = _read("web_dashboard", "database.py")
+    src = database_source()
     assert "class WorkloadCredentialLease" in src
     assert 'workload_credential_lease' in src
     # claim_* rather than lease_*: "lease" already means the provider-issued credential.

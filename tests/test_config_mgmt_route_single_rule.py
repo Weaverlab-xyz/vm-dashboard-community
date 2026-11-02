@@ -148,7 +148,8 @@ def test_only_the_resolver_module_knows_the_route_table():
     allowed = {os.path.join("web_dashboard", "database.py"),
                os.path.join("web_dashboard", "schema_migrations.py"), _SERVICE}
     offenders = [p for p in _py_files("web_dashboard")
-                 if "ConfigMgmtRoute" in _read(p) and p not in allowed]
+                 if "ConfigMgmtRoute" in _read(p) and p not in allowed
+                 and not p.startswith(os.path.join("web_dashboard", "database") + os.sep)]
     assert not offenders, \
         f"these modules query the route table directly instead of using the resolver: {offenders}"
 

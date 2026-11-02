@@ -34,9 +34,9 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-agentcell-episode")
 
 _WORKER = os.path.join(_ROOT, "examples", "playbooks", "agent", "files", "mcp_agent.py")
 _API = os.path.join(_ROOT, "web_dashboard", "api", "agentcell.py")
-_DB = os.path.join(_ROOT, "web_dashboard", "database.py")
 
 from web_dashboard.services import agentcell_service as A  # noqa: E402
+from _database_src import database_source
 
 _JWT = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW06c2E6YXBwOmNpIn0.sigsig"
 _SOFT = "It was not possible to get a credential for Request ID: 77"
@@ -324,7 +324,7 @@ def test_the_agent_row_holds_no_credential():
     Checked on the COLUMN DECLARATIONS: the docstring explains at length why there is no
     credential column, so scanning the prose finds the words it promises the absence of.
     """
-    db = _read(_DB)
+    db = database_source()
     start = db.index("class AgentCell(Base):")
     end = db.index(chr(10) + "class ", start + 10)
     columns = [ln.strip() for ln in db[start:end].splitlines() if "= Column(" in ln]
@@ -373,7 +373,7 @@ def test_the_row_does_not_pretend_to_track_the_workers_progress():
     assert written == set(A.ROW_STATES), (
         f"the API writes {written}, which is not the set the row claims to hold — one of "
         "the two is wrong")
-    db = _read(_DB)
+    db = database_source()
     assert "the worker cannot report them back" in db or "cannot call back" in db or \
         "ROW_STATES" in db, "the column does not say why it holds only two states"
 

@@ -28,6 +28,7 @@ import os
 import re
 import sys
 from _settings_src import settings_source
+from _database_src import database_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -42,7 +43,6 @@ _POLICY = os.path.join(_SVC, "notify_policy.py")
 _TRANSPORTS = os.path.join(_SVC, "notify_transports.py")
 _SCANNER = os.path.join(_SVC, "notify_scanner.py")
 _EXPIRY_POLICY = os.path.join(_SVC, "expiry_policy.py")
-_DB = os.path.join(_ROOT, "web_dashboard", "database.py")
 _SETTINGS_HTML = os.path.join(_ROOT, "web_dashboard", "templates", "settings.html")
 _DASH_HTML = os.path.join(_ROOT, "web_dashboard", "templates", "dashboard.html")
 
@@ -281,7 +281,7 @@ def test_the_drain_path_never_touches_job_rows():
 def test_the_delivery_table_has_a_unique_dedupe_constraint():
     """This constraint — not an in-process set — is what makes an event fire once
     across two gunicorn workers and three worker replicas."""
-    src = _src(_DB)
+    src = database_source()
     assert "notification_deliveries" in src, "the deliveries table is not declared"
     assert re.search(r'UniqueConstraint\(\s*["\']dedupe_key["\']', src), (
         "notification_deliveries has no UNIQUE on dedupe_key — nothing prevents five "
