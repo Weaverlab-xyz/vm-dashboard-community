@@ -5,6 +5,7 @@
 
 All inputs are environment variables so no secret appears in `ps` or the image.
 """
+import json
 import os
 import stat
 import sys
@@ -13,6 +14,21 @@ from playwright.sync_api import sync_playwright
 
 from . import flows
 from .storage_client import DashboardStorage
+
+
+def load_bundle() -> None:
+    """Fill the environment from the sealed bundle the agent wrote, when there is one.
+
+    On a control node the agent hands logins over as a file, not as environment variables,
+    because an environment variable is visible to `docker inspect` for the container's life.
+    Anything already set explicitly wins, so running by hand is unchanged.
+    """
+    path = os.environ.get("ROBOT_BUNDLE_FILE", "")
+    if not path:
+        return
+    with open(path, encoding="utf-8") as fh:
+        for key, value in json.load(fh).items():
+            os.environ.setdefault(str(key), str(value))
 
 
 def env(name: str, required: bool = True) -> str:
@@ -88,4 +104,6 @@ COMMANDS = {"installer": run_installer, "integration": run_integration}
 if __name__ == "__main__":
     if len(sys.argv) != 2 or sys.argv[1] not in COMMANDS:
         sys.exit(f"usage: python -m robot [{'|'.join(COMMANDS)}]")
+    load_bundle()
+    os.makedirs(os.environ.get("ROBOT_DOWNLOAD_DIR", "/work"), exist_ok=True)
     COMMANDS[sys.argv[1]]()

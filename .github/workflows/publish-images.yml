@@ -104,6 +104,13 @@ jobs:
             context: runners/agent-updater
             dockerfile: runners/agent-updater/Dockerfile
             sign: true
+          # The POV control node's browser robot (agent_ui_robot): Playwright, driving the
+          # Password Safe and PRA UIs for the two steps their APIs cannot do. Pulled by the
+          # control node's bootstrap, never by the agent. Signed so a host can pin it.
+          - image: chrweav/ui-robot
+            context: runners/ui-robot
+            dockerfile: runners/ui-robot/Dockerfile
+            sign: true
     steps:
       - name: Checkout
         uses: actions/checkout@v7

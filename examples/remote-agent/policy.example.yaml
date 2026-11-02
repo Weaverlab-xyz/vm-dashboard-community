@@ -272,6 +272,27 @@ job_types:
 #   # Which Docker network the Gateway joins. Defaults to `sibling.network`, then `bridge`.
 #   # network: bridge
 
+# ── UI robot (OFF) ───────────────────────────────────────────────────────────
+# A browser (Playwright) in a throwaway sibling container, driving the Password Safe and PRA
+# web UIs for the two setup steps their APIs cannot do. Needs the Docker socket. A job says
+# only which of two tasks to run (`installer` or `integration`); the image comes from HERE.
+# The Password Safe and PRA logins arrive sealed per job and are written into the container
+# as a file, never as environment variables.
+#
+# The robot calls the dashboard itself as a SPIFFE-authenticated service account, so it
+# mounts the volume your SPIFFE helper writes `oauth.jwt` into, READ-ONLY. Leave
+# `svid_volume` out and it has no dashboard credential, which is what you want on a host that
+# only ever runs it by hand.
+#
+#   docker pull chrweav/ui-robot:latest
+#
+# ui_robot:
+#   enabled: true
+#   image: chrweav/ui-robot:latest
+#   svid_volume: dashboard_agent_spiffe_jwt
+#   # network: bridge
+#   # max_runtime_minutes: 30
+
 # ── File shares (OFF, and it needs no Docker socket) ─────────────────────────
 # Letting the dashboard use a directory or a corporate UNC share on THIS network as its
 # storage backend — the place its playbooks, scripts and inventories live. The agent does

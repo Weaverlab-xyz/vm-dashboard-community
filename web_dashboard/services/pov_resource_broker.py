@@ -607,6 +607,10 @@ def teardown(db: Session, env: PovEnvironment) -> str:
     dashboard never created, so it says so rather than pretending to reap it.
     """
     lines = []
+    # The UI robot's stored logins go with the POV. Silent: they are not part of the broker's
+    # registration, and this function's return value is built around that.
+    from . import pov_ui_robot
+    pov_ui_robot.clear_credentials(env)
     if has_installer_key(env):
         clear_installer_key(env)
         lines.append("Cleared the stored Resource Broker installer key.")

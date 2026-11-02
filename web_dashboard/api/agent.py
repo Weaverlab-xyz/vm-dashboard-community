@@ -66,6 +66,7 @@ from sqlalchemy.orm import Session
 
 from ..database import Job, RemoteAgent, User, get_db
 from ..services import (agent_ansible_bundle, agent_ansible_meta, agent_gateway_meta,
+                        agent_ui_robot_meta,
                         agent_k8s_meta,
                         agent_guard, agent_hypervisor_meta, agent_job_meta,
                         agent_assurance_service, agent_lifecycle_service,
@@ -447,6 +448,10 @@ def _envelope_payload(job_type: str, meta: dict) -> dict:
         # difference between putting a privileged container on a host and taking it away.
         # The deploy key is NOT here — it rides the sealed per-job channel.
         return agent_gateway_meta.envelope_payload(meta)
+    if job_type == "agent_ui_robot":
+        # Two scalars. The logins ride the sealed /ui-robot-bundle channel, and the image is
+        # the agent's own policy -- see agent_ui_robot_meta.
+        return agent_ui_robot_meta.envelope_payload(meta)
     if job_type in agent_lifecycle_service.CONTROL_JOB_TYPES:
         # Upgrade: repository, digest, version -- exactly what the agent checks against its
         # policy.yaml before it hands the request to its updater. Restart: nothing.
@@ -1045,6 +1050,54 @@ async def job_k8s_bundle(job_id: str, body: BundleRequest, request: Request,
     agent_service.audit(db, agent, "agent.k8s_bundle", ip=_client_ip(request),
                         details={"job_id": job.id, "cluster_id": meta.get("cluster_id") or "",
                                  "steps": meta.get("step_kinds") or []})
+    return JSONResponse(content={"sealed": envelope},
+                        headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
+
+
+@router.post("/jobs/{job_id}/ui-robot-bundle")
+async def job_ui_robot_bundle(job_id: str, body: BundleRequest, request: Request,
+                              agent: RemoteAgent = Depends(signed_agent),
+                              db: Session = Depends(get_db)):
+    """Hand an ``agent_ui_robot`` job its Password Safe / PRA logins, sealed.
+
+    :func:`job_gateway_key`'s shape, and scoped down the same way: ``running`` jobs only, the
+    reply key checked before anything is read, and the content derived from the JOB ROW and
+    never from the request, so a stolen agent identity cannot ask for another POV's logins.
+    """
+    job = _owned(db, agent, job_id, statuses=("running",))
+    _require_attested_for_release(agent)
+    if job.job_type != "agent_ui_robot":
+        raise HTTPException(status_code=409,
+                            detail="This job type does not use a UI robot bundle.")
+    try:
+        agent_sealing.check_reply_key(body.reply_key)
+    except agent_sealing.SealError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The reply key could not be used to seal a response: {exc}")
+
+    from ..services import pov_ui_robot
+    audience = _resolve_audience(request)
+    try:
+        bundle, scrub = pov_ui_robot.bundle_for_job(db, job, audience)
+    except pov_ui_robot.UiRobotError as exc:
+        # 409 with the detail passed through: it becomes the job's error_message.
+        raise HTTPException(status_code=409, detail=str(exc))
+    try:
+        envelope = agent_sealing.seal(
+            body.reply_key, json.dumps({"bundle": bundle, "scrub": scrub}),
+            agent_id=agent.id, audience=audience, job_id=job.id,
+            ref=pov_ui_robot.SEAL_REF)
+    except agent_sealing.SealError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The reply key could not be used to seal a response: {exc}")
+
+    meta = job.metadata_dict or {}
+    agent_service.audit(db, agent, "agent.ui_robot_bundle", ip=_client_ip(request),
+                        details={"job_id": job.id,
+                                 "environment_id": str(meta.get("environment_id") or ""),
+                                 "task": bundle.get("ROBOT_TASK")})
     return JSONResponse(content={"sealed": envelope},
                         headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
 
