@@ -30,6 +30,7 @@ import os
 import re
 import sys
 import types
+from _database_src import database_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -322,7 +323,7 @@ def test_windows_family_is_known_and_checked():
 
 
 def test_recipe_column_and_migration():
-    assert "recipe = Column(String(40), nullable=True)" in _read("web_dashboard", "database.py")
+    assert "recipe = Column(String(40), nullable=True)" in database_source()
     mig = _read("web_dashboard", "schema_migrations.py")
     assert 'Migration("0010_registered_image_recipe"' in mig
     assert 'add_column("registered_images", "recipe", "VARCHAR(40)")' in mig

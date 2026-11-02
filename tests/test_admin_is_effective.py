@@ -64,6 +64,8 @@ def _python_files():
 
 
 def _allowed(rel, line):
+    if rel.startswith("web_dashboard/database/"):
+        rel = "web_dashboard/database.py"  # the layer is a package; one exemption covers it
     return any(rel == path and (not frag or frag in line) for path, frag in _ALLOWED)
 
 

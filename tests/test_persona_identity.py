@@ -31,10 +31,10 @@ sys.path.insert(0, _ROOT)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-persona-identity")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _schema import build_schema  # noqa: E402
+from _database_src import database_source
 
 build_schema("persona-identity")
 
-_DB = os.path.join(_ROOT, "web_dashboard", "database.py")
 _LEGACY = os.path.join(_ROOT, "web_dashboard", "schema_legacy.py")
 _AUTH = os.path.join(_ROOT, "web_dashboard", "api", "auth.py")
 _USER_MODEL = os.path.join(_ROOT, "web_dashboard", "models", "user.py")
@@ -68,7 +68,7 @@ class _M:
 # ── the columns exist, and are separate on purpose ───────────────────────────
 
 def test_both_user_columns_exist_and_are_migrated():
-    src = _read(_DB)
+    src = database_source()
     for col in ("persona", "session_persona"):
         assert re.search(r"^    %s = Column\(String\(32\)" % col, src, re.M), \
             f"users.{col} is not a String(32) column"
@@ -77,7 +77,7 @@ def test_both_user_columns_exist_and_are_migrated():
 
 
 def test_the_group_mapping_carries_a_persona_and_a_priority():
-    src = _read(_DB)
+    src = database_source()
     block = src.split("class OAuthGroupMapping(Base)", 1)[1].split("\nclass ", 1)[0]
     assert "persona = Column(String(32)" in block
     assert "persona_priority = Column(Integer" in block
@@ -89,7 +89,7 @@ def test_the_group_mapping_carries_a_persona_and_a_priority():
 def test_the_two_user_columns_are_documented_as_separate_writers():
     """The comment is the only thing that stops the next author collapsing them into one
     column, which would reintroduce the clobber."""
-    src = _read(_DB)
+    src = database_source()
     block = src.split("    persona = Column(String(32), nullable=True)", 1)[0][-1600:]
     assert "session_persona" in block and "login" in block.lower(), \
         "the persona columns carry no note about the login overwrite"
@@ -554,7 +554,7 @@ def _method_body(src, name):
 
 
 def test_the_persona_columns_are_not_in_effective_permissions():
-    src = _read(_DB)
+    src = database_source()
     for fn in ("effective_permissions_dict", "is_effective_admin"):
         body = _method_body(src, fn)
         assert "persona" not in body, \

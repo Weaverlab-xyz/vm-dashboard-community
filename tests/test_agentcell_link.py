@@ -33,7 +33,6 @@ if _ROOT not in sys.path:
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-agentcell-link")
 
 _API = os.path.join(_ROOT, "web_dashboard", "api", "agentcell.py")
-_DB = os.path.join(_ROOT, "web_dashboard", "database.py")
 _DOC = os.path.join(_ROOT, "docs", "profiles", "demo", "agent-demo-cell.md")
 # The cell's docs are a hub and a page per demo beside it (agent-demo-cell/).
 _DOC_DIR = os.path.join(_ROOT, "docs", "profiles", "demo", "agent-demo-cell")
@@ -42,6 +41,7 @@ _TAB = os.path.join(_ROOT, "web_dashboard", "templates", "workload_lab",
                     "_agent.html")
 
 from web_dashboard.services import agentcell_service as A  # noqa: E402
+from _database_src import database_source
 
 
 def _read(path):
@@ -251,7 +251,7 @@ def test_the_other_lease_states_render():
 # -- nothing secret moves ------------------------------------------------------
 
 def test_the_row_gains_no_credential_column():
-    block = _read(_DB).split("class AgentCell(Base):", 1)[1].split("\nclass ", 1)[0]
+    block = database_source().split("class AgentCell(Base):", 1)[1].split("\nclass ", 1)[0]
     cols = set(re.findall(r"^\s{4}(\w+)\s*=\s*Column", block, re.M))
     for required in ("linked_mechanism", "linked_credential_id", "linked_at"):
         assert required in cols, f"AgentCell no longer records {required!r}"

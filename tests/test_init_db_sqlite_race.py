@@ -26,6 +26,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-init-db-race")
 from sqlalchemy.exc import OperationalError  # noqa: E402
 
 from web_dashboard import database as D  # noqa: E402
+from _database_src import database_source
 
 
 class _Conn:
@@ -107,7 +108,7 @@ def test_the_retry_is_bounded():
 
 
 def test_init_db_uses_it_on_sqlite():
-    src = open(os.path.join(_ROOT, "web_dashboard", "database.py"), encoding="utf-8").read()
+    src = database_source()
     body = src.split("def init_db():", 1)[1].split("\ndef ", 1)[0]
     assert "_create_all_sqlite(conn)" in body
     D.init_db()     # and a real fresh SQLite file still initialises

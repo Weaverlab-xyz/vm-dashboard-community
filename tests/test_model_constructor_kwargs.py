@@ -13,11 +13,11 @@ installed and cannot be broken by an unrelated import error.
 import ast
 import os
 import sys
+from _database_src import database_top_level_nodes, is_database_file
 
 _REPO_ROOT = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 _WEB = os.path.join(_REPO_ROOT, "web_dashboard")
-_DATABASE_PY = os.path.join(_WEB, "database.py")
 
 # SQLAlchemy accepts these on any declarative model regardless of columns.
 _ALWAYS_OK = {"_sa_instance_state"}
@@ -25,10 +25,8 @@ _ALWAYS_OK = {"_sa_instance_state"}
 
 def _model_columns() -> dict:
     """``{ModelName: {column_attr, ...}}`` from database.py's class bodies."""
-    with open(_DATABASE_PY, "r", encoding="utf-8") as handle:
-        tree = ast.parse(handle.read(), filename=_DATABASE_PY)
     models = {}
-    for node in tree.body:
+    for node in database_top_level_nodes():
         if not isinstance(node, ast.ClassDef):
             continue
         columns = set()
@@ -56,9 +54,11 @@ def _constructor_kwargs() -> list:
     for dirpath, dirnames, filenames in os.walk(_WEB):
         dirnames[:] = [d for d in dirnames if d not in ("__pycache__", "functions")]
         for filename in sorted(filenames):
-            if not filename.endswith(".py") or filename == "database.py":
+            if not filename.endswith(".py"):
                 continue
             full = os.path.join(dirpath, filename)
+            if is_database_file(full):
+                continue
             with open(full, "r", encoding="utf-8") as handle:
                 try:
                     tree = ast.parse(handle.read(), filename=full)

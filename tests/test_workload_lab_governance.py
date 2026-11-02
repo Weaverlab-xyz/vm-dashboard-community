@@ -34,6 +34,7 @@ Runs under pytest or standalone:  python tests/test_workload_lab_governance.py
 import os
 import re
 import sys
+from _database_src import database_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -192,7 +193,7 @@ def test_no_tab_stores_a_credential_on_its_row():
     length why there is no credential column, so scanning the prose finds the very words it
     promises the absence of.
     """
-    db = _read("web_dashboard", "database.py")
+    db = database_source()
     # AgentCell is here because it now FETCHES one: an agent can open a bounded,
     # approval-gated request against the Kubernetes tab's managed account. The row
     # records the request — id, state, timestamps — and a credential landing on it would
@@ -472,7 +473,7 @@ def test_the_cloud_tab_stores_no_credential_and_says_where_scope_lives():
     SCOPE is set by the dynamic secret rather than by the dashboard — unlike every sibling
     tab, this one cannot choose what the identity may do, and implying otherwise would be
     claiming a control it does not have."""
-    db = _read("web_dashboard", "database.py")
+    db = database_source()
     start = db.index("class WorkloadCloudCredential(Base):")
     end = db.index(chr(10) + "class ", start + 10)
     columns = [ln.strip() for ln in db[start:end].splitlines() if "= Column(" in ln]

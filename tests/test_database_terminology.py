@@ -31,6 +31,7 @@ Run: python tests/test_database_terminology.py   (or under pytest)
 import os
 import sys
 from _settings_src import settings_source
+from _database_src import database_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -148,7 +149,7 @@ def test_the_oci_heading_anchor_is_intact():
 # ── the identifier half must NOT be renamed ───────────────────────────────────
 
 def test_the_table_and_model_are_untouched():
-    src = _read(os.path.join(_ROOT, "web_dashboard", "database.py"))
+    src = database_source()
     assert '__tablename__ = "cloud_databases"' in src, "the table was renamed"
     assert "class CloudDatabase(" in src, "the ORM model was renamed"
 

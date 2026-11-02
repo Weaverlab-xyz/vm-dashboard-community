@@ -25,6 +25,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+from _database_src import database_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -71,8 +72,7 @@ _LEGACY_DDL = (
 
 
 def _read_database_py():
-    with open(os.path.join(_ROOT, "web_dashboard", "database.py"), encoding="utf-8") as fh:
-        return fh.read()
+    return database_source()
 
 
 def _migration_statements():

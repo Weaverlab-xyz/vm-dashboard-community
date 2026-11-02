@@ -21,6 +21,7 @@ import os
 import re
 import sys
 from _pov_api_src import pov_api_source
+from _database_src import database_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -80,7 +81,7 @@ def test_the_vendor_surface_is_untouched():
 
 def test_persisted_names_are_untouched():
     """Renaming one of these reads a key that was never written: a blank, not an error."""
-    db = _read(os.path.join(_ROOT, "web_dashboard", "database.py"))
+    db = database_source()
     for col in ("pra_jump_group_name", "pra_jump_group_id"):
         assert col in db, f"the {col} column was renamed"
     cfg = _read(os.path.join(_ROOT, "web_dashboard", "config.py"))

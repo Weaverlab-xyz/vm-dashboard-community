@@ -53,7 +53,6 @@ os.environ.setdefault("JWT_SECRET_KEY", "x" * 32)
 
 _API = os.path.join(_ROOT, "web_dashboard", "api", "jobs.py")
 _JOBSVC = os.path.join(_ROOT, "web_dashboard", "services", "job_service.py")
-_DB = os.path.join(_ROOT, "web_dashboard", "database.py")
 _PAGE = os.path.join(_ROOT, "web_dashboard", "templates", "jobs", "list.html")
 
 # The only legitimate reason to skip is a bare interpreter with no app deps, so probe
@@ -76,6 +75,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover — bare interpreter
 from web_dashboard.database import Base, Job, SessionLocal, engine  # noqa: E402
 from web_dashboard.services import agent_hypervisor_meta as ahm     # noqa: E402
 from web_dashboard.services import job_service                      # noqa: E402
+from _database_src import database_source
 
 Base.metadata.create_all(bind=engine)
 
@@ -305,7 +305,7 @@ def test_the_backfill_runs_outside_the_advisory_locked_transaction():
     """It is data, not DDL. Run inside init_db's advisory-locked transaction it would
     hold that lock across a batched write over every hypervisor job in the table — the
     shape of the startup deadlock this tree has already had once."""
-    src = _read(_DB)
+    src = database_source()
     call = src.index("backfill_job_checkins")
     lock_block = src.index("Base.metadata.create_all(bind=conn)")
     assert call > lock_block, "the check-in backfill moved inside the locked block"

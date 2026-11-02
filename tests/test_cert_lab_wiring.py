@@ -12,6 +12,7 @@ import os
 import re
 import sys
 from _settings_src import settings_source
+from _database_src import database_source
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -208,7 +209,7 @@ def test_the_aws_enrollment_policy_can_revoke():
 
 def test_the_path_length_rides_the_row_the_form_and_both_modules():
     svc = _read("web_dashboard", "services", "cert_lab_service.py")
-    db = _read("web_dashboard", "database.py")
+    db = database_source()
     api = _read("web_dashboard", "api", "cert_lab.py")
     page = _page("certificates")
     assert "ca_path_length = Column(Integer" in db

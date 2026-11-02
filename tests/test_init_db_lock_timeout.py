@@ -16,16 +16,12 @@ does no I/O at all. A bounded wait turns that from an outage into a skipped migr
 """
 import ast
 import pathlib
+from _database_src import database_function, database_top_level_nodes
 
-DB_PY = pathlib.Path(__file__).resolve().parents[1] / "web_dashboard" / "database.py"
 
 
 def _init_db() -> ast.FunctionDef:
-    tree = ast.parse(DB_PY.read_text(encoding="utf-8"))
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "init_db":
-            return node
-    raise AssertionError("init_db() not found in database.py")
+    return database_function("init_db")
 
 
 def _sql_literals_in_order(node: ast.AST) -> list[str]:
@@ -88,9 +84,8 @@ def test_the_lock_timeout_is_set_before_create_all_runs():
 
 
 def test_the_timeout_is_a_bounded_positive_value():
-    tree = ast.parse(DB_PY.read_text(encoding="utf-8"))
     value = None
-    for node in ast.walk(tree):
+    for node in (n for top in database_top_level_nodes() for n in ast.walk(top)):
         if isinstance(node, ast.Assign):
             for t in node.targets:
                 if isinstance(t, ast.Name) and t.id == "_DDL_LOCK_TIMEOUT_MS":
