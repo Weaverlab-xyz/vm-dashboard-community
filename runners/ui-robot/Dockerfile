@@ -4,15 +4,16 @@
 FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
 
 # The base image lags on OS and Python package fixes, and the image scan blocks a fixable HIGH
-# or CRITICAL. Take the distro's security updates, and a virtualenv new enough to carry its
-# fixes (the base ships 20.27.1). Both are re-evaluated on every rebuild.
+# or CRITICAL. Take the distro's security updates, and remove the base's virtualenv 20.27.1:
+# the robot never creates a virtualenv, and upgrading it left a copy the scan still found.
 # The distro's updated python3 ships a PEP 668 marker the base image did not have, which
 # makes every system-wide pip install refuse. This is a single-purpose image, so say so once.
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 RUN apt-get update \
  && apt-get -y --no-install-recommends upgrade \
  && rm -rf /var/lib/apt/lists/* \
- && pip install --no-cache-dir --ignore-installed "virtualenv>=21.14.9"
+ && find / -xdev \( -name 'virtualenv' -o -name 'virtualenv-*.dist-info' \) -path '*-packages/*' \
+      -prune -exec rm -rf {} +
 
 WORKDIR /app
 COPY requirements.txt .
