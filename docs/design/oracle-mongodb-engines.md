@@ -14,12 +14,11 @@ stays out of Password Safe: its users change only through the Atlas Admin API. *
 makes both Configuration Management targets: `python-oracledb` + `pymongo` +
 `community.mongodb` in the runner image, Mongo-only connection vars (`db_auth_source`,
 `db_tls`, `db_replica_set` — the Atlas module now outputs the replica set) and three
-samples. All five slices are in; what remains is live validation, the dedicated PRA 26.3
-tunnels once the provider ships them, and the private-IP custom plugin.
+samples. All five slices are in, and the dedicated Oracle/MongoDB tunnels landed with `sra` v1.5.0
+(2026-11-02); what remains is live validation and the private-IP custom plugin.
 
-Re-checked 2026-10-07: `beyondtrust/sra` **v1.4.0** (2026-09-25, the latest) still validates
-`tunnel_type` as `OneOf("tcp", "mssql")`, and nothing on its `main` mentions MongoDB or
-Oracle. Oracle on Azure / GCP (Oracle Database@Azure,
+`beyondtrust/sra` **v1.5.0** adds `sra_oracle_tunnel_jump` and `sra_mongodb_tunnel_jump`
+(v1.4.0 still validated `tunnel_type` as `OneOf("tcp", "mssql")`). Oracle on Azure / GCP (Oracle Database@Azure,
 Oracle Database@Google Cloud, Autonomous tier) is deferred.
 
 ## Why
@@ -49,7 +48,7 @@ MongoDB was absent everywhere.
   A dedicated Oracle or MongoDB tunnel type is therefore blocked **in the provider**, not
   in PRA. The dashboard brokers DB tunnels with the provider only, never `btapi`, so it
   waits for the provider.
-* Until then, both engines use `tunnel_type = "tcp"` with
+* Before v1.5.0, both engines used `tunnel_type = "tcp"` with
   `tunnel_definitions = "<port>;<port>"` and `tunnel_listen_address = "127.0.0.1"`. That
   is the same shape as the k8s API tunnel, which is proven live. No username or database
   goes on a tcp jump.
@@ -102,11 +101,15 @@ native path to the plugin path whenever its platform is configured (a
 `clouddb_ps_platform_<cloud>_oracle` key), and the plugin's address grammar gets a validator
 in `ps_resource_service` beside the others. Until then `_PS_NATIVE_ENGINES` is the only route.
 
-## Where the swap happens when the provider ships
+## The swap (done, provider v1.5.0)
 
-`terraform_pra_service._DB_TUNNEL_RESOURCE` and `_DB_TUNNEL_TYPE` are the whole change on
-the generation side. An existing tcp tunnel lives in its job's stored state as an
-`sra_protocol_tunnel_jump`, and the destroy path regenerates it from that state
-(`_engine_from_tunnel_state`, `tunnel_definitions`). Old rows therefore keep
-decommissioning cleanly; moving them to the new resource is a destroy + re-broker, not a
-state move.
+`terraform_pra_service._DB_TUNNEL_RESOURCE` now maps oracle/mongodb to the dedicated
+resources, and the HCL pins `>= 1.5.0, < 2.0` (the Dockerfile provider cache too). An
+existing tcp tunnel lives in its job's stored state as an `sra_protocol_tunnel_jump`, and
+the destroy path regenerates it from that state with `legacy_tcp=True` so the address
+matches. Old rows therefore keep decommissioning cleanly; moving them to the new resource
+is a destroy + re-broker, not a state move.
+
+Not yet threaded: MongoDB `auth_database` (the generator supports it; the appliance falls
+back to `database`, then `admin`). Unverified live: whether the dedicated tunnels change
+client TLS behaviour versus the old raw forward (Oracle Autonomous uses `tcps`).
