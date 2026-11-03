@@ -505,20 +505,6 @@ def test_a_new_host_starts_the_newest_release_by_digest():
     raise AssertionError("a shell-shaped image was accepted")
 
 
-if __name__ == "__main__":
-    fns = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
-    failures = 0
-    for fn in fns:
-        try:
-            fn()
-            print(f"ok   {fn.__name__}")
-        except Exception as e:  # noqa: BLE001
-            failures += 1
-            print(f"FAIL {fn.__name__}: {e!r}")
-    print(f"\n{len(fns) - failures}/{len(fns)} passed")
-    sys.exit(1 if failures else 0)
-
-
 # ── removing releases, and syncing from Docker Hub ────────────────────────────
 
 def test_a_release_that_was_rolled_out_can_still_be_removed():
@@ -609,3 +595,18 @@ def test_a_workstream_follows_its_own_track_in_a_rollout():
         assert len(queued) == 1, out
     finally:
         CLIENT.put("/api/agents/releases/lag", json={"lag": -1, "workstream": "hydra"})
+
+
+if __name__ == "__main__":
+    from _monkeypatch import run as _run
+    fns = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
+    failures = 0
+    for fn in fns:
+        try:
+            _run(fn)
+            print(f"ok   {fn.__name__}")
+        except Exception as e:  # noqa: BLE001
+            failures += 1
+            print(f"FAIL {fn.__name__}: {e!r}")
+    print(f"\n{len(fns) - failures}/{len(fns)} passed")
+    sys.exit(1 if failures else 0)

@@ -57,6 +57,18 @@ for a in "${allowed[@]}"; do
   fi
 done
 
+# A test defined BELOW a file's `if __name__ == "__main__"` runner is not in globals()
+# when the runner collects them, so it never runs and the file still passes. Five agent
+# lifecycle tests sat there unrun for a release; refuse it.
+late=0
+for f in "${files[@]}"; do
+  n=$(awk '/^if __name__ == "__main__"/{m=1; next} m && /^(async )?def test_/{c++} END{print c+0}' "$f")
+  if [ "$n" -gt 0 ]; then
+    echo "::error file=$f::$f defines $n test(s) after its __main__ runner; they never run. Move the runner to the end."
+    late=1
+  fi
+done
+
 fail=0
 failed=()
 skipped=()
@@ -95,4 +107,5 @@ if [ ${#skipped[@]} -gt 0 ]; then
   echo "expected here because another job runs the file, add it to $ALLOWLIST with why."
 fi
 [ "$stale" -eq 0 ] || fail=1
+[ "$late" -eq 0 ] || fail=1
 exit $fail
