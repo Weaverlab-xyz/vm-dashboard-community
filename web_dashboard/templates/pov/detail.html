@@ -87,12 +87,12 @@
             <span class="text-gray-400" x-text="'· ' + seenAgo()"></span>
           </span>
           <button type="button" x-show="showStart()" @click="power('running')"
-                  :disabled="!powerActionable() || powerBusy"
+                  :disabled="!powerActionable() || !!powerBusy"
                   :title="powerActionable() ? 'Start this POV' : 'Only an active POV can be started'"
                   class="text-xs px-3 py-1.5 rounded-lg bg-green-600 text-white hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed"
                   x-text="powerBusy === 'running' ? 'Starting…' : 'Start'"></button>
           <button type="button" x-show="showSuspend()" @click="power('suspended')"
-                  :disabled="!powerActionable() || powerBusy"
+                  :disabled="!powerActionable() || !!powerBusy"
                   :title="powerActionable() ? 'Suspend this POV' : 'Only an active POV can be suspended'"
                   class="text-xs px-3 py-1.5 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
                   x-text="powerBusy === 'suspended' ? 'Suspending…' : 'Suspend'"></button>
