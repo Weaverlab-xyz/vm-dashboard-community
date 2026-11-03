@@ -119,16 +119,14 @@ def validate(*, suspend_at: str, resume_at: str, tz_name: str, days: str) -> dic
     """
     suspend = parse_hhmm(suspend_at)
     resume = parse_hhmm(resume_at)
-    if resume is not None and suspend is None:
-        raise ScheduleError(
-            "a resume time with no suspend time would wake something that nothing ever "
-            "puts to sleep; set a suspend time too, or clear both")
+    # A start time on its own is a valid RUN schedule: something else (Skytap's idle timer,
+    # an operator, the idle sweep) puts the environment to sleep, and the schedule wakes it.
     if suspend is not None and suspend == resume:
         raise ScheduleError(
             "the suspend and resume times are the same, so the schedule would both stop "
             "and start it at that moment")
     resolve_timezone(tz_name)
-    normalized_days = normalize_days(days) if suspend is not None else ""
+    normalized_days = normalize_days(days) if (suspend or resume) is not None else ""
     return {
         "suspend_at_local": suspend_at.strip() if suspend is not None else None,
         "resume_at_local": resume_at.strip() if resume is not None else None,
@@ -138,8 +136,9 @@ def validate(*, suspend_at: str, resume_at: str, tz_name: str, days: str) -> dic
 
 
 def has_schedule(row) -> bool:
-    """A schedule exists only if it has a suspend time. A resume alone is not one."""
-    return bool((getattr(row, "suspend_at_local", "") or "").strip())
+    """A schedule exists if it has a suspend time or a start (resume) time."""
+    return bool((getattr(row, "suspend_at_local", "") or "").strip()
+                or (getattr(row, "resume_at_local", "") or "").strip())
 
 
 def _boundaries(hhmm: tuple, tz, days: str, start_utc: datetime, end_utc: datetime):
@@ -165,8 +164,11 @@ def _boundaries(hhmm: tuple, tz, days: str, start_utc: datetime, end_utc: dateti
     return out
 
 
-def due_action(row, now_utc: datetime) -> str:
+def due_action(row, now_utc: datetime, allow: tuple = (SUSPEND, RESUME)) -> str:
     """What the schedule wants done to ``row`` right now: ``""``, ``SUSPEND`` or ``RESUME``.
+
+    ``allow`` filters which verbs may be returned; a platform that suspends itself passes
+    ``(RESUME,)`` so a stored suspend time is never acted on.
 
     ``""`` is by far the common answer — a boundary is crossed twice a day at most, and
     the sweep runs every ten minutes.
@@ -193,10 +195,10 @@ def due_action(row, now_utc: datetime) -> str:
 
     crossings = []
     suspend = parse_hhmm(getattr(row, "suspend_at_local", "") or "")
-    if suspend is not None:
+    if suspend is not None and SUSPEND in allow:
         crossings += [(at, SUSPEND) for at in _boundaries(suspend, tz, days, last, now_utc)]
     resume = parse_hhmm(getattr(row, "resume_at_local", "") or "")
-    if resume is not None:
+    if resume is not None and RESUME in allow:
         crossings += [(at, RESUME) for at in _boundaries(resume, tz, days, last, now_utc)]
 
     if not crossings:
@@ -226,8 +228,11 @@ def describe(row) -> dict:
         when = "Mon–Fri"
     else:
         when = ", ".join(label for label, on in zip(DAY_LABELS, days) if on == "1")
-    summary = f"Suspends {suspend} {when} ({tz_name})"
-    summary += f", resumes {resume}" if resume else ", resume by hand"
+    if not suspend:
+        summary = f"Starts {resume} {when} ({tz_name})"
+    else:
+        summary = f"Suspends {suspend} {when} ({tz_name})"
+        summary += f", resumes {resume}" if resume else ", resume by hand"
     return {
         "scheduled": True,
         "summary": summary,
