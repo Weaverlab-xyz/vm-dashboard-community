@@ -158,7 +158,10 @@ The **Lifecycle** panel lists the releases the dashboard may offer.
   before the fleet follows.
 - **Per-workstream tracks.** Under the track, each workstream has its own selector
   (*default*, n, n-1, n-2). Set an agent's **Workstream** in its details panel and it
-  follows that workstream's track; an agent with no workstream follows the default.
+  follows that workstream's track; an agent with no workstream follows the default. That
+  includes the image its cloud host starts on: a host for an agent in a workstream on n-2
+  starts on that workstream's n-2 release, not the dashboard-wide one. Setting a track for
+  a workstream name that does not exist is refused; clearing one (*default*) always works.
 - **Recording releases also arms a check.** Once any release is recorded, an agent that
   reports a version of 2.10 or later that is not among them is flagged **Not a recorded
   release**. A signed build always comes from a release, so the version is either a local

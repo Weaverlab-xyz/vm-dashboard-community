@@ -627,6 +627,18 @@ def test_a_workstream_track_is_validated_audited_and_answers_with_its_own_target
             assert "kraken" in (row.details or ""), row.details
         finally:
             db.close()
+        # A host started for an agent in that workstream starts on its track, not on n.
+        from web_dashboard.services import agent_host_service as ahs
+        db = SessionLocal()
+        try:
+            agent = RemoteAgent(name=f"agent-{uuid.uuid4().hex[:8]}", workstream="kraken")
+            wide = ahs.agent_image(db)
+            own = ahs.agent_image(db, agent)
+            pinned = agent_release_service.target(db, "chrweav/dashboard-agent", agent=agent)
+            assert own == f"chrweav/dashboard-agent@{pinned.digest}", own
+            assert own != wide, (own, wide)
+        finally:
+            db.close()
         # A track left by a workstream that no longer exists can still be cleared.
         assert CLIENT.put("/api/agents/releases/lag",
                           json={"lag": -1, "workstream": "long-gone"}).status_code == 200

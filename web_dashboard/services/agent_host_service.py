@@ -303,13 +303,15 @@ def k8s_signer(image: str) -> tuple:
                 f"set for it (Settings → Ansible → Kubernetes image signer).")
 
 
-def agent_image(db) -> str:
-    """The agent image a new host starts: the target release (newest, or n-1/n-2 by the lifecycle setting), by digest, when
-    there is one (what the fleet is being moved to), else the latest tag."""
+def agent_image(db, agent=None) -> str:
+    """The agent image a host starts: the target release by digest -- newest, or n-1/n-2 by
+    the track ``agent``'s workstream follows (the dashboard-wide one without a workstream)
+    -- when there is one, else the latest tag. Without the agent, a host for a workstream
+    held at n-2 would start on n and sit ahead of its own track."""
     from . import agent_release_service
     from .agent_lifecycle_service import DEFAULT_REPOSITORY
     # Only a release of the project's repository: that is what the generated policy pins.
-    row = agent_release_service.target(db, DEFAULT_REPOSITORY)
+    row = agent_release_service.target(db, DEFAULT_REPOSITORY, agent=agent)
     return f"{DEFAULT_REPOSITORY}@{row.digest}" if row else AGENT_IMAGE
 
 
@@ -1043,7 +1045,7 @@ async def _start(db, host, job_id: str) -> None:
                                                          host.max_concurrent,
                                                          upgrades=spire, k8s_image=k8s,
                                                          k8s_verify=k8s_verify),
-                              material=material, image=agent_image(db), k8s_image=k8s,
+                              material=material, image=agent_image(db, agent), k8s_image=k8s,
                               k8s_signer_pem=k8s_pem)
 
     job_service.update_progress(db, job_id, 20, "Opening egress for the subnet")
