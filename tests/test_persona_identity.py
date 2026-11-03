@@ -31,7 +31,7 @@ sys.path.insert(0, _ROOT)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-persona-identity")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _schema import build_schema  # noqa: E402
-from _database_src import database_source
+from _database_src import database_module_source, database_source
 
 build_schema("persona-identity")
 
@@ -89,7 +89,7 @@ def test_the_group_mapping_carries_a_persona_and_a_priority():
 def test_the_two_user_columns_are_documented_as_separate_writers():
     """The comment is the only thing that stops the next author collapsing them into one
     column, which would reintroduce the clobber."""
-    src = database_source()
+    src = database_module_source("identity")
     block = src.split("    persona = Column(String(32), nullable=True)", 1)[0][-1600:]
     assert "session_persona" in block and "login" in block.lower(), \
         "the persona columns carry no note about the login overwrite"
