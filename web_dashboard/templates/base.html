@@ -24,6 +24,10 @@
      any template that goes back to writing the path out by hand -- in an attribute or
      in a comment like this one, which is why this one describes the path rather than
      quoting it. #}
+  {# The admin's display time zone, for formatTimestamp() in app.js. A data attribute on a
+     meta tag rather than an inline script: Jinja's autoescape is correct for an attribute
+     and would not be for a script body. #}
+  <meta name="display-timezone" content="{{ display_timezone }}">
   <script src="{{ static_url('js/app.js') }}"></script>
   <style>
     [x-cloak] { display: none !important; }

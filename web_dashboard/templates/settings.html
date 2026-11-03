@@ -459,6 +459,19 @@
              x-text="branding.brand_env_label"></div>
       </div>
 
+      <!-- Display time zone: presentation only. Stored times stay UTC. -->
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Display time zone</label>
+        <select x-model="branding.display_timezone"
+                class="w-full max-w-md border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <option value="">UTC (default)</option>
+          <template x-for="tz in timezoneChoices" :key="tz">
+            <option :value="tz" x-text="tz" :selected="tz === branding.display_timezone"></option>
+          </template>
+        </select>
+        <p class="text-xs text-gray-400 mt-1">How the Job History and Audit Log show times, for everyone on this instance. The zone abbreviation is shown beside each time. Records themselves stay in UTC.</p>
+      </div>
+
       <div class="flex items-center gap-3 pt-1">
         <button type="button" @click="saveBranding()" :disabled="brandingSaving"
                 class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed">

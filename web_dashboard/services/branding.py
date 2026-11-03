@@ -183,3 +183,50 @@ def overrides() -> dict:
         return out
     except Exception:
         return {}
+
+
+# -- Display time zone -----------------------------------------------------------------
+# Stored times are UTC and stay UTC; this only decides how a browser PRESENTS them. It lives
+# beside the branding rows because it is the same kind of thing -- one admin-chosen global
+# row, saved from the Appearance card -- but it is deliberately NOT part of overrides():
+# that dict is splatted into ui_theme.theme_for, which has no use for it.
+#
+# "" means UTC, which is what every page showed before this existed.
+DEFAULT_TIMEZONE = "UTC"
+
+
+def clean_timezone(value) -> str:
+    """``value`` if it is an IANA zone the Python runtime knows, else ``""``.
+
+    Checked with zoneinfo rather than a regex so the write path and the read path agree on
+    what is valid, and so the string that ends up in a page is always a real zone name --
+    it is interpolated into an inline script, where an arbitrary stored value would be an
+    injection rather than a bad setting.
+    """
+    from zoneinfo import ZoneInfo
+
+    candidate = (value or "").strip() if isinstance(value, str) else ""
+    if not candidate or not re.fullmatch(r"[A-Za-z0-9_+\-/]{1,64}", candidate):
+        return ""
+    try:
+        ZoneInfo(candidate)
+    except Exception:
+        return ""
+    return candidate
+
+
+def display_timezone() -> str:
+    """The zone timestamps render in. Never raises; falls back to UTC."""
+    try:
+        return clean_timezone(config_service.get_raw("display_timezone")) or DEFAULT_TIMEZONE
+    except Exception:
+        return DEFAULT_TIMEZONE
+
+
+def timezone_choices() -> list[str]:
+    """Every IANA zone this runtime knows, sorted, for the settings picker."""
+    try:
+        from zoneinfo import available_timezones
+        return sorted(available_timezones())
+    except Exception:
+        return [DEFAULT_TIMEZONE]
