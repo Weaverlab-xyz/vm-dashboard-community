@@ -437,6 +437,48 @@ def test_the_robot_image_is_refused_when_policy_does_not_enable_it():
     raise AssertionError("expected a refusal")
 
 
+# ── what the setup ladder reads ──────────────────────────────────────────────
+
+def test_describe_reports_flags_and_the_preflights_own_refusal():
+    db = d.SessionLocal()
+    env, _row = _ready(db)
+    out = pov_ui_robot.describe(db, env)
+    assert out["ui_robot_wanted"] is True and out["ui_robot_job_id"] == ""
+    assert out["ui_robot_installer_block"] == ""
+    # The integration needs logins the installer does not; the page must say which.
+    assert "pra_user" in out["ui_robot_integration_block"]
+    assert "Nothing was queued" not in out["ui_robot_integration_block"]
+    assert all(isinstance(v, bool) for v in out["ui_robot_stored"].values())
+    for secret in ("ps-pw-123456", "TOTPSECRET234567", "svc-ps"):
+        assert secret not in repr(out)
+    db.close()
+
+
+def test_describe_agrees_with_what_queue_would_do():
+    db = d.SessionLocal()
+    env, _row = _ready(db)
+    assert pov_ui_robot.describe(db, env)["ui_robot_installer_block"] == ""
+    pov_ui_robot.queue(db, env, task="installer", created_by="t")
+    out = pov_ui_robot.describe(db, env)
+    assert out["ui_robot_job_id"]
+    pov_ui_robot.clear_credentials(env)
+    assert "ps_user" in pov_ui_robot.describe(db, env)["ui_robot_installer_block"]
+    db.close()
+
+
+def test_a_second_robot_task_is_refused_while_one_is_active():
+    db = d.SessionLocal()
+    env, _row = _ready(db)
+    first = pov_ui_robot.queue(db, env, task="installer", created_by="t")
+    msg = _refusal(lambda: pov_ui_robot.queue(db, env, task="installer", created_by="t"))
+    assert "already running" in msg and msg.endswith("Nothing was queued.")
+    assert pov_ui_robot.active_job(db, env).id == first.id
+    first.status = "completed"
+    db.commit()
+    assert pov_ui_robot.active_job(db, env) is None
+    db.close()
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

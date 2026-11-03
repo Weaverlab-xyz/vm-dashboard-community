@@ -116,6 +116,41 @@ def wanted(db: Session, env: PovEnvironment) -> bool:
     return True
 
 
+def active_job(db: Session, env: PovEnvironment) -> Job | None:
+    """The robot job for this POV that is queued or running now, if any.
+
+    One at a time per POV: two robots logged into the same Password Safe account race on its
+    session, and a second press is nearly always an impatient first one.
+    """
+    rows = (db.query(Job)
+              .filter(Job.job_type == "agent_ui_robot",
+                      Job.status.in_(job_service.ACTIVE_STATUSES)).all())
+    return next((r for r in rows
+                 if (r.metadata_dict or {}).get("environment_id") == env.id), None)
+
+
+def describe(db: Session, env: PovEnvironment) -> dict:
+    """What the setup ladder needs to know about the robot. Never a value, only whether.
+
+    ``*_block`` is the preflight's own refusal with its trailing "Nothing was queued." taken
+    off, or "" when the task could be queued right now, so the page and the route can never
+    disagree about whether a button works.
+    """
+    out = {"ui_robot_wanted": wanted(db, env), "ui_robot_job_id": "",
+           "ui_robot_stored": credential_state(env),
+           "ui_robot_installer_block": "", "ui_robot_integration_block": ""}
+    if not out["ui_robot_wanted"]:
+        return out
+    running = active_job(db, env)
+    out["ui_robot_job_id"] = running.id if running else ""
+    for task in agent_ui_robot_meta.VALID_TASKS:
+        try:
+            preflight(db, env, task)
+        except UiRobotError as exc:
+            out[f"ui_robot_{task}_block"] = str(exc).replace(" Nothing was queued.", "")
+    return out
+
+
 def preflight(db: Session, env: PovEnvironment, task: str) -> RemoteAgent:
     """Everything checkable before a job row exists. Cheapest and most likely wrong first;
     every refusal ends "Nothing was queued." because a failed row renders only its error."""
@@ -167,6 +202,9 @@ def queue(db: Session, env: PovEnvironment, *, task: str, created_by: str = "") 
     logins this job may have.
     """
     agent = preflight(db, env, task)
+    if active_job(db, env):
+        raise UiRobotError("a UI robot task is already running on this POV; wait for it to "
+                           "finish. Nothing was queued.")
     meta = agent_ui_robot_meta.ui_robot_meta(
         {"task": task}, description=f"UI robot ({task}) for POV {env.name}")
     meta["environment_id"] = env.id
