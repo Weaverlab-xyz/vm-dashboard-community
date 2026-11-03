@@ -517,3 +517,95 @@ if __name__ == "__main__":
             print(f"FAIL {fn.__name__}: {e!r}")
     print(f"\n{len(fns) - failures}/{len(fns)} passed")
     sys.exit(1 if failures else 0)
+
+
+# ── removing releases, and syncing from Docker Hub ────────────────────────────
+
+def test_a_release_that_was_rolled_out_can_still_be_removed():
+    _fresh_fleet()
+    rel = _release("2.30.7", "sha256:" + "e" * 64)
+    CLIENT.post("/api/agents/rollouts", json={"release_id": rel})
+    # In flight: refused, and says why (409, not the FK 500 it used to be).
+    busy = CLIENT.delete(f"/api/agents/releases/{rel}")
+    assert busy.status_code == 409, busy.text
+    _clear_control_jobs()
+    assert CLIENT.delete(f"/api/agents/releases/{rel}").status_code == 200
+    versions = [r["version"] for r in CLIENT.get("/api/agents/releases").json()["releases"]]
+    assert "2.30.7" not in versions
+
+
+def test_sync_records_every_labelled_hub_tag_and_follows_a_rebuilt_digest(monkeypatch):
+    digests = {"latest": "sha256:" + "a" * 64, "2.30.8": "sha256:" + "a" * 64,
+               "2.30.9": "sha256:" + "b" * 64, "old": "sha256:" + "c" * 64}
+    versions = {"latest": "2.30.8", "2.30.8": "2.30.8", "2.30.9": "2.30.9", "old": ""}
+    monkeypatch.setattr(agent_release_service, "list_hub_tags",
+                        lambda repository=None, session=None: ["2.30.9", "2.30.8", "old"])
+    monkeypatch.setattr(agent_release_service, "read_registry",
+                        lambda repo, tag, session=None: {"version": versions[tag],
+                                                         "digest": digests[tag]})
+    out = CLIENT.post("/api/agents/releases/sync", json={}).json()
+    assert sorted(out["added"]) == ["2.30.8", "2.30.9"], out
+    assert out["skipped"] == ["old"], out
+    digests["2.30.9"] = "sha256:" + "d" * 64          # the tag was rebuilt
+    out = CLIENT.post("/api/agents/releases/sync", json={}).json()
+    assert out["updated"] == ["2.30.9"] and out["added"] == [], out
+
+
+def test_the_track_setting_offers_n_minus_one_or_two_and_never_nothing():
+    _release("2.11.0", "sha256:" + "1" * 64)
+    _release("2.11.1", "sha256:" + "2" * 64)
+    _release("2.11.2", "sha256:" + "3" * 64)
+    try:
+        for lag in (0, 1, 2):
+            out = CLIENT.put("/api/agents/releases/lag", json={"lag": lag}).json()
+            assert out["lag"] == lag
+            assert CLIENT.get("/api/agents").json()["release_lag"] == lag
+        assert CLIENT.put("/api/agents/releases/lag", json={"lag": 3}).status_code == 400
+        db = SessionLocal()
+        try:
+            rows = agent_release_service.list_releases(db)
+            assert agent_release_service.target(db).version == rows[2].version
+        finally:
+            db.close()
+    finally:
+        CLIENT.put("/api/agents/releases/lag", json={"lag": 0})
+
+
+def test_finished_rollouts_can_be_hidden_and_a_live_one_cannot():
+    _fresh_fleet()
+    rel = _release("2.11.5", "sha256:" + "5" * 64)
+    ro = CLIENT.post("/api/agents/rollouts", json={"release_id": rel}).json()["id"]
+    assert CLIENT.delete(f"/api/agents/rollouts/{ro}").status_code == 409
+    _clear_control_jobs()
+    assert CLIENT.delete(f"/api/agents/rollouts/{ro}").status_code == 200
+    assert ro not in [r["id"] for r in CLIENT.get("/api/agents/rollouts").json()["rollouts"]]
+
+
+def test_a_workstream_follows_its_own_track_in_a_rollout():
+    from web_dashboard.database import Workgroup
+    _fresh_fleet()
+    db = SessionLocal()
+    try:
+        if not db.query(Workgroup).filter(Workgroup.name == "hydra").first():
+            db.add(Workgroup(name="hydra", display_name="Hydra"))
+            db.commit()
+    finally:
+        db.close()
+    _release("2.40.0", "sha256:" + "4" * 64)
+    _release("2.40.1", "sha256:" + "5" * 64)
+    newest = _release("2.40.2", "sha256:" + "6" * 64)
+    hydra, _ = _agent(version="2.39.0")
+    other, _ = _agent(version="2.39.0")
+    assert CLIENT.patch(f"/api/agents/{hydra}", json={"workstream": "nope"}).status_code == 400
+    row = CLIENT.patch(f"/api/agents/{hydra}", json={"workstream": "Hydra"}).json()
+    assert row["workstream"] == "hydra", row
+    try:
+        assert CLIENT.put("/api/agents/releases/lag",
+                          json={"lag": 2, "workstream": "hydra"}).status_code == 200
+        assert CLIENT.get("/api/agents/releases").json()["workstream_lags"] == {"hydra": 2}
+        out = CLIENT.post("/api/agents/rollouts", json={"release_id": newest}).json()
+        queued = {j["agent"] for j in out["jobs"]}
+        assert any("n-2" in why and "2.40.0" in why for why in out["skipped"].values()), out
+        assert len(queued) == 1, out
+    finally:
+        CLIENT.put("/api/agents/releases/lag", json={"lag": -1, "workstream": "hydra"})

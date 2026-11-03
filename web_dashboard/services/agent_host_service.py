@@ -304,12 +304,12 @@ def k8s_signer(image: str) -> tuple:
 
 
 def agent_image(db) -> str:
-    """The agent image a new host starts: the newest recorded release, by digest, when
+    """The agent image a new host starts: the target release (newest, or n-1/n-2 by the lifecycle setting), by digest, when
     there is one (what the fleet is being moved to), else the latest tag."""
     from . import agent_release_service
     from .agent_lifecycle_service import DEFAULT_REPOSITORY
     # Only a release of the project's repository: that is what the generated policy pins.
-    row = agent_release_service.newest(db, DEFAULT_REPOSITORY)
+    row = agent_release_service.target(db, DEFAULT_REPOSITORY)
     return f"{DEFAULT_REPOSITORY}@{row.digest}" if row else AGENT_IMAGE
 
 
