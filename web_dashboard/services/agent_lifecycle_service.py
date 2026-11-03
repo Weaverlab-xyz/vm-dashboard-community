@@ -207,6 +207,10 @@ def _queue_ring(db: Session, rollout: AgentRollout, release: AgentRelease, which
         if version_tuple(agent.agent_version) >= version_tuple(release.version):
             skipped[agent.name] = f"already on {agent.agent_version}"
             continue
+        held = _held_by_track(db, agent, release)
+        if held:
+            skipped[agent.name] = held
+            continue
         try:
             job = upgrade(db, agent, release, actor=actor, schedule=schedule,
                           rollout_id=rollout.id)
@@ -220,6 +224,19 @@ def _queue_ring(db: Session, rollout: AgentRollout, release: AgentRelease, which
     return queued
 
 
+def _held_by_track(db: Session, agent: RemoteAgent, release: AgentRelease) -> str:
+    """Why a rollout to ``release`` leaves this agent alone: its workstream's track (n-1,
+    n-2) stops at an older release. "" when the release is within its track."""
+    from . import agent_release_service
+    tracked = agent_release_service.target(db, agent=agent)
+    if tracked is None or version_tuple(release.version) <= version_tuple(tracked.version):
+        return ""
+    lag = agent_release_service.lag_for(agent.workstream)
+    label = "n" if lag == 0 else f"n-{lag}"
+    where = f"workstream {agent.workstream}" if agent.workstream else "the dashboard default"
+    return f"on track {label} ({where}), which stops at {tracked.version}"
+
+
 def _preview_default(db: Session, rollout: AgentRollout, release: AgentRelease) -> None:
     """Name the default ring's ineligible agents up front, so the operator can fix them
     while the canary runs; the default pass re-checks and clears any that were fixed."""
@@ -229,7 +246,7 @@ def _preview_default(db: Session, rollout: AgentRollout, release: AgentRelease) 
             continue
         if version_tuple(agent.agent_version) >= version_tuple(release.version):
             continue
-        reason = host_gate(None, agent)
+        reason = host_gate(None, agent) or _held_by_track(db, agent, release)
         if reason:
             skipped[agent.name] = reason
     rollout.skipped = json.dumps(skipped)

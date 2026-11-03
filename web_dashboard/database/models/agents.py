@@ -90,6 +90,9 @@ class RemoteAgent(Base):
     control_k8s_signature = Column(String(240), nullable=True)
     paused = Column(Boolean, nullable=True)
     upgrade_ring = Column(String(16), nullable=True)
+    # The workstream whose release track (n / n-1 / n-2) this agent follows. NULL = the
+    # dashboard-wide track.
+    workstream = Column(String(64), nullable=True)
 
     # Assurance (docs/platform/spiffe/remote-agents/spire-attestation.md, "Ongoing
     # checks"): attestation is checked at every start, and these keep checking after it.
