@@ -190,7 +190,7 @@ the new scope declared — not always three. The new resources now carry the
 > **revokes that route from every user who has an explicit permission
 > map** — with no error, no log line, and no row the administrator who
 > set those permissions ever saw. A new scope needs a backfill in
-> `web_dashboard/database.py` in the same change, granting exactly what a
+> `web_dashboard/database/rbac_backfills.py` in the same change, granting exactly what a
 > non-admin with an explicit map could already reach: the full level set
 > for a previously ungated route, and *nothing* for one that required the
 > Admin flag. See

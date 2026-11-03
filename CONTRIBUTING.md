@@ -340,7 +340,7 @@ MIGRATIONS = (
 )
 ```
 
-Add the column to the model as well. Each migration runs once per database, in name order,
+Add the column to the model as well (models live in `web_dashboard/database/models/`, one module per domain). Each migration runs once per database, in name order,
 inside `init_db`'s locked boot transaction, and is recorded in `schema_markers` under
 `ddl:<name>`. Its steps must be safe on a database `create_all` has just built, because on
 a new install the column is already there: `add_column` and `create_index` look before
