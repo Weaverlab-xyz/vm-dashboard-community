@@ -144,7 +144,8 @@ The **Lifecycle** panel lists the releases the dashboard may offer.
   image's digest and its version from the `dashboard-agent.version` label, and records every
   release it finds. You never type a version or a digest. Tags with no label (they predate
   central upgrades) are skipped, and a tag that was rebuilt refreshes the digest of the row
-  Docker Hub wrote. The dashboard needs outbound HTTPS to `hub.docker.com` and
+  Docker Hub wrote. That change is never silent: the panel warns which release moved, the
+  release's notes record the old and new digest, and the audit entry carries both in full. The dashboard needs outbound HTTPS to `hub.docker.com` and
   `registry-1.docker.io`.
 - **Remove** deletes a release and the finished rollouts that used it. It is refused while a
   rollout of that release is still running.

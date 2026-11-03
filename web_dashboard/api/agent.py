@@ -1728,13 +1728,16 @@ def check_releases(body: ReleaseCheckRequest, request: Request,
     tag = (body.tag or "latest").strip()
     if not re.match(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$", tag):
         raise HTTPException(status_code=400, detail="not an image tag")
+    before = {r.version: r.digest for r in agent_release_service.list_releases(db)}
     try:
         row = agent_release_service.check_registry(db, actor=current_user.username, tag=tag)
     except agent_lifecycle_service.LifecycleError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+    details = {"tag": tag, "version": row.version, "digest": row.digest}
+    if before.get(row.version) not in (None, row.digest):
+        details["previous_digest"] = before[row.version]   # a rebuilt tag moved it
     job_service.log_audit(db, current_user.username, "agent.release_check",
-                          ip_address=_client_ip(request),
-                          details={"tag": tag, "version": row.version, "digest": row.digest})
+                          ip_address=_client_ip(request), details=details)
     return agent_release_service.release_dict(row)
 
 

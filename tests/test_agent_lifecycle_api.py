@@ -535,6 +535,20 @@ def test_sync_records_every_labelled_hub_tag_and_follows_a_rebuilt_digest(monkey
     digests["2.30.9"] = "sha256:" + "d" * 64          # the tag was rebuilt
     out = CLIENT.post("/api/agents/releases/sync", json={}).json()
     assert out["updated"] == ["2.30.9"] and out["added"] == [], out
+    # The move is never silent: the result, the audit entry and the row's notes say so.
+    assert out["digest_changes"] == [{"version": "2.30.9", "from": "sha256:" + "b" * 64,
+                                      "to": "sha256:" + "d" * 64}], out
+    from web_dashboard.database import AuditLog
+    db = SessionLocal()
+    try:
+        row = (db.query(AuditLog).filter(AuditLog.action == "agent.release_sync")
+               .order_by(AuditLog.timestamp.desc()).first())
+        assert "b" * 64 in row.details and "d" * 64 in row.details, row.details
+    finally:
+        db.close()
+    rel = next(r for r in CLIENT.get("/api/agents/releases").json()["releases"]
+               if r["version"] == "2.30.9")
+    assert rel["notes"].startswith("Digest changed") and "sha256:bbbbbbbbbbbb" in rel["notes"]
 
 
 def test_the_track_setting_offers_n_minus_one_or_two_and_never_nothing():
