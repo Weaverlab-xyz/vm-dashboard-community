@@ -1675,14 +1675,28 @@ def set_release_lag(body: LagRequest, request: Request,
                     current_user: User = Depends(require_explicit_permission("agents", "write")),
                     db: Session = Depends(get_db)):
     """Offer the newest release (0), one behind (1, "n-1") or two behind (2, "n-2")."""
+    from ..services import workgroup_service
+    name = (body.workstream or "").strip()
+    workstream = ""
+    if name:
+        try:
+            workstream = workgroup_service.canonical_or_none(db, name) or ""
+        except workgroup_service.WorkgroupError:
+            workstream = ""
+        # Clearing (-1) is allowed for a name that no longer exists, so a track left
+        # behind by a deleted workstream can still be removed.
+        if not workstream and body.lag != -1:
+            raise HTTPException(status_code=400, detail=f"Unknown workstream '{name}'")
+        workstream = workstream or name.lower()
     try:
-        lag = agent_release_service.set_lag(body.lag, body.workstream)
+        lag = agent_release_service.set_lag(body.lag, workstream)
     except agent_lifecycle_service.LifecycleError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     job_service.log_audit(db, current_user.username, "agent.release_lag",
-                          ip_address=_client_ip(request), details={"lag": lag})
-    target = agent_release_service.target(db)
-    return {"lag": lag, "workstream": body.workstream,
+                          ip_address=_client_ip(request),
+                          details={"lag": lag, "workstream": workstream or None})
+    target = agent_release_service.target(db, workstream=workstream or None)
+    return {"lag": lag, "workstream": workstream,
             "target": agent_release_service.release_dict(target) if target else None}
 
 

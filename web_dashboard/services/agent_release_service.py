@@ -102,13 +102,16 @@ def set_lag(lag: int, workstream: str = "") -> int:
     return lag
 
 
-def target(db: Session, repository: str = "", agent=None) -> Optional[AgentRelease]:
+def target(db: Session, repository: str = "", agent=None,
+           workstream: Optional[str] = None) -> Optional[AgentRelease]:
     """The release to offer: the track's lag behind the newest (the agent's workstream's
-    track when it has one), or the oldest there is when fewer are recorded -- never
-    nothing, while something is."""
+    track when it has one, else ``workstream``'s), or the oldest there is when fewer are
+    recorded -- never nothing, while something is."""
     rows = [r for r in list_releases(db)
             if not repository or (r.repository or DEFAULT_REPOSITORY) == repository]
-    lag = lag_for(getattr(agent, "workstream", None)) if agent is not None else get_lag()
+    if agent is not None:
+        workstream = getattr(agent, "workstream", None)
+    lag = lag_for(workstream) if workstream else get_lag()
     return rows[min(lag, len(rows) - 1)] if rows else None
 
 

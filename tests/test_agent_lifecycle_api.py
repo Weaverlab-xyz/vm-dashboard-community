@@ -597,6 +597,43 @@ def test_a_workstream_follows_its_own_track_in_a_rollout():
         CLIENT.put("/api/agents/releases/lag", json={"lag": -1, "workstream": "hydra"})
 
 
+
+def test_a_workstream_track_is_validated_audited_and_answers_with_its_own_target():
+    from web_dashboard.database import AuditLog, Workgroup
+    db = SessionLocal()
+    try:
+        if not db.query(Workgroup).filter(Workgroup.name == "kraken").first():
+            db.add(Workgroup(name="kraken", display_name="Kraken"))
+            db.commit()
+    finally:
+        db.close()
+    _release("2.50.0", "sha256:" + "7" * 64)
+    _release("2.50.1", "sha256:" + "8" * 64)
+    _release("2.50.2", "sha256:" + "9" * 64)
+    try:
+        # A typo is refused rather than stored as a track nothing follows.
+        bad = CLIENT.put("/api/agents/releases/lag", json={"lag": 1, "workstream": "krakn"})
+        assert bad.status_code == 400, bad.text
+        assert "krakn" not in CLIENT.get("/api/agents/releases").json()["workstream_lags"]
+        # Mixed case is stored canonical, and the answer is that workstream's target.
+        out = CLIENT.put("/api/agents/releases/lag",
+                         json={"lag": 2, "workstream": "Kraken"}).json()
+        assert out["workstream"] == "kraken", out
+        assert out["target"]["version"] == "2.50.0", out
+        db = SessionLocal()
+        try:
+            row = (db.query(AuditLog).filter(AuditLog.action == "agent.release_lag")
+                   .order_by(AuditLog.timestamp.desc()).first())
+            assert "kraken" in (row.details or ""), row.details
+        finally:
+            db.close()
+        # A track left by a workstream that no longer exists can still be cleared.
+        assert CLIENT.put("/api/agents/releases/lag",
+                          json={"lag": -1, "workstream": "long-gone"}).status_code == 200
+    finally:
+        CLIENT.put("/api/agents/releases/lag", json={"lag": -1, "workstream": "kraken"})
+
+
 if __name__ == "__main__":
     from _monkeypatch import run as _run
     fns = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
