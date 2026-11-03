@@ -14,7 +14,7 @@ scope needs, in the same change:
 2. a display label in `permissionScopeLabel` (`web_dashboard/static/js/app.js`), and a
    place in `PERMISSION_SCOPE_GROUPS` (`web_dashboard/api/auth.py`), which lays out the
    grid (`tests/test_permission_catalog.py` asserts every scope is in exactly one group);
-3. a **backfill** in `web_dashboard/database.py` granting exactly the levels a non-admin
+3. a **backfill** in `web_dashboard/database/rbac_backfills.py` granting exactly the levels a non-admin
    with an explicit map could already reach. It must widen three places:
    `users.permissions`, `oauth_group_mappings.default_permissions`, and the **built-in
    roles** in `web_dashboard/services/role_service.py`. Built-in roles are seeded once and
