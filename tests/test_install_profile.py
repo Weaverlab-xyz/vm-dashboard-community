@@ -861,20 +861,6 @@ def test_no_refusal_message_shows_the_raw_profile_value():
         + "\n".join(offenders))
 
 
-if __name__ == "__main__":
-    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    failures = 0
-    for fn in fns:
-        try:
-            fn()
-            print(f"ok   {fn.__name__}")
-        except Exception as e:  # noqa: BLE001
-            failures += 1
-            print(f"FAIL {fn.__name__}: {e}")
-    print(f"\n{len(fns) - failures}/{len(fns)} passed")
-    sys.exit(1 if failures else 0)
-
-
 def test_the_demo_cell_routers_are_not_reachable_on_a_pov_instance():
     """The OT and network cell routers deploy into the GLOBAL bt_* tenant.
 
@@ -893,3 +879,17 @@ def test_the_demo_cell_routers_are_not_reachable_on_a_pov_instance():
     assert '_profile_page_gate("cloud_pages")' in m.group(1), (
         "the OT router is gated only on pra_enabled, which is profile-neutral, so it "
         "deploys into the global tenant on a POV instance")
+
+
+if __name__ == "__main__":
+    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    failures = 0
+    for fn in fns:
+        try:
+            fn()
+            print(f"ok   {fn.__name__}")
+        except Exception as e:  # noqa: BLE001
+            failures += 1
+            print(f"FAIL {fn.__name__}: {e}")
+    print(f"\n{len(fns) - failures}/{len(fns)} passed")
+    sys.exit(1 if failures else 0)

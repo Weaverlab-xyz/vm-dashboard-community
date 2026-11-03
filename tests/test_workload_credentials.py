@@ -1351,20 +1351,6 @@ def test_the_edit_endpoint_uses_the_reference_writer():
     assert "write_sync_validated" not in patch
 
 
-if __name__ == "__main__":
-    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    failures = 0
-    for fn in fns:
-        try:
-            fn()
-            print(f"ok   {fn.__name__}")
-        except Exception as e:
-            failures += 1
-            print(f"FAIL {fn.__name__}: {e}")
-    print(f"\n{len(fns) - failures}/{len(fns)} passed")
-    sys.exit(1 if failures else 0)
-
-
 def _jwt(claims: dict) -> str:
     import base64
     import json as _json
@@ -1404,3 +1390,18 @@ def test_test_connection_in_pat_mode_does_not_touch_the_identity_token(monkeypat
         raise AssertionError("PAT mode must not fetch an identity token")
     monkeypatch.setattr(wlc, "_workload_token", boom)
     assert "token_aud" not in wlc.test_connection()
+
+
+if __name__ == "__main__":
+    from _monkeypatch import run as _run
+    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    failures = 0
+    for fn in fns:
+        try:
+            _run(fn)
+            print(f"ok   {fn.__name__}")
+        except Exception as e:
+            failures += 1
+            print(f"FAIL {fn.__name__}: {e}")
+    print(f"\n{len(fns) - failures}/{len(fns)} passed")
+    sys.exit(1 if failures else 0)

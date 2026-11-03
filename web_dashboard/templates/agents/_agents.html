@@ -24,7 +24,7 @@
 
   <!-- Toast -->
   <div x-show="toast" x-cloak x-transition
-       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : toastType === 'warning' ? 'bg-amber-50 border-amber-200 text-amber-700' : 'bg-green-50 border-green-200 text-green-700'"
        class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
 
   <!-- Blocked mint: the pinned signing audience contradicts Public base URL, so a new
@@ -1163,8 +1163,15 @@ function agentsPage() {
       try {
         const r = await API.post('/api/agents/releases/sync', {});
         const n = r.added.length + r.updated.length;
-        this.flash(n ? `Docker Hub: recorded ${[...r.added, ...r.updated].join(', ')}.`
-                     : 'Docker Hub: already up to date.', 'success');
+        const moved = (r.digest_changes || []).map(c => c.version);
+        if (moved.length) {
+          // A rebuilt tag moved a digest hosts pin: say so, not just "recorded".
+          this.flash(`Docker Hub: the digest of ${moved.join(', ')} changed (the tag was rebuilt). `
+                     + 'The release notes show the old and new digest.', 'warning');
+        } else {
+          this.flash(n ? `Docker Hub: recorded ${r.added.join(', ')}.`
+                       : 'Docker Hub: already up to date.', 'success');
+        }
         await this.loadLifecycle();
       } catch (e) {
         this.flash(e.message || String(e), 'error');
@@ -1393,7 +1400,7 @@ function agentsPage() {
     flash(msg, type) {
       this.toast = msg;
       this.toastType = type;
-      setTimeout(() => { this.toast = ''; }, 4000);
+      setTimeout(() => { this.toast = ''; }, type === 'warning' ? 10000 : 4000);
     },
   };
 }
