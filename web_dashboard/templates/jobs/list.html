@@ -99,16 +99,17 @@
           <th class="px-4 py-3 font-semibold text-gray-600">Target</th>
           <th class="px-4 py-3 font-semibold text-gray-600">Progress</th>
           <th class="px-4 py-3 font-semibold text-gray-600">Created</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">Time</th>
           <th class="px-4 py-3 font-semibold text-gray-600">Duration</th>
           <th class="px-4 py-3 font-semibold text-gray-600 text-right">Actions</th>
         </tr>
       </thead>
       <tbody class="divide-y divide-gray-50">
         <tr x-show="loading">
-          <td colspan="7" class="px-4 py-10 text-center text-gray-400">Loading…</td>
+          <td colspan="8" class="px-4 py-10 text-center text-gray-400">Loading…</td>
         </tr>
         <tr x-show="!loading && jobs.length === 0">
-          <td colspan="7" class="px-4 py-10 text-center text-gray-400">No jobs found.</td>
+          <td colspan="8" class="px-4 py-10 text-center text-gray-400">No jobs found.</td>
         </tr>
         <template x-for="job in jobs" :key="job.id">
           <tr class="hover:bg-gray-50 transition">
@@ -148,6 +149,7 @@
               <span x-show="job.status !== 'running'" class="text-gray-400 text-xs">–</span>
             </td>
             <td class="px-4 py-3 text-gray-500 text-xs" x-text="timeAgo(job.created_at)"></td>
+            <td class="px-4 py-3 text-gray-500 text-xs whitespace-nowrap" x-text="formatTimestamp(job.created_at)"></td>
             <td class="px-4 py-3 text-gray-500 text-xs" x-text="formatDuration(job.duration_seconds)"></td>
             <td class="px-4 py-3 text-right">
               <a :href="'/jobs/' + job.id"
@@ -307,7 +309,7 @@
         return fname.replace('.vmx', '');
       },
 
-      statusBadge, timeAgo, formatDuration,
+      statusBadge, timeAgo, formatDuration, formatTimestamp,
       scheduleBadge, scheduleLabel, scheduleTitle,
     };
   }

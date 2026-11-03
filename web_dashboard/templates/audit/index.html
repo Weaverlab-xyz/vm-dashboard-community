@@ -94,7 +94,7 @@
         <thead class="bg-gray-50 text-gray-600">
           <tr>
             <th class="text-left font-medium px-4 py-3 w-20">Seq</th>
-            <th class="text-left font-medium px-4 py-3 w-44">When (UTC)</th>
+            <th class="text-left font-medium px-4 py-3 w-44">When</th>
             <th class="text-left font-medium px-4 py-3 w-32">Actor</th>
             <th class="text-left font-medium px-4 py-3 w-48">Action</th>
             <th class="text-left font-medium px-4 py-3">Target</th>
@@ -106,7 +106,7 @@
           <template x-for="e in entries" :key="e.id">
             <tr class="hover:bg-gray-50 align-top">
               <td class="px-4 py-3 font-mono text-xs text-gray-500" x-text="e.seq"></td>
-              <td class="px-4 py-3 whitespace-nowrap" x-text="(e.timestamp || '').replace('T', ' ').slice(0, 19)"></td>
+              <td class="px-4 py-3 whitespace-nowrap" x-text="formatTimestamp(e.timestamp)"></td>
               <td class="px-4 py-3" x-text="e.username || '—'"></td>
               <td class="px-4 py-3 font-mono text-xs" x-text="e.action"></td>
               <td class="px-4 py-3 break-all text-gray-700" x-text="e.target_vm || '—'"></td>

@@ -120,12 +120,13 @@ def test_the_split_left_every_member_somewhere():
     # The page's script had 148 members before the split; a member dropped while moving
     # code between files would leave a binding with nothing behind it. 151 since the POV
     # cloud panel's multi-cloud checkboxes added povCloudChoices, povCloudOn and
-    # togglePovCloud -- an ADDED member is the only reason to change this number.
+    # togglePovCloud. 152 since the Appearance card's display-time-zone picker added
+    # timezoneChoices -- an ADDED member is the only reason to change this number.
     for must in ("init", "openPanel", "savePanelConfig", "loadFeatureFlags", "integrations",
                  "saveBranding", "startRegistration", "saveRegionSets", "loadDbops",
                  "showToast"):
         assert must in names, f"{must} is defined nowhere in the Settings script"
-    assert len(names) == 151, len(names)
+    assert len(names) == 152, len(names)
 
 
 if __name__ == "__main__":

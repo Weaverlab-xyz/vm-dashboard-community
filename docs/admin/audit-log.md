@@ -81,6 +81,11 @@ across action, target and details. **Verify chain** runs the integrity check on 
 and states the result either way; an intact chain is the thing an auditor wants said out
 loud, not assumed.
 
+**Time zone.** The *When* column, like the Time column on **Job History**, shows each
+entry in the zone an admin picks under **Settings → Appearance → Display time zone**, with
+the zone abbreviation beside it (`2026-11-03 13:19:33 CST`). The default is UTC. This is
+presentation only: entries are stored in UTC, and the CSV/JSON export is unchanged.
+
 | Endpoint | What it does |
 |---|---|
 | `GET /api/audit` | A page of entries, newest first, with the filters above |
