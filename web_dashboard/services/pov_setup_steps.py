@@ -273,7 +273,10 @@ def _rb_installer(p: dict):
     if p.get("rb_asset") and p.get("rb_has_key"):
         return DONE, f"installer {p['rb_asset']} and its key are stored", ""
     if p.get("ui_robot_job_id"):
-        return RUNNING, "the UI robot is fetching the installer", ""
+        if p.get("ui_robot_task", "installer") == "installer":
+            return RUNNING, "the UI robot is fetching the installer", ""
+        # The other task (the PRA integration) holds the POV's one robot slot.
+        return BLOCKED, "the UI robot is busy with another task; fetch once it finishes", ""
     block = p.get("ui_robot_installer_block")
     if block:
         return BLOCKED, f"{block}. Or stage the installer and key by hand.", "ui_robot_installer"

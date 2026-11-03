@@ -479,6 +479,46 @@ def test_a_second_robot_task_is_refused_while_one_is_active():
     db.close()
 
 
+
+def test_describe_names_the_running_task_and_the_list_reads_jobs_once():
+    db = d.SessionLocal()
+    env, _row = _ready(db)
+    job = pov_ui_robot.queue(db, env, task="installer", created_by="t")
+    out = pov_ui_robot.describe(db, env)
+    assert out["ui_robot_job_id"] == job.id and out["ui_robot_task"] == "installer"
+    batch = pov_ui_robot.active_jobs(db)
+    assert batch[env.id].id == job.id
+    # The list passes its batched entry; the answer is the same as describing alone.
+    assert pov_ui_robot.describe(db, env, running=batch.get(env.id)) == out
+    assert pov_ui_robot.describe(db, env, running=None)["ui_robot_job_id"] == ""
+    job.status = "completed"
+    db.commit()
+    db.close()
+
+
+def test_a_held_queue_claim_refuses_a_second_request_and_a_stale_one_is_taken():
+    from datetime import timedelta
+    from web_dashboard.utils.clock import utcnow
+    db = d.SessionLocal()
+    env, _row = _ready(db)
+    key = pov_ui_robot._CLAIM.format(env_id=env.id)
+    # Another worker is mid-queue: this request must not also queue.
+    db.add(d.EphemeralState(key=key, value="", expires_at=utcnow() + timedelta(seconds=30)))
+    db.commit()
+    msg = _refusal(lambda: pov_ui_robot.queue(db, env, task="installer", created_by="t"))
+    assert "already running" in msg and pov_ui_robot.active_job(db, env) is None
+    # A claim left by a dead process expires rather than blocking the POV for good.
+    db.query(d.EphemeralState).filter(d.EphemeralState.key == key).update(
+        {d.EphemeralState.expires_at: utcnow() - timedelta(seconds=1)})
+    db.commit()
+    job = pov_ui_robot.queue(db, env, task="installer", created_by="t")
+    # And a successful queue gives the claim back.
+    assert db.query(d.EphemeralState).filter(d.EphemeralState.key == key).first() is None
+    job.status = "completed"
+    db.commit()
+    db.close()
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
