@@ -1316,6 +1316,7 @@ def _agent_row(agent: RemoteAgent, running: int = 0) -> dict:
         "k8s_signature": agent.control_k8s_signature or "",
         "paused": bool(agent.paused),
         "upgrade_ring": agent_lifecycle_service.ring(agent),
+        "workstream": agent.workstream or "",
         "lifecycle_blocked": agent_lifecycle_service.host_gate(None, agent) or "",
         # What changed since it attested that a person should look at; cleared by
         # acknowledging (docs/platform/spiffe/remote-agents/spire-attestation.md).
@@ -1518,11 +1519,12 @@ def list_agents(current_user: User = Depends(require_explicit_permission("agents
                 REQUIRE_SPIRE_FOR_SECRETS),
             "spire_min_agent_version": dashboard_spire.MIN_AGENT_VERSION,
             # For the "update available" badge: the newest release recorded, if any.
-            "newest_release": _newest_release(db)}
+            "newest_release": _newest_release(db),
+            "release_lag": agent_release_service.get_lag()}
 
 
 def _newest_release(db: Session) -> Optional[dict]:
-    row = agent_release_service.newest(db)
+    row = agent_release_service.target(db)
     return agent_release_service.release_dict(row) if row else None
 
 
@@ -1651,7 +1653,37 @@ def list_releases(current_user: User = Depends(require_explicit_permission("agen
                   db: Session = Depends(get_db)):
     return {"releases": [agent_release_service.release_dict(r)
                          for r in agent_release_service.list_releases(db)],
-            "repository": agent_lifecycle_service.DEFAULT_REPOSITORY}
+            "repository": agent_lifecycle_service.DEFAULT_REPOSITORY,
+            "lag": agent_release_service.get_lag(),
+            "workstream_lags": agent_release_service.get_workstream_lags(),
+            "workstreams": _workstream_names(db)}
+
+
+def _workstream_names(db: Session) -> list:
+    from ..services import workgroup_service
+    return workgroup_service.list_names(db)
+
+
+class LagRequest(BaseModel):
+    lag: int
+    # Blank: the dashboard-wide track. Else that workstream's (-1 = follow the default).
+    workstream: str = ""
+
+
+@admin_router.put("/releases/lag")
+def set_release_lag(body: LagRequest, request: Request,
+                    current_user: User = Depends(require_explicit_permission("agents", "write")),
+                    db: Session = Depends(get_db)):
+    """Offer the newest release (0), one behind (1, "n-1") or two behind (2, "n-2")."""
+    try:
+        lag = agent_release_service.set_lag(body.lag, body.workstream)
+    except agent_lifecycle_service.LifecycleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    job_service.log_audit(db, current_user.username, "agent.release_lag",
+                          ip_address=_client_ip(request), details={"lag": lag})
+    target = agent_release_service.target(db)
+    return {"lag": lag, "workstream": body.workstream,
+            "target": agent_release_service.release_dict(target) if target else None}
 
 
 @admin_router.post("/releases", status_code=201)
@@ -1692,6 +1724,21 @@ def check_releases(body: ReleaseCheckRequest, request: Request,
     return agent_release_service.release_dict(row)
 
 
+@admin_router.post("/releases/sync")
+def sync_releases(request: Request,
+                  current_user: User = Depends(require_explicit_permission("agents", "write")),
+                  db: Session = Depends(get_db)):
+    """Record every release Docker Hub publishes for the agent image (what the
+    Lifecycle panel's *Check Docker Hub* button calls)."""
+    try:
+        result = agent_release_service.sync_registry(db, actor=current_user.username)
+    except agent_lifecycle_service.LifecycleError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    job_service.log_audit(db, current_user.username, "agent.release_sync",
+                          ip_address=_client_ip(request), details=result)
+    return result
+
+
 @admin_router.delete("/releases/{release_id}")
 def delete_release(release_id: str, request: Request,
                    current_user: User = Depends(require_explicit_permission("agents", "write")),
@@ -1700,7 +1747,10 @@ def delete_release(release_id: str, request: Request,
     if row is None:
         raise HTTPException(status_code=404, detail="Release not found.")
     version = row.version
-    agent_release_service.delete(db, row)
+    try:
+        agent_release_service.delete(db, row)
+    except agent_lifecycle_service.LifecycleError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     job_service.log_audit(db, current_user.username, "agent.release_delete",
                           ip_address=_client_ip(request), details={"version": version})
     return {"detail": f"Release {version} removed."}
@@ -1732,6 +1782,37 @@ def start_rollout(body: RolloutRequest, request: Request,
                           details={"rollout": rollout.id, "version": release.version,
                                    "jobs": len(out["jobs"]), "skipped": len(out["skipped"])})
     return out
+
+
+@admin_router.delete("/rollouts")
+def clear_rollouts(request: Request,
+                   current_user: User = Depends(require_explicit_permission("agents", "write")),
+                   db: Session = Depends(get_db)):
+    """Hide every finished rollout (done or stopped); one in flight stays."""
+    from ..database import AgentRollout
+    n = db.query(AgentRollout).filter(AgentRollout.status.notin_(("canary", "default"))
+                                      ).delete(synchronize_session=False)
+    db.commit()
+    job_service.log_audit(db, current_user.username, "agent.rollout_clear",
+                          ip_address=_client_ip(request), details={"cleared": n})
+    return {"cleared": n}
+
+
+@admin_router.delete("/rollouts/{rollout_id}")
+def clear_rollout(rollout_id: str, request: Request,
+                  current_user: User = Depends(require_explicit_permission("agents", "write")),
+                  db: Session = Depends(get_db)):
+    from ..database import AgentRollout
+    row = db.query(AgentRollout).filter(AgentRollout.id == rollout_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Rollout not found.")
+    if row.status in ("canary", "default"):
+        raise HTTPException(status_code=409, detail="That rollout is still in progress.")
+    db.delete(row)
+    db.commit()
+    job_service.log_audit(db, current_user.username, "agent.rollout_clear",
+                          ip_address=_client_ip(request), details={"rollout": rollout_id})
+    return {"detail": "Rollout hidden."}
 
 
 @admin_router.get("/rollouts/{rollout_id}")
@@ -1948,6 +2029,8 @@ class AgentUpdateRequest(BaseModel):
     description: Optional[str] = None
     # "canary" upgrades first in a rollout; "default" the rest.
     upgrade_ring: Optional[str] = None
+    # The workstream whose release track (n / n-1 / n-2) it follows; "" clears it.
+    workstream: Optional[str] = None
 
 
 @admin_router.patch("/{agent_id}")
@@ -1972,6 +2055,16 @@ def update_agent(agent_id: str, body: AgentUpdateRequest, request: Request,
             agent_lifecycle_service.set_ring(db, agent, str(body.upgrade_ring))
         except agent_lifecycle_service.LifecycleError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+    if body.workstream is not None:
+        from ..services import workgroup_service
+        name = str(body.workstream).strip()
+        try:
+            canonical = workgroup_service.canonical_or_none(db, name) if name else None
+        except workgroup_service.WorkgroupError:
+            canonical = None
+        if name and not canonical:
+            raise HTTPException(status_code=400, detail=f"Unknown workstream '{name}'")
+        agent.workstream = canonical
     db.commit()
     db.refresh(agent)
     job_service.log_audit(db, current_user.username, "agent.update",

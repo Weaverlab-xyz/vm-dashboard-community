@@ -202,7 +202,7 @@
                   <span x-text="a.agent_version || '—'"></span>
                   <!-- Against the newest release recorded under Lifecycle, below. -->
                   <span x-show="updateAvailable(a)" x-cloak
-                        :title="'Release ' + (newestRelease ? newestRelease.version : '') + ' is recorded'"
+                        :title="'Release ' + (targetFor(a) ? targetFor(a).version : '') + ' is on this agent\'s track'"
                         class="ml-1 inline-flex px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-sans text-[10px] font-medium">update</span>
                   <span x-show="a.upgrade_ring === 'canary'" x-cloak
                         title="Upgrades first in a rollout"
@@ -344,6 +344,15 @@
                           <option value="default">default</option>
                           <option value="canary">canary (first)</option>
                         </select>
+                        <span class="ml-3">Workstream</span>
+                        <select :value="a.workstream" @change="setWorkstream(a, $event.target.value)"
+                                title="Its release track (n, n-1, n-2) follows this workstream"
+                                class="ml-1 text-xs border border-gray-300 rounded px-1 py-0.5">
+                          <option value="">none (default track)</option>
+                          <template x-for="w in workstreams" :key="w">
+                            <option :value="w" :selected="w === a.workstream" x-text="w"></option>
+                          </template>
+                        </select>
                       </dd>
                     </div>
                     <div x-show="a.status === 'enrolling'" class="col-span-2">
@@ -392,15 +401,51 @@
       <a href="/docs/platform/spiffe/remote-agents/lifecycle" class="text-blue-600 hover:underline">How it works</a>
     </p>
 
+    <div class="flex flex-wrap items-center gap-2 mb-3 text-sm text-gray-700">
+      <label class="text-xs font-medium text-gray-700">Track</label>
+      <select x-model="releaseLag" @change="setLag()"
+              title="Which release this dashboard offers for upgrades and new agents"
+              class="text-sm border border-gray-300 rounded-lg px-2 py-1">
+        <option value="0">Newest (n)</option>
+        <option value="1">One behind (n-1)</option>
+        <option value="2">Two behind (n-2)</option>
+      </select>
+      <span class="text-xs text-gray-500">
+        Offering <span class="font-mono" x-text="targetRelease() ? targetRelease().version : 'none yet'"></span>
+        for upgrades and new agents. A rollout leaves an agent alone if its track stops short of the release.
+      </span>
+    </div>
+
+    <div x-show="workstreams.length > 0" class="mb-3 text-xs text-gray-600">
+      <div class="mb-1">Per workstream: agents set to a workstream (in their row below) follow its track instead.</div>
+      <template x-for="w in workstreams" :key="w">
+        <div class="inline-flex items-center gap-1 mr-4 mb-1">
+          <span class="font-medium" x-text="w"></span>
+          <select :value="workstreamLags[w] === undefined ? '-1' : String(workstreamLags[w])"
+                  @change="setWorkstreamLag(w, $event.target.value)"
+                  class="text-xs border border-gray-300 rounded px-1 py-0.5">
+            <option value="-1">default</option>
+            <option value="0">n</option>
+            <option value="1">n-1</option>
+            <option value="2">n-2</option>
+          </select>
+        </div>
+      </template>
+    </div>
+
     <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Releases</h3>
     <div x-show="releases.length === 0" class="text-sm text-gray-400 mb-3">
-      None recorded. Check Docker Hub, or add one by hand (an air-gapped mirror's digest).
+      None recorded. Click Check Docker Hub to load the published agent releases.
     </div>
     <table x-show="releases.length > 0" class="w-full text-sm mb-3">
       <tbody>
         <template x-for="r in releases" :key="r.id">
           <tr class="border-b border-gray-50">
-            <td class="py-1.5 pr-4 font-mono text-xs text-gray-800" x-text="r.version"></td>
+            <td class="py-1.5 pr-4 font-mono text-xs text-gray-800">
+              <span x-text="r.version"></span>
+              <span x-show="targetRelease() && targetRelease().id === r.id"
+                    class="ml-1 px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-sans">offered</span>
+            </td>
             <td class="py-1.5 pr-4 font-mono text-xs text-gray-500" x-text="r.repository"></td>
             <td class="py-1.5 pr-4 font-mono text-xs text-gray-500 break-all" :title="r.digest"
                 x-text="r.digest.slice(0, 19) + '…'"></td>
@@ -413,7 +458,9 @@
         </template>
       </tbody>
     </table>
-    <div class="flex flex-wrap items-end gap-2 mb-6">
+    <details class="mb-6">
+      <summary class="text-xs text-gray-500 cursor-pointer mb-2">Air-gapped site with an image mirror? Record a release by hand</summary>
+    <div class="flex flex-wrap items-end gap-2">
       <input x-model="releaseForm.version" placeholder="2.10.1"
              class="w-28 text-sm border border-gray-300 rounded-lg px-2 py-1.5 font-mono"/>
       <input x-model="releaseForm.repository" placeholder="chrweav/dashboard-agent"
@@ -426,8 +473,13 @@
         Add release
       </button>
     </div>
+    </details>
 
-    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Rollouts</h3>
+    <div class="flex items-center justify-between mb-2">
+      <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Rollouts</h3>
+      <button x-show="rollouts.some(r => r.status !== 'canary' && r.status !== 'default')"
+              @click="clearRollout(null)" class="text-xs text-gray-500 hover:text-gray-700">Hide finished</button>
+    </div>
     <div x-show="rollouts.length === 0" class="text-sm text-gray-400">None yet.</div>
     <template x-for="ro in rollouts" :key="ro.id">
       <div class="border border-gray-100 rounded-lg px-3 py-2 mb-2 text-xs">
@@ -436,6 +488,8 @@
           <span :class="rolloutClass(ro.status)" class="px-1.5 py-0.5 rounded font-medium" x-text="ro.status"></span>
           <span class="text-gray-400" x-text="fmt(ro.created_at)"></span>
           <span class="text-red-600" x-text="ro.detail"></span>
+          <button x-show="ro.status !== 'canary' && ro.status !== 'default'" @click="clearRollout(ro)"
+                  class="ml-auto text-gray-400 hover:text-gray-600">Hide</button>
         </div>
         <div class="mt-1 text-gray-600">
           <template x-for="j in ro.jobs" :key="j.job_id">
@@ -809,6 +863,9 @@ function agentsPage() {
     releases: [],
     rollouts: [],
     newestRelease: null,
+    releaseLag: 0,
+    workstreamLags: {},
+    workstreams: [],
     releaseBusy: false,
     releaseForm: {version: '', repository: '', digest: ''},
     upgrade: {open: false, rollout: false, agentId: '', name: '', from: '', release_id: '',
@@ -900,6 +957,7 @@ function agentsPage() {
         this.spireMinVersion = r.spire_min_agent_version || '2.6.0';
         this.secretsRequireSpire = !!r.dashboard_secrets_require_spire;
         this.newestRelease = r.newest_release || null;
+        this.releaseLag = r.release_lag || 0;
         this.notEnabled = false;
         this.noAccess = '';
       } catch (e) {
@@ -931,9 +989,61 @@ function agentsPage() {
                                              API.get('/api/agents/rollouts')]);
         this.releases = rel.releases || [];
         this.rollouts = ro.rollouts || [];
-        this.newestRelease = this.releases[0] || null;
+        this.releaseLag = rel.lag || 0;
+        this.workstreamLags = rel.workstream_lags || {};
+        this.workstreams = rel.workstreams || [];
+        this.newestRelease = this.targetRelease();
       } catch (e) {
         // The agents list already reports a feature-off or denied state.
+      }
+    },
+
+    // n, n-1 or n-2: the release offered by default, never past the oldest recorded.
+    targetRelease() {
+      return this.releases[Math.min(this.releaseLag, this.releases.length - 1)] || null;
+    },
+
+    // The same, for one agent: its workstream's track when it has one.
+    targetFor(a) {
+      const own = a && a.workstream ? this.workstreamLags[a.workstream] : undefined;
+      const lag = own === undefined ? this.releaseLag : own;
+      return this.releases[Math.min(lag, this.releases.length - 1)] || null;
+    },
+
+    async setWorkstreamLag(ws, lag) {
+      try {
+        await API.put('/api/agents/releases/lag', {lag: Number(lag), workstream: ws});
+      } catch (e) {
+        this.flash('Could not save it: ' + (e.message || e), 'error');
+      }
+      await this.loadLifecycle();
+    },
+
+    async setWorkstream(a, ws) {
+      try {
+        await API.patch(`/api/agents/${encodeURIComponent(a.id)}`, {workstream: ws});
+        await this.load(true);
+      } catch (e) {
+        this.flash('Could not set the workstream: ' + (e.message || e), 'error');
+      }
+    },
+
+    async setLag() {
+      try {
+        await API.put('/api/agents/releases/lag', {lag: Number(this.releaseLag)});
+        await this.loadLifecycle();
+      } catch (e) {
+        this.flash('Could not save it: ' + (e.message || e), 'error');
+        await this.loadLifecycle();
+      }
+    },
+
+    async clearRollout(ro) {
+      try {
+        await API.delete('/api/agents/rollouts' + (ro ? '/' + encodeURIComponent(ro.id) : ''));
+        await this.loadLifecycle();
+      } catch (e) {
+        this.flash('Could not hide it: ' + (e.message || e), 'error');
       }
     },
 
@@ -949,8 +1059,9 @@ function agentsPage() {
     },
 
     updateAvailable(a) {
-      return !!(this.newestRelease && a.status !== 'revoked' && a.agent_version
-                && this.newerThan(this.newestRelease.version, a.agent_version));
+      const t = this.targetFor(a);
+      return !!(t && a.status !== 'revoked' && a.agent_version
+                && this.newerThan(t.version, a.agent_version));
     },
 
     rolloutClass(s) {
@@ -962,14 +1073,14 @@ function agentsPage() {
     openUpgrade(a) {
       this.scheduleReset();
       this.upgrade = {open: true, rollout: false, agentId: a.id, name: a.name,
-                      from: a.agent_version, release_id: (this.releases[0] || {}).id || '',
+                      from: a.agent_version, release_id: (this.targetRelease() || {}).id || '',
                       force: false, busy: false};
     },
 
     openRollout() {
       this.scheduleReset();
       this.upgrade = {open: true, rollout: true, agentId: '', name: '', from: '',
-                      release_id: (this.releases[0] || {}).id || '', force: false, busy: false};
+                      release_id: (this.targetRelease() || {}).id || '', force: false, busy: false};
     },
 
     async submitUpgrade() {
@@ -1050,8 +1161,10 @@ function agentsPage() {
     async checkHub() {
       this.releaseBusy = true;
       try {
-        const r = await API.post('/api/agents/releases/check', {tag: 'latest'});
-        this.flash(`Docker Hub: ${r.version} (${r.digest.slice(0, 19)}…) recorded.`, 'success');
+        const r = await API.post('/api/agents/releases/sync', {});
+        const n = r.added.length + r.updated.length;
+        this.flash(n ? `Docker Hub: recorded ${[...r.added, ...r.updated].join(', ')}.`
+                     : 'Docker Hub: already up to date.', 'success');
         await this.loadLifecycle();
       } catch (e) {
         this.flash(e.message || String(e), 'error');

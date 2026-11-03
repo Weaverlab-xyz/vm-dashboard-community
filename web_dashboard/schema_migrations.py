@@ -382,6 +382,10 @@ MIGRATIONS: tuple = (
     # it (verified | pending | unchecked | failed: ...). NULL is "not reported".
     Migration("0011_k8s_image_signature",
               (add_column("remote_agents", "control_k8s_signature", "VARCHAR(240)"),)),
+    # The workstream an agent's release track follows (n / n-1 / n-2 per workstream).
+    # NULL: no workstream, so the dashboard-wide track.
+    Migration("0012_agent_workstream",
+              (add_column("remote_agents", "workstream", "VARCHAR(64)"),)),
 )
 
 
