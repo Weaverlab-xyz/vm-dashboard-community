@@ -792,8 +792,18 @@
                      The exception is a cloud, where the DASHBOARD runs the idle timer
                      too: both are ours, nothing fights, so it shows under the schedule. -->
                 <template x-if="e.suspend_on_idle_seconds && e.idle_suspend_by !== 'dashboard'">
-                  <p class="text-xs text-gray-600 whitespace-nowrap"
-                     x-text="Math.round(e.suspend_on_idle_seconds / 60) + ' min idle'"></p>
+                  <div class="space-y-0.5">
+                    <p class="text-xs text-gray-600 whitespace-nowrap"
+                       x-text="Math.round(e.suspend_on_idle_seconds / 60) + ' min idle'"></p>
+                    <!-- The platform suspends itself; the dashboard only STARTS it. -->
+                    <p class="text-xs whitespace-nowrap"
+                       :class="e.schedule && e.schedule.scheduled ? 'text-gray-600' : 'text-gray-300'"
+                       :title="(e.schedule && e.schedule.summary) || 'No scheduled start'"
+                       x-text="e.schedule && e.schedule.scheduled ? ('starts ' + e.schedule.resume_at_local) : 'no scheduled start'"></p>
+                    <button @click="setSchedule(e)" :disabled="!actionable(e)"
+                            title="Start this POV on a schedule"
+                            class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed">edit start</button>
+                  </div>
                 </template>
                 <template x-if="!e.suspend_on_idle_seconds || e.idle_suspend_by === 'dashboard'">
                   <div class="space-y-0.5">
@@ -801,7 +811,9 @@
                        :class="e.schedule && e.schedule.scheduled ? 'text-gray-600' : 'text-gray-300'"
                        :title="(e.schedule && e.schedule.summary) || 'This POV runs until somebody suspends it'"
                        x-text="e.schedule && e.schedule.scheduled
-                               ? (e.schedule.suspend_at_local + (e.schedule.resume_at_local ? '–' + e.schedule.resume_at_local : ''))
+                               ? (e.schedule.suspend_at_local
+                                  ? e.schedule.suspend_at_local + (e.schedule.resume_at_local ? '–' + e.schedule.resume_at_local : '')
+                                  : 'starts ' + e.schedule.resume_at_local)
                                : 'always on'"></p>
                     <button @click="setSchedule(e)" :disabled="!actionable(e)"
                             title="Suspend and resume this POV on a schedule"
@@ -2436,17 +2448,31 @@ function povPage(tabSlugs) {
     // per POV would be more surface than the feature is worth.
     async setSchedule(env) {
       const cur = env.schedule || {};
-      const suspend = window.prompt(
+      // A platform with its own idle timer (Skytap) suspends itself: only ask for a start.
+      const startOnly = env.idle_suspend_by === 'platform';
+      const suspend = startOnly ? '' : window.prompt(
         'Suspend this POV at what local time each day? 24-hour HH:MM.\n' +
-        'Leave blank to remove the schedule.',
+        'Leave blank for a start-only schedule (or to remove the schedule).',
         cur.suspend_at_local || '19:00');
       if (suspend === null) return;
       let resume = '', tz = '', days = '';
-      if (suspend.trim()) {
+      if (startOnly) {
+        resume = window.prompt(
+          'Start this POV at what local time? 24-hour HH:MM. Leave blank to remove the schedule.',
+          cur.resume_at_local || '08:00');
+        if (resume === null) return;
+      } else if (suspend.trim()) {
         resume = window.prompt(
           'Resume it at what time? Blank means it stays down until you start it.',
           cur.resume_at_local || '08:00');
         if (resume === null) return;
+      } else {
+        resume = window.prompt(
+          'Start this POV at what local time? 24-hour HH:MM. Leave blank to remove the schedule.',
+          cur.resume_at_local || '08:00');
+        if (resume === null) return;
+      }
+      if (suspend.trim() || resume.trim()) {
         tz = window.prompt(
           'Which timezone? An IANA name, e.g. Europe/London. Blank means UTC.',
           cur.schedule_timezone || 'UTC');

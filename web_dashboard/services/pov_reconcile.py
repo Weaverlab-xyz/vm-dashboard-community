@@ -300,9 +300,9 @@ def sweep_schedules(db: Session, *, job_id: str = "") -> int:
     action invisible: as a job it has a row, a Live Output and a cancel, and its failure
     reaches the dashboard's failed-jobs panel like any other.
 
-    Skipped entirely for a platform with an idle timer of its own. The capability table is
-    the arbiter, so a platform that grows one later stops being driven from here without
-    this function learning its name.
+    A platform with an idle timer of its own (Skytap) is only ever STARTED from here: it
+    suspends itself, and the schedule's start time brings it back. The capability table is
+    the arbiter, so no platform name appears in this function.
     """
     from . import pov_env_service, suspend_schedule
 
@@ -325,9 +325,12 @@ def sweep_schedules(db: Session, *, job_id: str = "") -> int:
         if not suspend_schedule.has_schedule(env):
             continue
         try:
-            if lab_platforms.supports(env.platform, "idle_suspend"):
-                continue
-            wanted = suspend_schedule.due_action(env, now)
+            # A platform with its own idle timer suspends itself, so the dashboard only
+            # ever STARTS it on a schedule; a stored suspend time is never acted on.
+            allow = ((suspend_schedule.RESUME,)
+                     if lab_platforms.supports(env.platform, "idle_suspend")
+                     else (suspend_schedule.SUSPEND, suspend_schedule.RESUME))
+            wanted = suspend_schedule.due_action(env, now, allow)
         except Exception as exc:  # noqa: BLE001 — one bad row never stops the sweep
             logger.warning("POV %s: could not evaluate its schedule", env.id,
                            exc_info=True)

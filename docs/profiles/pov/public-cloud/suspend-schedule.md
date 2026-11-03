@@ -10,8 +10,8 @@ column, or carried on a blueprint so every POV of a kind starts with it.
 
 | Field | Meaning |
 |---|---|
-| Suspend at | Local time, 24-hour `HH:MM`. Blank removes the schedule |
-| Resume at | Blank means it stays down until somebody starts it |
+| Suspend at | Local time, 24-hour `HH:MM`. Blank means no scheduled suspend |
+| Resume at (start) | Local time the POV is started. Blank means it stays down until somebody starts it. May be set on its own: a start-only **run schedule** |
 | Timezone | An IANA name. Blank means UTC — not the server's zone, which is an accident of its base image |
 | Days | Seven characters of `0`/`1`, Monday first. `1111100` is Mon–Fri |
 
@@ -42,8 +42,11 @@ Output, a cancel, and a place in the failed-jobs panel. It is attributed to
 `pov-schedule`, not to whoever set the schedule, so the row says why the POV went to sleep
 at 19:00.
 
-Setting a schedule is refused on a platform that has its own idle timer. The two answer
-the same question, and a POV carrying both is one where neither is in charge.
+A platform with its own idle timer (Skytap) suspends itself, so a suspend time is refused
+there: the two answer the same question, and a POV carrying both is one where neither is in
+charge. A **start-only** schedule is allowed on every platform, Skytap included, and is the
+way to bring a suspended Skytap POV back each morning without pressing Start. Set it from the
+*Sleeps* column on the POV list or *Edit run schedule* on the POV's Setup tab.
 
 For a single early start before a call, outside the schedule's hours or on a platform that
 refuses one, book a [warm-up](../lifecycle.md#warming-a-pov-up-for-a-demo) instead.
