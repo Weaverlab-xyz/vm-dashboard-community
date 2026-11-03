@@ -218,7 +218,7 @@ def clean_timezone(value) -> str:
 def display_timezone() -> str:
     """The zone timestamps render in. Never raises; falls back to UTC."""
     try:
-        return clean_timezone(config_service.get_raw("display_timezone")) or DEFAULT_TIMEZONE
+        return clean_timezone(config_service.get_raw("brand_timezone")) or DEFAULT_TIMEZONE
     except Exception:
         return DEFAULT_TIMEZONE
 

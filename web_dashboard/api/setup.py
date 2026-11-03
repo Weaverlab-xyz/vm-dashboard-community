@@ -3115,7 +3115,7 @@ _BRANDING_KEYS = (
     "brand_accent_hex",
     # Not branding, but the same shape (one global admin row saved from the Appearance
     # card), so it rides the same save/reset rather than getting a second endpoint.
-    "display_timezone",
+    "brand_timezone",
 )
 
 # NOT here on purpose: the brand_logo_* pointer rows. patch_branding below writes every key
@@ -3137,9 +3137,9 @@ class BrandingConfig(BaseModel):
     brand_primary: str = ""
     brand_secondary: str = ""
     brand_accent_hex: str = ""
-    display_timezone: str = ""
+    brand_timezone: str = ""
 
-    @field_validator("display_timezone")
+    @field_validator("brand_timezone")
     @classmethod
     def _tz(cls, v: str) -> str:
         from ..services import branding

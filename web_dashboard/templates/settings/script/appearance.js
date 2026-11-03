@@ -10,7 +10,7 @@ function settingsAppearance() {
       brand_name: '', brand_full: '', brand_accent: '',
       brand_env_label: '', brand_env_color: '',
       brand_primary: '', brand_secondary: '', brand_accent_hex: '',
-      display_timezone: '',
+      brand_timezone: '',
     },
     // IANA zone names for the display-time-zone picker, from the server's own zoneinfo so
     // every option is one the save will accept.
@@ -252,7 +252,7 @@ function settingsAppearance() {
         brand_name: '', brand_full: '', brand_accent: '',
         brand_env_label: '', brand_env_color: '',
         brand_primary: '', brand_secondary: '', brand_accent_hex: '',
-        display_timezone: '',
+        brand_timezone: '',
       };
       this.brandingCustom = false;
       // "Reset to defaults" that left a customer logo in the nav bar would read as a bug.
