@@ -227,6 +227,11 @@ locals {
 resource "aws_iam_policy" "read" {
   name        = "${var.name_prefix}-read"
   description = "vm-dashboard POV cloud provider: read-only (request path)."
+  # An IAM policy description cannot be edited: a change would destroy the policy and
+  # drop its role attachments. The policy document is versioned in place.
+  lifecycle {
+    ignore_changes = [description]
+  }
   policy = jsonencode({
     Version   = "2012-10-17"
     Statement = local.read_statements
@@ -237,6 +242,11 @@ resource "aws_iam_policy" "read" {
 resource "aws_iam_policy" "provision" {
   name        = "${var.name_prefix}-provision"
   description = "vm-dashboard POV cloud provider: build, power and tear down POV environments (jobs)."
+  # An IAM policy description cannot be edited: a change would destroy the policy and
+  # drop its role attachments. The policy document is versioned in place.
+  lifecycle {
+    ignore_changes = [description]
+  }
   policy = jsonencode({
     Version   = "2012-10-17"
     Statement = concat(local.read_statements, local.provision_statements)
