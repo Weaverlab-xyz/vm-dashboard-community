@@ -5,8 +5,8 @@
 Part of [POV design notes](README.md).
 
 **Status: the dashboard and agent sides are built and unit-tested; the robot's selectors
-are not recorded, the setup ladder has no row for it yet, and none of it has been run against
-a live Password Safe, PRA or control node.** What was built is in
+are not recorded, and none of it has been run against a live Password Safe, PRA or control
+node.** The setup ladder has a row and the POV page has buttons for it. What was built is in
 [What was built, and how it differs from the plan](#what-was-built-and-how-it-differs-from-the-plan);
 every statement about a live system is listed under [Not verified](#not-verified). The code
 references are to the tree this page was written against, so re-check a line number before
@@ -33,8 +33,13 @@ Where it differs from the sections below, which were written first:
   it, and `rb_ready` still refuses the install until the zone is set.
 - **Two extra login fields**, `ps_api_key` and `ps_runas_user`, for the integration form. They
   are separate from the tenant's own secret on purpose.
-- **Not built:** a setup-ladder row and its UI buttons (section 7), the Rebuild-time check that
-  an OAuth client exists for the control node's SPIFFE ID, and any selector.
+- **The ladder row is the installer only.** `rb_installer` ("Resource Broker installer
+  fetched") sits before `resource_broker` and is `done` on a staged installer plus a stored key,
+  however they got there. The integration has no row of its own: `pra_ps` already judges it from
+  PRA's own account counts, so the page puts a **Create integration** button and the write-only
+  **Robot logins** form on that row instead. One robot task runs per POV at a time.
+- **Not built:** the Rebuild-time check that an OAuth client exists for the control node's
+  SPIFFE ID, and any selector.
 
 ## The problem
 

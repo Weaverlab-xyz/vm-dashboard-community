@@ -65,7 +65,7 @@ _CURSOR_STATES = (READY, BLOCKED)
 
 # Where a step's job id lives on the row, for the steps that have one. A mapping rather
 # than a special case, so a step that gains a job id later is one line here.
-_JOB_KEYS = {"environment": "provision_job_id"}
+_JOB_KEYS = {"environment": "provision_job_id", "rb_installer": "ui_robot_job_id"}
 
 
 def _int(value) -> int:
@@ -258,6 +258,29 @@ def _resource_broker(p: dict):
     return BLOCKED, "needs " + _join(missing), "resource_broker"
 
 
+def _rb_installer(p: dict):
+    """The installer and its key fetched from Password Safe by the UI robot.
+
+    Judged on the artifacts the Resource Broker step reads (a staged installer and a stored
+    key), never on the robot job, for the same reason as every step here. A POV whose operator
+    staged both by hand is simply done, which is why this step is never a gate on
+    ``resource_broker``.
+    """
+    if _out(p, "password_safe"):
+        return SKIPPED, _not_chosen("Password Safe"), ""
+    if not p.get("ps_tenant_id"):
+        return SKIPPED, _no_tenant("Password Safe"), ""
+    if p.get("rb_asset") and p.get("rb_has_key"):
+        return DONE, f"installer {p['rb_asset']} and its key are stored", ""
+    if p.get("ui_robot_job_id"):
+        return RUNNING, "the UI robot is fetching the installer", ""
+    block = p.get("ui_robot_installer_block")
+    if block:
+        return BLOCKED, f"{block}. Or stage the installer and key by hand.", "ui_robot_installer"
+    return (READY, "Log in to Password Safe and fetch the installer and its key",
+            "ui_robot_installer")
+
+
 def _entitle_agent(p: dict):
     if _out(p, "entitle"):
         return SKIPPED, _not_chosen("Entitle"), ""
@@ -387,6 +410,7 @@ STEPS = (
     ("guest_os",        "Every guest's OS known",            _guest_os),
     ("broker",          "Control node agent enrolled",       _broker),
     ("gateway",         "PRA Gateway",                       _gateway),
+    ("rb_installer",    "Resource Broker installer fetched", _rb_installer),
     ("resource_broker", "Resource Broker",                   _resource_broker),
     ("entitle_agent",   "Entitle agent",                     _entitle_agent),
     ("wireup",          "VMs wired into PRA / PS / Entitle", _wireup),
@@ -408,6 +432,7 @@ NEEDS = {
     "guest_os":        ("environment",),
     "broker":          ("environment", "guest_os"),
     "gateway":         ("broker",),
+    "rb_installer":    ("broker",),
     "resource_broker": ("environment",),
     "entitle_agent":   ("broker",),
     "wireup":          ("gateway", "guest_os"),

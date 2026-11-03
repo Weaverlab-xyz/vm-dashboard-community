@@ -69,6 +69,11 @@ def _row(**over):
         "rb_zone": "zone-1",
         "rb_has_key": True,
         "rb_ready": True,
+        # pov_ui_robot.describe
+        "ui_robot_wanted": True,
+        "ui_robot_job_id": "",
+        "ui_robot_installer_block": "",
+        "ui_robot_integration_block": "",
         # pov_entitle_agent.describe
         "entitle_agent_installed": True,
         "entitle_agent_ready": True,
@@ -101,7 +106,7 @@ def test_the_ladder_is_the_dependency_order_and_every_step_appears_once():
     result = steps.describe(_row())
     keys = [s["key"] for s in result["steps"]]
     assert keys == ["use_cases", "environment", "guest_os", "broker", "gateway",
-                    "resource_broker", "entitle_agent", "wireup", "pra_ps", "ot_adapter",
+                    "rb_installer", "resource_broker", "entitle_agent", "wireup", "pra_ps", "ot_adapter",
                     "share"], keys
     assert len(set(keys)) == len(keys), "a step key is duplicated"
     assert keys == list(steps.STEP_KEYS), "STEP_KEYS has drifted from STEPS"
@@ -483,6 +488,46 @@ def test_the_ot_adapter_is_ready_then_done_on_the_registration():
 def test_the_ot_adapter_is_skipped_without_an_entitle_tenant():
     assert _state("ot_adapter", cell_role_counts={"ot-sim": 1},
                   entitle_tenant_id="") == "skipped"
+
+
+def test_the_installer_step_is_judged_on_the_artifacts_not_the_robot_job():
+    """Done is a staged installer AND a stored key, however they got there."""
+    done = _by_key(steps.describe(_row()))["rb_installer"]
+    assert done["state"] == "done" and "bootstrapper.exe" in done["detail"]
+    # Half staged is not done: the Resource Broker install needs both.
+    assert _state("rb_installer", rb_has_key=False) == "ready"
+    assert _state("rb_installer", rb_asset="", rb_has_key=False) == "ready"
+    # A finished robot job proves nothing; only the artifacts do.
+    assert _state("rb_installer", rb_asset="", rb_has_key=False,
+                  ui_robot_job_id="") == "ready"
+
+
+def test_the_installer_step_says_why_it_cannot_run_and_offers_the_manual_way():
+    blocked = _by_key(steps.describe(_row(
+        rb_asset="", rb_has_key=False,
+        ui_robot_installer_block="this POV has no stored robot login for: ps_user")))["rb_installer"]
+    assert blocked["state"] == "blocked" and blocked["action"] == "ui_robot_installer"
+    assert "ps_user" in blocked["detail"] and "by hand" in blocked["detail"]
+
+
+def test_the_installer_step_is_running_while_the_robot_job_is_active():
+    step = _by_key(steps.describe(_row(rb_asset="", rb_has_key=False,
+                                       ui_robot_job_id="job-9")))["rb_installer"]
+    assert step["state"] == "running" and step["job_id"] == "job-9"
+
+
+def test_the_installer_step_is_skipped_without_a_password_safe_tenant():
+    assert _state("rb_installer", ps_tenant_id="", rb_asset="", rb_has_key=False) == "skipped"
+    assert _state("rb_installer", use_case_products="pra", rb_asset="",
+                  rb_has_key=False) == "skipped"
+
+
+def test_the_installer_step_never_locks_the_resource_broker_step():
+    """The operator can still stage by hand, so a robot that cannot run holds nothing up."""
+    assert "rb_installer" not in steps.NEEDS["resource_broker"]
+    row = _by_key(steps.describe(_row(
+        rb_asset="", rb_has_key=False, ui_robot_installer_block="no login")))
+    assert row["resource_broker"]["locked"] is False
 
 
 if __name__ == "__main__":

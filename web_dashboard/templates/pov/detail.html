@@ -182,6 +182,42 @@
                     <span :class="toneClass(f.tone)" x-text="f.text"></span>
                   </template>
                 </p>
+                <!-- The UI robot: logs into Password Safe / PRA in a browser on the control
+                     node for the two things their APIs cannot do. Its logins are write-only:
+                     the page learns only which are stored, never their values. -->
+                <div x-show="robotTask(s)" class="mt-2">
+                  <div class="flex flex-wrap items-center gap-2">
+                    <button type="button" @click="robotOpen = (robotOpen === s.key ? '' : s.key)"
+                            class="text-xs px-2.5 py-1 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50"
+                            x-text="robotOpen === s.key ? 'Hide robot logins' : 'Robot logins'"></button>
+                    <button type="button" x-show="s.key === 'pra_ps' && s.state !== 'done'"
+                            @click="runRobot('integration')"
+                            :disabled="!!env.ui_robot_integration_block || !!env.ui_robot_job_id || !!stepBusy"
+                            :title="env.ui_robot_integration_block || ''"
+                            class="text-xs px-2.5 py-1 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                            x-text="env.ui_robot_job_id ? 'Robot running…' : 'Create integration'"></button>
+                    <span x-show="s.key === 'pra_ps' && env.ui_robot_integration_block && s.state !== 'done'"
+                          class="text-[11px] text-amber-700" x-text="env.ui_robot_integration_block"></span>
+                  </div>
+                  <div x-show="robotOpen === s.key" class="mt-2 space-y-2">
+                    <p class="text-[11px] text-gray-500">
+                      Write-only. A blank box leaves what is stored alone. Use a dedicated account for this POV.
+                    </p>
+                    <template x-for="f in robotFields(s)" :key="'robot-' + f.key">
+                      <label class="block text-xs text-gray-700">
+                        <span x-text="f.label"></span>
+                        <span class="ml-1" :class="(env.ui_robot_stored || {})[f.key] ? 'text-green-700' : 'text-gray-400'"
+                              x-text="(env.ui_robot_stored || {})[f.key] ? '(stored)' : '(not set)'"></span>
+                        <input :type="f.secret ? 'password' : 'text'" autocomplete="off" spellcheck="false"
+                               x-model="robotDraft[f.key]"
+                               class="mt-0.5 block w-full max-w-sm rounded-lg border border-gray-300 px-2 py-1 text-xs">
+                      </label>
+                    </template>
+                    <button type="button" @click="saveRobotLogins(s)" :disabled="robotSaving"
+                            class="text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40"
+                            x-text="robotSaving ? 'Saving…' : 'Save logins'"></button>
+                  </div>
+                </div>
                 <!-- The use-case picker. A preset picks the products; every use case of
                      those products is then ticked and can be unticked one by one. Cards
                      left out are hidden from the Use cases tab, the customer's page and
@@ -1459,6 +1495,9 @@
         { key: 'entitle', label: 'Entitle', tenant: 'entitle_tenant_id' },
       ],
       scopeOpen: false,
+      robotOpen: '',
+      robotSaving: false,
+      robotDraft: {},
       scopeSaving: false,
       scopeGroups: [],
       scopeDraft: { products: [], excluded: [] },
@@ -1877,6 +1916,9 @@
                      tone: e.gateway_name ? '' : 'muted' });
           if (e.gateway_name && !e.gateway_has_key) out.push({ text: 'no deploy key', tone: 'warn' });
           if (e.gateway_created) out.push({ text: 'created here', tone: 'muted' });
+        } else if (s.key === 'rb_installer') {
+          out.push(e.rb_asset ? { text: 'installer ' + e.rb_asset } : { text: 'no installer', tone: 'muted' });
+          out.push(e.rb_has_key ? { text: 'key stored' } : { text: 'no key', tone: 'muted' });
         } else if (s.key === 'resource_broker') {
           out.push({ text: e.rb_asset ? 'installer ' + e.rb_asset : 'no installer chosen',
                      tone: e.rb_asset ? '' : 'muted' });
@@ -1919,6 +1961,7 @@
         if (s.key === 'pra_ps') return this.env.pra_ps_matched_count ? 'Link' : 'Check';
         const labels = {
           use_cases: 'Choose', vms: 'Set guest OS', broker: 'Install control node', gateway: 'Create & install',
+          ui_robot_installer: 'Fetch installer',
           resource_broker: 'Configure', entitle_agent: 'Install agent', wireup: 'Wire up',
           share: 'Share', ot_adapter: 'Deploy adapter',
         };
@@ -1946,6 +1989,7 @@
           return;
         }
         if (s.key === 'use_cases') { await this.openScope(); return; }
+        if (s.action === 'ui_robot_installer') { await this.runRobot('installer'); return; }
         if (s.key === 'pra_ps') { await this.praPs(this.env.pra_ps_matched_count ? 'link' : 'check'); return; }
         this.stepBusy = s.key;
         try {
@@ -1987,6 +2031,69 @@
             this.notice = `Shared until ${(data.share.share_expires_at || '').slice(0, 10)}. `
                         + `Password: ${data.share.password}`;
           }
+        } catch (e) {
+          this.error = e.message;
+        } finally {
+          this.stepBusy = '';
+          await this.loadEnv();
+          this.watchSetup();
+        }
+      },
+
+      // Which robot task a step owns, or '' for a step with no robot behind it.
+      robotTask(s) {
+        if (!this.env.ui_robot_wanted) return '';
+        if (s.key === 'rb_installer') return 'installer';
+        return (s.key === 'pra_ps' && this.env.pra_tenant_id) ? 'integration' : '';
+      },
+
+      robotFields(s) {
+        const ps = [
+          { key: 'ps_user', label: 'Password Safe user' },
+          { key: 'ps_password', label: 'Password Safe password', secret: true },
+          { key: 'ps_totp_secret', label: 'Password Safe TOTP secret (blank if no MFA)', secret: true },
+        ];
+        const pra = [
+          { key: 'pra_user', label: 'PRA user' },
+          { key: 'pra_password', label: 'PRA password', secret: true },
+          { key: 'pra_totp_secret', label: 'PRA TOTP secret (blank if no MFA)', secret: true },
+          { key: 'ps_api_key', label: 'Password Safe API key PRA will use', secret: true },
+          { key: 'ps_runas_user', label: 'Password Safe run-as user PRA will use' },
+        ];
+        return this.robotTask(s) === 'installer' ? ps : pra;
+      },
+
+      async saveRobotLogins(s) {
+        const body = {};
+        for (const f of this.robotFields(s)) {
+          const v = (this.robotDraft[f.key] || '').trim();
+          if (v) body[f.key] = v;
+        }
+        if (!Object.keys(body).length) { this.error = 'Nothing to save: every box is blank.'; return; }
+        this.robotSaving = true; this.error = ''; this.notice = '';
+        try {
+          const res = await this.apiFetch('/api/pov/managed/' + this.envId + '/ui-robot/credentials', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.detail || ('Request failed (' + res.status + ').'));
+          this.robotDraft = {};
+          this.notice = 'Robot logins saved. They are not shown again.';
+        } catch (e) {
+          this.error = e.message;
+        } finally {
+          this.robotSaving = false;
+          await this.loadEnv();
+        }
+      },
+
+      async runRobot(task) {
+        this.stepBusy = 'robot'; this.error = ''; this.notice = '';
+        try {
+          const data = await this.stepPost('/api/pov/managed/' + this.envId + '/ui-robot', { task });
+          this.notice = 'UI robot queued (job ' + data.job_id + '). Watch it on the Jobs page.';
         } catch (e) {
           this.error = e.message;
         } finally {

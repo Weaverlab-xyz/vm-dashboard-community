@@ -79,7 +79,7 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         pov_ot_adapter,
                         pov_pra_ps_link, pov_ps_config, pov_ready,
                         pov_resource_broker,
-                        pov_setup_steps,
+                        pov_setup_steps, pov_ui_robot,
                         pov_share, spend_policy,
                         pov_summary,
                         pov_use_case_scope, pov_use_cases, pov_vendor_access,
@@ -255,6 +255,7 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
         out.update(broker)
     out.update(pov_gateway.describe(_db_of(env), env))
     out.update(pov_resource_broker.describe(_db_of(env), env))
+    out.update(pov_ui_robot.describe(_db_of(env), env))
     out.update(pov_entitle_agent.describe(_db_of(env), env))
     out.update(pov_ot_adapter.describe(env))
     out.update(pov_guest_step.describe(_db_of(env), env))
