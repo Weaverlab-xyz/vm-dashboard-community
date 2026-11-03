@@ -185,7 +185,10 @@ n-2 (workstream hydra), which stops at 2.12.0". With no canary agents, the rollo
 straight to everyone.
 
 Finished rollouts can be hidden with **Hide** on each, or **Hide finished** for all of them.
-A rollout still in progress cannot be hidden.
+A rollout still in progress cannot be hidden. Hiding keeps the record (which agent got which
+job, and why others were skipped): `GET /api/agents/rollouts?include_hidden=true` lists hidden
+ones too. Removing a release does delete its finished rollouts, since a rollout must name a
+release; the `agent.release_delete` audit entry keeps their full contents.
 
 ## Troubleshooting
 

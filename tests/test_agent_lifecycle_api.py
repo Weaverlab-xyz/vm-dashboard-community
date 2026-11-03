@@ -518,6 +518,18 @@ def test_a_release_that_was_rolled_out_can_still_be_removed():
     assert CLIENT.delete(f"/api/agents/releases/{rel}").status_code == 200
     versions = [r["version"] for r in CLIENT.get("/api/agents/releases").json()["releases"]]
     assert "2.30.7" not in versions
+    # Its rollouts go with it, so the audit entry keeps what they recorded.
+    import json as _json
+    from web_dashboard.database import AuditLog
+    db = SessionLocal()
+    try:
+        row = (db.query(AuditLog).filter(AuditLog.action == "agent.release_delete")
+               .order_by(AuditLog.timestamp.desc()).first())
+        details = _json.loads(row.details)
+        assert details["version"] == "2.30.7" and len(details["rollouts"]) == 1, details
+        assert {"jobs", "skipped", "status"} <= set(details["rollouts"][0]), details
+    finally:
+        db.close()
 
 
 def test_sync_records_every_labelled_hub_tag_and_follows_a_rebuilt_digest(monkeypatch):
@@ -579,6 +591,14 @@ def test_finished_rollouts_can_be_hidden_and_a_live_one_cannot():
     _clear_control_jobs()
     assert CLIENT.delete(f"/api/agents/rollouts/{ro}").status_code == 200
     assert ro not in [r["id"] for r in CLIENT.get("/api/agents/rollouts").json()["rollouts"]]
+    # Hidden, not deleted: the record of who got which job is still there.
+    kept = CLIENT.get("/api/agents/rollouts", params={"include_hidden": "true"}).json()
+    row = next(r for r in kept["rollouts"] if r["id"] == ro)
+    assert row["hidden_at"] and row["version"] == "2.11.5", row
+    assert CLIENT.get(f"/api/agents/rollouts/{ro}").status_code == 200
+    # Hide finished hides, and a second press counts nothing new.
+    assert CLIENT.delete("/api/agents/rollouts").json()["cleared"] >= 0
+    assert CLIENT.delete("/api/agents/rollouts").json()["cleared"] == 0
 
 
 def test_a_workstream_follows_its_own_track_in_a_rollout():

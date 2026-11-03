@@ -161,23 +161,26 @@ def _short(digest: str) -> str:
     return (digest or "")[:19]
 
 
-def delete(db: Session, release: AgentRelease) -> int:
-    """Remove a release and the finished rollouts that point at it; returns how many.
+def delete(db: Session, release: AgentRelease) -> list:
+    """Remove a release and the finished rollouts that point at it; returns those
+    rollouts as :func:`rollout_dict` described them, for the audit entry to keep.
 
     ``agent_rollouts.release_id`` is a foreign key, so deleting a release that was ever
     rolled out raised an IntegrityError (a 500) and the row could never be removed. A
     rollout still in flight refuses instead: it is reading this row.
     """
     from ..database import AgentRollout
+    from .agent_lifecycle_service import rollout_dict
     rollouts = db.query(AgentRollout).filter(AgentRollout.release_id == release.id).all()
     if any(r.status in ("canary", "default") for r in rollouts):
         raise LifecycleError(f"{release.version} has a rollout in progress. Wait for it to "
                              "finish (or stop), then remove it.")
+    described = [rollout_dict(db, r) for r in rollouts]
     for r in rollouts:
         db.delete(r)
     db.delete(release)
     db.commit()
-    return len(rollouts)
+    return described
 
 
 def release_dict(row: AgentRelease) -> dict:

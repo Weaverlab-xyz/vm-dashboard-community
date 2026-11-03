@@ -1765,19 +1765,27 @@ def delete_release(release_id: str, request: Request,
         raise HTTPException(status_code=404, detail="Release not found.")
     version = row.version
     try:
-        agent_release_service.delete(db, row)
+        removed = agent_release_service.delete(db, row)
     except agent_lifecycle_service.LifecycleError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    # The release's finished rollouts go with it (agent_rollouts.release_id is NOT NULL),
+    # so the audit entry keeps what they said: which agent got which job, and why not.
     job_service.log_audit(db, current_user.username, "agent.release_delete",
-                          ip_address=_client_ip(request), details={"version": version})
+                          ip_address=_client_ip(request),
+                          details={"version": version, "rollouts": removed})
     return {"detail": f"Release {version} removed."}
 
 
 @admin_router.get("/rollouts")
-def list_rollouts(current_user: User = Depends(require_explicit_permission("agents", "read")),
+def list_rollouts(include_hidden: bool = False,
+                  current_user: User = Depends(require_explicit_permission("agents", "read")),
                   db: Session = Depends(get_db)):
+    """The 20 most recent rollouts; ``include_hidden`` adds the ones hidden on the panel."""
     from ..database import AgentRollout
-    rows = db.query(AgentRollout).order_by(AgentRollout.created_at.desc()).limit(20).all()
+    q = db.query(AgentRollout)
+    if not include_hidden:
+        q = q.filter(AgentRollout.hidden_at.is_(None))
+    rows = q.order_by(AgentRollout.created_at.desc()).limit(20).all()
     return {"rollouts": [agent_lifecycle_service.rollout_dict(db, r) for r in rows]}
 
 
@@ -1805,10 +1813,14 @@ def start_rollout(body: RolloutRequest, request: Request,
 def clear_rollouts(request: Request,
                    current_user: User = Depends(require_explicit_permission("agents", "write")),
                    db: Session = Depends(get_db)):
-    """Hide every finished rollout (done or stopped); one in flight stays."""
+    """Hide every finished rollout (done or stopped); one in flight stays. Hidden, not
+    deleted: ``GET /rollouts?include_hidden=true`` still lists them."""
     from ..database import AgentRollout
-    n = db.query(AgentRollout).filter(AgentRollout.status.notin_(("canary", "default"))
-                                      ).delete(synchronize_session=False)
+    from ..utils.clock import utcnow
+    n = (db.query(AgentRollout)
+           .filter(AgentRollout.status.notin_(("canary", "default")),
+                   AgentRollout.hidden_at.is_(None))
+           .update({AgentRollout.hidden_at: utcnow()}, synchronize_session=False))
     db.commit()
     job_service.log_audit(db, current_user.username, "agent.rollout_clear",
                           ip_address=_client_ip(request), details={"cleared": n})
@@ -1825,7 +1837,8 @@ def clear_rollout(rollout_id: str, request: Request,
         raise HTTPException(status_code=404, detail="Rollout not found.")
     if row.status in ("canary", "default"):
         raise HTTPException(status_code=409, detail="That rollout is still in progress.")
-    db.delete(row)
+    from ..utils.clock import utcnow
+    row.hidden_at = row.hidden_at or utcnow()
     db.commit()
     job_service.log_audit(db, current_user.username, "agent.rollout_clear",
                           ip_address=_client_ip(request), details={"rollout": rollout_id})

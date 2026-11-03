@@ -2605,6 +2605,9 @@ class AgentRollout(Base):
     created_at = Column(DateTime, default=utcnow, nullable=False)
     created_by = Column(String(100))
     finished_at = Column(DateTime, nullable=True)
+    # Hide on the Lifecycle panel sets this rather than deleting the row: the row is the
+    # only record of which agent got which job and why the others were skipped.
+    hidden_at = Column(DateTime, nullable=True)
 
 
 class AgentHost(Base):
