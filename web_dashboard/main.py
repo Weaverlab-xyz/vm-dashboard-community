@@ -2307,8 +2307,9 @@ async def health(deep: int = 0):
 
 
 @app.get("/api/metrics", tags=["health"])
-async def metrics(_admin=Depends(auth.require_admin)):
-    """Event-loop lag, thread-pool and DB-pool saturation, and the job queue, as JSON.
+async def metrics(format: str = "json", _admin=Depends(auth.require_admin)):
+    """Event-loop lag, thread-pool and DB-pool saturation, and the job queue, as JSON
+    (default) or, with ``?format=prometheus``, as Prometheus exposition text.
 
     Administrators only: queue depth and pool sizes describe the install. Per PROCESS for
     everything but the job counts (see services/runtime_metrics), so the reply carries its
@@ -2317,7 +2318,14 @@ async def metrics(_admin=Depends(auth.require_admin)):
     under a deadline.
     """
     from .services import runtime_metrics
-    return await runtime_metrics.snapshot()
+    if format not in ("json", "prometheus"):
+        raise HTTPException(status_code=400, detail="format must be 'json' or 'prometheus'")
+    snap = await runtime_metrics.snapshot()
+    if format == "prometheus":
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(runtime_metrics.render_prometheus(snap),
+                                 media_type=runtime_metrics.PROMETHEUS_CONTENT_TYPE)
+    return snap
 
 
 @app.get("/api/about", tags=["health"])

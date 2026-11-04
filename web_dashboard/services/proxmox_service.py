@@ -205,7 +205,7 @@ def _list_all_resources_sync(conn, nodes: Optional[list[str]] = None) -> list[di
     all_resources = []
     for node in nodes:
         try:
-            all_resources.extend(_list_node_resources_sync(node))
+            all_resources.extend(_list_node_resources_sync(conn, node))
         except Exception as exc:
             logger.warning("Proxmox: could not list resources on node %s: %s", node, exc)
     return all_resources

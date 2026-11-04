@@ -499,4 +499,5 @@ def cancel_job(
         raise HTTPException(status_code=409, detail=f"Cannot cancel a job with status '{job.status}'")
 
     updated = job_service.set_cancelled(db, job_id)
-    return {"message": "Job cancelled", "job_id": job_id, "status": updated.status}
+    return {"message": "Job cancelled", "job_id": job_id,
+            "status": updated.status if updated else "cancelled"}

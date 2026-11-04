@@ -1431,12 +1431,15 @@ async def _main() -> None:
     # deferred or missed release bills by the hour. A no-op while the feature is off.
     from .services import azure_nat_service
     aznat = asyncio.create_task(azure_nat_service.reclaim_loop(), name="azure-vm-nat")
+    # Loop-lag + thread-pool numbers for the health payload. Report-only (see
+    # worker_health); started here with the other peers so _run_loop is untouched.
+    lagmon = asyncio.create_task(worker_health.loop_lag_monitor(), name="loop-lag")
     try:
         await _run_loop(shutdown=shutdown)   # returns once shutdown is set and jobs drain
     finally:
-        for task in (drain, stats, dirhealth, health, spiffe, aznat):
+        for task in (drain, stats, dirhealth, health, spiffe, aznat, lagmon):
             task.cancel()
-        for task in (drain, stats, dirhealth, health, spiffe, aznat):
+        for task in (drain, stats, dirhealth, health, spiffe, aznat, lagmon):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         # Non-blocking: a poller's thread still parked in time.sleep() would otherwise

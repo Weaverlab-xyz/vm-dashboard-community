@@ -233,6 +233,85 @@ def test_the_default_health_route_returns_the_plain_dict():
     deep = _run(main.health(deep=1))
     assert deep == {"status": "ok", "version": settings.api_version, "db": "ok"}, deep
 
+def _samples(text):
+    """Parse exposition text into {(name, frozenset(labels)): value}, checking its grammar."""
+    import re
+    out = {}
+    for line in text.splitlines():
+        if not line:
+            continue
+        if line.startswith("# HELP ") or line.startswith("# TYPE "):
+            continue
+        m = re.fullmatch(r'([a-zA-Z_:][a-zA-Z0-9_:]*)\{(.*)\} (-?[0-9.eE+-]+)', line)
+        assert m, f"not a valid sample line: {line!r}"
+        labels = frozenset(re.findall(r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"', m.group(2)))
+        out[(m.group(1), labels)] = float(m.group(3))
+    return out
+
+
+def _fake_snapshot():
+    return {
+        "pid": 42,
+        "event_loop": {"last_ms": 12.5, "max_60s_ms": 300.0, "samples": 60,
+                       "seconds_since_last_beat": 0.4},
+        "threads": {"anyio_sync_routes": {"busy": 3, "size": 8},
+                    "loop_default_executor": {"threads": 2, "size": 16, "queued": 0},
+                    "cloud_providers": {"aws": {"busy": 1, "size": 4}, "gcp": {"error": "X"}}},
+        "db_pool": {"pooled": True, "size": 5, "checked_out": 2, "overflow": 0,
+                    "checked_in": 3, "max_overflow": 10, "timeout_s": 30},
+        "jobs": {"queued": {"count": 0, "oldest_age_s": None},
+                 "pending": {"count": 2, "oldest_age_s": 90},
+                 "running": {"count": 1, "oldest_age_s": 10}},
+    }
+
+
+def test_prometheus_text_carries_the_snapshot_with_a_pid_label():
+    text = rm.render_prometheus(_fake_snapshot())
+    assert text.endswith("\n") and "\r" not in text
+    s = _samples(text)
+    P = ("pid", "42")
+    assert s[("dashboard_event_loop_lag_max_60s_seconds", frozenset([P]))] == 0.3
+    assert s[("dashboard_thread_pool_busy", frozenset([P, ("pool", "anyio_sync_routes")]))] == 3
+    assert s[("dashboard_thread_pool_size", frozenset([P, ("pool", "cloud_aws")]))] == 4
+    assert s[("dashboard_db_pool_checked_out", frozenset([P]))] == 2
+    assert s[("dashboard_jobs", frozenset([P, ("status", "pending")]))] == 2
+    assert s[("dashboard_jobs_oldest_age_seconds", frozenset([P, ("status", "pending")]))] == 90
+    assert s[("dashboard_jobs_up", frozenset([P]))] == 1
+    assert all(P in labels for _, labels in s), "every sample must say which process"
+
+
+def test_prometheus_omits_what_is_not_there_and_flags_a_failed_jobs_read():
+    snap = _fake_snapshot()
+    snap["event_loop"] = {"monitor": "no samples yet"}
+    snap["db_pool"] = {"pooled": False}
+    snap["jobs"] = {"error": "no answer from the database in 3s"}
+    s = _samples(rm.render_prometheus(snap))
+    names = {n for n, _ in s}
+    assert "dashboard_event_loop_lag_last_seconds" not in names
+    assert not any(n.startswith("dashboard_db_pool") for n in names)
+    assert "dashboard_jobs" not in names
+    assert s[("dashboard_jobs_up", frozenset([("pid", "42")]))] == 0
+    # An error section from cloud_providers must not become a sample.
+    assert not any(("pool", "cloud_gcp") in labels for _, labels in s)
+
+
+def test_prometheus_escapes_label_values():
+    assert rm._esc('a"b\\c\nd') == 'a\\"b\\\\c\\nd'
+
+
+def test_prometheus_from_a_real_snapshot_parses():
+    _samples(rm.render_prometheus(_run(rm.snapshot())))
+
+
+def test_the_route_serves_json_by_default_and_prometheus_on_request():
+    src = open(os.path.join(ROOT, "web_dashboard", "main.py"), encoding="utf-8").read()
+    at = src.index('@app.get("/api/metrics"')
+    body = src[at:src.index('@app.get("/api/about"')]
+    assert "Depends(auth.require_admin)" in body.split(":\n", 1)[0]
+    assert 'format: str = "json"' in body, "JSON must stay the default"
+    assert "render_prometheus" in body and "PROMETHEUS_CONTENT_TYPE" in body
+    assert "status_code=400" in body, "an unknown format must be refused, not guessed"
+
 
 def test_the_route_is_admin_only_and_the_sampler_is_started():
     src = open(os.path.join(ROOT, "web_dashboard", "main.py"), encoding="utf-8").read()
