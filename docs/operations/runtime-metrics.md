@@ -14,6 +14,40 @@ install. It is not part of the browser UI.
 curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8001/api/metrics
 ```
 
+### Prometheus format
+
+Add `?format=prometheus` for Prometheus exposition text instead of JSON (same admin-only
+token, same numbers; JSON stays the default, and any other value is a `400`).
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "http://localhost:8001/api/metrics?format=prometheus"
+```
+
+Every metric is a gauge named `dashboard_*` and carries a `pid` label, because the values
+are the answering process's own (see below): a scrape that lands on a different process
+reports a different `pid`, so a scrape job that wants both processes must scrape
+repeatedly and keep `pid` as a label rather than dropping it. Lag is in seconds, as
+`dashboard_event_loop_lag_last_seconds`, `dashboard_event_loop_lag_max_60s_seconds` and
+`dashboard_event_loop_seconds_since_last_beat`. Pools are
+`dashboard_thread_pool_{busy,size,queued}{pool="anyio_sync_routes|loop_default_executor|cloud_<provider>"}`
+and `dashboard_db_pool_{size,checked_out,checked_in,overflow,max_overflow}`. Jobs are
+`dashboard_jobs{status}` and `dashboard_jobs_oldest_age_seconds{status}`.
+
+Anything that is unavailable is left out rather than reported as zero: `db_pool` on SQLite,
+or `event_loop` in the first second. The exception is `dashboard_jobs_up`, which is `0`
+when the database read failed or timed out, so an alert can tell "the queue is empty" from
+"the queue could not be read". Prometheus needs the bearer token, so use `authorization`
+in the scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: dashboard
+    metrics_path: /api/metrics
+    params: {format: [prometheus]}
+    authorization: {credentials_file: /etc/prometheus/dashboard.token}
+    static_configs: [{targets: ["dashboard.example.com"]}]
+```
+
 ## What it reports
 
 | Section | Fields | A problem looks like |

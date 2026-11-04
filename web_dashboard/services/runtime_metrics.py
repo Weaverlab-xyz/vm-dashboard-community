@@ -182,3 +182,78 @@ async def snapshot() -> dict:
         "db_pool": _db_pool_section(),
         "jobs": await _jobs_section(),
     }
+
+
+# ── Prometheus text exposition ───────────────────────────────────────────────
+
+PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
+
+
+def _esc(value) -> str:
+    return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def render_prometheus(snap: dict) -> str:
+    """The same snapshot as Prometheus exposition text (format 0.0.4), hand-rolled.
+
+    No ``prometheus_client``: it would be a new dependency for a dozen gauges, and its
+    default multiprocess story does not fit ``gunicorn -w 2`` anyway. Every sample carries
+    a ``pid`` label because the values are the answering process's own; scrape twice (or
+    from both) to see both workers. Sections that errored or are not applicable are simply
+    absent, except ``dashboard_jobs_up`` which says whether the database read worked, so an
+    alert can tell "no queue" from "could not read the queue".
+    """
+    pid = snap.get("pid")
+    families: dict = {}      # name -> (help, [(labels, value)])
+
+    def add(name: str, help_text: str, value, **labels) -> None:
+        if value is None or isinstance(value, (str, dict, list)):
+            return
+        fam = families.setdefault(name, (help_text, []))
+        fam[1].append(({"pid": pid, **labels}, value))
+
+    loop = snap.get("event_loop") or {}
+    add("dashboard_event_loop_lag_last_seconds", "Lateness of the most recent loop-lag sample.",
+        None if "last_ms" not in loop else loop["last_ms"] / 1000)
+    add("dashboard_event_loop_lag_max_60s_seconds", "Worst loop-lag sample in the last 60 samples.",
+        None if "max_60s_ms" not in loop else loop["max_60s_ms"] / 1000)
+    add("dashboard_event_loop_seconds_since_last_beat",
+        "Seconds since the lag sampler last ran; far above 1 means the loop is blocked now.",
+        loop.get("seconds_since_last_beat"))
+
+    threads = snap.get("threads") or {}
+    anyio_pool = threads.get("anyio_sync_routes") or {}
+    add("dashboard_thread_pool_busy", "Threads in use.", anyio_pool.get("busy"), pool="anyio_sync_routes")
+    add("dashboard_thread_pool_size", "Thread pool capacity.", anyio_pool.get("size"), pool="anyio_sync_routes")
+    ex = threads.get("loop_default_executor") or {}
+    add("dashboard_thread_pool_busy", "Threads in use.", ex.get("threads"), pool="loop_default_executor")
+    add("dashboard_thread_pool_size", "Thread pool capacity.", ex.get("size"), pool="loop_default_executor")
+    add("dashboard_thread_pool_queued", "Work waiting for a thread.", ex.get("queued"), pool="loop_default_executor")
+    for provider, st in sorted((threads.get("cloud_providers") or {}).items()):
+        if isinstance(st, dict):
+            add("dashboard_thread_pool_busy", "Threads in use.", st.get("busy"), pool=f"cloud_{provider}")
+            add("dashboard_thread_pool_size", "Thread pool capacity.", st.get("size"), pool=f"cloud_{provider}")
+
+    db = snap.get("db_pool") or {}
+    if db.get("pooled"):
+        for key in ("size", "checked_out", "checked_in", "overflow", "max_overflow"):
+            add(f"dashboard_db_pool_{key}", f"SQLAlchemy pool {key.replace('_', ' ')}.", db.get(key))
+
+    jobs = snap.get("jobs") or {}
+    add("dashboard_jobs_up", "1 if the job counts were read from the database, else 0.",
+        0 if "error" in jobs else 1)
+    for status, st in sorted(jobs.items()):
+        if isinstance(st, dict) and "count" in st:
+            add("dashboard_jobs", "Jobs by status.", st["count"], status=status)
+            add("dashboard_jobs_oldest_age_seconds", "Age of the oldest job in this status.",
+                st.get("oldest_age_s"), status=status)
+
+    lines = []
+    for name, (help_text, samples) in families.items():
+        lines.append(f"# HELP {name} {help_text}")
+        lines.append(f"# TYPE {name} gauge")
+        for labels, value in samples:
+            lab = ",".join(f'{k}="{_esc(v)}"' for k, v in labels.items() if v is not None)
+            lines.append(f"{name}{{{lab}}} {float(value):g}" if isinstance(value, float)
+                         else f"{name}{{{lab}}} {int(value)}")
+    return "\n".join(lines) + "\n"
