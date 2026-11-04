@@ -75,3 +75,20 @@ scrape_configs:
 - `event_loop` says `no samples yet` for the first second after start.
 
 Nothing here is written anywhere or sent anywhere; it is computed when you ask.
+
+## Deep health check
+
+`GET /api/health` is the container probe and stays exactly `{"status": "ok", "version": ...}`;
+it never touches the database, so a probe cannot fail (and restart the app) just because the
+database is briefly slow. For a monitor that wants to know the database answers too, add
+`?deep=1`:
+
+```bash
+curl -s "http://localhost:8001/api/health?deep=1"
+# {"status":"ok","version":"...","db":"ok"}
+```
+
+It runs `SELECT 1` on its own thread with a 2 second deadline, so a slow or exhausted
+database cannot hold up the event loop. If the check fails or times out, the reply is
+`503` with `"status": "degraded"` and `"db": "error"`. Like the plain call it needs no
+login. Point external monitors at `?deep=1` and leave the container probe on the plain URL.

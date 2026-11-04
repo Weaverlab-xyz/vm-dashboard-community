@@ -184,6 +184,47 @@ async def snapshot() -> dict:
     }
 
 
+# ── Optional deep health: ``GET /api/health?deep=1`` ─────────────────────────
+
+_PING_DEADLINE_S = 2.0
+_ping_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="health-db")
+_ping_future: Optional[concurrent.futures.Future] = None
+_ping_lock = threading.Lock()
+
+
+def _ping_query() -> bool:
+    from sqlalchemy import text
+    from ..database import SessionLocal
+    db = SessionLocal()
+    try:
+        db.execute(text("SELECT 1"))
+    finally:
+        db.close()
+    return True
+
+
+async def db_check() -> str:
+    """``"ok"`` or ``"error"``: ``SELECT 1`` on this module's own thread, under a deadline.
+
+    Same pattern as ``_jobs_section``, for the same reason: an ``async`` route that did
+    this inline would block the event loop for as long as the database takes (or for the
+    whole pool timeout), and one that used the shared pools would wait behind the starvation
+    it is meant to detect. A previous ping still in flight counts as an error: the database
+    has not answered it either, and piling up more would only hold more pool connections.
+    Never raises.
+    """
+    global _ping_future
+    with _ping_lock:
+        if _ping_future is not None and not _ping_future.done():
+            return "error"
+        _ping_future = _ping_executor.submit(_ping_query)
+        fut = _ping_future
+    try:
+        await asyncio.wait_for(asyncio.wrap_future(fut), timeout=_PING_DEADLINE_S)
+        return "ok"
+    except Exception:  # noqa: BLE001 -- timeout, pool exhaustion, connection refused
+        return "error"
+
 # ── Prometheus text exposition ───────────────────────────────────────────────
 
 PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"

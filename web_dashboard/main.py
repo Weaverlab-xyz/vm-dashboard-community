@@ -2288,9 +2288,22 @@ async def workgroups_page(request: Request):
 # ── Health / diagnostic ───────────────────────────────────────────────────────
 
 @app.get("/api/health", tags=["health"])
-async def health():
-    """Quick health check."""
-    return {"status": "ok", "version": settings.api_version}
+async def health(deep: int = 0):
+    """Quick health check.
+
+    The default reply is the container/ACA probe and must not change. ``?deep=1`` is
+    opt-in: it also does ``SELECT 1`` (off the event loop, short deadline) and adds
+    ``"db": "ok" | "error"``; on ``error`` the status is 503.
+    """
+    body = {"status": "ok", "version": settings.api_version}
+    if not deep:
+        return body
+    from .services import runtime_metrics
+    body["db"] = await runtime_metrics.db_check()
+    if body["db"] != "ok":
+        body["status"] = "degraded"
+        return JSONResponse(body, status_code=503)
+    return body
 
 
 @app.get("/api/metrics", tags=["health"])
