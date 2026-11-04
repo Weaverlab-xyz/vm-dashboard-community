@@ -86,7 +86,11 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Could not prepare the setup token (non-fatal): %s", exc)
 
+    # Event-loop lag sampler for /api/metrics: one sleep per second, nothing else. It sits
+    # first so it is running before any warmer can block the loop.
+    from .services import runtime_metrics
     warmers = [
+        asyncio.create_task(runtime_metrics.loop_lag_monitor(), name="loop_lag_monitor"),
         asyncio.create_task(_warm_aws_amis(),               name="warm_aws_amis"),
         asyncio.create_task(_warm_aws_network_opts(),       name="warm_aws_network_opts"),
         asyncio.create_task(_warm_aws_instances(),          name="warm_aws_instances"),
@@ -2287,6 +2291,20 @@ async def workgroups_page(request: Request):
 async def health():
     """Quick health check."""
     return {"status": "ok", "version": settings.api_version}
+
+
+@app.get("/api/metrics", tags=["health"])
+async def metrics(_admin=Depends(auth.require_admin)):
+    """Event-loop lag, thread-pool and DB-pool saturation, and the job queue, as JSON.
+
+    Administrators only: queue depth and pool sizes describe the install. Per PROCESS for
+    everything but the job counts (see services/runtime_metrics), so the reply carries its
+    ``pid``. `async def` on purpose: a sync route would wait behind the very thread pool
+    whose exhaustion this exists to show, and the one database read runs on its own thread
+    under a deadline.
+    """
+    from .services import runtime_metrics
+    return await runtime_metrics.snapshot()
 
 
 @app.get("/api/about", tags=["health"])
