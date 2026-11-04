@@ -2390,6 +2390,7 @@ async def pin_private_address(rg: str, nic_name: str) -> dict:
 # differ per cloud in ways that are easy to get subtly wrong. These names stay as thin
 # Azure-bound delegates: they are the vocabulary the rest of this module and its tests
 # already use, and Azure's derived output is unchanged (10.99.5.247-.254 for a /24).
+from .tunnel_pool import POOL_MAX as _TUNNEL_POOL_MAX  # noqa: E402,F401  (kept: its tests read it here)
 from .tunnel_pool import POOL_SIZE as _TUNNEL_POOL_SIZE  # noqa: E402
 
 
