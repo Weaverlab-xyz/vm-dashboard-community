@@ -1,6 +1,6 @@
 """Infrastructure models: cloud functions, Kubernetes clusters, gateways, agent releases, rollouts and hosts."""
 import uuid
-from sqlalchemy import Column, String, Integer, DateTime, Boolean, Text, ForeignKey
+from sqlalchemy import Column, String, DateTime, Boolean, Text
 
 from ...utils.clock import utcnow
 from .._engine import Base

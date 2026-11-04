@@ -1,14 +1,10 @@
 """
 Database models and session management
 """
-import json
-import uuid
 from typing import List
-from sqlalchemy import Column, String, Integer, DateTime, Boolean, Text, ForeignKey
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..utils.clock import utcnow
 from ._engine import (  # noqa: F401  (re-exported: callers import these from web_dashboard.database)
     Base, SessionLocal, _is_sqlite, _pool_kwargs, engine, engine_url,
 )
