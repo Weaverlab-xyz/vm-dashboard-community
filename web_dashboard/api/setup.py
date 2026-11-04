@@ -3113,6 +3113,9 @@ _BRANDING_KEYS = (
     "brand_primary",
     "brand_secondary",
     "brand_accent_hex",
+    # Not branding, but the same shape (one global admin row saved from the Appearance
+    # card), so it rides the same save/reset rather than getting a second endpoint.
+    "brand_timezone",
 )
 
 # NOT here on purpose: the brand_logo_* pointer rows. patch_branding below writes every key
@@ -3134,6 +3137,19 @@ class BrandingConfig(BaseModel):
     brand_primary: str = ""
     brand_secondary: str = ""
     brand_accent_hex: str = ""
+    brand_timezone: str = ""
+
+    @field_validator("brand_timezone")
+    @classmethod
+    def _tz(cls, v: str) -> str:
+        from ..services import branding
+        candidate = (v or "").strip()
+        if not candidate:
+            return ""
+        cleaned = branding.clean_timezone(candidate)
+        if not cleaned:
+            raise ValueError(f"Unknown time zone '{v}'")
+        return cleaned
 
     @field_validator("brand_name", "brand_full", "brand_env_label")
     @classmethod
@@ -3207,9 +3223,10 @@ def get_branding(request: Request):
     rest of the app was cleaned of it.
     """
     _require_admin(request)
-    from ..services import brand_logo, config_service, ui_theme
+    from ..services import brand_logo, branding, config_service, ui_theme
     return {
         "config": {k: config_service.get_raw(k) for k in _BRANDING_KEYS},
+        "timezones": branding.timezone_choices(),
         "accents": ui_theme.accent_choices(),
         "defaults": {"brand_name": ui_theme.BRAND, "brand_full": ui_theme.BRAND_FULL},
         # Not folded into `config`: the panel PATCHes that object back wholesale, and the

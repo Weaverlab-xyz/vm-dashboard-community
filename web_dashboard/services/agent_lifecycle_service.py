@@ -357,7 +357,8 @@ def rollout_dict(db: Session, rollout: AgentRollout) -> dict:
             + rows(rollout.default_job_ids, "default"),
             "skipped": json.loads(rollout.skipped or "{}"),
             "created_at": rollout.created_at.isoformat() if rollout.created_at else None,
-            "finished_at": rollout.finished_at.isoformat() if rollout.finished_at else None}
+            "finished_at": rollout.finished_at.isoformat() if rollout.finished_at else None,
+            "hidden_at": rollout.hidden_at.isoformat() if rollout.hidden_at else None}
 
 
 def validate_repository(repository: str) -> str:

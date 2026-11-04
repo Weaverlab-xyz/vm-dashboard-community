@@ -530,6 +530,14 @@ def test_the_installer_step_never_locks_the_resource_broker_step():
     assert row["resource_broker"]["locked"] is False
 
 
+
+def test_the_installer_step_is_not_running_while_the_robot_does_the_integration():
+    step = _by_key(steps.describe(_row(rb_asset="", rb_has_key=False, ui_robot_job_id="job-9",
+                                       ui_robot_task="integration")))["rb_installer"]
+    assert step["state"] == "blocked" and step["job_id"] == "", step
+    assert "another task" in step["detail"] and step["action"] == ""
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

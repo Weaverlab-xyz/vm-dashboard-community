@@ -229,6 +229,8 @@ resource "aws_iam_policy" "read" {
   description = "vm-dashboard POV cloud provider: read-only (request path)."
   # An IAM policy description cannot be edited: a change would destroy the policy and
   # drop its role attachments. The policy document is versioned in place.
+  # So editing the description text below never applies to an existing policy. To change
+  # it on purpose, rename the policy (a planned replace) rather than removing this block.
   lifecycle {
     ignore_changes = [description]
   }
@@ -244,6 +246,8 @@ resource "aws_iam_policy" "provision" {
   description = "vm-dashboard POV cloud provider: build, power and tear down POV environments (jobs)."
   # An IAM policy description cannot be edited: a change would destroy the policy and
   # drop its role attachments. The policy document is versioned in place.
+  # So editing the description text below never applies to an existing policy. To change
+  # it on purpose, rename the policy (a planned replace) rather than removing this block.
   lifecycle {
     ignore_changes = [description]
   }

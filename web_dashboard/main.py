@@ -1057,6 +1057,9 @@ def _profile_context(request: Request) -> dict:
         # validated; it is empty on an instance that never set any, which is what
         # keeps this call identical to what it was before branding existed.
         "theme": ui_theme.theme_for(profile, settings.app_env, **branding.overrides()),
+        # The admin's chosen display zone. Stored times stay UTC; base.html hands this to
+        # app.js, whose formatTimestamp() is the one place that renders it.
+        "display_timezone": branding.display_timezone(),
         "persona": persona_key,
         "persona_label": persona.label if persona else "",
         "persona_source": persona_source,

@@ -386,6 +386,10 @@ MIGRATIONS: tuple = (
     # NULL: no workstream, so the dashboard-wide track.
     Migration("0012_agent_workstream",
               (add_column("remote_agents", "workstream", "VARCHAR(64)"),)),
+    # Hiding a finished rollout keeps it (hidden_at) instead of deleting the only record
+    # of which agent got which job. NULL: shown.
+    Migration("0013_agent_rollout_hidden",
+              (add_column("agent_rollouts", "hidden_at", "TIMESTAMP"),)),
 )
 
 

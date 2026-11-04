@@ -144,7 +144,8 @@ The **Lifecycle** panel lists the releases the dashboard may offer.
   image's digest and its version from the `dashboard-agent.version` label, and records every
   release it finds. You never type a version or a digest. Tags with no label (they predate
   central upgrades) are skipped, and a tag that was rebuilt refreshes the digest of the row
-  Docker Hub wrote. The dashboard needs outbound HTTPS to `hub.docker.com` and
+  Docker Hub wrote. That change is never silent: the panel warns which release moved, the
+  release's notes record the old and new digest, and the audit entry carries both in full. The dashboard needs outbound HTTPS to `hub.docker.com` and
   `registry-1.docker.io`.
 - **Remove** deletes a release and the finished rollouts that used it. It is refused while a
   rollout of that release is still running.
@@ -158,7 +159,10 @@ The **Lifecycle** panel lists the releases the dashboard may offer.
   before the fleet follows.
 - **Per-workstream tracks.** Under the track, each workstream has its own selector
   (*default*, n, n-1, n-2). Set an agent's **Workstream** in its details panel and it
-  follows that workstream's track; an agent with no workstream follows the default.
+  follows that workstream's track; an agent with no workstream follows the default. That
+  includes the image its cloud host starts on: a host for an agent in a workstream on n-2
+  starts on that workstream's n-2 release, not the dashboard-wide one. Setting a track for
+  a workstream name that does not exist is refused; clearing one (*default*) always works.
 - **Recording releases also arms a check.** Once any release is recorded, an agent that
   reports a version of 2.10 or later that is not among them is flagged **Not a recorded
   release**. A signed build always comes from a release, so the version is either a local
@@ -181,7 +185,10 @@ n-2 (workstream hydra), which stops at 2.12.0". With no canary agents, the rollo
 straight to everyone.
 
 Finished rollouts can be hidden with **Hide** on each, or **Hide finished** for all of them.
-A rollout still in progress cannot be hidden.
+A rollout still in progress cannot be hidden. Hiding keeps the record (which agent got which
+job, and why others were skipped): `GET /api/agents/rollouts?include_hidden=true` lists hidden
+ones too. Removing a release does delete its finished rollouts, since a rollout must name a
+release; the `agent.release_delete` audit entry keeps their full contents.
 
 ## Troubleshooting
 

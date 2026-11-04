@@ -211,19 +211,6 @@ def test_the_module_is_stdlib_only():
     assert imported <= {"functools", "logging", "os", "subprocess", "__future__"}, imported
 
 
-if __name__ == "__main__":
-    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
-    failures = 0
-    for fn in fns:
-        try:
-            fn()
-            print(f"ok   {fn.__name__}")
-        except Exception as exc:
-            failures += 1
-            print(f"FAIL {fn.__name__}: {exc}")
-    sys.exit(1 if failures else 0)
-
-
 # ── The release shown in the About box ──────────────────────────────────────
 
 def _version_with(git=None):
@@ -267,3 +254,16 @@ def test_no_version_anywhere_says_dev_rather_than_guessing():
     assert got["version"] == "dev"
     assert got["version_source"] == "unknown"
     assert got["commit"] == ""
+
+
+if __name__ == "__main__":
+    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    failures = 0
+    for fn in fns:
+        try:
+            fn()
+            print(f"ok   {fn.__name__}")
+        except Exception as exc:
+            failures += 1
+            print(f"FAIL {fn.__name__}: {exc}")
+    sys.exit(1 if failures else 0)

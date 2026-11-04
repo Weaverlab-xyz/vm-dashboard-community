@@ -31,10 +31,10 @@ def set_schedule(env_id: str, payload: ScheduleRequest,
                        current_user: User = Depends(get_current_user)):
     """Set or clear this POV's suspend schedule.
 
-    Refused on a platform that has its own idle timer. Skytap's `suspend_on_idle` and this
-    answer the same question, and a POV carrying both would be one where neither is
-    clearly in charge — the platform would suspend on idle, the dashboard would resume on
-    a boundary, and the pair would fight quietly for the length of the evaluation.
+    A suspend time is refused on a platform that has its own idle timer. Skytap's
+    `suspend_on_idle` and a dashboard suspend answer the same question, and a POV carrying
+    both would have neither clearly in charge. A scheduled START is fine there: nothing
+    else brings a suspended Skytap environment back.
 
     Setting a schedule CLEARS the evaluation latch, so the first pass after it records the
     time and acts on nothing. Without that, changing 19:00 to 22:00 at 20:00 would look
@@ -44,12 +44,14 @@ def set_schedule(env_id: str, payload: ScheduleRequest,
     if env is None:
         raise HTTPException(status_code=404, detail="No such POV environment")
     if lab_platforms.supports(env.platform, "idle_suspend"):
-        label = lab_platforms.capabilities(env.platform)["label"]
-        raise HTTPException(
-            status_code=409,
-            detail=(f"{label} suspends an environment on its own idle timer, so a "
-                    f"dashboard schedule would fight it. Set the idle timeout instead."))
-    if not lab_platforms.supports(env.platform, "scheduled_suspend"):
+        if (payload.suspend_at_local or "").strip():
+            label = lab_platforms.capabilities(env.platform)["label"]
+            raise HTTPException(
+                status_code=409,
+                detail=(f"{label} suspends an environment on its own idle timer, so a "
+                        f"dashboard suspend time would fight it. Set the idle timeout "
+                        f"instead; a scheduled start is still allowed."))
+    elif not lab_platforms.supports(env.platform, "scheduled_suspend"):
         raise HTTPException(
             status_code=409,
             detail=f"{env.platform} has no scheduled suspend.")

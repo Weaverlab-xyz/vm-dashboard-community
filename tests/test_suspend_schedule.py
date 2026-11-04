@@ -118,13 +118,30 @@ def test_a_stale_latch_is_not_replayed():
 
 def test_a_row_with_no_schedule_is_never_acted_on():
     assert sch.due_action(Row(suspend="", resume=""), _at(2026, 9, 1, 19, 5)) == ""
-    assert sch.has_schedule(Row(suspend="")) is False
+    assert sch.has_schedule(Row(suspend="", resume="")) is False
 
 
-def test_a_resume_alone_is_not_a_schedule():
-    """It would wake a POV that nothing ever puts to sleep."""
+def test_a_start_time_alone_is_a_run_schedule():
+    """Skytap suspends itself on idle; the schedule only has to bring it back."""
     row = Row(suspend="", resume="08:00", last=_naive(_at(2026, 9, 1, 7, 55)))
-    assert sch.due_action(row, _at(2026, 9, 1, 8, 5)) == ""
+    assert sch.has_schedule(row) is True
+    assert sch.due_action(row, _at(2026, 9, 1, 8, 5)) == sch.RESUME
+
+
+def test_a_start_only_weekday_schedule_does_nothing_at_the_weekend():
+    # 2026-09-05 is a Saturday, 2026-09-07 a Monday.
+    row = Row(suspend="", resume="08:00", days=sch.DAYS_WEEKDAYS,
+              last=_naive(_at(2026, 9, 5, 7, 55)))
+    assert sch.due_action(row, _at(2026, 9, 5, 8, 5)) == ""
+    row.schedule_last_checked_at = _naive(_at(2026, 9, 7, 7, 55))
+    assert sch.due_action(row, _at(2026, 9, 7, 8, 5)) == sch.RESUME
+
+
+def test_allow_filters_out_a_suspend_for_a_self_suspending_platform():
+    row = Row(last=_naive(_at(2026, 9, 1, 18, 55)))
+    assert sch.due_action(row, _at(2026, 9, 1, 19, 5), (sch.RESUME,)) == ""
+    row.schedule_last_checked_at = _naive(_at(2026, 9, 1, 7, 55))
+    assert sch.due_action(row, _at(2026, 9, 1, 8, 5), (sch.RESUME,)) == sch.RESUME
 
 
 def test_no_resume_time_means_the_pov_stays_down_until_somebody_starts_it():
@@ -212,8 +229,12 @@ def test_identical_suspend_and_resume_times_are_refused():
     assert "same" in _refused(resume_at="19:00")
 
 
-def test_a_resume_with_no_suspend_is_refused():
-    assert "nothing ever puts" in _refused(suspend_at="", resume_at="08:00")
+def test_a_start_with_no_suspend_is_accepted():
+    out = sch.validate(suspend_at="", resume_at="08:00", tz_name="UTC",
+                       days=sch.DAYS_WEEKDAYS)
+    assert out["suspend_at_local"] is None
+    assert out["resume_at_local"] == "08:00"
+    assert out["schedule_days"] == sch.DAYS_WEEKDAYS
 
 
 def test_a_day_mask_with_no_days_is_refused():
@@ -249,17 +270,22 @@ def test_the_sweep_stamps_the_latch_even_when_it_acts():
     assert stamp < enqueue, "the latch is stamped after the enqueue, so it can be skipped"
 
 
-def test_a_platform_with_its_own_idle_timer_is_left_alone():
-    """Skytap's suspend_on_idle and this schedule answer the same question. A POV carrying
-    both is one where neither is clearly in charge."""
+def test_a_platform_with_its_own_idle_timer_is_only_ever_started():
+    """Skytap's suspend_on_idle and a dashboard suspend answer the same question. The
+    sweep keeps the platform's timer in charge of suspending and only starts it."""
     from web_dashboard.services import lab_platforms as lp
     assert lp.supports("skytap", "idle_suspend") is True
     src = open(os.path.join(_ROOT, "web_dashboard", "services", "pov_reconcile.py"),
                encoding="utf-8").read()
     body = src.split("def sweep_schedules(", 1)[1].split("\nasync def ", 1)[0]
-    assert 'supports(env.platform, "idle_suspend")' in body, (
-        "the sweep does not skip platforms with their own idle timer, so a Skytap POV "
-        "would be driven by both")
+    assert 'supports(env.platform, "idle_suspend")' in body
+    assert "(suspend_schedule.RESUME,)" in body, (
+        "a Skytap POV would be suspended by the dashboard as well as its own timer")
+
+
+def test_the_summary_of_a_start_only_schedule_says_starts():
+    out = sch.describe(Row(suspend="", resume="08:00", days=sch.DAYS_WEEKDAYS))
+    assert out["summary"].startswith("Starts 08:00 Mon"), out["summary"]
 
 
 def test_the_summary_says_when_and_where():

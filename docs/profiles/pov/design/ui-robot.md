@@ -37,7 +37,10 @@ Where it differs from the sections below, which were written first:
   fetched") sits before `resource_broker` and is `done` on a staged installer plus a stored key,
   however they got there. The integration has no row of its own: `pra_ps` already judges it from
   PRA's own account counts, so the page puts a **Create integration** button and the write-only
-  **Robot logins** form on that row instead. One robot task runs per POV at a time.
+  **Robot logins** form on that row instead. One robot task runs per POV at a time, enforced
+  across both dashboard workers by a short claim row (`ephemeral_state`), so a double click
+  queues one job. While the integration task runs, `rb_installer` reads `blocked` ("busy with
+  another task"), not `running`.
 - **Not built:** the Rebuild-time check that an OAuth client exists for the control node's
   SPIFFE ID, and any selector.
 

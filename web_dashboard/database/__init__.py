@@ -3,12 +3,9 @@ Database models and session management
 """
 import json
 import uuid
-from datetime import datetime
-from typing import Optional, List
-from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean, Text, LargeBinary, ForeignKey, UniqueConstraint, Float, text
-from sqlalchemy.orm import declarative_base, relationship
-from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.pool import NullPool, QueuePool
+from typing import List
+from sqlalchemy import Column, String, Integer, DateTime, Boolean, Text, ForeignKey
+from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..utils.clock import utcnow
@@ -104,6 +101,9 @@ from .models.spire import (  # noqa: E402,F401  (re-exported: callers import the
 
 from .models.infrastructure import (  # noqa: E402,F401  (re-exported: callers import these from web_dashboard.database)
     CloudFunction, K8sCluster, Gateway,
+)
+
+from .models.agent_lifecycle import (  # noqa: E402,F401  (re-exported: callers import these from web_dashboard.database)
     AgentRelease, AgentRollout, AgentHost,
 )
 

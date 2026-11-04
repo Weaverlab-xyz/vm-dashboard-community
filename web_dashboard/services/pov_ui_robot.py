@@ -19,11 +19,14 @@ never in the signed envelope. They leave only through the sealed per-job channel
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from urllib.parse import urlsplit
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..database import Job, PovEnvironment, RemoteAgent
+from ..database import EphemeralState, Job, PovEnvironment, RemoteAgent
+from ..utils.clock import utcnow
 from . import (agent_service, agent_ui_robot_meta, bt_tenant_service, config_service,
                job_service, pov_gateway)
 
@@ -122,27 +125,52 @@ def active_job(db: Session, env: PovEnvironment) -> Job | None:
     One at a time per POV: two robots logged into the same Password Safe account race on its
     session, and a second press is nearly always an impatient first one.
     """
+    return active_jobs(db).get(env.id)
+
+
+def active_jobs(db: Session) -> dict:
+    """Every queued or running robot job, by POV environment id: one query for a whole
+    list of POVs, so a page of them does not scan the job table once per row."""
     rows = (db.query(Job)
               .filter(Job.job_type == "agent_ui_robot",
-                      Job.status.in_(job_service.ACTIVE_STATUSES)).all())
-    return next((r for r in rows
-                 if (r.metadata_dict or {}).get("environment_id") == env.id), None)
+                      Job.status.in_(job_service.ACTIVE_STATUSES))
+              .order_by(Job.created_at).all())
+    out: dict = {}
+    for r in rows:
+        env_id = (r.metadata_dict or {}).get("environment_id")
+        if env_id and env_id not in out:
+            out[env_id] = r
+    return out
 
 
-def describe(db: Session, env: PovEnvironment) -> dict:
+def _job_task(job: Job) -> str:
+    return agent_ui_robot_meta.normalize(job.metadata_dict or {})["task"]
+
+
+_UNSET = object()
+
+
+def describe(db: Session, env: PovEnvironment, *, running=_UNSET) -> dict:
     """What the setup ladder needs to know about the robot. Never a value, only whether.
 
     ``*_block`` is the preflight's own refusal with its trailing "Nothing was queued." taken
     off, or "" when the task could be queued right now, so the page and the route can never
-    disagree about whether a button works.
+    disagree about whether a button works. ``ui_robot_task`` names the task the running
+    job is doing, so a step can tell its own robot from the other one.
+
+    A list of POVs passes ``running`` (its entry from one :func:`active_jobs` call, or
+    None), so the page reads the job table once rather than once per row. The preflights
+    still run per row: the list's setup line shows the step's Blocked reason.
     """
-    out = {"ui_robot_wanted": wanted(db, env), "ui_robot_job_id": "",
+    out = {"ui_robot_wanted": wanted(db, env), "ui_robot_job_id": "", "ui_robot_task": "",
            "ui_robot_stored": credential_state(env),
            "ui_robot_installer_block": "", "ui_robot_integration_block": ""}
     if not out["ui_robot_wanted"]:
         return out
-    running = active_job(db, env)
+    if running is _UNSET:
+        running = active_job(db, env)
     out["ui_robot_job_id"] = running.id if running else ""
+    out["ui_robot_task"] = _job_task(running) if running else ""
     for task in agent_ui_robot_meta.VALID_TASKS:
         try:
             preflight(db, env, task)
@@ -202,17 +230,58 @@ def queue(db: Session, env: PovEnvironment, *, task: str, created_by: str = "") 
     logins this job may have.
     """
     agent = preflight(db, env, task)
-    if active_job(db, env):
-        raise UiRobotError("a UI robot task is already running on this POV; wait for it to "
-                           "finish. Nothing was queued.")
-    meta = agent_ui_robot_meta.ui_robot_meta(
-        {"task": task}, description=f"UI robot ({task}) for POV {env.name}")
-    meta["environment_id"] = env.id
-    job = job_service.create_job(
-        db, job_type="agent_ui_robot", created_by=created_by,
-        workgroup=env.workgroup, agent_id=agent.id, metadata=meta)
+    busy = UiRobotError("a UI robot task is already running on this POV; wait for it to "
+                        "finish. Nothing was queued.")
+    # Check-then-create is a race across gunicorn's two workers (a double click lands on
+    # both), so the check runs under a claim: a primary-key insert only one request wins,
+    # on SQLite and Postgres alike. It expires on its own if this process dies holding it.
+    key = _CLAIM.format(env_id=env.id)
+    if not _claim(db, key):
+        raise busy
+    try:
+        if active_job(db, env):
+            raise busy
+        meta = agent_ui_robot_meta.ui_robot_meta(
+            {"task": task}, description=f"UI robot ({task}) for POV {env.name}")
+        meta["environment_id"] = env.id
+        job = job_service.create_job(
+            db, job_type="agent_ui_robot", created_by=created_by,
+            workgroup=env.workgroup, agent_id=agent.id, metadata=meta)
+    finally:
+        _release(db, key)
     logger.info("POV %s: queued UI robot task %s on agent %s", env.id, task, agent.name)
     return job
+
+
+_CLAIM = "vmcli:pov_ui_robot:queue:{env_id}"
+_CLAIM_TTL = timedelta(seconds=60)
+
+
+def _claim(db: Session, key: str) -> bool:
+    """Take the queue claim for one POV; False when another request holds it."""
+    now = utcnow()
+    db.query(EphemeralState).filter(EphemeralState.key == key,
+                                    EphemeralState.expires_at < now
+                                    ).delete(synchronize_session=False)
+    db.commit()
+    db.add(EphemeralState(key=key, value="", expires_at=now + _CLAIM_TTL))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return False
+    return True
+
+
+def _release(db: Session, key: str) -> None:
+    try:
+        db.rollback()   # a failed create_job may have left the session mid-transaction
+        db.query(EphemeralState).filter(EphemeralState.key == key
+                                        ).delete(synchronize_session=False)
+        db.commit()
+    except Exception:  # noqa: BLE001 -- the claim expires by itself; never mask the job result
+        logger.warning("could not release UI robot claim %s; it expires in %ss",
+                       key, int(_CLAIM_TTL.total_seconds()))
 
 
 def bundle_for_job(db: Session, job: Job, dashboard_url: str) -> tuple[dict, list[str]]:

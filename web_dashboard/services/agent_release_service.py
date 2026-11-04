@@ -9,14 +9,18 @@ refuses (docs/platform/spiffe/remote-agents/lifecycle.md).
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import requests
 from sqlalchemy.orm import Session
 
 from ..database import AgentRelease
+from ..utils.clock import utcnow
 from .agent_lifecycle_service import (DEFAULT_REPOSITORY, LifecycleError,
                                       validate_release, validate_repository, version_tuple)
+
+logger = logging.getLogger(__name__)
 
 #: The label the agent image carries with its own version (runners/agent/Dockerfile).
 #: The image TAG is the dashboard release, not the agent version, so the tag cannot say.
@@ -102,13 +106,16 @@ def set_lag(lag: int, workstream: str = "") -> int:
     return lag
 
 
-def target(db: Session, repository: str = "", agent=None) -> Optional[AgentRelease]:
+def target(db: Session, repository: str = "", agent=None,
+           workstream: Optional[str] = None) -> Optional[AgentRelease]:
     """The release to offer: the track's lag behind the newest (the agent's workstream's
-    track when it has one), or the oldest there is when fewer are recorded -- never
-    nothing, while something is."""
+    track when it has one, else ``workstream``'s), or the oldest there is when fewer are
+    recorded -- never nothing, while something is."""
     rows = [r for r in list_releases(db)
             if not repository or (r.repository or DEFAULT_REPOSITORY) == repository]
-    lag = lag_for(getattr(agent, "workstream", None)) if agent is not None else get_lag()
+    if agent is not None:
+        workstream = getattr(agent, "workstream", None)
+    lag = lag_for(workstream) if workstream else get_lag()
     return rows[min(lag, len(rows) - 1)] if rows else None
 
 
@@ -126,7 +133,15 @@ def add(db: Session, *, version: str, digest: str, notes: str = "", actor: str,
             return existing
         if source == "registry" and existing.source == "registry":
             # Docker Hub is the authority for a row it wrote: a rebuilt tag moves the
-            # digest, and refusing made "Check Docker Hub" fail from then on.
+            # digest, and refusing made "Check Docker Hub" fail from then on. But the
+            # digest is what hosts pin, so the move is never silent: it is logged, and
+            # the row's notes (shown on the Lifecycle panel) say what it was before.
+            old = existing.digest
+            logger.warning("agent release %s: Docker Hub digest moved %s -> %s (by %s)",
+                           version, old, digest, actor)
+            change = (f"Digest changed {utcnow():%Y-%m-%d} by {actor}: "
+                      f"{_short(old)} -> {_short(digest)} (tag rebuilt on Docker Hub).")
+            existing.notes = (change + (" " + existing.notes if existing.notes else ""))[:2000]
             existing.digest = digest
             existing.repository = repository
             db.commit()
@@ -141,23 +156,31 @@ def add(db: Session, *, version: str, digest: str, notes: str = "", actor: str,
     return row
 
 
-def delete(db: Session, release: AgentRelease) -> int:
-    """Remove a release and the finished rollouts that point at it; returns how many.
+def _short(digest: str) -> str:
+    """``sha256:`` and the first 12 hex digits: enough to tell two digests apart."""
+    return (digest or "")[:19]
+
+
+def delete(db: Session, release: AgentRelease) -> list:
+    """Remove a release and the finished rollouts that point at it; returns those
+    rollouts as :func:`rollout_dict` described them, for the audit entry to keep.
 
     ``agent_rollouts.release_id`` is a foreign key, so deleting a release that was ever
     rolled out raised an IntegrityError (a 500) and the row could never be removed. A
     rollout still in flight refuses instead: it is reading this row.
     """
     from ..database import AgentRollout
+    from .agent_lifecycle_service import rollout_dict
     rollouts = db.query(AgentRollout).filter(AgentRollout.release_id == release.id).all()
     if any(r.status in ("canary", "default") for r in rollouts):
         raise LifecycleError(f"{release.version} has a rollout in progress. Wait for it to "
                              "finish (or stop), then remove it.")
+    described = [rollout_dict(db, r) for r in rollouts]
     for r in rollouts:
         db.delete(r)
     db.delete(release)
     db.commit()
-    return len(rollouts)
+    return described
 
 
 def release_dict(row: AgentRelease) -> dict:
@@ -251,7 +274,9 @@ def sync_registry(db: Session, *, actor: str, session=None) -> dict:
             "outbound HTTPS to hub.docker.com and registry-1.docker.io.") from exc
     if "latest" not in tags:
         tags.append("latest")
-    out = {"added": [], "updated": [], "unchanged": [], "skipped": []}
+    # ``digest_changes`` carries the full before/after of each "updated", so the audit
+    # entry the route writes from this result says exactly what moved.
+    out = {"added": [], "updated": [], "unchanged": [], "skipped": [], "digest_changes": []}
     seen = set()
     for tag in tags:
         try:
@@ -275,4 +300,7 @@ def sync_registry(db: Session, *, actor: str, session=None) -> dict:
             continue
         out["added" if prior is None else
             "unchanged" if prior == found["digest"] else "updated"].append(version)
+        if prior is not None and prior != found["digest"]:
+            out["digest_changes"].append(
+                {"version": version, "from": prior, "to": found["digest"]})
     return out

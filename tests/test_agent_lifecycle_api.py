@@ -505,20 +505,6 @@ def test_a_new_host_starts_the_newest_release_by_digest():
     raise AssertionError("a shell-shaped image was accepted")
 
 
-if __name__ == "__main__":
-    fns = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
-    failures = 0
-    for fn in fns:
-        try:
-            fn()
-            print(f"ok   {fn.__name__}")
-        except Exception as e:  # noqa: BLE001
-            failures += 1
-            print(f"FAIL {fn.__name__}: {e!r}")
-    print(f"\n{len(fns) - failures}/{len(fns)} passed")
-    sys.exit(1 if failures else 0)
-
-
 # ── removing releases, and syncing from Docker Hub ────────────────────────────
 
 def test_a_release_that_was_rolled_out_can_still_be_removed():
@@ -532,6 +518,18 @@ def test_a_release_that_was_rolled_out_can_still_be_removed():
     assert CLIENT.delete(f"/api/agents/releases/{rel}").status_code == 200
     versions = [r["version"] for r in CLIENT.get("/api/agents/releases").json()["releases"]]
     assert "2.30.7" not in versions
+    # Its rollouts go with it, so the audit entry keeps what they recorded.
+    import json as _json
+    from web_dashboard.database import AuditLog
+    db = SessionLocal()
+    try:
+        row = (db.query(AuditLog).filter(AuditLog.action == "agent.release_delete")
+               .order_by(AuditLog.timestamp.desc()).first())
+        details = _json.loads(row.details)
+        assert details["version"] == "2.30.7" and len(details["rollouts"]) == 1, details
+        assert {"jobs", "skipped", "status"} <= set(details["rollouts"][0]), details
+    finally:
+        db.close()
 
 
 def test_sync_records_every_labelled_hub_tag_and_follows_a_rebuilt_digest(monkeypatch):
@@ -549,6 +547,20 @@ def test_sync_records_every_labelled_hub_tag_and_follows_a_rebuilt_digest(monkey
     digests["2.30.9"] = "sha256:" + "d" * 64          # the tag was rebuilt
     out = CLIENT.post("/api/agents/releases/sync", json={}).json()
     assert out["updated"] == ["2.30.9"] and out["added"] == [], out
+    # The move is never silent: the result, the audit entry and the row's notes say so.
+    assert out["digest_changes"] == [{"version": "2.30.9", "from": "sha256:" + "b" * 64,
+                                      "to": "sha256:" + "d" * 64}], out
+    from web_dashboard.database import AuditLog
+    db = SessionLocal()
+    try:
+        row = (db.query(AuditLog).filter(AuditLog.action == "agent.release_sync")
+               .order_by(AuditLog.timestamp.desc()).first())
+        assert "b" * 64 in row.details and "d" * 64 in row.details, row.details
+    finally:
+        db.close()
+    rel = next(r for r in CLIENT.get("/api/agents/releases").json()["releases"]
+               if r["version"] == "2.30.9")
+    assert rel["notes"].startswith("Digest changed") and "sha256:bbbbbbbbbbbb" in rel["notes"]
 
 
 def test_the_track_setting_offers_n_minus_one_or_two_and_never_nothing():
@@ -579,6 +591,14 @@ def test_finished_rollouts_can_be_hidden_and_a_live_one_cannot():
     _clear_control_jobs()
     assert CLIENT.delete(f"/api/agents/rollouts/{ro}").status_code == 200
     assert ro not in [r["id"] for r in CLIENT.get("/api/agents/rollouts").json()["rollouts"]]
+    # Hidden, not deleted: the record of who got which job is still there.
+    kept = CLIENT.get("/api/agents/rollouts", params={"include_hidden": "true"}).json()
+    row = next(r for r in kept["rollouts"] if r["id"] == ro)
+    assert row["hidden_at"] and row["version"] == "2.11.5", row
+    assert CLIENT.get(f"/api/agents/rollouts/{ro}").status_code == 200
+    # Hide finished hides, and a second press counts nothing new.
+    assert CLIENT.delete("/api/agents/rollouts").json()["cleared"] >= 0
+    assert CLIENT.delete("/api/agents/rollouts").json()["cleared"] == 0
 
 
 def test_a_workstream_follows_its_own_track_in_a_rollout():
@@ -609,3 +629,67 @@ def test_a_workstream_follows_its_own_track_in_a_rollout():
         assert len(queued) == 1, out
     finally:
         CLIENT.put("/api/agents/releases/lag", json={"lag": -1, "workstream": "hydra"})
+
+
+
+def test_a_workstream_track_is_validated_audited_and_answers_with_its_own_target():
+    from web_dashboard.database import AuditLog, Workgroup
+    db = SessionLocal()
+    try:
+        if not db.query(Workgroup).filter(Workgroup.name == "kraken").first():
+            db.add(Workgroup(name="kraken", display_name="Kraken"))
+            db.commit()
+    finally:
+        db.close()
+    _release("2.50.0", "sha256:" + "7" * 64)
+    _release("2.50.1", "sha256:" + "8" * 64)
+    _release("2.50.2", "sha256:" + "9" * 64)
+    try:
+        # A typo is refused rather than stored as a track nothing follows.
+        bad = CLIENT.put("/api/agents/releases/lag", json={"lag": 1, "workstream": "krakn"})
+        assert bad.status_code == 400, bad.text
+        assert "krakn" not in CLIENT.get("/api/agents/releases").json()["workstream_lags"]
+        # Mixed case is stored canonical, and the answer is that workstream's target.
+        out = CLIENT.put("/api/agents/releases/lag",
+                         json={"lag": 2, "workstream": "Kraken"}).json()
+        assert out["workstream"] == "kraken", out
+        assert out["target"]["version"] == "2.50.0", out
+        db = SessionLocal()
+        try:
+            row = (db.query(AuditLog).filter(AuditLog.action == "agent.release_lag")
+                   .order_by(AuditLog.timestamp.desc()).first())
+            assert "kraken" in (row.details or ""), row.details
+        finally:
+            db.close()
+        # A host started for an agent in that workstream starts on its track, not on n.
+        from web_dashboard.services import agent_host_service as ahs
+        db = SessionLocal()
+        try:
+            agent = RemoteAgent(name=f"agent-{uuid.uuid4().hex[:8]}", workstream="kraken")
+            wide = ahs.agent_image(db)
+            own = ahs.agent_image(db, agent)
+            pinned = agent_release_service.target(db, "chrweav/dashboard-agent", agent=agent)
+            assert own == f"chrweav/dashboard-agent@{pinned.digest}", own
+            assert own != wide, (own, wide)
+        finally:
+            db.close()
+        # A track left by a workstream that no longer exists can still be cleared.
+        assert CLIENT.put("/api/agents/releases/lag",
+                          json={"lag": -1, "workstream": "long-gone"}).status_code == 200
+    finally:
+        CLIENT.put("/api/agents/releases/lag", json={"lag": -1, "workstream": "kraken"})
+
+
+if __name__ == "__main__":
+    from _monkeypatch import run as _run
+    fns = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
+    failures = 0
+    for fn in fns:
+        try:
+            _run(fn)
+            print(f"ok   {fn.__name__}")
+        except Exception as e:  # noqa: BLE001
+            failures += 1
+            print(f"FAIL {fn.__name__}: {e!r}")
+    print(f"\n{len(fns) - failures}/{len(fns)} passed")
+    sys.exit(1 if failures else 0)

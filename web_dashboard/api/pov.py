@@ -201,12 +201,13 @@ class PowerRequest(BaseModel):
 
 
 def _serialize(env: PovEnvironment, vms: list | None = None,
-               broker: dict | None = None) -> dict:
+               broker: dict | None = None, robot_jobs: dict | None = None) -> dict:
     """The row as the POV page reads it.
 
     ``broker`` is passed in rather than derived here because describing it needs a session
     and a query per row — the list endpoint does that once per row deliberately, and a
-    caller that does not care (the 202 responses) should not pay for it.
+    caller that does not care (the 202 responses) should not pay for it. ``robot_jobs``
+    is the list endpoint's one ``pov_ui_robot.active_jobs`` read, for the same reason.
     """
     out = {
         "id": env.id,
@@ -255,7 +256,10 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
         out.update(broker)
     out.update(pov_gateway.describe(_db_of(env), env))
     out.update(pov_resource_broker.describe(_db_of(env), env))
-    out.update(pov_ui_robot.describe(_db_of(env), env))
+    if robot_jobs is None:
+        out.update(pov_ui_robot.describe(_db_of(env), env))
+    else:
+        out.update(pov_ui_robot.describe(_db_of(env), env, running=robot_jobs.get(env.id)))
     out.update(pov_entitle_agent.describe(_db_of(env), env))
     out.update(pov_ot_adapter.describe(env))
     out.update(pov_guest_step.describe(_db_of(env), env))
@@ -622,7 +626,8 @@ def list_managed(db: Session = Depends(get_db),
     brokers = pov_broker.describe_many(db, rows)
     # Batched for the same reason: three queries for the page, whatever its length.
     engagement = pov_engagement.describe_many(db, rows)
-    return {"environments": [{**_serialize(e, broker=brokers.get(e.id)),
+    robot_jobs = pov_ui_robot.active_jobs(db)
+    return {"environments": [{**_serialize(e, broker=brokers.get(e.id), robot_jobs=robot_jobs),
                               "engagement": engagement.get(e.id, {})}
                              for e in rows]}
 

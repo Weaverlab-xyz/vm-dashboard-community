@@ -10,7 +10,11 @@ function settingsAppearance() {
       brand_name: '', brand_full: '', brand_accent: '',
       brand_env_label: '', brand_env_color: '',
       brand_primary: '', brand_secondary: '', brand_accent_hex: '',
+      brand_timezone: '',
     },
+    // IANA zone names for the display-time-zone picker, from the server's own zoneinfo so
+    // every option is one the save will accept.
+    timezoneChoices: [],
     // Swatches come from the server (ui_theme.accent_choices) rather than being repeated
     // here, so the colour shown on the button is the colour the theme will apply.
     brandingAccents: [],
@@ -44,6 +48,7 @@ function settingsAppearance() {
         // brand_accent when it wins, so there is nothing else to read it back from.
         this.brandingCustom = !!this.branding.brand_primary;
         this.brandingAccents = data.accents || [];
+        this.timezoneChoices = data.timezones || [];
         this.brandingDefaults = data.defaults || {};
         // Its own key, not spread into `branding` -- see the note on brandingLogo.
         this.brandingLogo = (data.logo && data.logo.url) ? data.logo : null;
@@ -247,6 +252,7 @@ function settingsAppearance() {
         brand_name: '', brand_full: '', brand_accent: '',
         brand_env_label: '', brand_env_color: '',
         brand_primary: '', brand_secondary: '', brand_accent_hex: '',
+        brand_timezone: '',
       };
       this.brandingCustom = false;
       // "Reset to defaults" that left a customer logo in the nav bar would read as a bug.

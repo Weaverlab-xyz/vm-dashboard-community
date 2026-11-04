@@ -1946,6 +1946,34 @@ function formatDuration(seconds) {
     return `${m}m ${s}s`;
 }
 
+// An absolute timestamp in the admin-chosen display zone (Settings -> Appearance), with the
+// zone abbreviation so it is never ambiguous: "2026-11-03 02:19:33 PM CST". Stored times are
+// UTC without a zone suffix, so one is added before parsing, as timeAgo does. Falls back to
+// UTC if the meta tag is missing (a page that owns its own <head>) or the zone is unknown.
+function formatTimestamp(isoStr) {
+    if (!isoStr) return '–';
+    const utcStr = /Z$|[+-]\d{2}:\d{2}$/.test(isoStr) ? isoStr : isoStr + 'Z';
+    const d = new Date(utcStr);
+    if (isNaN(d.getTime())) return String(isoStr);
+    const meta = document.querySelector('meta[name="display-timezone"]');
+    const zone = (meta && meta.content) || 'UTC';
+    const opts = {
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hour12: false, timeZoneName: 'short',
+    };
+    let parts;
+    try {
+        parts = new Intl.DateTimeFormat('en-CA', { ...opts, timeZone: zone }).formatToParts(d);
+    } catch (e) {
+        parts = new Intl.DateTimeFormat('en-CA', { ...opts, timeZone: 'UTC' }).formatToParts(d);
+    }
+    const p = {};
+    parts.forEach(x => { p[x.type] = x.value; });
+    const hour = p.hour === '24' ? '00' : p.hour;
+    return `${p.year}-${p.month}-${p.day} ${hour}:${p.minute}:${p.second} ${p.timeZoneName}`;
+}
+
 function timeAgo(isoStr) {
     if (!isoStr) return '–';
     // Server stores datetime.utcnow() without timezone info — treat as UTC

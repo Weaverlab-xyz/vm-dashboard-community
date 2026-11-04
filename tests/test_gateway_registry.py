@@ -223,7 +223,7 @@ def test_the_managed_row_is_adopted_by_the_ensure_path_only():
 
 def test_the_gateway_table_records_which_kind_it_is():
     src = database_module_source("infrastructure")
-    block = src[src.index("class Gateway(Base)"):src.index("class AgentRelease(Base)")]
+    block = src[src.index("class Gateway(Base)"):]   # Gateway is the last class in the module
     for col in ("cloud", "region", "name", "status", "managed", "host_id"):
         assert f"{col} = Column(" in block, f"Gateway has no {col} column"
     assert "index=True" in block
@@ -233,7 +233,7 @@ def test_the_gateway_table_records_the_egress_ip():
     """The column existed but nothing ever wrote it, so the node firewalls had no way
     to learn about a gateway they had to admit."""
     src = database_module_source("infrastructure")
-    block = src[src.index("class Gateway(Base)"):src.index("class AgentRelease(Base)")]
+    block = src[src.index("class Gateway(Base)"):]   # Gateway is the last class in the module
     assert "egress_ip = Column(" in block
     svc = _read("web_dashboard", "services", "gateway_service.py")
     assert "def record_egress_ip(" in svc, "nothing records a gateway's egress IP"
