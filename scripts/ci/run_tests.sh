@@ -23,6 +23,12 @@
 # only because an earlier file, alphabetically, had created the tables it reads, and
 # fail on a fresh checkout or when run alone. A file that sets its own URL keeps it.
 #
+# COVERAGE. COVERAGE=1 runs each file under `coverage run --parallel-mode
+# --source=web_dashboard`, one data file per process, written to $COVERAGE_DIR (default
+# .coverage-data/). Nothing else changes: same DBs, same skip guard, same exit codes.
+# scripts/ci/coverage_summary.py combines the data files. The `tests` job never sets it;
+# only .github/workflows/coverage.yml does (nightly), so a PR's runtime is unchanged.
+#
 # Run it with the interpreter CI uses (Python 3.12, web_dashboard/requirements.txt, and
 # NOT pytest: a skip calls pytest.skip() when pytest is importable, which a standalone
 # runner reports as an error).
@@ -44,6 +50,15 @@ is_allowed() {
   for a in "${allowed[@]}"; do [ "$a" = "$name" ] && return 0; done
   return 1
 }
+
+RUN=("$PY")
+if [ "${COVERAGE:-}" = "1" ]; then
+  COVERAGE_DIR="${COVERAGE_DIR:-$PWD/.coverage-data}"
+  rm -rf "$COVERAGE_DIR"; mkdir -p "$COVERAGE_DIR"
+  # Absolute: a test that chdirs must not scatter data files.
+  export COVERAGE_FILE="$COVERAGE_DIR/.coverage"
+  RUN=("$PY" -m coverage run --parallel-mode --source=web_dashboard)
+fi
 
 if [ $# -gt 0 ]; then files=("$@"); else files=(tests/test_*.py); fi
 
@@ -79,9 +94,9 @@ trap 'rm -f "$out"; rm -rf "$dbdir"' EXIT
 for f in "${files[@]}"; do
   echo "::group::$f"
   if [ -n "${DATABASE_URL:-}" ]; then
-    "$PY" "$f" 2>&1 | tee "$out"
+    "${RUN[@]}" "$f" 2>&1 | tee "$out"
   else
-    DATABASE_URL="sqlite:///$dbdir/$(basename "$f" .py).db" "$PY" "$f" 2>&1 | tee "$out"
+    DATABASE_URL="sqlite:///$dbdir/$(basename "$f" .py).db" "${RUN[@]}" "$f" 2>&1 | tee "$out"
   fi
   rc=${PIPESTATUS[0]}
   echo "::endgroup::"

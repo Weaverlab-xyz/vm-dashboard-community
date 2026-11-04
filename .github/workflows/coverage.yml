@@ -1,0 +1,66 @@
+name: Coverage
+
+# Line coverage of web_dashboard from the same per-file test run the `tests` job does,
+# nightly and on demand. Deliberately NOT on pull_request: it roughly doubles the suite's
+# runtime and has no threshold, so it informs (which services and routers nothing
+# exercises) and never gates. The normal `tests` job is untouched.
+#
+# Mechanism: COVERAGE=1 makes scripts/ci/run_tests.sh run each file as
+# `coverage run --parallel-mode --source=web_dashboard` (one data file per process, so
+# the per-file isolation the suite depends on is kept); scripts/ci/coverage_summary.py
+# combines them. A failing test file does not stop the report -- the `tests` job owns
+# pass/fail -- but it is shown in the step log.
+
+on:
+  schedule:
+    - cron: "17 5 * * *"   # best-effort, default branch only
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"  # same as the tests job
+          cache: pip
+          cache-dependency-path: web_dashboard/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r web_dashboard/requirements.txt coverage==7.6.10
+
+      - name: Run test suite under coverage
+        continue-on-error: true
+        run: COVERAGE=1 scripts/ci/run_tests.sh
+
+      - name: Combine and summarise
+        if: always()
+        run: |
+          python scripts/ci/coverage_summary.py | tee coverage-summary.txt
+          cat coverage-summary.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            .coverage-data/coverage.xml
+            .coverage-data/coverage.json
+            .coverage-data/report.txt
+            coverage-summary.txt
+          retention-days: 30
