@@ -185,6 +185,13 @@ def test_every_tab_records_and_can_remove_what_it_created():
             f"create needs a destroy, and the state to destroy from")
 
 
+def _end_of_class(src, start):
+    """Where the class beginning at ``start`` ends: the next top-level class, or the end of
+    the source when it is the last one in its file (the models are split across modules)."""
+    nxt = src.find(chr(10) + "class ", start + 10)
+    return len(src) if nxt < 0 else nxt
+
+
 def test_no_tab_stores_a_credential_on_its_row():
     """The rule all three models state. Ids and titles NAME the credential; Password Safe
     and Secrets Safe hold it.
@@ -202,7 +209,7 @@ def test_no_tab_stores_a_credential_on_its_row():
     for model in ("CertLab", "SpireLab", "WorkloadK8sToken", "WorkloadCloudCredential",
                   "AgentCell"):
         start = db.index(f"class {model}(Base):")
-        end = db.index(chr(10) + "class ", start + 10)
+        end = _end_of_class(db, start)
         columns = [ln.strip() for ln in db[start:end].splitlines() if "= Column(" in ln]
         assert columns, f"{model}: no column declarations found"
         declared = "\n".join(columns).lower()
@@ -475,7 +482,7 @@ def test_the_cloud_tab_stores_no_credential_and_says_where_scope_lives():
     claiming a control it does not have."""
     db = database_source()
     start = db.index("class WorkloadCloudCredential(Base):")
-    end = db.index(chr(10) + "class ", start + 10)
+    end = _end_of_class(db, start)
     columns = [ln.strip() for ln in db[start:end].splitlines() if "= Column(" in ln]
     assert columns
     declared = "\n".join(columns).lower()
