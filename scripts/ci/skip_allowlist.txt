@@ -8,6 +8,7 @@ test_opa_policies.py             # the `opa` job runs it with the real binary (O
 test_destroy_guardrails.py       # its test_rego_* checks need opa; the `opa` job runs them
 test_postgres_migrations.py      # the `postgres` job runs it against a real server
 test_postgres_retired_levels.py  # the `postgres` job runs it against a real server
+test_postgres_upgrade_from_release.py  # the `postgres` job runs it against a real server
 test_no_undefined_names.py       # its ruff sweep skips here; the `ruff` job covers it repo-wide
 test_function_package.py         # one test covers the azure-functions-ABSENT path, which
                                  # cannot run once requirements.txt installs it
