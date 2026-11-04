@@ -19,7 +19,6 @@ scripts/ci/template_js_allow.txt with the reason, the same shape as the test ski
 
 Usage:  python scripts/ci/check_template_js.py        (needs `node` on PATH)
 """
-import os
 import pathlib
 import re
 import subprocess
