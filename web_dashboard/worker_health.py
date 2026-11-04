@@ -32,7 +32,12 @@ The socket is not published anywhere. The ACA app has no ingress and ``docker-co
 gives the worker no ``ports:`` mapping, so this is reachable from the pod/host network
 only -- which is where probes come from. It exposes a phase name, two timestamps and the
 API version; nothing authenticated and nothing secret.
+
+It also reports ``event_loop`` lag and ``job_executor`` thread-pool numbers, as extra
+fields that play no part in the healthy/unhealthy decision (see ``loop_lag_monitor``).
 """
+import asyncio
+import collections
 import json
 import logging
 import threading
@@ -63,6 +68,15 @@ _started_at = time.time()
 _last_beat: float | None = None
 _server: ThreadingHTTPServer | None = None
 
+# Loop-lag and thread-pool numbers, REPORTED ONLY. They never feed ``healthy``: the
+# phase and the heartbeat above are the decision, and a slow loop is information for
+# whoever is reading the payload, not grounds to restart a worker mid-terraform-apply.
+_BEAT_S = 1.0
+_WINDOW = 60
+_lags: collections.deque = collections.deque(maxlen=_WINDOW)   # seconds of overshoot
+_last_sample_at: float | None = None
+_executor_stats: dict | None = None
+
 
 def mark(phase: str) -> None:
     """Record a startup/shutdown phase transition."""
@@ -76,6 +90,64 @@ def beat() -> None:
     global _last_beat
     with _lock:
         _last_beat = time.monotonic()
+
+
+def _executor_snapshot() -> dict:
+    """Default-executor numbers. Must run on the loop thread (it is where the loop is)."""
+    ex = getattr(asyncio.get_running_loop(), "_default_executor", None)
+    if ex is None:
+        return {"state": "not created yet"}
+    # Private attributes: tolerate their absence in a future Python.
+    queue = getattr(ex, "_work_queue", None)
+    return {"threads": len(getattr(ex, "_threads", ())),
+            "size": getattr(ex, "_max_workers", None),
+            "queued": queue.qsize() if queue is not None else None}
+
+
+async def loop_lag_monitor() -> None:
+    """Sleep ``_BEAT_S`` repeatedly and record how late each wake-up was.
+
+    The same sampler as ``services/runtime_metrics.loop_lag_monitor``, copied rather than
+    imported because this module may import nothing from ``web_dashboard`` but ``config``.
+    It also snapshots the job-runner thread pool on each beat, from the loop thread, so
+    the health server thread only ever reads plain numbers. Never raises.
+    """
+    global _last_sample_at, _executor_stats
+    loop = asyncio.get_running_loop()
+    while True:
+        try:
+            start = loop.time()
+            await asyncio.sleep(_BEAT_S)
+            lag = max(0.0, loop.time() - start - _BEAT_S)
+            try:
+                stats = _executor_snapshot()
+            except Exception as exc:  # noqa: BLE001
+                stats = {"error": type(exc).__name__}
+            with _lock:
+                _lags.append(lag)
+                _last_sample_at = time.monotonic()
+                _executor_stats = stats
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.debug("worker loop lag sample failed", exc_info=True)
+
+
+def _runtime_extras() -> dict:
+    with _lock:
+        samples = list(_lags)
+        since = None if _last_sample_at is None else round(time.monotonic() - _last_sample_at, 3)
+        executor = dict(_executor_stats) if _executor_stats is not None else None
+    if not samples:
+        loop_info = {"monitor": "no samples yet"}
+    else:
+        loop_info = {"last_ms": round(samples[-1] * 1000, 1),
+                     "max_60s_ms": round(max(samples) * 1000, 1),
+                     "samples": len(samples),
+                     # Far above the beat means the loop is blocked right now.
+                     "seconds_since_last_beat": since}
+    return {"event_loop": loop_info,
+            "job_executor": executor if executor is not None else {"state": "no samples yet"}}
 
 
 def status() -> tuple[bool, dict]:
@@ -94,6 +166,8 @@ def status() -> tuple[bool, dict]:
         "seconds_since_last_pass": stale_for,
         "stale_after_s": STALE_AFTER_S,
     }
+    # Extra fields only; computed after, and independent of, the decision above.
+    payload.update(_runtime_extras())
     if not healthy:
         # Say WHY, so a failing probe is self-describing in the replica listing rather
         # than sending whoever is paged back to the logs -- which is the one thing a

@@ -91,7 +91,67 @@ def test_the_payload_never_carries_a_secret():
     assert set(payload) <= {
         "status", "phase", "version", "uptime_s",
         "seconds_since_last_pass", "stale_after_s", "reason",
+        "event_loop", "job_executor",       # numbers only; see the tests below
     }, payload
+
+
+def _reset_lag():
+    with wh._lock:
+        wh._lags.clear()
+        wh._last_sample_at = None
+        wh._executor_stats = None
+
+
+def test_loop_numbers_are_extras_and_never_change_the_decision():
+    """No samples, a blocked-loop sample, or a saturated pool: same verdict as before."""
+    for lags, ex in (([], None), ([5.0], {"threads": 8, "size": 8, "queued": 99})):
+        _reset_lag()
+        with wh._lock:
+            wh._lags.extend(lags)
+            wh._executor_stats = ex
+        _reset(wh.RUNNING, beat=True)
+        healthy, payload = wh.status()
+        assert healthy is True and payload["status"] == "ok", payload
+        _reset(wh.STARTING)
+        healthy, payload = wh.status()
+        assert healthy is False and "event_loop" in payload, payload
+    _reset_lag()
+
+
+def test_the_monitor_reports_a_blocked_loop_and_the_executor():
+    import asyncio
+    import time as _t
+    from concurrent.futures import ThreadPoolExecutor
+
+    async def go():
+        _reset_lag()
+        old = wh._BEAT_S
+        wh._BEAT_S = 0.05
+        try:
+            asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=3))
+            await asyncio.to_thread(lambda: None)        # create the pool's first thread
+            task = asyncio.create_task(wh.loop_lag_monitor())
+            await asyncio.sleep(0.2)
+            _t.sleep(0.3)                                # synchronous work on the loop
+            await asyncio.sleep(0.2)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        finally:
+            wh._BEAT_S = old
+    asyncio.run(go())
+    extras = wh._runtime_extras()
+    assert extras["event_loop"]["max_60s_ms"] >= 200, extras
+    assert extras["job_executor"]["size"] == 3, extras
+    _reset_lag()
+
+
+def test_the_monitor_is_started_by_the_worker():
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "web_dashboard", "jobs_worker.py"), encoding="utf-8").read()
+    assert "worker_health.loop_lag_monitor()" in src
 
 
 def test_port_zero_disables_the_listener():

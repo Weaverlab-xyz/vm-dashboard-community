@@ -31,7 +31,8 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8001/api/metrics
   them. Everything except `jobs` is that process's own, and the reply carries its `pid`. Call
   it a few times to see both. `jobs` comes from the database and is the same in both.
 - **The job worker is a separate process** and is not in this reply. Its own health endpoint
-  is covered in [Job Worker](job-worker.md).
+  is covered in [Job Worker](job-worker.md); it reports its own `event_loop` and `job_executor`
+  numbers there, [as extra fields](job-worker/health-endpoint.md).
 - **It keeps answering when the app is struggling.** The loop and thread numbers need no
   database and no thread. The one database read runs on its own thread with a 3 second
   deadline, so if the database or its pool is the problem, `jobs` reports an `error` and
