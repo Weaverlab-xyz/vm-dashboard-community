@@ -747,7 +747,7 @@ def test_a_deploy_that_recorded_no_nic_says_what_to_do_instead():
 def test_the_permission_predicate_has_exactly_one_implementation():
     """api/auth.has_permission is the rule; the MCP tools and the suspend API call it
     rather than restating it. Two copies of a permission rule drift invisibly."""
-    from web_dashboard.api import auth, mcp_server
+    from web_dashboard.api import auth
     assert callable(auth.has_permission)
     src = open(os.path.join(_ROOT, "web_dashboard/api/mcp_server.py"), encoding="utf-8").read()
     assert "from .auth import has_permission" in src, "mcp_server should delegate"

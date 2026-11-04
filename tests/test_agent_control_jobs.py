@@ -15,7 +15,6 @@ What each test pins:
 Runs under pytest, or standalone:  python tests/test_agent_control_jobs.py
 """
 import importlib.util
-import json
 import os
 import signal
 import sys

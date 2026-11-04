@@ -82,7 +82,6 @@ def _ou_problem(ou: str, base_dn: str) -> str:
 
 def set_settings(db: Session, row, *, entra_hybrid: bool, hybrid_ou: str = ""):
     """Declare (or withdraw) that Entra Connect syncs this on-prem domain for hybrid join."""
-    from datetime import datetime
     if row.provider != "onprem_ad":
         raise HybridError("hybrid join is declared on the on-premises Active Directory row; "
                           "AD Connectors and DNS links inherit it")
@@ -126,7 +125,6 @@ def computer_name(cloud: str, *, instance_name: str = "", ssm_computer_name: str
 
 
 def _ssm_computer_name_sync(region: str, instance_id: str) -> str:
-    import boto3
     from . import aws_service
     ssm = aws_service.aws_client("ssm", region)
     out = ssm.describe_instance_information(

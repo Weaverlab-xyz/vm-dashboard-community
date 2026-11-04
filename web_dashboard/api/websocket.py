@@ -4,9 +4,7 @@ Clients connect to /api/ws/jobs/{job_id} and receive JSON messages
 as the job progresses.
 """
 import asyncio
-import json
 import logging
-from datetime import datetime
 from typing import Dict, Optional, Set, Tuple
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect

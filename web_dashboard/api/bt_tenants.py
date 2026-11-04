@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from ..database import User, get_db
 from ..services import bt_tenant_service, bt_tenant_verify
-from .auth import get_current_user, require_admin, require_explicit_permission, require_permission
+from .auth import get_current_user, require_explicit_permission, require_permission
 
 logger = logging.getLogger(__name__)
 # Shares the `pov_templates` scope rather than minting a `tenants` one: registering a

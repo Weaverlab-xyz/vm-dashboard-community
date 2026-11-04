@@ -202,7 +202,6 @@ def metadata(request: Request):
 # Where a JWT-SVID client assertion's signing keys come from. See
 # services/spiffe_assertion and the SpiffeTrustDomain model for the two sources.
 
-from datetime import datetime  # noqa: E402
 from typing import Optional as _Opt  # noqa: E402
 
 from fastapi import HTTPException  # noqa: E402

@@ -31,7 +31,7 @@ _TMPDB = os.path.join(tempfile.mkdtemp(prefix="directories-"), "test.db")
 os.environ["DATABASE_URL"] = f"sqlite:///{_TMPDB}"
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-directory-tests")
 
-from web_dashboard.database import Base, Job, ManagedDirectory, SessionLocal, engine  # noqa: E402
+from web_dashboard.database import Base, ManagedDirectory, SessionLocal, engine  # noqa: E402
 from web_dashboard.services import (directory_service as ds, job_service,  # noqa: E402
                                     windows_admin_secret as was)
 

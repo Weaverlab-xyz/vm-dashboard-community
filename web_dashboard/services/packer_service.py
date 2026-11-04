@@ -12,9 +12,7 @@ in command-line arguments or on-disk templates.
 """
 import asyncio
 import contextlib
-import json
 import logging
-import os
 import re
 import time
 from pathlib import Path

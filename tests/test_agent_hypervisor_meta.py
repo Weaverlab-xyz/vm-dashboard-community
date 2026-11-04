@@ -141,7 +141,6 @@ def test_the_tag_count_is_bounded_by_the_same_cap_in_both_directions():
 def test_set_tags_is_a_write_verb_and_is_resynced():
     """It changes `tags`, which IS a cached column — so unlike `snapshot` it has to
     trigger an inventory resync or the page keeps showing the pre-edit tags."""
-    import importlib.util as _ilu
     _p = os.path.join(_ROOT, "web_dashboard", "services", "hypervisor_sync_service.py")
     with open(_p, encoding="utf-8") as fh:
         src = fh.read()

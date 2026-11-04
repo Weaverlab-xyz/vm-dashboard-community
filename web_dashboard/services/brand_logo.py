@@ -38,7 +38,6 @@ omission reads as a decision rather than an oversight.
 import hashlib
 import re
 import xml.etree.ElementTree as ET
-from datetime import datetime
 from ..utils.clock import utcnow
 
 # 512 KB. A logo is a logo; this is generous for a PNG wordmark at 2x and still small

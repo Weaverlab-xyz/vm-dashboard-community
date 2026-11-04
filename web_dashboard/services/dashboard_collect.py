@@ -46,8 +46,8 @@ several of these api modules pull in cloud SDKs.
 """
 import asyncio
 import logging
-from dataclasses import dataclass, field
-from typing import Callable, Optional
+from dataclasses import dataclass
+from typing import Callable
 
 from . import dashboard_stat_cache as store
 

@@ -25,7 +25,6 @@ second permission — the silent-revocation trap the permissions doc warns about
 that a maintenance window exists is not sensitive; changing one is.
 """
 import logging
-from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException

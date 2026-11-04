@@ -27,7 +27,7 @@ firing a rule per target in a bulk apply would be both surprising and expensive.
 Safe processes asynchronously anyway, so "automatic" would not even mean "finished".
 """
 import logging
-from typing import List, Optional
+from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel

@@ -22,7 +22,6 @@ So the assertions here are mostly about what the link does NOT do:
 Runs under pytest, or standalone:
     python tests/test_agentcell_link.py
 """
-import ast
 import os
 import re
 import sys

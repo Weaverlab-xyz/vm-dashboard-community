@@ -25,7 +25,7 @@ build* retrieved, and a value proxied through this dashboard would record only t
 dashboard did.
 """
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException

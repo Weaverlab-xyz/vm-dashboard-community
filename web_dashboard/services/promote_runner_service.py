@@ -18,7 +18,6 @@ the hub artefact via a short-lived presigned URL the dashboard mints at
 task-launch time — no source-side credentials live in the container.
 """
 import logging
-from typing import Optional
 
 from . import aws_service, azure_service, config_service, gcp_service, oci_service, storage_service
 from ..config import settings

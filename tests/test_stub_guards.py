@@ -27,7 +27,6 @@ absent — which is why it needs a test rather than care.
 
 Run: python tests/test_stub_guards.py   (or under pytest)
 """
-import ast
 import os
 import re
 import sys

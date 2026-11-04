@@ -447,7 +447,7 @@ async def queue_deploy(db, parent_id: str, child_id: str, cmeta: dict, *,
     reference. The run reaches a private broker only from an in-cloud runner, which
     ``ot_service.config_runner_problem`` refused the whole deploy without.
     """
-    from . import ansible_run_meta, job_service, ot_service, storage_service
+    from . import ansible_run_meta, job_service, storage_service
 
     problem = skip_reason(cmeta, bmeta)
     if problem:
@@ -691,7 +691,7 @@ async def destroy(vm_job_id: str, cmeta: dict) -> str:
     tenant-side integration, so deleting it would strand the integration with no way
     to find it again — the same argument ``ot_service.destroy_agent_token`` makes.
     """
-    from . import config_service, entitle_registration_service as entitle
+    from . import entitle_registration_service as entitle
 
     state = (cmeta or {}).get("ot_faas_entitle_tf_state") or ""
     if not state:

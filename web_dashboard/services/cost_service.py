@@ -193,7 +193,6 @@ async def get_aws_mtd_cost() -> MtdCost:
     start, end = _month_range()
 
     def _query() -> MtdCost:
-        import boto3
         from botocore.exceptions import BotoCoreError, ClientError
         ce = aws_service.aws_client("ce", "")
         try:
@@ -466,7 +465,6 @@ async def get_aws_managed_breakdown() -> dict:
     start, end = _month_range()
 
     def _query() -> dict:
-        import boto3
         from botocore.exceptions import BotoCoreError, ClientError
         ce = aws_service.aws_client("ce", "")
         amounts, currency = {}, "USD"

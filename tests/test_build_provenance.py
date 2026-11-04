@@ -8,7 +8,6 @@ Two properties matter most and are easy to get wrong in opposite directions:
 provenance must never **fail a deploy**, and it must never **invent** a fact it does
 not have. A confidently wrong commit is worse than an honest blank.
 """
-import hashlib
 import io
 import os
 import sys

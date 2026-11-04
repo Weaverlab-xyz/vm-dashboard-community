@@ -23,7 +23,6 @@ pytest, or standalone:
 import importlib.util
 import os
 import re
-import struct
 import sys
 import tempfile
 

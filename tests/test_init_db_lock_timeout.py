@@ -15,7 +15,6 @@ worker. Every path timed out at the 240s ingress limit, including ``/api/health`
 does no I/O at all. A bounded wait turns that from an outage into a skipped migration.
 """
 import ast
-import pathlib
 from _database_src import database_function, database_top_level_nodes
 
 

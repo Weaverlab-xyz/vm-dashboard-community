@@ -533,7 +533,7 @@ async def deploy_stack(
 # Functions adapter also uses (it is vendored into the function's zip). Keeping the
 # names here means no call site changed.
 from . import portainer_access_rules as _rules  # noqa: E402
-from .portainer_access_rules import (  # noqa: E402
+from .portainer_access_rules import (  # noqa: E402,F401  (re-exported: callers read these from portainer_service)
     USER_ROLE_ADMIN, USER_ROLE_STANDARD, TEAM_ROLE_LEADER, TEAM_ROLE_MEMBER,
     PortainerRuleError,
 )

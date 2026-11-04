@@ -17,7 +17,6 @@ What these pin:
 Uses a real temp SQLite database; the storage backends are stubbed. Runs standalone:
     python tests/test_storage_asset_scope.py
 """
-import asyncio
 import os
 import re
 import sys

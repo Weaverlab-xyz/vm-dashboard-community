@@ -531,7 +531,7 @@ async def promote_to_aws_automated(
     progress_cb is an optional sync callable taking (pct, msg); the caller
     wires it to job_service.update_progress.
     """
-    from . import promote_runner_service, storage_service, aws_service
+    from . import promote_runner_service, aws_service
 
     if not target_region:
         raise ImageRegistryError("target_region is required for AWS promote.")
@@ -607,7 +607,6 @@ async def promote_to_aws_automated(
         _say(92, f"Cleaning up staged S3 object s3://{dest_bucket}/{dest_key}")
         import asyncio
         from .aws_service import aws_client
-        import boto3
         await asyncio.to_thread(
             lambda: aws_client("s3", target_region).delete_object(
                 Bucket=dest_bucket, Key=dest_key,

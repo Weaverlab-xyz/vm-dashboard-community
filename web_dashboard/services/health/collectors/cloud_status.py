@@ -19,7 +19,6 @@ def aws_instances(region: str, instance_ids: list) -> dict:
     ``describe_instances`` by FILTER, not by id: an id that no longer exists makes the
     by-id form fail the whole call, and one deleted VM must not blind the rest.
     """
-    import boto3
     from ... import aws_service
     ec2 = aws_service.aws_client("ec2", region)
     out: dict = {}
@@ -52,7 +51,6 @@ def aws_databases(region: str) -> dict:
     """``{id: status}`` for every RDS instance in a region, keyed by BOTH its identifier
     and its DbiResourceId: the Terraform provider's ``id`` output is one or the other
     depending on its version."""
-    import boto3
     from ... import aws_service
     rds = aws_service.aws_client("rds", region)
     out: dict = {}
@@ -68,7 +66,6 @@ def aws_databases(region: str) -> dict:
 def aws_cluster(region: str, name: str) -> dict:
     """``{status, issues, nodegroups: {name: {status, issues}}}`` for one EKS cluster,
     or ``{}`` when it does not exist."""
-    import boto3
     from ... import aws_service
     eks = aws_service.aws_client("eks", region)
     try:

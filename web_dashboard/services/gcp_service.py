@@ -4001,7 +4001,6 @@ def _fetch_cloud_run_job_logs(project_id: str, job_name: str, execution_name: st
     system messages (e.g. an OOM kill) are useful in failure logs."""
     try:
         from google.auth.transport.requests import AuthorizedSession
-        import requests as _requests
     except ImportError:
         return ""
 

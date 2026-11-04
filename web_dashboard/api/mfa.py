@@ -10,7 +10,6 @@ Credential management (authenticated):
   DELETE /api/mfa/credentials/{id}     — remove a device
 """
 import uuid
-from datetime import datetime
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException

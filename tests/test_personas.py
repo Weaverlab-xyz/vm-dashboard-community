@@ -216,7 +216,6 @@ def test_section_order_is_not_a_filter():
 # ── every declared name is real ──────────────────────────────────────────────
 
 def test_every_required_flag_is_a_real_flag():
-    from web_dashboard.services import personas as P
     from web_dashboard.services import feature_flags as ff
     # `cloud_pages` is a page group, not a flag, and entitle_request_portal_url is a
     # string. Neither is something a card can require.
@@ -245,7 +244,6 @@ def test_every_referenced_flag_has_a_human_label():
 
 
 def test_every_required_cloud_is_a_real_cloud():
-    from web_dashboard.services import personas as P
     for p, c in _all_cards():
         for cloud in c.requires_clouds:
             assert cloud in ("aws", "azure", "gcp", "oci"), \
@@ -623,7 +621,6 @@ def test_every_persona_has_cards_and_every_card_has_copy():
 
 
 def test_card_ids_are_unique_and_namespaced():
-    from web_dashboard.services import personas as P
     seen = {}
     for p, c in _all_cards():
         assert c.id not in seen, f"duplicate card id {c.id} ({p.key} and {seen.get(c.id)})"

@@ -127,7 +127,6 @@ _AWS_DC = {"Active": OK, "Creating": WARN, "Restoring": WARN, "Updating": WARN,
 
 
 def _aws_sync(region: str, directory_id: str, with_dcs: bool) -> tuple:
-    import boto3
     from . import aws_service
     ds = aws_service.aws_client("ds", region)
     found = ds.describe_directories(DirectoryIds=[directory_id]).get(

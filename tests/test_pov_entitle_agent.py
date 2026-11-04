@@ -30,7 +30,6 @@ import json
 import os
 import sys
 import uuid
-from datetime import datetime
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -42,7 +41,7 @@ from web_dashboard.utils.clock import utcnow  # noqa: E402
 d.Base.metadata.create_all(bind=d.engine)
 
 from web_dashboard.services import (agent_service, bt_tenant_service,  # noqa: E402
-                                    config_service, entitle_registration_service,
+                                    entitle_registration_service,
                                     pov_broker, pov_entitle_agent as ea, pov_env_service,
                                     pov_wireup)
 
