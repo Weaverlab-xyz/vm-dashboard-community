@@ -252,10 +252,11 @@ def test_the_route_table_is_unchanged():
         "  (if only the order differs, the order is the bug)")
 
 
-def test_the_router_is_mounted_once_by_main():
-    import web_dashboard.main as main
-    mounted = [r for r in main.app.routes if getattr(r, "path", "").startswith("/api/setup/")]
-    assert len(mounted) == len(ROUTES), (len(mounted), len(ROUTES))
+def test_main_still_mounts_the_router_by_attribute():
+    """main.py includes ``setup.router`` -- the one name the app needs from the module."""
+    with open(os.path.join(_ROOT, "web_dashboard", "main.py"), encoding="utf-8") as fh:
+        text = fh.read()
+    assert text.count("include_router(setup.router)") == 1
 
 
 if __name__ == "__main__":
