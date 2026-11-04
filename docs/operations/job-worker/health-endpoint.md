@@ -40,6 +40,14 @@ leaves jobs at 0% is a different fault (see [Threads](../job-worker.md#threads))
 curl -s localhost:8080/api/health
 ```
 
+The reply also carries two **informational** blocks that never affect the verdict above:
+`event_loop` (`last_ms`, `max_60s_ms`, `seconds_since_last_beat`, as for the app's
+[runtime metrics](../runtime-metrics.md)) and `job_executor` (`threads`, `size`, `queued`:
+the pool that runs the worker's blocking cloud and Terraform calls). A `max_60s_ms` in the
+hundreds means something ran synchronous work on the worker's event loop; `queued` above 0
+for a sustained time means jobs are waiting for a thread. Both read `no samples yet` for the
+first second after the loop starts.
+
 To probe it on Container Apps — and the same caveat as any probe change applies, it mints a
 new revision, so not during an incident:
 
