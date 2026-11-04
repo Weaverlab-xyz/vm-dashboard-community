@@ -46,7 +46,7 @@ from web_dashboard.database import (AgentRelease, Base, RemoteAgent,  # noqa: E4
                                     SessionLocal, SpiffeTrustDomain, engine, get_db)
 from web_dashboard.api import agent as agent_api  # noqa: E402
 from web_dashboard.services import (agent_assurance_service, agent_service,  # noqa: E402
-                                    agent_signing, config_service, notification_service)
+                                    config_service, notification_service)
 from web_dashboard.utils.clock import utcnow  # noqa: E402
 
 Base.metadata.create_all(bind=engine)

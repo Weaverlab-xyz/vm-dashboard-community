@@ -19,7 +19,6 @@ Pinned:
 
 Run: python tests/test_pov_broker_spire.py   (or under pytest)
 """
-import asyncio
 import os
 import re
 import shutil
@@ -45,7 +44,7 @@ from web_dashboard import database as d  # noqa: E402
 d.Base.metadata.create_all(bind=d.engine)
 
 from web_dashboard.services import (agent_service, config_service, dashboard_spire,  # noqa: E402
-                                    lab_platforms, pov_broker, pov_env_service)
+                                    pov_broker, pov_env_service)
 
 _URL = "https://pov-agents.example.test"
 _PEM = ("-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUQ0FfdGVzdF9vbmx5X25vdF9hX2NlcnQwCgYIKoZIzj0E\n"

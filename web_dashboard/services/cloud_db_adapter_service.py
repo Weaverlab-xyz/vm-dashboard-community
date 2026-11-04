@@ -260,7 +260,6 @@ def _stage_admin_secret(row: CloudDatabase, admin_password: str) -> dict:
 
 
 def _aws_secret_arn(name: str) -> str:
-    import boto3
     from . import aws_service
     client = aws_service.aws_client("secretsmanager", config_service.get("aws_region") or "")
     return str(client.describe_secret(SecretId=name)["ARN"])

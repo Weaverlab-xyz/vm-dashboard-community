@@ -19,6 +19,11 @@ select = [
     "F82",     # undefined names
     "F601", "F602",  # a dict key or variable key written twice
     "F811",    # a definition that shadows an unused one
+    # An unused import. Not style: it hides what a module really depends on, so a move
+    # leaves stale names behind (the database split left 12 in database/__init__.py) and a
+    # caller can quietly start relying on one. A name kept on purpose -- a re-export, or
+    # an import inside an availability check -- says so with `# noqa: F401  (why)`.
+    "F401",
     "PLE",     # pylint errors
     "B006",    # mutable default argument
     "B018",    # a statement that does nothing

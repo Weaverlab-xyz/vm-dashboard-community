@@ -9,7 +9,6 @@ import json
 import logging
 import threading
 from typing import Optional
-from datetime import datetime, timezone
 
 from . import cloud_executor
 

@@ -35,7 +35,7 @@ import os
 import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Optional
 
 from sqlalchemy import func

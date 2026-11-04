@@ -21,7 +21,6 @@ import asyncio
 import os
 import sys
 import tempfile
-import uuid
 from datetime import datetime, timedelta
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -35,7 +34,6 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-health-resource-tests")
 from web_dashboard.database import (Base, CertLab, CloudDatabase, K8sCluster,  # noqa: E402
                                     ManagedDirectory, SessionLocal, engine)
 from web_dashboard.services import job_service  # noqa: E402
-from web_dashboard.services.health import core  # noqa: E402
 from web_dashboard.services.health.collectors import cloud_status, resources as R  # noqa: E402
 
 Base.metadata.create_all(bind=engine)

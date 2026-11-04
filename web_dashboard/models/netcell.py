@@ -6,7 +6,7 @@ what a VyOS guest does with each cloud's key injection is the least certain thin
 about it, and answering that once is cheaper than answering it three times wrong.
 """
 from typing import List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class NetCellDeployRequest(BaseModel):

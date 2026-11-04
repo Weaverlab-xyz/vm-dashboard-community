@@ -169,7 +169,6 @@ async def check_directory_health(
         user: User = Depends(require_explicit_permission("directories", "read"))):
     """Check one directory now. Read-only against the directory: a control-plane read, a
     sign-in, or an anonymous LDAP probe through its agent."""
-    from datetime import datetime
     from ..database import DirectoryHealth
     from ..services import directory_health_service
     row = _row_or_404(db, directory_id, user)
@@ -907,7 +906,6 @@ async def pin_entitle_integration(directory_id: str, req: EntitleLinkRequest,
                                   user: User = Depends(require_explicit_permission("directories", "write"))):
     """Pin (or with "" unpin) the Entitle integration that governs this directory. The id
     is checked against Entitle's own list, and the NAME recorded is Entitle's."""
-    from datetime import datetime
     from ..services import entitle_directory_link as link
     row = _row_or_404(db, directory_id, user)
     wanted = (req.integration_id or "").strip()

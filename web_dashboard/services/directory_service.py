@@ -41,7 +41,6 @@ import os
 import re
 import secrets
 import string
-from datetime import datetime
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -546,7 +545,6 @@ def connector_username(account_name: str) -> str:
 
 
 def _aws_connect_sync(row: ManagedDirectory, password: str, username: str) -> str:
-    import boto3
     from . import aws_service
     ds = aws_service.aws_client("ds", row.region)
     kw = dict(
@@ -565,7 +563,6 @@ def _aws_wait_active_sync(region: str, directory_id: str, *, timeout: int = 1800
                           interval: int = 20, sleep=None) -> dict:
     """Poll until the connector is Active, or raise with AWS's own reason."""
     import time
-    import boto3
     from . import aws_service
     sleep = sleep or time.sleep
     ds = aws_service.aws_client("ds", region)
@@ -589,7 +586,6 @@ def _aws_wait_active_sync(region: str, directory_id: str, *, timeout: int = 1800
 
 
 def _aws_delete_sync(region: str, directory_id: str) -> None:
-    import boto3
     from . import aws_service
     ds = aws_service.aws_client("ds", region)
     try:
@@ -711,7 +707,6 @@ def _read_outputs(row: ManagedDirectory, outputs: dict) -> None:
 # ── the administrator credential ──────────────────────────────────────────────
 
 def _aws_reset_admin_sync(region: str, directory_id: str, password: str) -> None:
-    import boto3
     from . import aws_service
     ds = aws_service.aws_client("ds", region)
     ds.reset_user_password(DirectoryId=directory_id, UserName=AWS_ADMIN_USER,
@@ -1038,7 +1033,6 @@ async def reset_admin_password(db: Session, *, directory_id: str) -> dict:
 # ── discovery and registration ────────────────────────────────────────────────
 
 def _aws_describe_sync(region: str) -> list:
-    import boto3
     from . import aws_service
     ds = aws_service.aws_client("ds", region)
     out, token = [], None

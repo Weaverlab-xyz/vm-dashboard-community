@@ -8,11 +8,11 @@ import hashlib
 import logging
 import os
 import uuid
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Optional
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
@@ -34,8 +34,6 @@ from ..services.fido2_service import (
     fetch_fido2_challenge,
     store_oauth_state,
     verify_and_consume_oauth_state,
-    b64url_encode,
-    b64url_decode,
 )
 from ..services import external_workload, login_guard, personas, public_url, service_accounts
 from ..utils.clock import utcnow

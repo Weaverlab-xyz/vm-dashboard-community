@@ -43,7 +43,6 @@ from fastapi import HTTPException  # noqa: E402
 from web_dashboard.api.auth import (PERMISSION_SCOPE_LEVELS,  # noqa: E402
                                     has_explicit_permission, has_permission,
                                     validate_permissions_payload)
-from web_dashboard import database as db_mod  # noqa: E402
 from web_dashboard.database import (Base, OAuthGroupMapping, SchemaMarker,  # noqa: E402
                                     User, _BACKFILL_V1_DELIBERATELY_EMPTY,
                                     _BACKFILL_V1_SCOPES,

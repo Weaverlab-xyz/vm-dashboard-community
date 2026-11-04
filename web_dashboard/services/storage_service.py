@@ -189,7 +189,6 @@ def _s3_client():
         raise StorageError("boto3 is not installed")
     from .aws_service import aws_client
     region = _cfg("storage_s3_region") or _cfg("aws_region")
-    import boto3
     return aws_client("s3", region)
 
 

@@ -1,5 +1,5 @@
 """Job-related Pydantic schemas"""
-from typing import Optional, Dict, Any
+from typing import Optional
 from datetime import datetime
 from pydantic import BaseModel
 

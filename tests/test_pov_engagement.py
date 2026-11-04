@@ -40,7 +40,6 @@ from web_dashboard import database as d  # noqa: E402
 d.Base.metadata.create_all(bind=d.engine)
 
 from web_dashboard.api import auth as auth_api  # noqa: E402
-from web_dashboard.api import pov as pov_api  # noqa: E402
 from web_dashboard.services import pov_engagement as eng  # noqa: E402
 from web_dashboard.services import pov_use_cases  # noqa: E402
 from _pov_api_src import pov_api_source

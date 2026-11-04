@@ -91,7 +91,7 @@ from ..services.azure_service import AzureError
 from ..services.compose_service import ComposeError
 from ..services.portainer_service import PortainerError, PortainerNotConfigured
 from ..services.storage_service import StorageError
-from .auth import get_current_user, has_permission, require_permission
+from .auth import has_permission, require_permission
 
 logger = logging.getLogger(__name__)
 

@@ -22,7 +22,7 @@ Run: python tests/test_job_scheduling_claim.py   (or under pytest)
 """
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:

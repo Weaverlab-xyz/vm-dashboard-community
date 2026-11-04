@@ -21,7 +21,7 @@ not change the settings menu" still holds, and this is a capability of an existi
 integration rather than a fourth lab.
 """
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException

@@ -18,7 +18,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from web_dashboard import functions  # noqa: F401  (puts fnruntime on sys.path)
-from fnruntime.contract import Context, Request, Response
+from fnruntime.contract import Context, Request
 from web_dashboard.services import portainer_access_rules as rules
 from fnworkloads import portainer_access as adapter
 

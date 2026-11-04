@@ -36,7 +36,7 @@ import json
 import logging
 import ssl
 import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Optional
 
 import httpx

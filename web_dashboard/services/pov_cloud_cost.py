@@ -241,7 +241,6 @@ def footprint(environments: list) -> dict:
 def _client():
     from . import aws_service
     aws_service._require_boto3()
-    import boto3
     # Pinned: the Pricing API answers only in a few regions, so the configured
     # aws_region must not override this one.
     return aws_service.aws_client("pricing", _PRICING_REGION, pinned=True)

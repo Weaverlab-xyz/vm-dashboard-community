@@ -27,7 +27,6 @@ link, reports the lease state, and mints nothing.
 """
 import logging
 import uuid
-from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session

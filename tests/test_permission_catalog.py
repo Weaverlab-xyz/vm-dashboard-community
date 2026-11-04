@@ -33,7 +33,7 @@ sys.path.insert(0, _ROOT)
 from web_dashboard.api.auth import (  # noqa: E402
     PERMISSION_LEVELS, PERMISSION_SCOPE_GROUPS, PERMISSION_SCOPE_LEVELS, PERMISSION_SCOPES,
     grouped_permission_scopes, levels_for_scope)
-from _database_src import database_module_source, database_source
+from _database_src import database_module_source
 
 
 def _read(*parts):

@@ -37,7 +37,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 from web_dashboard import functions  # noqa: F401  (puts fnruntime on sys.path)
 from fnruntime import adapters
-from fnruntime.contract import Request, Response
+from fnruntime.contract import Response
 
 _SECRET = "test-shared-secret"
 _ENTRY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",

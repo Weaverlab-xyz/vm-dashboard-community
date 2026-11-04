@@ -25,7 +25,6 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Optional
 
 from sqlalchemy.exc import IntegrityError

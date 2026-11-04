@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from ..database import User, get_db
 from ..services import gateway_service, job_service, region_catalog, region_config
 from ..services.gateway_service import GatewayError
-from .auth import get_current_user, require_permission
+from .auth import require_permission
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/gateways", tags=["gateways"])

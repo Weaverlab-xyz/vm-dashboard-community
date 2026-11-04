@@ -65,8 +65,8 @@ GRAPH_SCOPE = "https://graph.microsoft.com/.default"
 # PERMISSION_LEVELS. The script imports them at runtime rather than
 # hard-coding so a new scope added to api/auth.py is automatically
 # covered the next time bootstrap runs.
-from ..api.auth import (PERMISSION_LEVELS, PERMISSION_SCOPE_LEVELS,  # noqa: E402
-                        PERMISSION_SCOPES)
+from ..api.auth import (PERMISSION_SCOPE_LEVELS,  # noqa: E402
+                        )
 
 
 @dataclass(frozen=True)

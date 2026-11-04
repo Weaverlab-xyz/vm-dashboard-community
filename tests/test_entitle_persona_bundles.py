@@ -310,7 +310,6 @@ def test_check_ou_accepts_only_a_dn_inside_the_domain():
 
 def _agent(db, version="2.8.0"):
     import uuid
-    from datetime import datetime
     from web_dashboard.database import RemoteAgent
     a = RemoteAgent(id=str(uuid.uuid4()), name=f"agent-{uuid.uuid4().hex[:6]}",
                     agent_version=version, is_active=True,

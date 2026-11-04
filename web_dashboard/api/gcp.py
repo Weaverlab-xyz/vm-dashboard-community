@@ -19,7 +19,6 @@ from ..config import settings
 from ..database import Job, User, get_db
 from ..models.gcp import (
     GCPCreateImageRequest,
-    GCPBulkDeployItem,
     GCPBulkDeployJobResult,
     GCPBulkDeployRequest,
     GCPBulkDeployResponse,
