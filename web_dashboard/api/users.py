@@ -324,7 +324,7 @@ def create_user(
         permissions=user.permissions_dict or None,
         pov_env_ids=user.pov_env_ids_list,
         role_id=user.role_id or "",
-        role_name=(role_service.get(db, user.role_id).name if user.role_id else ""),
+        role_name=getattr(role_service.get(db, user.role_id), "name", ""),
     )
 
 
@@ -449,7 +449,7 @@ def update_user(
         permissions=user.permissions_dict or None,
         pov_env_ids=user.pov_env_ids_list,
         role_id=user.role_id or "",
-        role_name=(role_service.get(db, user.role_id).name if user.role_id else ""),
+        role_name=getattr(role_service.get(db, user.role_id), "name", ""),
     )
 
 
