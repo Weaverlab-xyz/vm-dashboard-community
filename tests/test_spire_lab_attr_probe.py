@@ -50,7 +50,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- app deps missing
 
 # First-party imports UNGUARDED: a broken module must fail this file, not skip it.
 from web_dashboard.database import AuditLog, Base, Job, SessionLocal, SpireLab, engine  # noqa: E402
-from web_dashboard.services import job_service, ps_api_service  # noqa: E402
+from web_dashboard.services import ps_api_service  # noqa: E402
 from web_dashboard.services import spire_lab_service as svc  # noqa: E402
 
 Base.metadata.create_all(bind=engine)

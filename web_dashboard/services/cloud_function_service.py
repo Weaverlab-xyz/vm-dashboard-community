@@ -26,7 +26,6 @@ import os
 import re
 import secrets
 import shutil
-from datetime import datetime
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -887,7 +886,6 @@ async def _upload_package(*, cloud: str, fn_id: str, workload: str,
     key = location["key"]
 
     if cloud == "aws":
-        import boto3
         from . import aws_service
         client = aws_service.aws_client("s3", _cfg("aws_region"))
         await asyncio.to_thread(client.put_object, Bucket=location["bucket"],

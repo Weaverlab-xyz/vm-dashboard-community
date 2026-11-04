@@ -107,7 +107,6 @@ _install_stubs()
 # round-trip is meant to be testable without FastAPI or a database), and the packager
 # builds a real zip. Stubbing either would test the stub.
 from web_dashboard.services import ansible_run_meta  # noqa: E402
-from web_dashboard.services import cloud_function_package as pkg  # noqa: E402
 from web_dashboard.services import ot_faas_service as svc  # noqa: E402
 from web_dashboard.functions.fnruntime import secretref  # noqa: E402
 

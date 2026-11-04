@@ -240,7 +240,7 @@ async def backfill(db, workgroup: str, *, offset: int = 0) -> dict:
 
     Raises :class:`RuntimeError` when Password Safe cannot be asked at all.
     """
-    from . import (config_service, inventory_service, ps_api_service,
+    from . import (inventory_service, ps_api_service,
                    ps_attribute_catalog as pac)
 
     why_not = unavailable_reason()

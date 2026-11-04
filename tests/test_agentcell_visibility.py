@@ -214,7 +214,7 @@ def test_the_tiles_secondary_counts_authorization_not_installation():
     forever beside a working agent. `token_live` is the narrower thing the row actually
     knows, and total-minus-it is how many of these principals have stopped.
     """
-    from datetime import datetime, timedelta
+    from datetime import timedelta
     from web_dashboard.services import agentcell_service as A
 
     now = utcnow()

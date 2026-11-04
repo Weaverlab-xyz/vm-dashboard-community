@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 from web_dashboard import functions  # noqa: F401  (puts fnruntime on sys.path)
 from fnruntime import auth, dispatch, logs
-from fnruntime.contract import Context, Request, Response
+from fnruntime.contract import Request, Response
 
 _ENV_KEYS = ("FN_SHARED_SECRET", "FN_SHARED_SECRET_SECRET_ID", "FN_AUTH_HEADER",
              "FN_AUTH_PREFIX", "FN_DEBUG", "FN_LOG_BODY",

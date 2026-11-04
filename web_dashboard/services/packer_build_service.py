@@ -511,7 +511,6 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
         # (Azure can't create a managed image from a TL VM); Linux uses a plain
         # Generalized definition.
         if use_gallery:
-            from datetime import datetime
             gallery_rg = req.gallery_resource_group or _cfg("azure_gallery_resource_group") or resource_group
             gallery_name = req.gallery_name or _cfg("azure_shared_image_gallery") or "vmDashboardGallery"
             img_def_name = req.gallery_image_name or packer_service._safe_azure_name(req.image_name)
@@ -1013,7 +1012,6 @@ def _stage_bundled(build_dir: Path, files: list) -> list:
 # transient staging when the operator's hub is on a different cloud.
 
 def _versioned_blob_name(image_name: str, ext: str = "vhd") -> str:
-    from datetime import datetime
     ts = utcnow().strftime("%Y%m%dT%H%M%SZ")
     return f"images/{image_name}-{ts}.{ext}"
 

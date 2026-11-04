@@ -32,7 +32,7 @@ from ..models.image_registry import (
 )
 from ..services import change_window_service, image_registry_service, job_service
 from ..services.image_registry_service import ImageRegistryError, VALID_CLOUDS
-from .auth import get_current_user, require_permission
+from .auth import require_permission
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/images", tags=["images"])

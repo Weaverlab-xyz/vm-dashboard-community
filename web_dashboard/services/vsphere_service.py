@@ -11,7 +11,6 @@ disconnects in a finally block to avoid session leaks.
 import logging
 import ssl
 import time
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 

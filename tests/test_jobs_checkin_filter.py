@@ -75,7 +75,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover — bare interpreter
 from web_dashboard.database import Base, Job, SessionLocal, engine  # noqa: E402
 from web_dashboard.services import agent_hypervisor_meta as ahm     # noqa: E402
 from web_dashboard.services import job_service                      # noqa: E402
-from _database_src import database_module_source, database_source
+from _database_src import database_module_source
 
 Base.metadata.create_all(bind=engine)
 

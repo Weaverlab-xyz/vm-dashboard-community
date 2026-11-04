@@ -19,8 +19,6 @@ checkable without a BeyondTrust tenant:
 
 Run: python tests/test_epml_gui.py   (or under pytest)
 """
-import ast
-import inspect
 import os
 import re
 import sys

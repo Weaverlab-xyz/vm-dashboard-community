@@ -5,7 +5,7 @@ All routes require the authenticated user to have is_admin=True.
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -13,10 +13,9 @@ from ..database import (User, Fido2Credential, PersonalAccessToken, get_db, get_
                         password_length_error)
 from ..models.user import UserResponse
 from ..services import role_service
-from .auth import (PERMISSION_SCOPES, full_access_map, get_current_user, require_admin,
+from .auth import (PERMISSION_SCOPES, full_access_map, require_admin,
                    validate_permissions_payload)
 from .tokens import _generate_raw, hash_pat, pat_expiry, TokenCreateResponse
-from ..utils.clock import utcnow
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 

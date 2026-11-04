@@ -36,7 +36,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-agent-secret-tests")
 try:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
-    from web_dashboard.database import (Base, HypervisorConnection, Job, SessionLocal,
+    from web_dashboard.database import (Base, Job, SessionLocal,
                                        engine, get_db)
     from web_dashboard.api import agent as agent_api
     from web_dashboard.services import (agent_sealing, agent_signing,

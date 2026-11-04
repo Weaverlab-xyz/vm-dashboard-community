@@ -17,7 +17,6 @@ Text-and-render checks, no app imports. Runs under pytest or standalone:
 """
 import os
 import re
-import sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TEMPLATES = os.path.join(_ROOT, "web_dashboard", "templates")

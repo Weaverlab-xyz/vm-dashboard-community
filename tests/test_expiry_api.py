@@ -24,7 +24,7 @@ import os
 import re
 import sys
 import types
-from datetime import datetime, timedelta
+from datetime import timedelta
 from _database_src import database_top_level_nodes
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

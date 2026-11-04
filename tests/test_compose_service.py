@@ -11,7 +11,6 @@ import os
 try:
     import pytest
 except ModuleNotFoundError:  # standalone fallback (no pytest installed)
-    import contextlib
 
     class _Raises:
         def __init__(self, exc):

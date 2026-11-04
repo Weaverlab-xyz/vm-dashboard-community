@@ -696,7 +696,6 @@ async def reapply_acl(lab_id: str, db: Session = Depends(get_db),
     _require_enabled()
     row = _visible_or_404(db, lab_id, user)
     import json
-    from datetime import datetime
     # Resolved OUTSIDE the try, so the generic handler below can name the ACL without
     # risking an unbound local: `require_backend` raises only SpireLabError, which is
     # a 400 either way.

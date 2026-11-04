@@ -19,7 +19,6 @@ protected, and is not. So ``spend_policy.cappable`` is asked BEFORE the value is
 and its refusal names the cloud and the region rather than shrugging.
 """
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel

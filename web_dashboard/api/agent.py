@@ -57,7 +57,6 @@ import json
 import logging
 import re
 from typing import NamedTuple, Optional
-from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -68,7 +67,7 @@ from ..database import Job, RemoteAgent, User, get_db
 from ..services import (agent_ansible_bundle, agent_ansible_meta, agent_gateway_meta,
                         agent_ui_robot_meta,
                         agent_k8s_meta,
-                        agent_guard, agent_hypervisor_meta, agent_job_meta,
+                        agent_hypervisor_meta, agent_job_meta,
                         agent_assurance_service, agent_lifecycle_service,
                         agent_release_service,
                         agent_ps_credential_service, agent_sealing, agent_service,

@@ -42,7 +42,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- app deps missing
 
 from web_dashboard.database import (Base, Job, SessionLocal, SpiffeTrustDomain,  # noqa: E402
                                     SpireLab, engine)
-from web_dashboard.services import job_service, spire_lab_service as svc  # noqa: E402
+from web_dashboard.services import spire_lab_service as svc  # noqa: E402
 
 Base.metadata.create_all(bind=engine)
 

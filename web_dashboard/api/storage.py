@@ -28,11 +28,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..config import settings
 from ..database import User, get_db
 from ..services import asset_scope_service, job_service, storage_chunked, storage_service
 from ..services.storage_service import BACKENDS, StorageError
-from .auth import get_current_user, require_admin, require_permission
+from .auth import require_admin, require_permission
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/storage", tags=["storage"])

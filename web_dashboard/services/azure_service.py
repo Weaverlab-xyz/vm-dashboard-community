@@ -25,7 +25,8 @@ from . import cloud_executor, region_catalog
 logger = logging.getLogger(__name__)
 
 try:
-    from azure.identity import ClientSecretCredential
+    # Unused here, but part of the availability check: no azure-identity means no Azure.
+    from azure.identity import ClientSecretCredential  # noqa: F401
     from azure.mgmt.compute import ComputeManagementClient
     from azure.mgmt.compute.models import (
         VirtualMachine, HardwareProfile, StorageProfile, ImageReference,
@@ -43,8 +44,6 @@ try:
         ContainerGroup, Container, ResourceRequirements,
         ResourceRequests, OperatingSystemTypes,
         EnvironmentVariable, AzureFileVolume, Volume, VolumeMount,
-        SecurityContextDefinition as ContainerSecurityContext,
-        SecurityContextCapabilitiesDefinition as ContainerSecurityContextCapabilitiesDefinition,
     )
     from azure.mgmt.storage import StorageManagementClient
     # Import from the .resources submodule, not the top-level namespace: azure-mgmt-resource
@@ -2391,7 +2390,6 @@ async def pin_private_address(rg: str, nic_name: str) -> dict:
 # differ per cloud in ways that are easy to get subtly wrong. These names stay as thin
 # Azure-bound delegates: they are the vocabulary the rest of this module and its tests
 # already use, and Azure's derived output is unchanged (10.99.5.247-.254 for a /24).
-from .tunnel_pool import POOL_MAX as _TUNNEL_POOL_MAX  # noqa: E402
 from .tunnel_pool import POOL_SIZE as _TUNNEL_POOL_SIZE  # noqa: E402
 
 

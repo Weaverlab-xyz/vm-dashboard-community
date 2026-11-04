@@ -17,7 +17,6 @@ using ``azure_oauth_*`` keep working exactly as before.
 """
 import logging
 import time
-from typing import Optional
 from urllib.parse import urlencode
 
 import httpx

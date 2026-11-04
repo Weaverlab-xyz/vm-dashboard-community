@@ -11,7 +11,6 @@ So the SQL is where the value is, and it is pure string-building — no driver, 
 database, no cloud account needed to prove it.
 """
 import os
-import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))

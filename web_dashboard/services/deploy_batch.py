@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import List, Optional, Sequence
+from typing import List, Sequence
 
 from fastapi import HTTPException
 

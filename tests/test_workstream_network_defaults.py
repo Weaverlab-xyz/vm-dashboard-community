@@ -13,7 +13,6 @@ Uses a real temp SQLite database. Runs standalone:
     python tests/test_workstream_network_defaults.py
 """
 import os
-import re
 import sys
 import tempfile
 import uuid

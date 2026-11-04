@@ -7,7 +7,6 @@ Sessions are opened per call and always logged out in a finally block.
 All blocking XAPI calls run in _to_thread() so the FastAPI event loop
 is never blocked.
 """
-import http.client as _http
 import logging
 import ssl
 import xmlrpc.client

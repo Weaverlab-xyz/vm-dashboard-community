@@ -9,7 +9,6 @@ blocked in ``init_db()``. So the assertions below are mostly about the UNHEALTHY
 import json
 import os
 import sys
-import threading
 import urllib.error
 import urllib.request
 

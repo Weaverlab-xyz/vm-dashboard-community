@@ -32,7 +32,7 @@ import os
 import pathlib
 import sys
 import uuid
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)

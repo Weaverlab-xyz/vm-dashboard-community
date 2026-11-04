@@ -19,7 +19,6 @@ Run: python tests/test_hybrid_entra_join.py   (or under pytest)
 """
 import asyncio
 import inspect
-import json
 import os
 import sys
 import tempfile

@@ -77,13 +77,11 @@ never do.
 
 import json
 import logging
-import re
 from typing import Optional
 from urllib.parse import urlsplit
 
 from . import ps_resource_service
-from .ps_resource_service import (CERT_PACKAGE_LEAF, CERT_PACKAGE_SUBCA, CERT_PACKAGES,
-                                  cert_normalise_package)
+from .ps_resource_service import (CERT_PACKAGE_LEAF, CERT_PACKAGE_SUBCA, cert_normalise_package)
 
 logger = logging.getLogger(__name__)
 

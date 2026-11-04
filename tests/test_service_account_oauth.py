@@ -19,7 +19,7 @@ import os
 import sys
 import tempfile
 import uuid
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:

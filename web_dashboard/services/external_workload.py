@@ -26,7 +26,7 @@ as for a Phase-1 token, so there is one place to look.
 """
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from jose import jwt
 from jose.exceptions import JWTError

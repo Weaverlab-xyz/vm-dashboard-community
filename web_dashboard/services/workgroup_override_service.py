@@ -14,7 +14,6 @@ helper:
   - vsphere  →  managed object reference (moref)
   - xcpng    →  vm uuid
 """
-from datetime import datetime
 from typing import Dict, Iterable, List, Optional
 
 from sqlalchemy.orm import Session

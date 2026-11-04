@@ -19,7 +19,7 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 _DB_DIR = tempfile.mkdtemp(prefix="pov_stranded_")
 os.environ["DATABASE_URL"] = f"sqlite:///{os.path.join(_DB_DIR, 'pov.db')}".replace("\\", "/")

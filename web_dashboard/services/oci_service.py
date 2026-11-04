@@ -16,7 +16,7 @@ import base64
 import json
 import logging
 import re
-from typing import List, NamedTuple, Optional
+from typing import NamedTuple, Optional
 
 from . import cloud_executor, oci_freetier
 
