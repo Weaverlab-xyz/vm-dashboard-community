@@ -118,6 +118,28 @@ jobs:
       - name: ruff check
         run: ruff check --output-format=github
 
+  # ── Template JavaScript syntax ──────────────────────────────────────────────
+  #
+  # `node --check` on every inline <script> in the templates and on our own static JS
+  # (scripts/ci/check_template_js.py says how Jinja is handled). One syntax error discards
+  # the whole script block, so every Alpine expression on the page throws. The lexer in
+  # tests/test_template_scripts.py catches a broken string or a dropped bracket; this is a
+  # real parser, and it runs in seconds instead of waiting for the browser job.
+  js-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # Node comes with the runner image, as it does for the browser-smoke job.
+      - name: node --check
+        run: python scripts/ci/check_template_js.py
+
   # ── Type check (ratchet) ────────────────────────────────────────────────────
   #
   # pyright on services/, api/, database/ and the job worker, with only the rules that find
