@@ -81,3 +81,4 @@ corp-ca/*
 
 # Playwright for scripts/ci/browser_smoke.sh (npm install, never committed)
 node_modules/
+.coverage-data/
