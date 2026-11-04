@@ -118,6 +118,33 @@ jobs:
       - name: ruff check
         run: ruff check --output-format=github
 
+  # ── Type check (ratchet) ────────────────────────────────────────────────────
+  #
+  # pyright on services/, api/, database/ and the job worker, with only the rules that find
+  # real latent bugs (an Optional used without a check, a possibly-unbound name, a call that
+  # matches no overload); see pyrightconfig.json. The ~107 findings that exist today are in
+  # scripts/ci/pyright_baseline.json, and this job fails only on a NEW one. Nothing from
+  # requirements.txt is installed on purpose, so third-party types are Unknown and the
+  # result cannot change because a runner resolved a different package version. Pinned,
+  # because a new pyright can add findings.
+  pyright:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # pyright is an npm package; the pip wrapper downloads it with the Node on the runner.
+      - name: Install pyright
+        run: pip install pyright==1.1.409
+
+      - name: pyright (new findings only)
+        run: python scripts/ci/pyright_ratchet.py
+
   # ── Ansible syntax ──────────────────────────────────────────────────────────
   #
   # `ansible-playbook --syntax-check` on every shipped playbook: Ansible resolves each

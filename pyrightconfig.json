@@ -1,0 +1,22 @@
+{
+  "include": [
+    "web_dashboard/services",
+    "web_dashboard/api",
+    "web_dashboard/jobs_worker.py",
+    "web_dashboard/database"
+  ],
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "off",
+  "reportMissingImports": false,
+  "reportMissingModuleSource": false,
+  "reportUndefinedVariable": "error",
+  "reportPossiblyUnbound": "error",
+  "reportCallIssue": "error",
+  "reportIndexIssue": "error",
+  "reportOptionalMemberAccess": "error",
+  "reportOptionalSubscript": "error",
+  "reportOptionalOperand": "error",
+  "reportOptionalIterable": "error",
+  "reportOptionalCall": "error",
+  "reportRedeclaration": "error"
+}
