@@ -154,6 +154,86 @@ def test_a_failing_database_read_is_reported_not_raised():
         rm._jobs_query = real
 
 
+def test_db_check_ok_and_error():
+    from web_dashboard.database import init_db
+    init_db()
+    assert _run(rm.db_check()) == "ok"
+    real = rm._ping_query
+
+    def boom():
+        raise RuntimeError("db down")
+    rm._ping_query = boom
+    try:
+        assert _run(rm.db_check()) == "error"
+    finally:
+        rm._ping_query = real
+
+
+def test_a_slow_database_does_not_block_the_loop_and_is_an_error():
+    real, real_deadline = rm._ping_query, rm._PING_DEADLINE_S
+    rm._PING_DEADLINE_S = 0.05
+
+    def slow():
+        time.sleep(0.4)
+        return True
+    rm._ping_query = slow
+
+    async def go():
+        ticks = 0
+
+        async def ticker():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.01)
+                ticks += 1
+        t = asyncio.create_task(ticker())
+        started = time.monotonic()
+        result = await rm.db_check()
+        took = time.monotonic() - started
+        t.cancel()
+        # The previous ping is still running: the next check must not queue behind it.
+        again = await rm.db_check()
+        return result, took, ticks, again
+    try:
+        result, took, ticks, again = _run(go())
+        assert result == "error" and again == "error"
+        assert took < 0.3, f"waited {took:.2f}s on a slow database"
+        assert ticks >= 3, "the event loop was blocked during the check"
+    finally:
+        rm._ping_query, rm._PING_DEADLINE_S = real, real_deadline
+        if rm._ping_future is not None:
+            try:
+                rm._ping_future.result(timeout=2)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def test_the_default_health_reply_is_unchanged_and_deep_is_opt_in():
+    """/api/health is the container/ACA probe: the plain call must be exactly what it was."""
+    src = open(os.path.join(ROOT, "web_dashboard", "main.py"), encoding="utf-8").read()
+    at = src.index('@app.get("/api/health"')
+    body = src[at:src.index('@app.get("/api/metrics"')]
+    assert 'body = {"status": "ok", "version": settings.api_version}' in body
+    assert "if not deep:\n        return body" in body.replace("\r\n", "\n")
+    assert "async def health(deep: int = 0)" in body, "must stay async and default to shallow"
+    assert "db_check()" in body and "status_code=503" in body
+    # Reachable before setup completes, as before.
+    assert '"/api/health"' in src[:at]
+
+
+def test_the_default_health_route_returns_the_plain_dict():
+    try:
+        from web_dashboard import main
+    except Exception as exc:  # noqa: BLE001 -- the app needs optional SDKs
+        print(f"SKIP route call: main unavailable ({exc})")
+        return
+    from web_dashboard.config import settings
+    assert _run(main.health()) == {"status": "ok", "version": settings.api_version}
+    assert list(_run(main.health(deep=0))) == ["status", "version"]
+    deep = _run(main.health(deep=1))
+    assert deep == {"status": "ok", "version": settings.api_version, "db": "ok"}, deep
+
+
 def test_the_route_is_admin_only_and_the_sampler_is_started():
     src = open(os.path.join(ROOT, "web_dashboard", "main.py"), encoding="utf-8").read()
     at = src.index('@app.get("/api/metrics"')
