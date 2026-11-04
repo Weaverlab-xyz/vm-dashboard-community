@@ -1,0 +1,40 @@
+# How GitHub groups the pull requests in a release's generated notes
+# (.github/workflows/release-notes.yml runs `gh release create --generate-notes`).
+#
+# Sections are chosen by PR LABEL, first match wins, and a PR with no matching label lands
+# in "Other changes", so an unlabelled PR is never lost. The two labels below are the ones
+# worth setting by hand, because the title cannot say them and an operator upgrading needs
+# them:
+#
+#   rebuild        merging it needs the image rebuilt and redeployed, not just a restart
+#   schema-change  it adds or alters a table or column (a numbered entry in
+#                  schema_migrations.py), so an older image cannot be put back over the
+#                  upgraded database
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+    authors:
+      - dependabot
+  categories:
+    - title: Requires an image rebuild
+      labels:
+        - rebuild
+    - title: Schema changes
+      labels:
+        - schema-change
+    - title: Fixes
+      labels:
+        - bug
+    - title: Features
+      labels:
+        - enhancement
+    - title: Documentation
+      labels:
+        - documentation
+    - title: Dependencies
+      labels:
+        - dependencies
+    - title: Other changes
+      labels:
+        - "*"
