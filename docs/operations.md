@@ -23,6 +23,7 @@ cleans up.
 |---|---|
 | [Inventory](operations/inventory.md) | you want one list of everything across every cloud and hypervisor, to filter it by tag or Password Safe attribute, or to act on a selection |
 | [Job Worker](operations/job-worker.md) | a long job is sitting queued, or you are sizing the worker for more of them |
+| [Runtime Metrics](operations/runtime-metrics.md) | the dashboard is slow or hung and you want to know whether the event loop, a thread pool, the database pool or the job queue is full |
 | [Cloud Costs](operations/costs.md) | you want month-to-date cloud spend, a budget alert, or a budget in the cloud that alerts while the dashboard is down |
 | [Backup and Restore](operations/backup-and-restore.md) | you want to back up the dashboard, or restore it, and need to know what besides the database a restore needs |
 | [Auto-delete Timer](operations/auto-delete-timer.md) | you want lab resources to clean themselves up. Read it before enabling it, because it deletes infrastructure |
