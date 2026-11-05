@@ -4,7 +4,7 @@
 #
 # Same base as the agent, pinned by digest. cosign is a release binary pinned by sha256 —
 # the tool that decides whether an image may run is not something to fetch by tag.
-FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+FROM python:3.12-slim@sha256:e695ab189fa2d082b1c61c69a6b888a5adeca61ceeccad107b1ed2a125721a9e
 
 ARG TARGETARCH=amd64
 ARG COSIGN_VERSION=v2.4.1

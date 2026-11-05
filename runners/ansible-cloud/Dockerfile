@@ -31,7 +31,7 @@
 # Apple-silicon dev hosts alike:
 #   docker buildx build --platform linux/amd64,linux/arm64 \
 #     -t chrweav/ansible-cloud:latest --push runners/ansible-cloud
-FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+FROM python:3.12-slim@sha256:e695ab189fa2d082b1c61c69a6b888a5adeca61ceeccad107b1ed2a125721a9e
 
 ARG HELM_VERSION=v3.16.3
 ARG KUBECTL_VERSION=v1.31.3

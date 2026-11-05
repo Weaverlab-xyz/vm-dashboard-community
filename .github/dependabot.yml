@@ -30,6 +30,7 @@ updates:
     directories:
       - "/"
       - "/runners/agent"
+      - "/runners/agent-updater"
       - "/runners/ansible-cloud"
       - "/runners/ansible-winrm"
       - "/runners/hypervisor"

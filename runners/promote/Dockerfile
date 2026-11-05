@@ -47,7 +47,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
 # image promotion. Launched as an ECS Fargate task / Azure ACI container
 # / GCP Cloud Run job by the dashboard. Stays slim so cold-start is
 # fast and the runtime footprint is bounded.
-FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+FROM python:3.12-slim@sha256:e695ab189fa2d082b1c61c69a6b888a5adeca61ceeccad107b1ed2a125721a9e
 
 # libguestfs (virt-customize) offline-edits the disk image so an Azure-target
 # promotion can inject the Azure Linux Agent (waagent) into a foreign Linux
