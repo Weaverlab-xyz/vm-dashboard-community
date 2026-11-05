@@ -29,7 +29,7 @@
 # digest carried 44 fixable HIGH/CRITICAL findings (OpenSSL, expat, python3, rsync,
 # ansible-core); this one has none.
 #   willhallonline/ansible:latest as of 2026-10-26
-FROM willhallonline/ansible:latest@sha256:0b8923ad5642ec78d4db1d6c495a4aa3abc3a6d9845a3d4845679a24a75725c0
+FROM willhallonline/ansible:latest@sha256:15e4e6d50d35e9ae5fa6e89487ec4e2289c8b67ed648265abc168660434bfa30
 
 # The upstream image now defaults to the unprivileged `ansible` user. Both RUN layers
 # below write to system paths, and every runner that consumes this image ran as root for
