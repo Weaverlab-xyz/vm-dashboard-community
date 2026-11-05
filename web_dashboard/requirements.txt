@@ -61,7 +61,7 @@ boto3==1.43.123
 # the top-level namespace, which silently disabled the whole Azure integration on rebuild —
 # see services/azure_service.py. Bump these deliberately when adopting a new major.)
 azure-identity>=1.27.0,<2
-azure-mgmt-compute>=30.0.0,<39
+azure-mgmt-compute>=39.0.0,<40
 azure-mgmt-network>=25.0.0,<31
 azure-mgmt-resource>=23.0.0,<27
 azure-mgmt-containerinstance>=10.0.0,<11
