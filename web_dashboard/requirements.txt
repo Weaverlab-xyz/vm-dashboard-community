@@ -119,7 +119,7 @@ httpx>=0.27.0
 PyYAML>=6.0.3
 
 # Proxmox VE REST API
-proxmoxer>=2.0.0
+proxmoxer>=2.3.0
 requests>=2.31.0
 
 # VMware vSphere / ESXi (vSphere Web Services API)
