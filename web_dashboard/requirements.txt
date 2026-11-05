@@ -32,7 +32,7 @@ fido2>=1.1.2
 msal>=1.28.0
 
 # File uploads and forms
-python-multipart==0.0.32
+python-multipart==0.0.33
 
 # Templates
 jinja2==3.1.6
@@ -53,7 +53,7 @@ python-dotenv==1.2.4
 slowapi==0.1.10
 
 # AWS SDK
-boto3==1.43.122
+boto3==1.43.123
 
 # Azure SDK
 # Upper bounds cap each package at the next major so a fresh build can't float into an
