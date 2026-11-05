@@ -11,7 +11,7 @@ sqlalchemy==2.1.6
 psycopg2-binary==2.9.13
 
 # WSGI server (used in Docker / Container Apps)
-gunicorn==23.0.0
+gunicorn==26.2.0
 
 # Data validation
 # Upper bound is load-bearing: pydantic 2.14.0 (2026-10) removed the private
