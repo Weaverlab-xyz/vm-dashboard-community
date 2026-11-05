@@ -148,7 +148,7 @@ beyondtrust-bips-cli
 # plus an IANA zone, and resolves it with the stdlib — which reads the SYSTEM tzdb and has
 # none on Windows, so a schedule saved on a Debian container refuses to load on a
 # developer's host with "not a timezone this system knows". Pure data, no build step.
-tzdata>=2024.1
+tzdata>=2026.6
 
 # Not imported directly: pyasn1 comes in through rsa, pyasn1-modules and python-jose. The
 # floor is the release that fixes CVE-2026-119194..119197 (HIGH), which the image's Trivy
