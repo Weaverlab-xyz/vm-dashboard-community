@@ -80,7 +80,7 @@ mcp>=1.28.1,<2
 # Google Cloud SDK
 google-cloud-compute>=1.56.0
 google-cloud-secret-manager>=2.20.0
-google-cloud-storage>=2.14.0
+google-cloud-storage>=3.17.1
 google-cloud-run>=0.16.2
 # google-cloud-build powers the GCP image-export Daisy workflow trigger in
 # services/gcp_service.export_custom_image_to_vhd. Pulled in here rather
