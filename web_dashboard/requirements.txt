@@ -63,7 +63,7 @@ boto3==1.43.123
 azure-identity>=1.27.0,<2
 azure-mgmt-compute>=39.0.0,<40
 azure-mgmt-network>=25.0.0,<31
-azure-mgmt-resource>=23.0.0,<27
+azure-mgmt-resource>=26.0.0,<27
 azure-mgmt-containerinstance>=10.0.0,<11
 azure-mgmt-storage>=25.3.0,<26
 azure-keyvault-secrets>=4.7.0,<5
