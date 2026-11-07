@@ -28,7 +28,7 @@ pydantic-settings>=2.6.1
 # .pip-audit-ignore for why it, and its ecdsa dependency, are accepted.
 python-jose[cryptography]==3.5.0
 bcrypt==4.2.1
-fido2>=1.1.2
+fido2>=2.2.1
 msal>=1.39.0
 
 # File uploads and forms
