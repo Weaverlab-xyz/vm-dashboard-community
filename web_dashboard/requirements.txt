@@ -7,7 +7,7 @@ starlette>=1.10.0
 uvicorn[standard]==0.54.0
 
 # Database
-sqlalchemy==2.1.6
+sqlalchemy==2.1.8
 psycopg2-binary==2.9.13
 
 # WSGI server (used in Docker / Container Apps)
