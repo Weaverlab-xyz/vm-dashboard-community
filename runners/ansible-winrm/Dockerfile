@@ -39,13 +39,17 @@ FROM willhallonline/ansible:latest@sha256:15e4e6d50d35e9ae5fa6e89487ec4e2289c8b6
 USER root
 
 # Fixes published after the pinned digest was cut. The nightly Images scan failed on them
-# (2026-10-29: python3 CVE-2026-115557) with nothing changed in this repo. The floors make
+# (2026-10-29: python3 CVE-2026-115557; 2026-11-07: openssh CVE-2026-123158, rsync
+# CVE-2026-119741) with nothing changed in this repo. The floors make
 # the build fail loudly rather than silently install an older copy; drop a line once the
 # base digest carries that version. The 2026-10-26 digest above already carries the
 # earlier floors (expat, sudo, brotli, libcurl; certifi, black, filelock), so they went
 # with the bump. Dependabot proposes the next digest weekly (.github/dependabot.yml).
 RUN apk add --no-cache --upgrade \
-        "python3>=3.14.10-r0" "python3-pyc>=3.14.10-r0" "pyc>=3.14.10-r0"
+        "python3>=3.14.10-r0" "python3-pyc>=3.14.10-r0" "pyc>=3.14.10-r0" \
+        "openssh-client-common>=10.3_p1-r2" "openssh-client-default>=10.3_p1-r2" \
+        "openssh-keygen>=10.3_p1-r2" \
+        "rsync>=3.5.2-r0"
 
 # Upstream installs ansible itself with pip into the system Python, and the libraries its
 # modules import (pywinrm, paramiko, the BeyondTrust library) have to live in that same
