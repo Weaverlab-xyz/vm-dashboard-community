@@ -1,7 +1,7 @@
 # UI robot: the few steps the PRA / Password Safe APIs cannot do (see README.md).
 # The Playwright image ships Chromium and its system libraries; pin the tag to the
 # playwright version in requirements.txt or the browser build will not match.
-FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
+FROM mcr.microsoft.com/playwright/python:v1.64.1-noble
 
 # The base image lags on OS and Python package fixes, and the image scan blocks a fixable HIGH
 # or CRITICAL. Take the distro's security updates, and remove the base's virtualenv 20.27.1:
