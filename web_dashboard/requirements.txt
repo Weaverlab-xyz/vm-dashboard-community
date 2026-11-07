@@ -19,7 +19,7 @@ gunicorn==26.2.0
 # module level — so `import mcp.server` (api/mcp_server.py) fails and takes the whole app
 # down with it. 2.13.5 is the last version CI ran green on. Lift together with an mcp that
 # no longer imports it.
-pydantic>=2.7.2,<2.14
+pydantic>=2.14.2,<2.15
 pydantic-settings>=2.6.1
 
 # Authentication
