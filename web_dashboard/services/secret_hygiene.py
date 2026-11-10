@@ -93,6 +93,8 @@ SECRET_KEYS: frozenset = frozenset(k for k, _ in SECRET_REGISTRY) | frozenset({
     "setup_token",
     # storage backends
     "storage_local_password", "storage_agent_password",
+    # in-product feedback: the PAT that files the GitHub issue
+    "feedback_github_token",
 })
 
 # Prefix → backend id — must match secrets_backend_service._EXT_PREFIXES keys

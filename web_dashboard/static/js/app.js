@@ -2089,6 +2089,85 @@ function responsiveNav() {
             }
         },
 
+        // Send feedback. Lives in THIS component, beside openAbout, rather than in a
+        // component of its own: the button that opens it is a sibling of the About
+        // button in the drawer footer, and an Alpine method calling across to another
+        // component's member is the dead-button bug class. Nothing here duplicates a
+        // method name already on this object -- a repeated key is taken silently by the
+        // last one and kills the whole page's interactivity.
+        //
+        // The context (mode, repo, whether that repo is private) is fetched on first
+        // open and kept: none of it can change without an administrator saving the
+        // panel, and re-reading it would mean a GitHub round trip every time somebody
+        // opens the form.
+        feedbackOpen: false,
+        feedbackCtx: null,
+        feedbackCtxError: '',
+        feedbackSending: false,
+        feedbackResult: null,
+        feedbackError: '',
+        feedback: { category: 'bug', title: '', body: '' },
+
+        async openFeedback() {
+            this.mobileNav = false;
+            this.feedbackOpen = true;
+            this.feedbackResult = null;
+            this.feedbackError = '';
+            if (this.feedbackCtx) return;
+            this.feedbackCtxError = '';
+            try {
+                this.feedbackCtx = await API.get('/api/feedback/context');
+            } catch (e) {
+                this.feedbackCtxError = (e && e.message) || 'Could not open the form.';
+            }
+        },
+
+        closeFeedback() {
+            this.feedbackOpen = false;
+            // Only clear the text once it has actually gone somewhere. A failed submit
+            // leaves what they typed on screen -- retyping a bug report because the
+            // token was wrong is the kind of thing that stops people reporting again.
+            if (this.feedbackResult) {
+                this.feedback = { category: 'bug', title: '', body: '' };
+                this.feedbackResult = null;
+            }
+        },
+
+        async submitFeedback() {
+            if (this.feedbackSending) return;
+            if (!this.feedback.title.trim() || !this.feedback.body.trim()) {
+                this.feedbackError = 'A title and a description are both required.';
+                return;
+            }
+            this.feedbackSending = true;
+            this.feedbackError = '';
+            try {
+                const payload = {
+                    category: this.feedback.category,
+                    title: this.feedback.title.trim(),
+                    body: this.feedback.body.trim(),
+                    // The only context the browser supplies. Everything else -- version,
+                    // commit, profile -- is read server-side, so a page cannot misreport
+                    // which build a bug was found on.
+                    page_path: window.location.pathname
+                };
+                const res = await API.post('/api/feedback/submit', payload);
+                this.feedbackResult = res;
+                if (res && res.compose_url) {
+                    // Compose mode: the issue is filed by the submitter, under their own
+                    // account. Opened in a new tab rather than navigating, so the page
+                    // they were reporting on is still there when they come back.
+                    window.open(res.compose_url, '_blank', 'noopener');
+                } else {
+                    toast('Thank you - filed as #' + (res.issue_number || ''), 'success');
+                }
+            } catch (e) {
+                this.feedbackError = (e && e.message) || 'Could not send that.';
+            } finally {
+                this.feedbackSending = false;
+            }
+        },
+
         // Persona nav pinning. CURATION ONLY, and now structurally so: the links are
         // REORDERED within the one list that exists. Nothing is moved to a second
         // container that could hide it, and nothing is removed, so "a persona can never

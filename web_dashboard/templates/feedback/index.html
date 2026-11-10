@@ -1,0 +1,186 @@
+{% extends "base.html" %}
+{% block title %}Feedback{% endblock %}
+
+{# What you have sent, and what became of it.
+
+   This page is the second half of the loop. Without it the button is a suggestion box:
+   you type, it goes somewhere, and you never hear anything. With it, "did that get
+   looked at" has an answer you can reach yourself.
+
+   Ungated, like /jobs: the shell renders for anyone who reaches the URL and
+   /api/feedback/mine returns only the caller's own rows. Everyone may send feedback, so
+   everyone may see their own -- there is no grantable scope here and deliberately so
+   (adding one is a silent revocation for every existing role, which is a steep price for
+   a feature whose point is that nobody is excluded from it).
+
+   The all-submissions table is drawn only for an administrator, and that is enforced by
+   /api/feedback/all rather than by this template. These rows hold the full text somebody
+   typed, a POV guest's included, which is not everybody's to read. #}
+
+{% block content %}
+<div class="max-w-4xl mx-auto py-8 px-4"
+     x-data="feedbackPage()" x-init="requireAuth(); load()">
+
+  <div class="flex items-start justify-between mb-6 gap-4">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Feedback</h1>
+      <p class="text-sm text-gray-500 mt-1">
+        What you have sent from inside the dashboard, and where it went.
+      </p>
+    </div>
+    <button type="button" @click="openFromPage()"
+            class="flex-shrink-0 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium">
+      Send feedback
+    </button>
+  </div>
+
+  <p x-show="error" class="text-red-600 text-sm mb-4" x-text="error"></p>
+  <p x-show="loading" class="text-gray-500 text-sm">Loading&hellip;</p>
+
+  <template x-if="!loading && !mine.length && !error">
+    <div class="rounded-xl border border-gray-200 bg-white p-8 text-center">
+      <p class="text-gray-500 text-sm">
+        You have not sent any feedback yet. The <strong>Send feedback</strong> button is in
+        the menu on every page.
+      </p>
+    </div>
+  </template>
+
+  <div x-show="mine.length" class="rounded-xl border border-gray-200 bg-white overflow-hidden">
+    <table class="w-full text-sm">
+      <thead class="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
+        <tr>
+          <th class="px-4 py-3">Sent</th>
+          <th class="px-4 py-3">Summary</th>
+          <th class="px-4 py-3">Page</th>
+          <th class="px-4 py-3">Status</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+        <template x-for="r in mine" :key="r.id">
+          <tr>
+            <td class="px-4 py-3 whitespace-nowrap text-gray-500"
+                x-text="formatTimestamp(r.created_at)"></td>
+            <td class="px-4 py-3">
+              <div class="font-medium text-gray-900" x-text="r.title"></div>
+              <div class="text-xs text-gray-400" x-text="r.category"></div>
+            </td>
+            <td class="px-4 py-3 font-mono text-xs text-gray-500" x-text="r.page_path || '-'"></td>
+            <td class="px-4 py-3">
+              <template x-if="r.github_issue_url">
+                <a :href="r.github_issue_url" target="_blank" rel="noopener noreferrer"
+                   class="text-blue-600 underline font-mono text-xs"
+                   x-text="'#' + r.github_issue_number"></a>
+              </template>
+              <template x-if="!r.github_issue_url">
+                <span class="text-xs"
+                      :class="r.status === 'error' ? 'text-red-600' : 'text-gray-500'"
+                      x-text="r.status === 'composed' ? 'saved here' : r.status"></span>
+              </template>
+              <div x-show="r.error_message" class="text-[11px] text-red-500 mt-0.5"
+                   x-text="r.error_message"></div>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  {# Administrators: everything, from everyone, including evaluation guests. #}
+  <div x-show="$store.auth.isAdmin" class="mt-10">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="text-lg font-semibold text-gray-900">All submissions</h2>
+      <button type="button" @click="loadAll()"
+              class="text-xs px-3 py-1.5 rounded-md bg-gray-100 hover:bg-gray-200 font-medium">
+        <span x-show="!allLoaded">Load</span>
+        <span x-show="allLoaded">Refresh</span>
+      </button>
+    </div>
+    <p x-show="allError" class="text-red-600 text-sm mb-2" x-text="allError"></p>
+    <div x-show="allLoaded" class="rounded-xl border border-gray-200 bg-white overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
+          <tr>
+            <th class="px-4 py-3">Sent</th>
+            <th class="px-4 py-3">From</th>
+            <th class="px-4 py-3">Summary</th>
+            <th class="px-4 py-3">Status</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          <template x-for="r in all" :key="r.id">
+            <tr>
+              <td class="px-4 py-3 whitespace-nowrap text-gray-500"
+                  x-text="formatTimestamp(r.created_at)"></td>
+              <td class="px-4 py-3">
+                <div class="text-gray-900" x-text="r.submitted_by"></div>
+                <div class="text-[11px]"
+                     :class="r.submitter_kind === 'accessor' ? 'text-amber-600' : 'text-gray-400'"
+                     x-text="r.submitter_kind === 'accessor' ? 'evaluation guest' : 'user'"></div>
+              </td>
+              <td class="px-4 py-3">
+                <div class="font-medium text-gray-900" x-text="r.title"></div>
+                <div class="text-xs text-gray-500 whitespace-pre-wrap" x-text="r.body"></div>
+              </td>
+              <td class="px-4 py-3">
+                <template x-if="r.github_issue_url">
+                  <a :href="r.github_issue_url" target="_blank" rel="noopener noreferrer"
+                     class="text-blue-600 underline font-mono text-xs"
+                     x-text="'#' + r.github_issue_number"></a>
+                </template>
+                <template x-if="!r.github_issue_url">
+                  <span class="text-xs"
+                        :class="r.status === 'error' ? 'text-red-600' : 'text-gray-500'"
+                        x-text="r.status"></span>
+                </template>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function feedbackPage() {
+    return {
+      mine: [], loading: true, error: '',
+      all: [], allLoaded: false, allError: '',
+
+      async load() {
+        this.loading = true; this.error = '';
+        try {
+          const res = await API.get('/api/feedback/mine');
+          this.mine = (res && res.data) || [];
+        } catch (e) {
+          this.error = (e && e.message) || 'Could not load your feedback.';
+        } finally {
+          this.loading = false;
+        }
+      },
+
+      async loadAll() {
+        this.allError = '';
+        try {
+          const res = await API.get('/api/feedback/all');
+          this.all = (res && res.data) || [];
+          this.allLoaded = true;
+        } catch (e) {
+          this.allError = (e && e.message) || 'Could not load all submissions.';
+        }
+      },
+
+      // The form itself lives in base.html, on the nav component. Rather than reach
+      // across into another Alpine component's members -- the cross-component call that
+      // yields a button which silently does nothing -- this dispatches an event the nav
+      // listens for on window.
+      openFromPage() {
+        window.dispatchEvent(new CustomEvent('open-feedback'));
+      }
+    };
+  }
+</script>
+{% endblock %}

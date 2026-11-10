@@ -358,11 +358,23 @@
           Logout
         </button>
       </div>
-      <div class="flex-shrink-0 px-4 pb-4 -mt-1">
+      {# Chrome, not navigation: neither of these is a data-nav link, so the nav scope
+         gates do not apply to them and the top bar keeps the two controls whose
+         width-give-up order tests/test_mobile_nav pins. Feedback sits next to About
+         because they answer neighbouring questions -- what am I running, and this is
+         wrong -- and because the footer is the one part of the drawer that is always
+         reachable without scrolling 28 links. #}
+      <div class="flex-shrink-0 px-4 pb-4 -mt-1 flex items-center gap-2">
         <button type="button" @click="openAbout()"
-                class="w-full text-center text-xs px-3 py-2 rounded-md {{ nav_hover }} {{ user_text }} hover:text-white transition">
+                class="flex-1 text-center text-xs px-3 py-3 rounded-md {{ nav_hover }} {{ user_text }} hover:text-white transition">
           About
         </button>
+        {% if feedback_enabled %}
+        <button type="button" @click="openFeedback()"
+                class="flex-1 text-center text-xs px-3 py-3 rounded-md {{ nav_hover }} {{ user_text }} hover:text-white transition">
+          Send feedback
+        </button>
+        {% endif %}
       </div>
     </div>
 
@@ -406,6 +418,160 @@
         </div>
       </div>
     </div>
+
+    {% if feedback_enabled %}
+    {# Send feedback. Same shape as the About box above, and gated on feedbackOpen rather
+       than mobileNav: tests/test_mobile_nav asserts that exactly one element which is not
+       the backdrop hangs off the drawer's own x-show, so a second one here would fail it.
+
+       The repository and whether it is private are stated in the form itself. That is the
+       whole privacy story for this feature: a GitHub issue in a public repo is readable by
+       anyone, and the person typing is sometimes a prospect who will name their employer.
+       Telling them where it goes, at the moment they type, is worth more than any filter. #}
+    <div x-show="feedbackOpen" x-cloak
+         class="fixed inset-0 z-[60] flex items-center justify-center p-4"
+         @open-feedback.window="openFeedback()"
+         @keydown.escape.window="closeFeedback()">
+      <div class="absolute inset-0 bg-black/40 touch-none" @click="closeFeedback()"></div>
+      <div class="relative w-full max-w-lg bg-white text-gray-800 rounded-lg shadow-2xl max-h-[90vh] overflow-y-auto"
+           role="dialog" aria-modal="true" aria-labelledby="feedback-title">
+        <div class="flex items-center justify-between px-5 py-4 border-b border-gray-200">
+          <h3 id="feedback-title" class="text-base font-semibold text-gray-900">Send feedback</h3>
+          <button type="button" @click="closeFeedback()" aria-label="Close"
+                  class="text-gray-400 hover:text-gray-600 transition-colors">
+            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+
+        <div class="px-5 py-4 text-sm space-y-3">
+          <p x-show="feedbackCtxError" class="text-red-600" x-text="feedbackCtxError"></p>
+
+          {# Filed, or composed. Replaces the form rather than sitting under it: the
+             question "did that work" should not need scrolling to answer. #}
+          <template x-if="feedbackResult">
+            <div class="space-y-2">
+              <p class="text-green-700 font-medium">Thank you.</p>
+              <template x-if="feedbackResult.issue_url">
+                <p class="text-gray-600">
+                  Filed as
+                  <a :href="feedbackResult.issue_url" target="_blank" rel="noopener noreferrer"
+                     class="text-blue-600 underline font-mono"
+                     x-text="'#' + feedbackResult.issue_number"></a>.
+                </p>
+              </template>
+              <template x-if="feedbackResult.compose_url">
+                <div class="text-gray-600 space-y-2">
+                  <p>
+                    A GitHub issue form has opened in a new tab with everything filled in.
+                    Press Submit there to file it under your own account.
+                  </p>
+                  <p>
+                    <a :href="feedbackResult.compose_url" target="_blank" rel="noopener noreferrer"
+                       class="text-blue-600 underline">Open it again</a>
+                    if the tab did not appear.
+                  </p>
+                  <p x-show="feedbackResult.truncated" class="text-[11px] text-amber-700">
+                    Your description was long, so the link carries a shortened copy. The
+                    full text was saved in this dashboard.
+                  </p>
+                </div>
+              </template>
+              <button type="button" @click="closeFeedback()"
+                      class="mt-2 px-3 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm font-medium">
+                Close
+              </button>
+            </div>
+          </template>
+
+          <template x-if="!feedbackResult && feedbackCtx && feedbackCtx.enabled && feedbackCtx.mode !== 'off'">
+            <div class="space-y-3">
+              {# Where this is going, said plainly, before anything is typed. #}
+              <div class="rounded-lg border p-2.5 text-[11px]"
+                   :class="feedbackCtx.repo_private === false
+                             ? 'border-amber-200 bg-amber-50 text-amber-800'
+                             : 'border-gray-200 bg-gray-50 text-gray-600'">
+                <template x-if="feedbackCtx.repo_private === false">
+                  <span>
+                    This becomes a <strong>public</strong> issue in
+                    <span class="font-mono" x-text="feedbackCtx.repo"></span>, readable by
+                    anyone. Please leave out anything you would not post publicly.
+                  </span>
+                </template>
+                <template x-if="feedbackCtx.repo_private === true">
+                  <span>
+                    Goes to the private repository
+                    <span class="font-mono" x-text="feedbackCtx.repo"></span>.
+                  </span>
+                </template>
+                <template x-if="feedbackCtx.repo_private === null || feedbackCtx.repo_private === undefined">
+                  <span>
+                    Goes to <span class="font-mono" x-text="feedbackCtx.repo"></span>. Whether
+                    that repository is public could not be checked, so please treat it as public.
+                  </span>
+                </template>
+              </div>
+
+              <div>
+                <label class="block text-xs font-medium text-gray-700 mb-1" for="feedback-category">What is this?</label>
+                <select id="feedback-category" x-model="feedback.category"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="bug">Something is broken</option>
+                  <option value="idea">An idea or a request</option>
+                  <option value="docs">The docs are wrong or missing</option>
+                  <option value="other">Something else</option>
+                </select>
+              </div>
+
+              <div>
+                <label class="block text-xs font-medium text-gray-700 mb-1" for="feedback-title">Summary</label>
+                <input id="feedback-title" type="text" x-model="feedback.title"
+                       :maxlength="feedbackCtx.max_title || 200"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                       placeholder="One line: what happened">
+              </div>
+
+              <div>
+                <label class="block text-xs font-medium text-gray-700 mb-1" for="feedback-body">Details</label>
+                <textarea id="feedback-body" x-model="feedback.body" rows="5"
+                          :maxlength="feedbackCtx.max_body || 8000"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                          placeholder="What you did, what you expected, what happened instead."></textarea>
+                <p class="text-[11px] text-gray-400 mt-1">
+                  The page you are on, the version and the build are attached automatically.
+                  Please do not paste passwords, tokens or keys -- anything that looks like
+                  one is refused rather than filed.
+                </p>
+              </div>
+
+              <p x-show="feedbackError" class="text-red-600 text-[12px]" x-text="feedbackError"></p>
+
+              <div class="flex items-center justify-between pt-1">
+                <a href="/feedback" class="text-[11px] text-blue-600 underline">What I have sent</a>
+                <button type="button" @click="submitFeedback()" :disabled="feedbackSending"
+                        class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium">
+                  <span x-show="!feedbackSending"
+                        x-text="feedbackCtx.mode === 'compose' ? 'Open a GitHub issue' : 'Send feedback'"></span>
+                  <span x-show="feedbackSending">Sending...</span>
+                </button>
+              </div>
+            </div>
+          </template>
+
+          {# Enabled but with nowhere to send. An administrator's problem, so it says so
+             rather than showing a form that cannot succeed. #}
+          <template x-if="!feedbackResult && feedbackCtx && (!feedbackCtx.enabled || feedbackCtx.mode === 'off')">
+            <p class="text-gray-500">
+              Feedback has no destination configured on this instance yet.
+            </p>
+          </template>
+
+          <p x-show="!feedbackCtx && !feedbackCtxError" class="text-gray-500">Loading&hellip;</p>
+        </div>
+      </div>
+    </div>
+    {% endif %}
 
     {# Flyout backdrop: dims the page while the drawer is open. Click to dismiss. Sits
        below the drawer (z-40 < drawer's z-50).
