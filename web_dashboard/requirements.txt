@@ -89,7 +89,7 @@ google-cloud-run>=0.16.2
 google-cloud-build>=3.42.0
 # Cloud cost: query the GCP Cloud Billing BigQuery export (services/cost_service.py).
 google-cloud-bigquery>=3.0.0
-google-auth>=2.62.0
+google-auth>=2.62.1
 
 # Azure Blob Storage (Packer template archive; also the Cloud Functions package
 # blob that WEBSITE_RUN_FROM_PACKAGE points at)
