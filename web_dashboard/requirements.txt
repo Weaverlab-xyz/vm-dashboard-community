@@ -2,12 +2,12 @@
 # fastapi 0.109 held starlette at 0.36, which has seven published advisories; the floor on
 # starlette is the version that fixes the last of them. pip-audit in CI (tests.yml) is
 # what notices the next one.
-fastapi==0.162.0
+fastapi==0.162.2
 starlette>=1.10.0
 uvicorn[standard]==0.54.0
 
 # Database
-sqlalchemy==2.1.6
+sqlalchemy==2.1.8
 psycopg2-binary==2.9.13
 
 # WSGI server (used in Docker / Container Apps)
@@ -53,7 +53,7 @@ python-dotenv==1.2.4
 slowapi==0.1.10
 
 # AWS SDK
-boto3==1.43.123
+boto3==1.43.126
 
 # Azure SDK
 # Upper bounds cap each package at the next major so a fresh build can't float into an
