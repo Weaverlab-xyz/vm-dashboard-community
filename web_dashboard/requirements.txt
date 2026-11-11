@@ -93,7 +93,7 @@ google-auth>=2.62.0
 
 # Azure Blob Storage (Packer template archive; also the Cloud Functions package
 # blob that WEBSITE_RUN_FROM_PACKAGE points at)
-azure-storage-blob>=12.19.0,<13
+azure-storage-blob>=12.31.1,<13
 
 # Azure Functions Python worker library — Cloud Functions preview. The dashboard
 # never imports this at runtime; it is VENDORED INTO the deployed zip by
