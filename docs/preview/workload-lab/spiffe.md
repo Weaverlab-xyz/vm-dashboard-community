@@ -127,7 +127,7 @@ Preview features**. Nothing here is a secret.
 | Setting | Key | Default | What it does |
 |---|---|---|---|
 | Allowed source CIDRs | `spire_lab_source_cidrs` | blank | Who may reach tcp/8081, and 8443 and 8082 with it. Blank changes no cloud ACL: it does not open anything |
-| SPIRE version | `spire_lab_version` | `1.15.5` | What every mode installs (for `k8s`, the chart's images), and what **Upgrade** moves to |
+| SPIRE version | `spire_lab_version` | `1.16.0` | What every mode installs (for `k8s`, the chart's images), and what **Upgrade** moves to |
 | CA TTL | `spire_lab_ca_ttl` | `168h` | Caps every SVID the server issues, the admin credential included |
 | Admin SVID TTL | `spire_lab_admin_ttl` | `720h` | What the admin mint asks for; the CA TTL decides what it gets |
 | Secrets Safe safe | `spire_lab_ps_safe` | `Automation` | Where the admin credential lands. It must exist already, with create rights |

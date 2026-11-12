@@ -32,7 +32,7 @@
 #
 # extra_vars:
 #   trust_domain: weaverlab.test        # REQUIRED — the Managed System models one of these
-#   spire_version: 1.15.5
+#   spire_version: 1.16.0
 #   spire_sha256: ""                # overrides the pinned checksum table
 #   bind_port: 8081
 #   federation_port: 8082                 # the bundle endpoint, for SPIFFE federation
@@ -44,7 +44,7 @@
   become: true
   vars:
     trust_domain: ""
-    spire_version: "1.15.5"
+    spire_version: "1.16.0"
     spire_sha256: ""
     # SHA-256 of the upstream release tarballs, checked against the project's own
     # *_sha256sum.txt. Pinned per version and architecture; a version not in this table
@@ -57,6 +57,9 @@
       "1.15.5":
         amd64: f0d1740504fc95e49860ea22dcbe878ebbfee4c9bb077c6a586ed66b9c82a62e
         arm64: 451baba77cba6a0b2cdd3ca8b589589418b88673867d2da7f8dac9099252b372
+      "1.16.0":
+        amd64: 7bcf5e167151a1fc58293768462b44e155ba8784214582aefa6adf18c633d1d5
+        arm64: ba2804905a27ca72b0478ae790b580ea26233abafac7e480bbaf54152d5c2c5b
     spire_allow_unpinned: false
     bind_port: 8081
     federation_port: 8082

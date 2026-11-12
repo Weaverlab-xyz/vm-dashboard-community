@@ -39,7 +39,7 @@
 #   helm_version: 3.16.2
 #   helm_sha256: ""                       # the tarball's SHA-256 from get.helm.sh (*.sha256sum)
 #   spire_chart_version: 0.30.2           # pinned; ships SPIRE 1.15.3, so the images below override it
-#   spire_version: 1.15.5                 # the server, agent and OIDC provider images, as the
+#   spire_version: 1.16.0                 # the server, agent and OIDC provider images, as the
 #                                         #   other modes install; pinned by digest
 #   spire_allow_unpinned: false           # true = take a tag-only image
 #   spire_crds_chart_version: 0.6.1       # blank = latest, with a warning
@@ -71,7 +71,7 @@
     # the chart's three SPIRE images are set here, by digest, to the release the vm and
     # docker modes install. The same multi-arch index digests as spire-docker-server.yml;
     # move them together with spire_version.
-    spire_version: "1.15.5"
+    spire_version: "1.16.0"
     spire_image_digests:
       "1.15.3":
         server: "sha256:4082f30d3e0ddc4000a171392c4ea174345ee44d161ee917c70b97b2ecfba141"
@@ -81,6 +81,10 @@
         server: "sha256:584a9c5cc95b9457f5033e7e4488d603fffe5ec48a80c4dba14b05c5e1c2c384"
         agent: "sha256:3652c732b0f0d36f4dd78394230a1b1cd0ddcc29548a46c67a996b1a78c14481"
         oidc: "sha256:8889641f0eaec84bb42ea1445dff71c0a6a2cfd2a3cfbbee63d17578aaaec7fc"
+      "1.16.0":
+        server: "sha256:ff546f4c62dafc479a0cd79eae9a7b6df2975754d75efd31706098e0d7548837"
+        agent: "sha256:ab3a8ce70435374cc5d84c81eabf0278dc046ddbc0a736d59694ba9e5975b1b6"
+        oidc: "sha256:455c1bce62c28b005eea5322c7860abef0350fe7def6717ebf37f76e165e45bc"
     spire_allow_unpinned: false
     ca_subject_country: "US"
     ca_subject_organization: "Workload Lab"

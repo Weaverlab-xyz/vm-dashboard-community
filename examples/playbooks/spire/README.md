@@ -12,7 +12,7 @@ network ACL is opened — see [Opening the port](#opening-the-port).
 
 | File | Target | Runner image | What it does |
 |---|---|---|---|
-| `spire-server-install.yml` | Linux VM (SSH) | `ansible-winrm` | SPIRE 1.15.5 under systemd as the `spire` user, sandboxed: one trust domain, sqlite datastore, `join_token` attestor, `admin_ids`, `jwt_issuer`, and the federation bundle endpoint (`https_spiffe`, tcp/8082) |
+| `spire-server-install.yml` | Linux VM (SSH) | `ansible-winrm` | SPIRE 1.16.0 under systemd as the `spire` user, sandboxed: one trust domain, sqlite datastore, `join_token` attestor, `admin_ids`, `jwt_issuer`, and the federation bundle endpoint (`https_spiffe`, tcp/8082) |
 | `spire-open-ports.yml` | Linux VM (SSH) | `ansible-winrm` | Opens tcp/8081, plus the lab's `extra_ports` (8443 for the OIDC provider, 8082 for the bundle endpoint), on the **host** firewall (firewalld or ufw) |
 | `spire-seed-entries.yml` | Linux VM (SSH) | `ansible-winrm` | The 11 registration entries the demo is built on |
 | `spire-admin-identity.yml` | Linux VM (SSH) | `ansible-winrm` | Mints the admin X509-SVID, packs a PKCS#12, writes it into Password Safe |
