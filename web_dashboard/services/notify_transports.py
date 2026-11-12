@@ -21,12 +21,11 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 import time
 
 import httpx
 
-from . import notify_policy, outbound_url
+from . import http_ca, notify_policy, outbound_url
 
 logger = logging.getLogger(__name__)
 
@@ -59,23 +58,13 @@ class RateLimited(NotifyError):
 # ── TLS / proxy ──────────────────────────────────────────────────────────────
 
 def _verify():
-    """The CA bundle to verify against.
+    """The CA bundle to verify against -- see services/http_ca for the whole story.
 
-    ``httpx`` builds its SSL context from ``certifi`` and does **not** read
-    ``SSL_CERT_FILE`` / ``REQUESTS_CA_BUNDLE`` the way ``requests`` does — yet this
-    image sets both (Dockerfile) and ``docker-compose.corp-ca.yml`` mounts the host
-    bundle over the container's. Behind a TLS-inspecting proxy that mismatch means
-    every Slack/Teams POST fails ``CERTIFICATE_VERIFY_FAILED`` while terraform and
-    boto3 in the same container work fine, which is a miserable thing to debug.
-
-    Resolving the bundle explicitly also makes the behaviour independent of which
-    httpx minor is installed.
+    Kept as a thin alias rather than inlined at the call sites: this module's payload
+    builders and signing are what its tests reach for, and the indirection costs
+    nothing.
     """
-    for var in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
-        path = os.environ.get(var) or ""
-        if path and os.path.isfile(path):
-            return path
-    return True
+    return http_ca.verify()
 
 
 # ── Payload builders ─────────────────────────────────────────────────────────

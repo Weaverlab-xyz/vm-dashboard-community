@@ -11,6 +11,7 @@
   DELETE /api/pov/accessor/self/use-cases/{cid}  un-tick it                (accessor)
   POST   /api/pov/accessor/self/share/reveal     the lab link's password   (accessor)
   POST   /api/pov/accessor/self/wake             start a suspended POV    (accessor)
+  POST   /api/pov/accessor/self/feedback         tell us what went wrong  (accessor)
 
 Two routers in one module because they are two halves of one feature, and one file is
 where the relationship between them stays visible. Their AUTH is what differs, and sharply:
@@ -39,8 +40,10 @@ from sqlalchemy.orm import Session
 from fastapi import Request
 
 from ..database import PovEnvironment, User, get_db
-from ..services import (job_service, pov_accessor_entitle, pov_accessor_service,
-                        pov_env_service, pov_signoff, pov_use_cases)
+from ..services import (feedback_service, job_service, pov_accessor_entitle,
+                        pov_accessor_service, pov_env_service, pov_signoff,
+                        pov_use_cases)
+from . import feedback as feedback_api
 from . import pov_gates
 from .auth import get_current_user, require_pov_env_access
 
@@ -337,3 +340,41 @@ def reveal_self_share_password(db: Session = Depends(get_db),
     except pov_accessor_service.AccessorError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"password": password}
+
+
+@self_router.post("/self/feedback")
+def submit_self_feedback(payload: feedback_api.FeedbackCreate,
+                         db: Session = Depends(get_db),
+                         current_user: User = Depends(get_current_user)):
+    """The prospect tells us something is wrong, from inside their own evaluation.
+
+    This route exists HERE, and not on the feedback router, for one reason worth stating
+    plainly: the accessor allowlist in ``auth.get_current_user`` is a bare ``startswith``
+    over ``/api/pov/accessor/self``, and two assertions in ``tests/test_pov_accessor``
+    hold it to exactly its current length. A feedback route of its own would have meant
+    widening it -- and because the match has no path boundary, a slightly careless entry
+    there (``/api/feedback`` rather than the full ``/api/feedback/submit``) would hand
+    every prospect on the instance the ``/mine`` and ``/all`` listings, which is to say
+    everything every other prospect and every SE has ever typed into this form.
+
+    So it rides the prefix that is already allowed, and inherits the property the rest of
+    ``/self`` has by construction: the POV comes from the session, there is no parameter
+    to tamper with, and ``env.id`` is stamped on the row so an SE reading the report knows
+    which evaluation it came out of.
+
+    The heavy lifting -- throttle, credential refusal, record-then-file -- is
+    ``feedback_api.record_and_deliver``, shared with the dashboard's own route so the two
+    cannot drift on the thing that matters.
+    """
+    if not feedback_service.guest_submissions_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail="Feedback from evaluation guests is turned off on this instance.")
+    env = _accessor_env(db, current_user)
+    return feedback_api.record_and_deliver(
+        db,
+        submitted_by=current_user.username,
+        submitter_kind="accessor",
+        payload=payload,
+        pov_env_id=env.id,
+    )

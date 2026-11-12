@@ -107,6 +107,30 @@ RUN if [ "$BUILD_SKIP_DEBIAN_UPDATES" = "1" ]; then \
         echo "--- end ---"; \
     fi
 
+# zlib1g: Debian security update DSA-6613-1, taken explicitly rather than by moving
+# the digest above.
+#
+# The pinned base ships zlib1g 1:1.3.dfsg+really1.3.1-1+b1, which carries
+# CVE-2026-76844 and CVE-2026-85091 (both HIGH). Debian fixed both in trixie-security
+# as 1:1.3.dfsg+really1.3.1-1+deb13u1, and the base image already lists that suite in
+# /etc/apt/sources.list.d/debian.sources, so the fix is one apt-get away.
+#
+# A digest bump does NOT fix this, which is why the pin above is unchanged: the current
+# python:3.12-slim image is still built from the 2026-11-04 Debian snapshot and ships
+# the same vulnerable +b1. Until an upstream rebuild picks up deb13u1, every image on
+# this base fails scripts/ci/trivy_image.sh on these two CVEs. Drop this step (and bump
+# the digest) once that rebuild lands.
+#
+# Scoped to the one package instead of a blanket `apt-get upgrade`: the whole point of a
+# digest-pinned base is that a rebuild changes only what we asked it to change.
+#
+# With BUILD_SKIP_DEBIAN_UPDATES=1 the security suite is stripped from apt's sources by
+# the step above, so this degrades to a no-op rather than failing — the same trade-off
+# that flag already documents.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends --only-upgrade zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
 # Point Python TLS clients (pip, requests, etc.) at the system trust store
 # so they pick up any corp CA installed above.
 ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt \

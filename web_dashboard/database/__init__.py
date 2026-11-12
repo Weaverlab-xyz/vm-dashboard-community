@@ -46,7 +46,7 @@ from .models.identity import (  # noqa: E402,F401  (re-exported: callers import 
 
 from .models.operations import (  # noqa: E402,F401  (re-exported: callers import these from web_dashboard.database)
     EphemeralState, NotificationEndpoint, NotificationDelivery,
-    AuditLog, ConfigApplyState,
+    AuditLog, ConfigApplyState, FeedbackSubmission,
 )
 
 

@@ -72,6 +72,10 @@ def _load():
     ou = _by_path("outbound_url")
     # No DNS: every webhook host is a public address (outbound_url has its own tests).
     ou._resolve = lambda host, port: [(2, 1, 6, "", ("93.184.215.14", port))]
+    # The CA-bundle helper notify_transports._verify delegates to. Loaded by path like
+    # the rest: it imports nothing but os, and without it the sibling import fails on a
+    # package that only exists in this test's sys.modules.
+    _by_path("http_ca")
     return _by_path("notify_policy"), _by_path("notify_transports")
 
 

@@ -288,6 +288,7 @@ def flags() -> dict:
         # permanently off: the switch saved fine, but its initial state is read from
         # /api/features and this key never reached it.
         "notifications_enabled": enabled("notifications_enabled", settings.notifications_enabled),
+        "feedback_enabled": enabled("feedback_enabled", settings.feedback_enabled),
         # Entitle user-JIT Phase 4 UI affordances — surfaces the
         # "Request access" nav link + portal URL when both are configured.
         "entitle_user_jit_enabled":   enabled("entitle_user_jit_enabled", settings.entitle_user_jit_enabled),
@@ -425,6 +426,7 @@ def feature_map() -> dict:
         "cloud_unmanaged_discovery": raw["cloud_unmanaged_discovery_enabled"],
         "vm_spend_cap": raw["vm_spend_cap_enabled"],
         "notifications": raw["notifications_enabled"],
+        "feedback": raw["feedback_enabled"],
         # Not a feature flag -- the profile-owned page group, forwarded from flags()
         # so the BROWSER reads the same answer main._profile_page_gate and
         # _nav_links.html already do. Without it the dashboard's OT tile, whose only
