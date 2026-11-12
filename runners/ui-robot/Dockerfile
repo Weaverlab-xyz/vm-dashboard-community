@@ -18,6 +18,22 @@ RUN apt-get update \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# The base image preinstalls these five, and pip leaves an already-satisfying version
+# alone, so the install above never moves them no matter what requirements.txt asks for --
+# they have to be named. Each one is a fixable HIGH or CRITICAL that the image scan blocks
+# on (certifi's is CRITICAL), and .trivyignore.yaml asks for a package upgrade in
+# preference to an exception entry. requests reaches the network through certifi and
+# urllib3; the other three are base-image tooling the robot never imports. Floors so a
+# later security release is picked up on the next build, capped at the next major so a
+# fresh build cannot float past what requests supports.
+RUN pip install --no-cache-dir --upgrade \
+      'certifi>=2026.10.18' \
+      'filelock>=4.2.1,<5' \
+      'msgpack>=1.2.3,<2' \
+      'setuptools>=78.1.1,<80' \
+      'urllib3>=2.8.0,<3'
+
 COPY robot ./robot
 
 # Downloads land here; mount a volume if you want to keep them.
