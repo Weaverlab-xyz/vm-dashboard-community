@@ -1129,6 +1129,7 @@ from .api import gateways as gateways_api  # noqa: E402
 from .api import agent_hosts as agent_hosts_api  # noqa: E402
 from .api import expiry as expiry_api  # noqa: E402
 from .api import notifications as notifications_api  # noqa: E402
+from .api import feedback as feedback_api  # noqa: E402
 from .api import agent as agent_api  # noqa: E402
 from .api import worker as worker_api  # noqa: E402
 from .api import health_checks as health_checks_api  # noqa: E402
@@ -1601,6 +1602,12 @@ app.include_router(expiry_api.router)
 # able to add and test an endpoint *before* switching the feature on, and every route
 # here is admin-only and harmless while it is off.
 app.include_router(notifications_api.router)
+# UNGATED, deliberately. An administrator has to read /api/feedback/context to
+# configure the destination before the feature can be switched on, and a router
+# behind _feature_gate answers 404 -- which the UI reads as 'no data' rather than
+# 'not set up'. Each route refuses on its own terms, with a sentence, when the flag
+# is off or no repository is set.
+app.include_router(feedback_api.router)
 
 # Job-worker concurrency readout. Read-only and admin-only; not feature-gated because the
 # worker has no off switch — it is the process that runs every queued job.
@@ -1808,6 +1815,18 @@ async def notifications_page(request: Request):
     screen for them is the admin-only Settings drawer. Same shape as /schedules: the shell
     renders for anyone and /api/notifications enforces the scope."""
     return templates.TemplateResponse(request, "notifications/index.html", {"request": request})
+
+
+@app.get("/feedback", response_class=HTMLResponse, include_in_schema=False)
+async def feedback_page(request: Request):
+    """What you have sent, and what became of it -- the second half of the loop.
+
+    Ungated, like /jobs: the shell renders for anyone and /api/feedback/mine returns only
+    the caller's own rows, because everybody may send feedback and so everybody may see
+    their own. The all-submissions view on the same page is drawn only for an
+    administrator and is enforced by /api/feedback/all, not by this route.
+    """
+    return templates.TemplateResponse(request, "feedback/index.html", {"request": request})
 
 
 @app.get("/health", response_class=HTMLResponse, include_in_schema=False)

@@ -150,7 +150,7 @@ jobs:
       # (it only reads public hashicorp/packer-plugin-* release tags).
       - name: Install cosign
         if: matrix.sign
-        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac  # v3.9.1
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532  # v4.1.3
 
       # The agent version (AGENT_VERSION in agent.py), which differs from the release tag:
       # baked into the image as the `dashboard-agent.version` label the updater checks.

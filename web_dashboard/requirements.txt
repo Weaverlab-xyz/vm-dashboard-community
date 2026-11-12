@@ -19,7 +19,7 @@ gunicorn==26.2.0
 # module level — so `import mcp.server` (api/mcp_server.py) fails and takes the whole app
 # down with it. 2.13.5 is the last version CI ran green on. Lift together with an mcp that
 # no longer imports it.
-pydantic>=2.7.2,<2.14
+pydantic>=2.14.2,<2.15
 pydantic-settings>=2.6.1
 
 # Authentication
@@ -28,7 +28,7 @@ pydantic-settings>=2.6.1
 # .pip-audit-ignore for why it, and its ecdsa dependency, are accepted.
 python-jose[cryptography]==3.5.0
 bcrypt==4.2.1
-fido2>=1.1.2
+fido2>=2.2.1
 msal>=1.39.0
 
 # File uploads and forms
@@ -63,10 +63,10 @@ boto3==1.43.123
 azure-identity>=1.27.0,<2
 azure-mgmt-compute>=39.0.0,<40
 azure-mgmt-network>=25.0.0,<31
-azure-mgmt-resource>=23.0.0,<27
+azure-mgmt-resource>=26.0.0,<27
 azure-mgmt-containerinstance>=10.0.0,<11
 azure-mgmt-storage>=25.3.0,<26
-azure-keyvault-secrets>=4.7.0,<5
+azure-keyvault-secrets>=4.12.0,<5
 azure-mgmt-automation>=1.0.0,<2
 
 # MCP (Model Context Protocol) server — exposes dashboard tools to AI clients
@@ -93,7 +93,7 @@ google-auth>=2.62.0
 
 # Azure Blob Storage (Packer template archive; also the Cloud Functions package
 # blob that WEBSITE_RUN_FROM_PACKAGE points at)
-azure-storage-blob>=12.19.0,<13
+azure-storage-blob>=12.31.1,<13
 
 # Azure Functions Python worker library — Cloud Functions preview. The dashboard
 # never imports this at runtime; it is VENDORED INTO the deployed zip by
@@ -108,12 +108,12 @@ azure-functions>=1.21,<2
 # Vault secret + Usage API access in services/oci_service.py; the DB/OKE
 # provisioning goes through the oracle/oci Terraform provider. Loose floor per
 # CONTRIBUTING; the package bundles its own signing/crypto deps.
-oci>=2.120.0
+oci>=2.190.0
 
 # Async HTTP client (Portainer CE API, Ollama)
 # The old <0.28 bound existed for the TestClient in starlette 0.36, which passed httpx
 # the `app=` shortcut 0.28 removed. Starlette 1.x no longer does.
-httpx>=0.27.0
+httpx>=0.28.1
 
 # YAML parsing (playbook generation validation)
 PyYAML>=6.0.3

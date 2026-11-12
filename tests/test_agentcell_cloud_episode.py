@@ -656,9 +656,16 @@ def test_a_deny_probe_from_the_wrong_cloud_is_refused():
         assert "iam-list-users" in str(exc), "the refusal does not name the right probe"
     else:
         raise AssertionError("an Azure deny probe was accepted against an AWS mint")
-    # The two that must still pass: the cloud's own probe, and `none`.
+    # The two that must still pass: the cloud's own probe, and `none` (plus `auto`,
+    # which resolves to the cloud's own). The probe itself is stubbed — this test is
+    # about the dispatch, and the real one would call sts.amazonaws.com from CI.
+    seen = []
+    m.aws_cloud_probe = lambda *, values, deny_probe, region, verify: \
+        seen.append(deny_probe) or {}
     for ok in ("iam-list-users", "none", "auto"):
         m._cloud_probe(_cloud_args(cloud_deny_probe=ok), aws)
+    assert seen == ["iam-list-users", "none", "iam-list-users"], \
+        f"the accepted choices reached the AWS probe as {seen}"
 
 
 def test_a_transport_failure_is_fatal_with_the_bill_named():

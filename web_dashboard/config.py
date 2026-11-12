@@ -1864,6 +1864,43 @@ class Settings(BaseSettings):
     notify_max_queue: int = 500                    # above this, emit() suppresses
     notify_retention_days: int = 30                # 0 = keep delivery rows forever
 
+    # -- In-product feedback -------------------------------------------------
+    # The "Send feedback" button in the drawer, and the POV guest's equivalent on
+    # /pov/access. A submission is always recorded in `feedback_submissions`; what
+    # happens next depends on whether a token is configured.
+    #
+    # TWO MODES, and the mode is derived, never configured:
+    #   * DIRECT  -- repo AND token set. The server files the issue itself and the
+    #                submitter gets the number back in the same response.
+    #   * COMPOSE -- repo set, token blank. The server composes the identical title
+    #                and body and hands back a github.com/.../issues/new?title=&body=
+    #                link. Nothing is filed server-side and no credential exists on
+    #                the instance, which is the only honest shape for the public
+    #                release -- a self-hoster files it under their own account.
+    # Blank repo means the feature is off whatever the flag says.
+    feedback_enabled: bool = False
+    # "owner/name". DELIBERATELY BLANK rather than defaulting to the upstream repo:
+    # with a default, an operator who sets a token without changing this would file
+    # a prospect's wording into a world-readable tracker. Validated against a strict
+    # slug pattern before it reaches either an API path or a redirect -- see
+    # services/feedback_service.validate_repo for why that is not optional.
+    feedback_github_repo: str = ""
+    # PAT with issues:write. Fernet-encrypted; listed in secret_hygiene.SECRET_KEYS,
+    # which is what keeps it out of GET /api/setup/config.
+    feedback_github_token: str = ""
+    feedback_labels: str = "user-feedback"         # put on every issue this files
+    feedback_guest_submissions: bool = True        # let a POV accessor submit
+    # Sliding-window caps, counted off the submissions table itself (there is no
+    # separate counter) -- services/feedback_guard. 0 disables a cap, matching
+    # login_guard and agent_guard.
+    feedback_max_per_user: int = 5
+    feedback_max_global: int = 50
+    feedback_window_hours: int = 24
+    # Issue-state polling, worker-side. 0 = off, which is the shipped slice: the row
+    # keeps the issue URL and the page links out. See docs/admin/feedback.md before
+    # raising it -- a per-row poll burns the API budget, so it polls the LIST.
+    feedback_poll_minutes: int = 0
+
     # Ephemeral cloud secrets for managed-account checkout on the ECS / Cloud Run
     # runners. OFF by default: a checked-out Password Safe credential is written to
     # the cloud secret store as a short-lived, RBAC-locked secret, injected via the
