@@ -37,6 +37,7 @@ import json
 import os
 import sys
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 
 
@@ -380,19 +381,38 @@ def test_the_sweep_is_its_own_job_type_and_a_singleton():
 
 def test_the_pin_uses_the_sdks_real_attribute_name():
     """The SDK half of the test that would have caught the bug this fix was written on
-    top of: which of the two spellings the model actually declares.
+    top of: which of the two spellings the model actually accepts.
 
     Skipped rather than failed when the SDK is not installed — the spelling can only be
     asked of the SDK itself, and a sweep that reports a missing optional dependency as a
     failure teaches people to ignore sweep failures. The source scan that catches a
     relapse lives in the sibling test below and needs no SDK.
+
+    Asked of the model's behaviour rather than of `_attribute_map`: azure-mgmt-network 33
+    is built by the typespec generator, which moved every field named here onto a nested
+    `properties` model reached through a flattening shim, and dropped msrest's
+    `_attribute_map` altogether. Constructing the model and reading the field back asks
+    the same question in a way that survives that change — and on a generated model it can
+    also check the wire name, which `_attribute_map` only ever implied.
     """
     if _NicIPConfig is None:
         _skip(f"azure-mgmt-network not installed ({_AZURE_ERR}); it is a requirement in "
               "CI (web_dashboard/requirements.txt), where this check runs")
         return
-    assert "private_ip_allocation_method" in _NicIPConfig._attribute_map
-    assert "private_ip_address_allocation" not in _NicIPConfig._attribute_map
+    cfg = _NicIPConfig(private_ip_allocation_method="Static")
+    assert (cfg.private_ip_allocation_method or "").lower() == "static", (
+        "the spelling the pin writes must read back off the model")
+    if isinstance(cfg, Mapping):  # a typespec model is a mapping over the body it will send
+        body = json.dumps(cfg, default=dict)  # default=dict unwraps the nested model
+        assert "privateIPAllocationMethod" in body, body
+    # The misspelling must not quietly become settable: that is the whole bug, a pin that
+    # writes an attribute ARM never reads and reports success.
+    try:
+        _NicIPConfig(private_ip_address_allocation="Static")
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("the SDK accepted private_ip_address_allocation as a keyword")
 
 
 def test_the_pin_spells_the_attribute_the_way_the_sdk_does():
