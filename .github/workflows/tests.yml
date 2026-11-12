@@ -29,12 +29,13 @@ concurrency:
 jobs:
   tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"  # matches the Dockerfile base image
           cache: pip
@@ -63,12 +64,13 @@ jobs:
   # every class a page actually carried has a rule (scripts/ci/css_coverage.sh).
   browser-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"  # matches the Dockerfile base image
           cache: pip
@@ -103,12 +105,13 @@ jobs:
   # findings to a rule, and that should arrive as a deliberate bump, not a red main.
   ruff:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -127,12 +130,13 @@ jobs:
   # real parser, and it runs in seconds instead of waiting for the browser job.
   js-syntax:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -151,12 +155,13 @@ jobs:
   # because a new pyright can add findings.
   pyright:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -176,12 +181,13 @@ jobs:
   # collections; the BeyondTrust ones come from Galaxy, as in the runner images.
   ansible-syntax:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -192,7 +198,7 @@ jobs:
       # last set main downloaded (saved below, on main only), and a pull request reads
       # main's caches. See scripts/ci/galaxy_collections.sh.
       - name: Restore the last Galaxy collections main downloaded
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.ansible/collections
           key: ansible-galaxy-${{ github.run_id }}
@@ -200,14 +206,16 @@ jobs:
 
       - name: Install Ansible and the BeyondTrust collections
         id: galaxy
+        # Pinned, like ruff and pyright: a new ansible release can change what
+        # --syntax-check accepts, and that should arrive as a deliberate bump.
         run: |
-          pip install ansible
+          pip install ansible==14.6.0
           scripts/ci/galaxy_collections.sh beyondtrust.secrets_safe beyondtrust.password_safe
           ansible --version
 
       - name: Save the collections for the next Galaxy outage
         if: github.ref == 'refs/heads/main' && steps.galaxy.outputs.fresh == 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.ansible/collections
           key: ansible-galaxy-${{ github.run_id }}
@@ -225,6 +233,7 @@ jobs:
   # operator applies from a workstation and requires 1.11 for a write-only attribute.
   terraform:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.tf-plugin-cache
       # The modules commit no lock files (.gitignore), and without one Terraform 1.4+
@@ -232,7 +241,7 @@ jobs:
       TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE: "true"
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Read the Terraform version from the Dockerfile
         id: tf
@@ -245,14 +254,14 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
       - name: Cache provider plugins
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: .tf-plugin-cache
           key: tf-plugins-${{ hashFiles('terraform/**/*.tf') }}
           restore-keys: tf-plugins-
 
       - name: Set up Terraform ${{ steps.tf.outputs.version }} (as the image ships)
-        uses: hashicorp/setup-terraform@v4
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1
         with:
           terraform_version: ${{ steps.tf.outputs.version }}
           terraform_wrapper: false
@@ -272,7 +281,7 @@ jobs:
           scripts/ci/terraform_validate.sh "$out"/virtual_app "$out"/bundles
 
       - name: Set up Terraform 1.11 for workload_credentials
-        uses: hashicorp/setup-terraform@v4
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1
         with:
           terraform_version: "~1.11.0"
           terraform_wrapper: false
@@ -294,9 +303,10 @@ jobs:
   docs-gate:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # The gate diffs against the merge base and reads every commit on the branch,
           # so it needs history, not the default single-commit checkout.
@@ -331,6 +341,7 @@ jobs:
   # `tests/test_postgres_*.py` glob is the extension point for the next one.
   postgres:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     services:
       postgres:
@@ -353,10 +364,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"  # matches the Dockerfile base image
           cache: pip
@@ -412,12 +423,13 @@ jobs:
   # fails this job rather than the whole suite.
   opa:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"  # matches the Dockerfile base image
           cache: pip
@@ -440,6 +452,14 @@ jobs:
                  "version here; a second pin is how CI and the image drift apart."
             exit 1
           fi
+          # The checksum comes from the Dockerfile too, for the same reason: CI verifies
+          # exactly the bytes the image verifies.
+          OPA_SHA256=$(sed -n 's/^ARG OPA_SHA256_AMD64=//p' Dockerfile)
+          if [ -z "$OPA_SHA256" ]; then
+            echo "::error::could not read ARG OPA_SHA256_AMD64 from the Dockerfile."\
+                 "Fix this rather than skipping the check."
+            exit 1
+          fi
           echo "Installing OPA $OPA_VERSION (from Dockerfile)"
           # --retry-all-errors for the same reason the Dockerfile uses it: this
           # endpoint drops connections mid-transfer, which curl will not otherwise
@@ -447,6 +467,7 @@ jobs:
           curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
             "https://openpolicyagent.org/downloads/v${OPA_VERSION}/opa_linux_amd64_static" \
             -o /usr/local/bin/opa
+          echo "${OPA_SHA256}  /usr/local/bin/opa" | sha256sum -c -
           chmod +x /usr/local/bin/opa
           opa version   # proof the binary arrived intact, as in the Dockerfile
 
