@@ -20,6 +20,7 @@ applies just as much to infrastructure you run in production. See
 | **installing or running** the dashboard — an **operator** | [Getting started](getting-started.md), then the sections below |
 | **running your own infrastructure** with it | the sections below — you want the `demo` profile, whatever its name suggests |
 | **showing** it to someone, or running **customer proof-of-value** work | [Demo and POV profiles](profiles/README.md) |
+| **standing up your first POV**, and wanting its whole shape on one page | [POV architecture and workflow](architecture.md) |
 | **changing the code** — a **contributor** | [Design notes](design/README.md), [runbooks](runbooks/README.md), [notes](notes/README.md), and [CONTRIBUTING.md](../CONTRIBUTING.md) |
 
 ## Sections

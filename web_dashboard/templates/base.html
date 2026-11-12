@@ -404,6 +404,13 @@
             </dl>
           </template>
         </div>
+        {# The rest of this box says which build you are on; this says what the thing in
+           front of you actually is. A plain anchor on purpose: the modal carries no state
+           for it, and the docs shell is public, so it needs no token either. #}
+        <div class="px-5 py-3 border-t border-gray-200">
+          <a href="/docs/architecture" target="_blank" rel="noopener"
+             class="text-sm font-medium text-blue-600 hover:text-blue-800 transition-colors">POV architecture and workflow &rarr;</a>
+        </div>
       </div>
     </div>
 
