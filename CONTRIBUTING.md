@@ -101,6 +101,12 @@ A new page needs the one-line header block under its H1 and a row in
 [docs/README.md](docs/README.md); `tests/test_docs_conventions.py` enforces
 both.
 
+Write tables as plain Markdown pipe tables. The renderer wraps each one in its own
+horizontal scroll box, so a table too wide for a phone scrolls itself instead of
+widening the page and carrying every paragraph off-screen with it. Don't hand-wrap one
+in a `<div>` — that nests two scroll boxes. A hand-authored `<svg>` figure does need a
+wrapper of its own, because only tables are wrapped for you.
+
 Moving or renaming a page? Repoint the links in the repo, and add the old path to
 `_MOVED` in [web_dashboard/api/docs_pages.py](web_dashboard/api/docs_pages.py) so
 bookmarks and links outside the repo get a 301 instead of a 404. A folder entry covers
