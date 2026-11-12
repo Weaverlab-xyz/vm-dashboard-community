@@ -110,8 +110,8 @@ GUEST_DOCKER_SOCKET = "/var/run/docker.sock"
 # same two sidecars as examples/remote-agent/docker-compose.spire.yml, pinned to the same
 # digests — tests/test_pov_broker_spire.py keeps them in step — run with `docker run`
 # because the bootstrap is a shell script, not a compose project.
-SPIRE_AGENT_IMAGE = ("ghcr.io/spiffe/spire-agent:1.15.5"
-                     "@sha256:3652c732b0f0d36f4dd78394230a1b1cd0ddcc29548a46c67a996b1a78c14481")
+SPIRE_AGENT_IMAGE = ("ghcr.io/spiffe/spire-agent:1.16.0"
+                     "@sha256:ab3a8ce70435374cc5d84c81eabf0278dc046ddbc0a736d59694ba9e5975b1b6")
 SPIFFE_HELPER_IMAGE = ("ghcr.io/spiffe/spiffe-helper:0.12.1"
                        "@sha256:49a7b1aca5b497bb4c1ca1ed1f15397bdf9c9cafb8036df4b963b566bd234f7f")
 GUEST_SPIRE_DIR = GUEST_STATE_DIR + "/spire"
