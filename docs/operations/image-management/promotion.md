@@ -11,19 +11,79 @@ Targets: AMI / Managed Image / Custom Image, one or more.
 
 The end-to-end flow:
 
-```mermaid
-flowchart LR
-    build["Packer build<br/>AWS / Azure / GCP / OCI"] --> export["Native export to<br/>same-cloud storage"]
-    export -- "same-backend as hub<br/>(no copy)" --> hub[("Hub backend<br/>S3 / Blob / GCS")]
-    export -- "different cloud<br/>(cross-backend copy)" --> hub
-    hub -- "presigned URL" --> runner["Target-cloud runner<br/>ECS / ACI / Cloud Run"]
-    runner -- "qemu-img convert<br/>+ upload" --> staging[("Target-cloud staging")]
-    staging --> imp["Cloud import API<br/>ec2.ImportImage<br/>images.create_or_update<br/>images.insert"]
-    imp --> ami["Native image<br/>AMI / Managed Image / Custom Image"]
-    ami --> promo["RegisteredImage.promotions"]
-    style hub fill:#e0e7ff
-    style ami fill:#d1fae5
-```
+<figure style="margin:2rem 0">
+<div style="overflow-x:auto">
+<svg viewBox="0 0 860 650" role="img" aria-label="The image promotion path: a Packer build is exported to the hub backend — with no copy when the build cloud already matches the hub, or a cross-backend storage_service.copy() when it does not — then pulled by a target-cloud runner over a presigned URL, converted with qemu-img into target-cloud staging, imported by the cloud&#39;s own API into a native image, and recorded on RegisteredImage.promotions." style="width:100%;min-width:720px;height:auto;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif">
+<defs>
+<marker id="pmarw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="currentColor"/></marker>
+</defs>
+<g fill="currentColor" text-anchor="middle">
+<rect x="24" y="44" width="812" height="224" rx="10" fill="#f8fafc" stroke="#e2e8f0"/>
+<text x="40" y="68" text-anchor="start" font-size="11" font-weight="700" letter-spacing="1.2" fill="#64748b">1 · BUILD AND LAND ON THE HUB</text>
+<rect x="44" y="128" width="150" height="56" rx="7" fill="#ffffff" stroke="#cbd5e1"/>
+<text x="119" y="150" font-size="12">Packer build</text>
+<text x="119" y="166" font-size="10" fill="#475569">AWS · Azure · GCP · OCI</text>
+<text x="253" y="147" font-size="10" fill="#475569">exports a VHD</text>
+<line x1="194" y1="156" x2="312" y2="156" stroke="currentColor" marker-end="url(#pmarw)"/>
+<rect x="316" y="128" width="164" height="56" rx="7" fill="#ffffff" stroke="#cbd5e1"/>
+<text x="398" y="150" font-size="12">Native export to</text>
+<text x="398" y="166" font-size="12">same-cloud storage</text>
+<text x="610" y="80" font-size="10.5" fill="#475569">build cloud = hub backend</text>
+<text x="610" y="92" font-size="10.5" fill="#475569">the native export is the hub upload — no copy</text>
+<path d="M484,144 L536,104 L732,104 L732,122" fill="none" stroke="currentColor" marker-end="url(#pmarw)"/>
+<path d="M648,138 A84,10 0 0 1 816,138 V182 A84,10 0 0 1 648,182 Z" fill="#eff6ff" stroke="#1d4ed8"/>
+<path d="M648,138 A84,10 0 0 0 816,138" fill="none" stroke="#1d4ed8"/>
+<text x="732" y="162" font-size="11.5" font-weight="600" fill="#1d4ed8">Hub backend</text>
+<text x="732" y="176" font-size="10" fill="#1d4ed8">S3 · Blob · GCS</text>
+<text x="424" y="218" text-anchor="end" font-size="10.5" fill="#475569">build cloud ≠ hub backend</text>
+<text x="424" y="231" text-anchor="end" font-size="10.5" fill="#475569">(AWS build, hub on Azure Blob)</text>
+<path d="M440,184 L440,229 L496,229" fill="none" stroke="currentColor" marker-end="url(#pmarw)"/>
+<rect x="500" y="206" width="164" height="46" rx="7" fill="#f1f5f9" stroke="#94a3b8"/>
+<text x="582" y="225" font-size="11">storage_service.copy()</text>
+<text x="582" y="240" font-size="9.5" fill="#475569">staging copy then deleted</text>
+<path d="M668,229 L732,229 L732,194" fill="none" stroke="currentColor" marker-end="url(#pmarw)"/>
+<rect x="24" y="284" width="812" height="156" rx="10" fill="#f8fafc" stroke="#e2e8f0"/>
+<text x="40" y="308" text-anchor="start" font-size="11" font-weight="700" letter-spacing="1.2" fill="#64748b">2 · CONVERT IN THE TARGET CLOUD</text>
+<text x="782" y="272" text-anchor="end" font-size="10.5" fill="#475569">presigned URL</text>
+<path d="M790,191 L790,330" fill="none" stroke="currentColor" marker-end="url(#pmarw)"/>
+<rect x="576" y="334" width="240" height="60" rx="7" fill="#ffffff" stroke="#cbd5e1"/>
+<text x="696" y="358" font-size="12">Target-cloud runner</text>
+<text x="696" y="375" font-size="10" fill="#475569">ECS · ACI · Cloud Run</text>
+<text x="410" y="344" font-size="10.5" fill="#475569">qemu-img convert</text>
+<text x="410" y="356" font-size="10.5" fill="#475569">+ upload</text>
+<line x1="572" y1="366" x2="248" y2="366" stroke="currentColor" marker-end="url(#pmarw)"/>
+<path d="M44,344 A100,10 0 0 1 244,344 V384 A100,10 0 0 1 44,384 Z" fill="#f1f5f9" stroke="#94a3b8"/>
+<path d="M44,344 A100,10 0 0 0 244,344" fill="none" stroke="#94a3b8"/>
+<text x="144" y="366" font-size="11.5" font-weight="600">Target-cloud staging</text>
+<text x="144" y="379" font-size="10" fill="#475569">bucket or container</text>
+<text x="430" y="426" font-size="10.5" fill="#475569">The convert runs inside the target cloud — image bytes never transit the dashboard container.</text>
+<rect x="24" y="456" width="812" height="174" rx="10" fill="#f8fafc" stroke="#e2e8f0"/>
+<text x="40" y="480" text-anchor="start" font-size="11" font-weight="700" letter-spacing="1.2" fill="#64748b">3 · IMPORT AND RECORD</text>
+<text x="152" y="448" text-anchor="start" font-size="10.5" fill="#475569">the import API reads the staged object</text>
+<path d="M144,396 L144,504" fill="none" stroke="currentColor" marker-end="url(#pmarw)"/>
+<rect x="44" y="508" width="204" height="84" rx="7" fill="#ffffff" stroke="#cbd5e1"/>
+<text x="146" y="528" font-size="11" font-weight="600">Cloud import API</text>
+<text x="146" y="545" font-size="9.5" fill="#475569">ec2.ImportImage</text>
+<text x="146" y="558" font-size="9.5" fill="#475569">images.create_or_update</text>
+<text x="146" y="571" font-size="9.5" fill="#475569">images.insert</text>
+<text x="289" y="541" font-size="10" fill="#475569">creates</text>
+<line x1="252" y1="550" x2="326" y2="550" stroke="currentColor" marker-end="url(#pmarw)"/>
+<rect x="330" y="508" width="204" height="84" rx="7" fill="#eff6ff" stroke="#1d4ed8"/>
+<text x="432" y="534" font-size="11.5" font-weight="600" fill="#1d4ed8">Native image</text>
+<text x="432" y="552" font-size="10" fill="#1d4ed8">AMI · Managed Image</text>
+<text x="432" y="566" font-size="10" fill="#1d4ed8">Custom Image</text>
+<text x="577" y="541" font-size="10" fill="#475569">recorded as</text>
+<line x1="538" y1="550" x2="616" y2="550" stroke="currentColor" marker-end="url(#pmarw)"/>
+<rect x="620" y="508" width="196" height="84" rx="7" fill="#ffffff" stroke="#cbd5e1"/>
+<text x="718" y="530" font-size="11" font-weight="600">RegisteredImage</text>
+<text x="718" y="545" font-size="11" font-weight="600">.promotions</text>
+<text x="718" y="564" font-size="10" fill="#475569">one row per target cloud</text>
+<text x="430" y="614" font-size="10.5" fill="#475569">The hub artefact stays the source of truth; each target cloud adds its own promotion row.</text>
+</g>
+</svg>
+</div>
+<figcaption style="font-size:.85rem;color:#475569;margin-top:.5rem">The promotion path, from Packer build to <code>RegisteredImage.promotions</code>. Two edges reach the hub: when the build cloud already matches the hub backend the native export <em>is</em> the hub upload and nothing is copied; when it does not, <code>storage_service.copy()</code> moves the VHD across and deletes the staging copy.</figcaption>
+</figure>
 
 ## Build → hub
 
