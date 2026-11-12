@@ -8,10 +8,10 @@ FROM mcr.microsoft.com/playwright/python:v1.64.1-noble
 # the robot never creates a virtualenv, and upgrading it left a copy the scan still found.
 # Dropping the package is not enough on its own. The base also ran `virtualenv venv`, which
 # leaves a seed cache under /root/.cache holding an UNPACKED pip wheel, and the scanner reads
-# that pip's _vendor/vendor.txt as if those were installed packages. That file, not this image,
-# is where the certifi, urllib3, msgpack and setuptools findings come from: the image has no
-# setuptools or msgpack at all, and the certifi and urllib3 it does have arrive with requests,
-# already past their advisories. 24 MB, and nothing reads it at run time.
+# that pip's vendored-dependency inventory as if those were packages of this image. The cache,
+# not this image, is where the certifi 2026.6.17, urllib3 2.7.0, msgpack 1.1.2 and setuptools
+# 70.3.0 findings came from; the certifi and urllib3 actually installed here arrive with
+# requests, already past their advisories. 24 MB, and nothing reads it at run time.
 # The distro's updated python3 ships a PEP 668 marker the base image did not have, which
 # makes every system-wide pip install refuse. This is a single-purpose image, so say so once.
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
@@ -26,19 +26,21 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Two leftovers the scan still blocks on once the seed cache is gone, neither of them
-# reachable by upgrading requirements.txt, because pip leaves an already-satisfying version
-# alone -- both have to be named:
-#   * filelock came in as virtualenv's dependency and outlived it (python-discovery still
-#     requires it, so it is upgraded rather than removed with the rest); 4.2.0 is a fixable HIGH.
-#   * pip's OWN _vendor/vendor.txt is read by the scanner as if those were installed packages.
-#     The base's pip 26.2.2 vendors msgpack 1.1.2 and urllib3 2.7.0, both fixable; 26.3 moved
-#     them to 1.2.4 and 2.8.0. The setuptools line it still carries is accepted in
-#     .trivyignore.yaml -- no setuptools is vendored or installed here, only pkg_resources.
-# Floors so the next security release is taken on the following build, filelock capped at the
-# next major. Do not add setuptools: every version in range vendors its own flagged
-# jaraco.context and wheel copies, which is a trade of one finding for two.
-RUN pip install --no-cache-dir --upgrade 'pip>=26.3' 'filelock>=4.2.1,<5'
+# filelock came in as virtualenv's dependency and outlived it -- python-discovery still
+# requires it, so it is upgraded rather than removed with the rest. 4.2.0 is a fixable HIGH,
+# and pip leaves an already-satisfying version alone, so the install above does not move it
+# however current requirements.txt is: it has to be named. A floor so the next security
+# release is taken on the following build, capped at the next major.
+RUN pip install --no-cache-dir --upgrade 'filelock>=4.2.1,<5'
+
+# Nothing is installed at run time -- the robot is a fixed set of wheels and runs as an
+# unprivileged uid -- so pip comes out once the installs above are done. It is the last
+# thing here carrying somebody else's dependency inventory: pip reports the libraries it
+# vendored, and the scanner reads that inventory as this image's own packages even where
+# the code is absent, which is how a setuptools finding reached an image whose
+# `import setuptools` raises ModuleNotFoundError. Taking pip out removes the inventory and
+# the vendored copies together, and leaves nothing that could install at run time.
+RUN python -m pip uninstall -y pip
 
 COPY robot ./robot
 

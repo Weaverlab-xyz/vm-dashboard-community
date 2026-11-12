@@ -16,15 +16,3 @@ vulnerabilities:
     paths:
       - "opt/walinuxagent-src/_vendor/setuptools/_vendor/wheel-0.45.1.dist-info/METADATA"
     statement: setuptools-internal vendored copy, used only for WALinuxAgent's setup.py inside the target VM image; no allowed setuptools ships a fixed one
-
-  # The UI robot's pip records what it vendored in pip/_vendor/vendor.txt, and the scanner
-  # reads that file as a package list. pip vendors `pkg_resources`, which ships in the
-  # setuptools distribution, so the manifest names setuptools even though neither setuptools
-  # nor the PackageIndex module this advisory is about is present: `import setuptools` in the
-  # image raises ModuleNotFoundError, and pip/_vendor has a pkg_resources directory and no
-  # setuptools one. Only pip's next release changes the pin. The rest of that manifest is kept
-  # current by the pip floor in runners/ui-robot/Dockerfile.
-  - id: CVE-2025-47273
-    paths:
-      - "usr/local/lib/python3.12/dist-packages/pip/_vendor/vendor.txt"
-    statement: pip vendors pkg_resources from the setuptools distribution and records it as setuptools; no setuptools module, and no PackageIndex, exists in this image
