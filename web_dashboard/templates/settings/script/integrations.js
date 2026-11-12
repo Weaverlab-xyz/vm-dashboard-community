@@ -66,6 +66,8 @@ function settingsIntegrations() {
         desc: 'Containerised agents inside private networks that poll out to this dashboard to discover on-premises Kubernetes clusters and databases. No inbound firewall rules. Adds an Agents page for registering and revoking them. Terminate TLS in front of the dashboard before enabling — this is the only API that serves callers outside your own network.' },
       { key: 'spiffe',       label: 'SPIFFE and SPIRE',         group: 'platform', hasConfig: true,  enabled: true, configOnly: true,
         desc: 'The dashboard\'s own SPIRE server, which remote agents attest to, and the dashboard\'s own SPIFFE identity, which AWS, Azure, GCP and Workload Credentials can trust instead of a stored key.' },
+      { key: 'feedback',     label: 'In-product feedback',      group: 'platform', hasConfig: true,  enabled: false,
+        desc: 'Puts a Send feedback button on every page, and on the POV access page a prospect sees. Each submission is saved here with the page, version and commit it came from, and -- with a GitHub token -- filed as an issue in a repository you name. With no token it hands the submitter a prefilled issue form to file themselves, so no credential is stored. Point it at a private repository if evaluation guests can submit.' },
       { key: 'mcp_server',   label: 'MCP Server',                group: 'platform', hasConfig: false, enabled: false,
         desc: 'Expose read-only dashboard tools to an MCP-compatible AI client (Claude Desktop, Claude Code, Cursor) at /mcp, authenticated with a Personal Access Token. Each tool returns only what the token owner could see in the UI. Off by default; turning it on serves an endpoint that reads your estate.' },
       { key: 'vm_spend_cap', label: 'VM spend caps', group: 'governance', hasConfig: false, enabled: false,
@@ -142,6 +144,7 @@ function settingsIntegrations() {
         const features = await API.get('/api/features');
         const map = {
           vmware: features.vmware,
+          feedback: features.feedback,
           password_safe: features.password_safe, pra: features.pra, epml: features.epml,
           portainer: features.portainer,
           ansible: features.ansible, entitle: features.entitle,

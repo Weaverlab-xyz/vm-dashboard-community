@@ -112,6 +112,56 @@ def _relative_link_extension(page: str):
     return _Ext()
 
 
+def _table_scroll_extension():
+    """Wrap every rendered ``<table>`` in a horizontally scrollable ``<div>``.
+
+    A Markdown table is as wide as its widest row needs to be, and a table will not lay
+    out narrower than its min-content width however hard you squeeze it. On a phone that
+    means the table pushes the whole page wider than the viewport, so the *page* scrolls
+    sideways and every paragraph on it drifts off-screen with the table. ``promotion.md``
+    did this: two tables laid out at 627px and 531px inside a 375px viewport.
+
+    The fix is the same shape as the one the hand-authored SVG figures use — put the wide
+    thing in its own scroll container so the figure scrolls instead of the page. Done here
+    rather than in ``_SHELL`` because ``overflow`` needs a box of its own: ``overflow-x``
+    on the ``<table>`` itself only works by making it ``display:block``, which forfeits
+    table layout (``width:100%`` stops filling, columns stop aligning across rows).
+
+    Authors write plain Markdown pipe tables and GitHub renders those natively, so nothing
+    in ``docs/`` has to know this exists.
+
+    Imports inside, so the module keeps its no-hard-dependency-on-markdown contract.
+    """
+    from xml.etree.ElementTree import Element
+
+    from markdown.extensions import Extension
+    from markdown.treeprocessors import Treeprocessor
+
+    class _Wrap(Treeprocessor):
+        def run(self, root):
+            # Snapshot the parents before mutating: replacing a child under the element
+            # an .iter() is standing on is how you skip siblings.
+            for parent in list(root.iter()):
+                for i, child in enumerate(list(parent)):
+                    if child.tag != "table":
+                        continue
+                    wrapper = Element("div", {"class": "table-scroll"})
+                    # The tail is the whitespace that followed the table, and it belongs
+                    # outside the new box, not inside it.
+                    wrapper.tail, child.tail = child.tail, None
+                    wrapper.append(child)
+                    parent[i] = wrapper
+
+    class _Ext(Extension):
+        def extendMarkdown(self, md):
+            # Any treeprocessor priority works — "tables" is a blockprocessor, so every
+            # <table> exists before this stage begins. Below docs_relative_links at 4 only
+            # to keep the two in a readable order.
+            md.treeprocessors.register(_Wrap(md), "docs_table_scroll", 3)
+
+    return _Ext()
+
+
 def _render_markdown(text: str, page: str | None = None) -> str:
     """Render Markdown → HTML. Imported lazily so a missing ``markdown`` lib can't
     crash app startup — the docs renderer is non-essential; it degrades to a
@@ -126,7 +176,8 @@ def _render_markdown(text: str, page: str | None = None) -> str:
         import markdown as _md
         from markdown.extensions.toc import TocExtension
         extensions = ["fenced_code", "tables", "sane_lists",
-                      TocExtension(slugify=_GitHubSlugger())]
+                      TocExtension(slugify=_GitHubSlugger()),
+                      _table_scroll_extension()]
         if page is not None:
             extensions.append(_relative_link_extension(page))
         return _md.markdown(text, extensions=extensions)
@@ -574,6 +625,11 @@ _SHELL = """<!doctype html>
   pre {{ background:#0f172a; color:#e2e8f0; padding:1rem; border-radius:8px; overflow:auto; }}
   pre code {{ background:none; padding:0; color:inherit; }}
   table {{ border-collapse:collapse; width:100%; margin:1rem 0; }}
+  /* Tables arrive wrapped by _table_scroll_extension so a wide one scrolls itself
+     instead of widening the page on a phone. The wrapper carries the vertical margin;
+     the table inside it drops its own so the two don't stack. */
+  .table-scroll {{ overflow-x:auto; margin:1rem 0; }}
+  .table-scroll table {{ margin:0; }}
   th,td {{ border:1px solid #e2e8f0; padding:.5rem .7rem; text-align:left; vertical-align:top; }}
   th {{ background:#f1f5f9; }}
   blockquote {{ border-left:3px solid #cbd5e1; margin:1rem 0; padding:.25rem 1rem; color:#475569; }}

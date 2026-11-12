@@ -1,4 +1,4 @@
-"""Operational state models: ephemeral state, notification endpoints and deliveries, the audit log, config apply state."""
+"""Operational state models: ephemeral state, notification endpoints and deliveries, the audit log, config apply state, in-product feedback."""
 import json
 import uuid
 from sqlalchemy import Column, String, Integer, DateTime, Boolean, Text, UniqueConstraint
@@ -209,3 +209,69 @@ class ConfigApplyState(Base):
     job_id = Column(String(36))
 
     __table_args__ = (UniqueConstraint("target", "playbook_ref", name="uq_apply_target_playbook"),)
+
+
+class FeedbackSubmission(Base):
+    """One piece of feedback somebody sent from inside the product.
+
+    The row is written BEFORE the GitHub call, with ``status="pending"``, and updated
+    to ``filed`` / ``composed`` / ``error`` after. That order is doing two jobs:
+
+    * **It is the rate-limit counter.** ``services/feedback_guard`` counts rows in a
+      sliding window rather than keeping a tally, for the reason ``agent_guard`` gives
+      about the nonce table — a counter in process memory gives each of the two gunicorn
+      workers its own private allowance, so the cap silently doubles. Writing first also
+      means a failing token does not buy unlimited retries.
+    * **It makes a lost issue impossible.** Filing first and recording second has a
+      window where the issue exists on GitHub and nothing here knows its number.
+
+    ``body`` is the FULL text even when the compose-mode deep link had to carry a
+    truncated copy, so nothing the submitter typed is lost to a URL length limit.
+
+    There is no migration entry for this table and none is needed: ``bootstrap.init_db``
+    runs ``Base.metadata.create_all`` with checkfirst, which creates a wholly new table
+    on an existing database. ``schema_migrations`` is for columns on tables that already
+    exist.
+    """
+    __tablename__ = "feedback_submissions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # Indexed because every read of this table is "mine, newest first" or a window
+    # count for the throttle, and both sort or filter on it.
+    created_at = Column(DateTime, default=utcnow, nullable=False, index=True)
+
+    # The principal, as a username string. Indexed: the per-user throttle counts on it.
+    submitted_by = Column(String(150), nullable=False, index=True)
+    # "user" | "accessor". A POV guest's feedback reads differently from an SE's, and
+    # without this the only way to tell them apart is to go looking in the users table.
+    submitter_kind = Column(String(20), nullable=False, default="user")
+    # Set only for an accessor, from api/pov_accessor._accessor_env -- which POV the
+    # prospect was looking at when they said it.
+    pov_env_id = Column(String(36))
+
+    category = Column(String(32), nullable=False, default="other")   # bug | idea | docs | other
+    title = Column(String(300), nullable=False)
+    body = Column(Text, nullable=False)
+
+    # Auto-captured context. Read SERVER-side (build_provenance.app_version,
+    # feature_flags.install_profile) -- only page_path comes from the browser, because
+    # it labels a report and governs nothing.
+    page_path = Column(String(500))
+    app_version = Column(String(64))
+    commit = Column(String(64))
+    instance_profile = Column(String(20))
+
+    # "direct" | "compose" -- which mode was in force when this was submitted.
+    mode = Column(String(10), nullable=False, default="direct")
+    github_issue_number = Column(Integer)
+    github_issue_url = Column(Text)
+    # Last known "open"/"closed", only ever set by the optional worker poll. Empty in
+    # the shipped slice, where the page links out instead of polling.
+    issue_state = Column(String(20))
+    checked_at = Column(DateTime)
+
+    # pending | filed | composed | error
+    status = Column(String(20), nullable=False, default="pending")
+    # Operator-facing reason the file failed. Never GitHub's raw body: that can carry
+    # repo names and token scopes a prospect has no business reading.
+    error_message = Column(Text)

@@ -13,6 +13,7 @@ may do what, the machines that call it, its secrets and audit record, and what i
 | [Audit Log](admin/audit-log.md) | you need to show who did what, or to satisfy yourself that the record has not been edited |
 | [Health](admin/health.md) | you want to know whether what the dashboard depends on is working, or why an area shows as degraded |
 | [Notifications](admin/notifications.md) | you want to hear about expiring resources and failed jobs without opening the dashboard |
+| [Feedback](admin/feedback.md) | you want the people using the dashboard, including a prospect in an evaluation, to be able to tell you what is wrong from the page they are on |
 
 Related:
 - [Platform](platform.md): single sign-on, the dashboard's own identity in place of stored keys, and

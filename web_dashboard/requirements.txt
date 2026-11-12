@@ -28,7 +28,7 @@ pydantic-settings>=2.6.1
 # .pip-audit-ignore for why it, and its ecdsa dependency, are accepted.
 python-jose[cryptography]==3.5.0
 bcrypt==4.2.1
-fido2>=1.1.2
+fido2>=2.2.1
 msal>=1.39.0
 
 # File uploads and forms
@@ -108,7 +108,7 @@ azure-functions>=1.21,<2
 # Vault secret + Usage API access in services/oci_service.py; the DB/OKE
 # provisioning goes through the oracle/oci Terraform provider. Loose floor per
 # CONTRIBUTING; the package bundles its own signing/crypto deps.
-oci>=2.120.0
+oci>=2.190.0
 
 # Async HTTP client (Portainer CE API, Ollama)
 # The old <0.28 bound existed for the TestClient in starlette 0.36, which passed httpx
