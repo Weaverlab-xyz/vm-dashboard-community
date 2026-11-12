@@ -14,7 +14,7 @@
 #
 # Build:  docker build -t <registry>/dash-spire:1 examples/cloud-spire
 # Guide:  docs/platform/spiffe.md#on-a-managed-container-runtime
-FROM ghcr.io/spiffe/spire-server:1.15.5@sha256:584a9c5cc95b9457f5033e7e4488d603fffe5ec48a80c4dba14b05c5e1c2c384 AS spire
+FROM ghcr.io/spiffe/spire-server:1.16.0@sha256:ff546f4c62dafc479a0cd79eae9a7b6df2975754d75efd31706098e0d7548837 AS spire
 
 FROM busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
 
