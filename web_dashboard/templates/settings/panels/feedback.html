@@ -1,0 +1,129 @@
+{# Settings slide-over panel "feedback". Included by settings.html inside settingsPage(); the state it binds (panelCfg, panelOpen, …) lives in that page's script. #}
+      <template x-if="panel?.key === 'feedback' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Puts a <strong>Send feedback</strong> button on every page. A submission is
+            always saved here; whether it also becomes a GitHub issue depends on the two
+            fields below.
+            See <a href="/docs/admin/feedback" class="text-blue-600 underline">the feedback doc</a>.
+          </p>
+
+          {# The mode is derived, not configured, so it is stated rather than chosen. This
+             block is the single most useful thing in the panel: it answers "what will
+             actually happen when somebody clicks the button" without making the operator
+             infer it from two text inputs. #}
+          <div class="rounded-lg border p-3 text-[11px]"
+               :class="!panelCfg.feedback_github_repo
+                         ? 'border-amber-200 bg-amber-50 text-amber-800'
+                         : 'border-blue-200 bg-blue-50 text-blue-800'">
+            <template x-if="!panelCfg.feedback_github_repo">
+              <span>
+                <span class="font-medium">No destination set.</span>
+                The button stays hidden until you name a repository below, however the
+                toggle is set.
+              </span>
+            </template>
+            <template x-if="panelCfg.feedback_github_repo && (panelCfg._secrets_set || []).includes('feedback_github_token')">
+              <span>
+                <span class="font-medium">Direct mode.</span>
+                The dashboard files the issue itself and shows the submitter its number
+                straight away.
+              </span>
+            </template>
+            <template x-if="panelCfg.feedback_github_repo && !(panelCfg._secrets_set || []).includes('feedback_github_token')">
+              <span>
+                <span class="font-medium">Compose mode.</span>
+                With no token, the dashboard hands the submitter a prefilled GitHub issue
+                form to file under their own account. Nothing is filed by the server and
+                no credential is stored here.
+              </span>
+            </template>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Repository</label>
+            <input type="text" x-model="panelCfg.feedback_github_repo"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="owner/name">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Deliberately blank out of the box. <strong>Point this at a private
+              repository</strong> if evaluation guests can submit &mdash; a GitHub issue in
+              a public repo is world-readable, and a prospect may well name their own
+              company in the box. The form tells the submitter which it is.
+            </p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">GitHub token</label>
+            <input type="password" x-model="panelCfg.feedback_github_token" autocomplete="new-password"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   :placeholder="(panelCfg._secrets_set || []).includes('feedback_github_token')
+                                 ? '•••••••• stored — leave blank to keep'
+                                 : 'Leave blank for compose mode'">
+            <p class="text-[11px] text-gray-400 mt-1">
+              A fine-grained PAT with <span class="font-mono">Issues: read and write</span>
+              on that one repository. Nothing else is needed. Leaving this blank is a
+              supported configuration, not a half-finished one.
+            </p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Labels</label>
+            <input type="text" x-model="panelCfg.feedback_labels"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="user-feedback">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Comma-separated, put on every issue this files. A label that does not exist
+              in the repository will make GitHub reject the issue, so create it first.
+            </p>
+          </div>
+
+          <label class="flex items-start gap-2">
+            <input type="checkbox" x-model="panelCfg.feedback_guest_submissions"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            <span class="text-sm text-gray-700">
+              <span class="font-medium">Let evaluation guests submit</span>
+              <span class="block text-[11px] text-gray-400 mt-0.5">
+                Adds the button to the POV access page a prospect sees. Their submission is
+                tagged with the POV it came from. This is the feedback that is hardest to
+                get any other way &mdash; and the reason the repository above should be
+                private.
+              </span>
+            </span>
+          </label>
+
+          <div class="grid grid-cols-3 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Per person</label>
+              <input type="number" min="0" x-model.number="panelCfg.feedback_max_per_user"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Instance-wide</label>
+              <input type="number" min="0" x-model.number="panelCfg.feedback_max_global"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Window (hours)</label>
+              <input type="number" min="1" x-model.number="panelCfg.feedback_window_hours"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+          </div>
+          <p class="text-[11px] text-gray-400 -mt-2">
+            A sliding window, counted off the submissions themselves &mdash; not a lockout, so
+            it lifts on its own and the response says when. <span class="font-mono">0</span>
+            removes a cap.
+          </p>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Issue state polling (minutes)</label>
+            <input type="number" min="0" x-model.number="panelCfg.feedback_poll_minutes"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <p class="text-[11px] text-gray-400 mt-1">
+              <span class="font-mono">0</span> &mdash; the shipped default &mdash; means the
+              dashboard records the issue link and does not ask GitHub about it again. Raise
+              it only if you want open/closed shown in-app.
+            </p>
+          </div>
+        </div>
+      </template>
