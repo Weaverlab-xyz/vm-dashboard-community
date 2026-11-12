@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "partials/tab_bar.html" import tab_bar %}
+{% from "partials/collapsible.html" import collapsible %}
 {% block title %}POV Environments{% endblock %}
 
 {#
@@ -114,6 +115,34 @@
   </div>
 
   <div x-show="activeTab === 'build'" x-cloak role="tabpanel" class="space-y-6">
+
+  {# ── How a POV goes ────────────────────────────────────────────────────────────
+     A presenter with no POVs lands on this tab (see ensureTab), and until now the first
+     thing they saw was a name field. Three phases, named as /docs/architecture names them,
+     and the two pages worth opening before pressing Build.
+
+     Open only while they own none: once somebody has built a POV this is a row of text
+     above the control they came for, so it collapses and stays wherever they put it for
+     the rest of the session. #}
+  <div class="bg-white rounded-xl border border-gray-200">
+    {% call collapsible("howOpen", "How a POV goes", hint="— three phases",
+                        button_class="px-4 py-3 text-sm font-semibold text-gray-700",
+                        body_class="px-4 pb-4 text-sm text-gray-600 space-y-2") %}
+      <p><span class="font-medium text-gray-800">Build</span> — name it, pick a blueprint,
+        tick the products this evaluation tests and choose the customer's tenant for each.</p>
+      <p><span class="font-medium text-gray-800">Set up</span> — the POV opens on its
+        <span class="font-medium">Setup</span> tab and lists every step in order, one button
+        each, with the next one highlighted. Each step links the page that explains it.</p>
+      <p><span class="font-medium text-gray-800">Run and retire</span> — book a warm-up
+        before the call, share the link with the customer, and let the expiry timer reap it.</p>
+      <p class="pt-1 flex flex-wrap gap-x-4 gap-y-1">
+        <a href="/docs/profiles/pov/first-pov" target="_blank" rel="noopener noreferrer"
+           class="text-blue-600 hover:underline">Your first POV, end to end →</a>
+        <a href="/docs/architecture" target="_blank" rel="noopener noreferrer"
+           class="text-blue-600 hover:underline">The whole thing in one diagram →</a>
+      </p>
+    {% endcall %}
+  </div>
 
   {# The platform toggle and Build by hand live here, not in the page header: both only
      steer a BUILD, and neither touches the Mine / Past lists. #}
@@ -1292,6 +1321,11 @@ function povPage(tabSlugs) {
     loading: true,
     creating: false,
     showCreate: false,
+    // The "How a POV goes" panel above the Build form. Starts closed and is opened once,
+    // after the first load, for somebody who owns no POV yet -- so a returning presenter
+    // never sees it pop open and collapse again, and whatever either of them does with it
+    // then holds for the rest of the session.
+    howOpen: false,
     // The blueprint strip: the name, the chosen card, and the tenants it builds with.
     // `<kind>_field` keys for the same reason as `form`'s. Its own object so picking a
     // card never touches the by-hand form, and the reverse.
@@ -1648,6 +1682,10 @@ function povPage(tabSlugs) {
       this.ensureTab();
       // A first visit with nothing to list opens on Build; a bookmark's fragment wins.
       if (!window.location.hash && this.canProvision && !this.managed.length) this.select('build', false);
+      // Same condition, one decision later: the presenter who has built nothing is the
+      // one the orientation panel is for, so it starts open for them and closed for
+      // everybody else. Set once, here, and never re-seeded by a later load().
+      this.howOpen = this.canProvision && !this.managed.length;
       // /pov?edit=rb&env=<id> is where the POV detail page's Setup tab sends the Resource
       // Broker step: that form (installer picker, zone, key) lives here, so open it.
       const q = new URLSearchParams(window.location.search);

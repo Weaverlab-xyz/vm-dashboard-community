@@ -55,17 +55,9 @@ the UI can degrade visibly rather than offering a button that fails.
 
 Open a POV and go to its **Setup** tab. A POV that is not finished opens there by default,
 and every row on the POV list has a **Continue setup →** link to it. The tab lists every
-step in order:
-
-1. environment running
-2. every guest's OS known
-3. control node agent enrolled
-4. PRA Gateway
-5. Resource Broker
-6. Entitle agent
-7. VMs wired
-8. Password Safe credentials in PRA
-9. customer share link
+step in order; the steps themselves, and what each one is for, are in
+[Your first POV, end to end](first-pov.md#set-it-up-step-by-step), which is the one place
+that enumerates them.
 
 Each step has one button. The step to do next is highlighted. A step that depends on one
 that is not finished yet is greyed out and names the step to finish first. Only a real
@@ -92,6 +84,7 @@ These are read-only. To edit them, use the controls on the POV list page.
 
 | Page | What's in it |
 |---|---|
+| [Your first POV, end to end](first-pov.md) | For a presenter with a login: build it, walk the setup ladder, get ready for the call, and retire it. Start here. |
 | [Standing up a POV instance](standing-one-up.md) | Its own JWT key, its own env file, and the registry of customer tenants it resolves against. |
 | [Running POVs on a public cloud](public-cloud.md) | Choosing clouds, what gets created, what it costs, and the per-provider differences. |
 | [The Gateway and the Resource Broker](gateway-and-broker.md) | The outbound-dialling Gateway that brokers sessions in, and the Resource Broker that lets Password Safe reach the guests. |
