@@ -55,7 +55,15 @@ FROM python:3.12-slim@sha256:e695ab189fa2d082b1c61c69a6b888a5adeca61ceeccad107b1
 # appliance in userspace, so it needs a kernel package and works in an
 # unprivileged container (no /dev/kvm) via the TCG "direct" backend.
 # linux-image is arch-matched so the multi-arch (amd64 + arm64) build works.
+#
+# The --only-upgrade of zlib1g is Debian security update DSA-6613-1 (CVE-2026-76844,
+# CVE-2026-85091, both HIGH), fixed in trixie-security as
+# 1:1.3.dfsg+really1.3.1-1+deb13u1. The pinned base still ships the vulnerable
+# 1:1.3.dfsg+really1.3.1-1+b1 and so fails scripts/ci/trivy_image.sh; bumping the digest
+# does not help, because the tag's current image is built from the same Debian snapshot.
+# See the root Dockerfile for the full note.
 RUN apt-get update \
+    && apt-get install -y --no-install-recommends --only-upgrade zlib1g \
     && apt-get install -y --no-install-recommends \
          qemu-utils \
          ca-certificates \
