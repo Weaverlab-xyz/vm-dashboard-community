@@ -2294,6 +2294,51 @@ class NotificationsFeatureConfig(BaseModel):
     notify_retention_days: int = 30
 
 
+class FeedbackFeatureConfig(BaseModel):
+    """In-product feedback: the button, and where a submission goes.
+
+    The toggle owns `feedback_enabled`. What the feature then DOES is derived from the
+    two fields below rather than configured, and the derivation is the whole design:
+
+      * repo + token  -> DIRECT. The server files the issue and the submitter gets the
+                         number back in the same response.
+      * repo, no token -> COMPOSE. The server hands back a prefilled
+                         github.com/.../issues/new link and files nothing. No credential
+                         exists on the instance, which is the only honest shape for a
+                         public release -- a self-hoster files it under their own
+                         account.
+      * no repo       -> off, whatever the toggle says.
+
+    `feedback_github_repo` is deliberately BLANK by default rather than pointing at the
+    upstream repository. A default would be convenient and would also mean that an
+    operator who pastes in a token without changing the repo files a prospect's wording
+    into a world-readable tracker. Choosing the destination is a decision somebody should
+    have to make; the panel shows whether the chosen repo is private.
+
+    `feedback_github_token` is a secret: it is in secret_hygiene.SECRET_KEYS, so
+    _read_feature returns "" for it and reports it through `_secrets_set` instead, and
+    a blank on save keeps the stored value rather than clearing it.
+
+    Every numeric field is annotated plain `int`, never Optional[int]: _read_feature
+    keys off `info.annotation is int`, so an Optional reads back as "" for an unset key
+    and 422s the whole panel on save.
+    """
+    enabled: bool = False
+    feedback_github_repo: str = ""
+    feedback_github_token: str = ""
+    feedback_labels: str = "user-feedback"
+    # Whether a POV evaluation guest may submit at all. On by default: they are the
+    # audience whose feedback is hardest to get any other way.
+    feedback_guest_submissions: bool = True
+    # Sliding-window caps counted off the submissions table itself. 0 disables a cap.
+    feedback_max_per_user: int = 5
+    feedback_max_global: int = 50
+    feedback_window_hours: int = 24
+    # Issue-state polling, worker-side. 0 = off, which is the shipped default: the row
+    # keeps the issue URL and the page links out to GitHub.
+    feedback_poll_minutes: int = 0
+
+
 class WorkloadCredentialsFeatureConfig(BaseModel):
     """Workload Credentials, a BeyondTrust integration (Settings -> Integrations ->
     BeyondTrust).
@@ -2408,6 +2453,7 @@ _FEATURE_MODELS = {
     "admission_control": AdmissionControlFeatureConfig,
     "resource_expiry":   ResourceExpiryFeatureConfig,
     "notifications":  NotificationsFeatureConfig,
+    "feedback":       FeedbackFeatureConfig,
     "multi_region":   MultiRegionFeatureConfig,
     "oidc":           OidcFeatureConfig,
     "cloud_functions": CloudFunctionsFeatureConfig,
