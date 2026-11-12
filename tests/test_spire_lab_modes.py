@@ -264,9 +264,9 @@ def test_the_helm_stage_passes_pinned_chart_versions():
     assert play["spire_crds_chart_version"] == svc.SPIRE_CRDS_CHART_VERSION
     # 0.30.2 ships SPIRE 1.15.3, so the play sets its images: the three modes run the
     # same server.
-    assert _play("spire-server-install.yml")["vars"]["spire_version"] == "1.15.5"
-    assert _play("spire-docker-server.yml")["vars"]["spire_version"] == "1.15.5"
-    assert play["spire_version"] == "1.15.5"
+    assert _play("spire-server-install.yml")["vars"]["spire_version"] == "1.16.0"
+    assert _play("spire-docker-server.yml")["vars"]["spire_version"] == "1.16.0"
+    assert play["spire_version"] == "1.16.0"
     assert v["spire_version"] == svc._install_vars(_row())["spire_version"]
 
 

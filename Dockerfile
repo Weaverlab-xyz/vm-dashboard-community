@@ -16,7 +16,7 @@
 # Only the client half is used here — this image never runs a server. Statically linked,
 # so it runs on the slim base unchanged. Same pinned digest as docker-compose.spire.yml
 # and the sidecar image; tests/test_spire_overlay.py keeps all three in step.
-FROM ghcr.io/spiffe/spire-server:1.15.5@sha256:584a9c5cc95b9457f5033e7e4488d603fffe5ec48a80c4dba14b05c5e1c2c384 AS spire
+FROM ghcr.io/spiffe/spire-server:1.16.0@sha256:ff546f4c62dafc479a0cd79eae9a7b6df2975754d75efd31706098e0d7548837 AS spire
 
 FROM python:3.12-slim@sha256:e695ab189fa2d082b1c61c69a6b888a5adeca61ceeccad107b1ed2a125721a9e AS base
 

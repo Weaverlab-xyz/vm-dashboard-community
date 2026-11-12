@@ -61,8 +61,8 @@ ANSIBLE_IMAGE = "chrweav/ansible-winrm:latest"
 DB_IMAGE = "chrweav/ansible-cloud:latest"
 # The SPIRE pair, pinned by digest exactly as examples/remote-agent/docker-compose.spire.yml
 # pins them. A tag here would let a registry change what runs beside the agent.
-SPIRE_AGENT_IMAGE = ("ghcr.io/spiffe/spire-agent:1.15.5@sha256:"
-                     "3652c732b0f0d36f4dd78394230a1b1cd0ddcc29548a46c67a996b1a78c14481")
+SPIRE_AGENT_IMAGE = ("ghcr.io/spiffe/spire-agent:1.16.0@sha256:"
+                     "ab3a8ce70435374cc5d84c81eabf0278dc046ddbc0a736d59694ba9e5975b1b6")
 SPIFFE_HELPER_IMAGE = ("ghcr.io/spiffe/spiffe-helper:0.12.1@sha256:"
                        "49a7b1aca5b497bb4c1ca1ed1f15397bdf9c9cafb8036df4b963b566bd234f7f")
 # The agent image is pulled at boot, so the agent always runs a build at least this new.
