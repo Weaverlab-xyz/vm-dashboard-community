@@ -444,6 +444,33 @@ NEEDS = {
     "share":           ("environment",),
 }
 
+# The page that explains each step, as a path under docs/ with no `.md` — the spelling
+# `UseCase.docs` uses. A fragment is allowed and is how a step points at its own section of
+# a page covering several.
+#
+# A dict rather than a fourth element in STEPS: the resolvers' `(state, detail, action)`
+# contract is unpacked directly by `describe` and by the tests, and a doc path is not a
+# function of the row anyway — it is a property of the step, which is what NEEDS already is.
+#
+# Two steps point at the presenter walkthrough rather than at a deeper page. `broker`
+# because the control node is documented twice, once per platform, and a static map can
+# only name one — the walkthrough's section is the neutral answer and links on to both.
+# `use_cases` because the only other page on it is a design note written for implementers.
+_STEP_DOCS = {
+    "use_cases":       "profiles/pov/first-pov#choose-the-use-cases",
+    "environment":     "profiles/pov/lifecycle#warming-a-pov-up-for-a-demo",
+    "guest_os":        "profiles/pov/gateway-and-broker#telling-the-dashboard-what-a-guest-runs",
+    "broker":          "profiles/pov/first-pov#enrol-the-control-node-agent",
+    "gateway":         "profiles/pov/gateway-and-broker#the-pov-gateway",
+    "rb_installer":    "profiles/pov/gateway-and-broker#the-resource-broker",
+    "resource_broker": "profiles/pov/gateway-and-broker#the-resource-broker",
+    "entitle_agent":   "profiles/pov/wiring#the-entitle-agent",
+    "wireup":          "profiles/pov/wiring",
+    "pra_ps":          "profiles/pov/ps-runbook#password-safe-credentials-in-pra",
+    "ot_adapter":      "profiles/pov/demo-cells#just-in-time-hmi-access-through-entitle",
+    "share":           "profiles/pov/customer-access/share-link",
+}
+
 # A dependency in one of these no longer holds anything up.
 _SETTLED = (DONE, SKIPPED, CONFIGURED)
 
@@ -463,7 +490,10 @@ def describe(parts: dict) -> dict:
     for key, label, resolve in STEPS:
         state, detail, action = resolve(parts)
         step = {"key": key, "label": label, "state": state,
-                "detail": detail, "action": action, "job_id": ""}
+                "detail": detail, "action": action, "job_id": "",
+                # `.get` so a step added without a guide serves "" and the row still
+                # renders; tests/test_pov_setup_step_docs is what keeps the map complete.
+                "docs": f"/docs/{_STEP_DOCS[key]}" if _STEP_DOCS.get(key) else ""}
         job_key = _JOB_KEYS.get(key)
         if job_key and state == RUNNING:
             step["job_id"] = str(parts.get(job_key) or "")

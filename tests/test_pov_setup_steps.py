@@ -116,7 +116,7 @@ def test_the_ladder_is_the_dependency_order_and_every_step_appears_once():
     # Every step carries the full contract, so no template has to guard on absence.
     for step in result["steps"]:
         assert set(step) == {"key", "label", "state", "detail", "action", "job_id",
-                             "locked", "locked_by"}, step
+                             "locked", "locked_by", "docs"}, step
         assert step["label"], f"{step['key']} has no label"
 
 

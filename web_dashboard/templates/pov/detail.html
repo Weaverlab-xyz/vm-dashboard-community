@@ -133,7 +133,13 @@
            settled is greyed with the step to finish first named. -->
       <div x-show="tab === 'setup'" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
         <div class="flex items-baseline justify-between mb-4">
-          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Set up this POV</h2>
+          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Set up this POV
+            <!-- The whole ladder in prose, for somebody walking it for the first time.
+                 Each step below also links the page for that step on its own. -->
+            <a href="/docs/profiles/pov/first-pov#set-it-up-step-by-step"
+               target="_blank" rel="noopener noreferrer"
+               class="ml-2 normal-case tracking-normal font-normal text-xs text-blue-600 hover:underline">Guide →</a>
+          </h2>
           <p class="text-xs text-gray-500"
              x-text="(env.setup ? env.setup.settled : 0) + ' of ' + (env.setup ? env.setup.total : 0) + ' settled'
                      + (env.setup && env.setup.busy ? ' · working…' : '')"></p>
@@ -187,6 +193,12 @@
                     <span :class="toneClass(f.tone)" x-text="f.text"></span>
                   </template>
                 </p>
+                <!-- What this step IS, for a presenter meeting it for the first time. The
+                     path comes from pov_setup_steps._STEP_DOCS, already /docs/-prefixed
+                     there — so tests/test_app_docs_links.py cannot see it, and
+                     tests/test_pov_setup_step_docs.py is what keeps it resolving. -->
+                <a x-show="s.docs" :href="s.docs" target="_blank" rel="noopener noreferrer"
+                   class="inline-block mt-1 text-[11px] text-blue-600 hover:underline">Guide →</a>
                 <!-- The UI robot: logs into Password Safe / PRA in a browser on the control
                      node for the two things their APIs cannot do. Its logins are write-only:
                      the page learns only which are stored, never their values. -->

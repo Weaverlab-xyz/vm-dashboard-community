@@ -1,13 +1,13 @@
 # POV architecture and workflow
 
-> **Audience:** operator · **Profile:** `pov` · **Read this when:** you are standing up your first POV, or explaining to somebody else what one is made of.
+> **Audience:** operator · **Profile:** `pov` · **Read this when:** you want the shape of the whole thing at once, or are explaining to somebody else what a POV is made of.
 
 Part of [A POV Instance](profiles/pov/README.md). One page for the shape of the whole thing:
 what builds a POV, what wires it, and what retires it.
 
 <figure style="margin:2rem 0">
 <div style="overflow-x:auto">
-<svg viewBox="0 0 860 660" role="img" aria-label="A POV's life in three phases: it is built on a lab platform against its own BeyondTrust tenants, set up in nine ordered steps of which three are optional, then run for the call and reaped afterwards." style="width:100%;min-width:720px;height:auto;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif">
+<svg viewBox="0 0 860 660" role="img" aria-label="A POV's life in three phases: it is built on a lab platform against its own BeyondTrust tenants, set up in an ordered chain of steps with a row of optional ones hanging off it, then run for the call and reaped afterwards." style="width:100%;min-width:720px;height:auto;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif">
 <defs>
 <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="currentColor"/></marker>
 <marker id="arwd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#94a3b8"/></marker>
@@ -34,46 +34,56 @@ what builds a POV, what wires it, and what retires it.
 <text x="686" y="140" font-size="11.5" font-weight="600">This POV&#39;s tenants</text>
 <text x="686" y="156" font-size="10" fill="#475569">PRA · Password Safe · Entitle</text>
 <rect x="24" y="200" width="812" height="262" rx="10" fill="#f8fafc" stroke="#e2e8f0"/>
-<text x="40" y="222" text-anchor="start" font-size="11" font-weight="700" letter-spacing="1.2" fill="#64748b">2 · SET UP — NINE STEPS, IN ORDER</text>
-<rect x="44" y="244" width="104" height="50" rx="7" fill="#ffffff" stroke="#cbd5e1"/>
-<text x="96" y="264" font-size="10.5">1 · Environment</text>
-<text x="96" y="278" font-size="10.5">running</text>
-<line x1="152" y1="269" x2="172" y2="269" stroke="currentColor" marker-end="url(#arw)"/>
-<rect x="176" y="244" width="104" height="50" rx="7" fill="#ffffff" stroke="#cbd5e1"/>
-<text x="228" y="264" font-size="10.5">2 · Guest OS</text>
-<text x="228" y="278" font-size="10.5">known</text>
-<line x1="284" y1="269" x2="304" y2="269" stroke="currentColor" marker-end="url(#arw)"/>
-<rect x="308" y="244" width="104" height="50" rx="7" fill="#ffffff" stroke="#cbd5e1"/>
-<text x="360" y="264" font-size="10.5">3 · Control node</text>
-<text x="360" y="278" font-size="10.5">agent enrolled</text>
-<line x1="416" y1="269" x2="436" y2="269" stroke="currentColor" marker-end="url(#arw)"/>
-<rect x="440" y="244" width="104" height="50" rx="7" fill="#ffffff" stroke="#cbd5e1"/>
-<text x="492" y="264" font-size="10.5">4 · PRA</text>
-<text x="492" y="278" font-size="10.5">Gateway</text>
-<line x1="548" y1="269" x2="568" y2="269" stroke="currentColor" marker-end="url(#arw)"/>
-<rect x="572" y="244" width="104" height="50" rx="7" fill="#ffffff" stroke="#cbd5e1"/>
-<text x="624" y="264" font-size="10.5">7 · VMs</text>
-<text x="624" y="278" font-size="10.5">wired</text>
-<line x1="680" y1="269" x2="700" y2="269" stroke="#1d4ed8" marker-end="url(#arwa)"/>
-<rect x="704" y="244" width="104" height="50" rx="7" fill="#eff6ff" stroke="#1d4ed8"/>
-<text x="756" y="264" font-size="10.5" fill="#1d4ed8" font-weight="600">9 · Customer</text>
-<text x="756" y="278" font-size="10.5" fill="#1d4ed8" font-weight="600">share link</text>
-<line x1="550" y1="296" x2="550" y2="324" stroke="#94a3b8" stroke-dasharray="4 3"/>
-<line x1="382" y1="324" x2="718" y2="324" stroke="#94a3b8" stroke-dasharray="4 3"/>
-<line x1="382" y1="324" x2="382" y2="346" stroke="#94a3b8" stroke-dasharray="4 3" marker-end="url(#arwd)"/>
-<line x1="550" y1="324" x2="550" y2="346" stroke="#94a3b8" stroke-dasharray="4 3" marker-end="url(#arwd)"/>
-<line x1="718" y1="324" x2="718" y2="346" stroke="#94a3b8" stroke-dasharray="4 3" marker-end="url(#arwd)"/>
-<rect x="308" y="352" width="148" height="50" rx="7" fill="#ffffff" stroke="#94a3b8" stroke-dasharray="4 3"/>
-<text x="382" y="372" font-size="10.5">5 · Resource</text>
-<text x="382" y="386" font-size="10.5">Broker</text>
-<rect x="476" y="352" width="148" height="50" rx="7" fill="#ffffff" stroke="#94a3b8" stroke-dasharray="4 3"/>
-<text x="550" y="372" font-size="10.5">6 · Entitle</text>
-<text x="550" y="386" font-size="10.5">agent</text>
-<rect x="644" y="352" width="148" height="50" rx="7" fill="#ffffff" stroke="#94a3b8" stroke-dasharray="4 3"/>
-<text x="718" y="372" font-size="10.5">8 · Password Safe</text>
-<text x="718" y="386" font-size="10.5">credentials in PRA</text>
-<text x="430" y="424" font-size="10.5" fill="#475569">Optional — none of these three holds up the share link.</text>
-<text x="430" y="441" font-size="10.5" fill="#475569">The broker VM is created at step 5, last: its policy needs addresses the targets do not have until they exist.</text>
+<text x="40" y="222" text-anchor="start" font-size="11" font-weight="700" letter-spacing="1.2" fill="#64748b">2 · SET UP — IN ORDER</text>
+<rect x="44" y="244" width="89" height="50" rx="7" fill="#ffffff" stroke="#cbd5e1"/>
+<text x="88" y="264" font-size="10">Use cases</text>
+<text x="88" y="278" font-size="10">chosen</text>
+<line x1="137" y1="269" x2="153" y2="269" stroke="currentColor" marker-end="url(#arw)"/>
+<rect x="157" y="244" width="89" height="50" rx="7" fill="#ffffff" stroke="#cbd5e1"/>
+<text x="201" y="264" font-size="10">Environment</text>
+<text x="201" y="278" font-size="10">running</text>
+<line x1="250" y1="269" x2="266" y2="269" stroke="currentColor" marker-end="url(#arw)"/>
+<rect x="270" y="244" width="89" height="50" rx="7" fill="#ffffff" stroke="#cbd5e1"/>
+<text x="314" y="264" font-size="10">Guest OS</text>
+<text x="314" y="278" font-size="10">known</text>
+<line x1="363" y1="269" x2="379" y2="269" stroke="currentColor" marker-end="url(#arw)"/>
+<rect x="383" y="244" width="89" height="50" rx="7" fill="#ffffff" stroke="#cbd5e1"/>
+<text x="427" y="264" font-size="10">Control node</text>
+<text x="427" y="278" font-size="10">agent enrolled</text>
+<line x1="476" y1="269" x2="492" y2="269" stroke="currentColor" marker-end="url(#arw)"/>
+<rect x="496" y="244" width="89" height="50" rx="7" fill="#ffffff" stroke="#cbd5e1"/>
+<text x="540" y="264" font-size="10">PRA</text>
+<text x="540" y="278" font-size="10">Gateway</text>
+<line x1="589" y1="269" x2="605" y2="269" stroke="currentColor" marker-end="url(#arw)"/>
+<rect x="609" y="244" width="89" height="50" rx="7" fill="#ffffff" stroke="#cbd5e1"/>
+<text x="653" y="264" font-size="10">VMs</text>
+<text x="653" y="278" font-size="10">wired</text>
+<line x1="702" y1="269" x2="718" y2="269" stroke="#1d4ed8" marker-end="url(#arwa)"/>
+<rect x="722" y="244" width="89" height="50" rx="7" fill="#eff6ff" stroke="#1d4ed8"/>
+<text x="766" y="264" font-size="10" fill="#1d4ed8" font-weight="600">Customer</text>
+<text x="766" y="278" font-size="10" fill="#1d4ed8" font-weight="600">share link</text>
+<line x1="427" y1="296" x2="427" y2="324" stroke="#94a3b8" stroke-dasharray="4 3"/>
+<line x1="114" y1="324" x2="738" y2="324" stroke="#94a3b8" stroke-dasharray="4 3"/>
+<line x1="114" y1="324" x2="114" y2="346" stroke="#94a3b8" stroke-dasharray="4 3" marker-end="url(#arwd)"/>
+<line x1="270" y1="324" x2="270" y2="346" stroke="#94a3b8" stroke-dasharray="4 3" marker-end="url(#arwd)"/>
+<line x1="426" y1="324" x2="426" y2="346" stroke="#94a3b8" stroke-dasharray="4 3" marker-end="url(#arwd)"/>
+<line x1="582" y1="324" x2="582" y2="346" stroke="#94a3b8" stroke-dasharray="4 3" marker-end="url(#arwd)"/>
+<line x1="738" y1="324" x2="738" y2="346" stroke="#94a3b8" stroke-dasharray="4 3" marker-end="url(#arwd)"/>
+<rect x="44" y="352" width="140" height="50" rx="7" fill="#ffffff" stroke="#94a3b8" stroke-dasharray="4 3"/>
+<text x="114" y="372" font-size="10">Resource Broker</text>
+<text x="114" y="386" font-size="10">installer</text>
+<rect x="200" y="352" width="140" height="50" rx="7" fill="#ffffff" stroke="#94a3b8" stroke-dasharray="4 3"/>
+<text x="270" y="379" font-size="10">Resource Broker</text>
+<rect x="356" y="352" width="140" height="50" rx="7" fill="#ffffff" stroke="#94a3b8" stroke-dasharray="4 3"/>
+<text x="426" y="379" font-size="10">Entitle agent</text>
+<rect x="512" y="352" width="140" height="50" rx="7" fill="#ffffff" stroke="#94a3b8" stroke-dasharray="4 3"/>
+<text x="582" y="372" font-size="10">Password Safe</text>
+<text x="582" y="386" font-size="10">credentials in PRA</text>
+<rect x="668" y="352" width="140" height="50" rx="7" fill="#ffffff" stroke="#94a3b8" stroke-dasharray="4 3"/>
+<text x="738" y="372" font-size="10">OT HMI access</text>
+<text x="738" y="386" font-size="10">through Entitle</text>
+<text x="426" y="424" font-size="10.5" fill="#475569">Optional — none of these holds up the share link, and a POV that does not test the product settles them grey.</text>
+<text x="426" y="441" font-size="10.5" fill="#475569">The broker VM is created last: its policy needs addresses the targets do not have until they exist.</text>
 <rect x="24" y="478" width="812" height="170" rx="10" fill="#f8fafc" stroke="#e2e8f0"/>
 <text x="40" y="500" text-anchor="start" font-size="11" font-weight="700" letter-spacing="1.2" fill="#64748b">3 · RUN AND RETIRE</text>
 <rect x="60" y="518" width="136" height="54" rx="7" fill="#ffffff" stroke="#cbd5e1"/>
@@ -122,16 +132,19 @@ builds the blueprints and creates no POV itself. See [Roles](admin/permissions/r
 
 ## Set up
 
-Every POV walks the same nine steps, and the POV's **Setup** tab lists them in this order with
+**If this is your first POV, read [Your first POV, end to end](profiles/pov/first-pov.md)
+instead of this page** — it walks the steps in order, says what each one is for, and is the one
+place that lists them.
+
+Every POV walks the same steps, and the POV's **Setup** tab lists them in this order with
 one button each. A POV that is not finished opens there by default. A step that depends on an
-unfinished one is greyed out and names the step to finish first —
-[standing one up](profiles/pov/standing-one-up.md) walks them in order.
+unfinished one is greyed out and names the step to finish first.
 
 Only real dependencies lock a step. **Resource Broker, Entitle agent and Password Safe
 credentials in PRA are optional and never hold up the customer share link**, which is why the
 diagram hangs them off the chain rather than putting them in it.
 
-Two of the nine are worth reading before you need them:
+Two of them are worth reading before you need them:
 
 - **PRA Gateway and Resource Broker** — [gateway and broker](profiles/pov/gateway-and-broker.md),
   and [the design note](profiles/pov/design/resource-broker.md) for why the broker VM is built
