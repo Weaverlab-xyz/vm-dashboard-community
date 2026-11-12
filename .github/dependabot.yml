@@ -10,7 +10,28 @@
 # A major version is a PR of its own (not grouped), since it is the one most likely to
 # need code changes.
 version: 2
+
+# runners/ui-robot's base image (mcr.microsoft.com/playwright/python:vX.Y.Z-noble) and its
+# `playwright==X.Y.Z` in requirements.txt must move together: the image ships the browser
+# build that one Playwright version drives. Bumped separately, the image still builds and
+# the robot fails at run time. One multi-ecosystem group puts both bumps in a single PR.
+multi-ecosystem-groups:
+  ui-robot-playwright:
+    schedule:
+      interval: weekly
+      day: monday
+
 updates:
+  - package-ecosystem: docker
+    directory: "/runners/ui-robot"
+    patterns: ["*"]
+    multi-ecosystem-group: ui-robot-playwright
+
+  - package-ecosystem: pip
+    directory: "/runners/ui-robot"
+    patterns: ["*"]
+    multi-ecosystem-group: ui-robot-playwright
+
   - package-ecosystem: pip
     directories:
       - "/web_dashboard"

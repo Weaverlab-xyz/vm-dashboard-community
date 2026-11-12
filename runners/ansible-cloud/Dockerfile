@@ -43,7 +43,15 @@ ARG KUBECTL_SHA256_ARM64=a3953ad2b32eca0b429249a5fbdf4f8ef7d57223c45cc0401fd80fd
 # FreeTDS for pymssql (the PyPI wheels bundle it, but keep the runtime libs +
 # build headers so a source build also succeeds on any arch); curl/tar to fetch
 # the helm + kubectl binaries; ca-certificates for TLS to the cluster/DB.
+#
+# The --only-upgrade of zlib1g is Debian security update DSA-6613-1 (CVE-2026-76844,
+# CVE-2026-85091, both HIGH), fixed in trixie-security as
+# 1:1.3.dfsg+really1.3.1-1+deb13u1. The pinned base still ships the vulnerable
+# 1:1.3.dfsg+really1.3.1-1+b1 and so fails scripts/ci/trivy_image.sh; bumping the digest
+# does not help, because the tag's current image is built from the same Debian snapshot.
+# See the root Dockerfile for the full note.
 RUN apt-get update \
+ && apt-get install -y --no-install-recommends --only-upgrade zlib1g \
  && apt-get install -y --no-install-recommends \
         gcc \
         freetds-dev \
