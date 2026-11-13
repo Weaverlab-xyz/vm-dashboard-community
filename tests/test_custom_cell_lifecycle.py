@@ -453,14 +453,16 @@ def test_a_database_its_cloud_restarted_is_stopped_again_while_suspended():
     cell = _active_cell(db, me)
     svc.power(db, cell, "stop", actor=me.username)
     POWERED.clear()
-    import types
-    fake = types.ModuleType("web_dashboard.services.clouddb_power")
-    fake.needs_restop = lambda row, now=None: True
-    sys.modules["web_dashboard.services.clouddb_power"] = fake
+    # Patched on the real module (now on main, #1331): `from . import clouddb_power`
+    # resolves the package ATTRIBUTE first, so a stand-in in sys.modules alone is never
+    # seen once the real module has been imported.
+    from web_dashboard.services import clouddb_power
+    saved = clouddb_power.needs_restop
+    clouddb_power.needs_restop = lambda row, now=None: True
     try:
         svc._restop_databases(db, cell, me.username)
     finally:
-        del sys.modules["web_dashboard.services.clouddb_power"]
+        clouddb_power.needs_restop = saved
     assert [(k, a, r) for k, _, a, _, r in POWERED] == [("database", "stop", True)]
 
 
