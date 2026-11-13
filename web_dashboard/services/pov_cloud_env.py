@@ -119,6 +119,9 @@ IDLE_METRICS_LAG_S = 900
 # The shortest idle window that means anything given the lag and the period above.
 IDLE_MIN_WINDOW_S = 1800
 IDLE_MAX_WINDOW_S = 86400
+# What a new cloud POV gets when nobody chose a window. A cost control must be on unless
+# somebody turned it off: 0 stays "off", but only when it is SENT, never when it is absent.
+DEFAULT_IDLE_WINDOW_S = 3600
 
 # How long to wait for every instance in an environment to reach a runstate. Generous:
 # this covers a cold Windows boot as well as a Linux one, and the caller is a job with its
