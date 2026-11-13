@@ -77,6 +77,14 @@ because it is what disqualifies most ideas.
 > the demo*. In both, the environment is not scenery for a feature tour — it is the
 > premise, and the PAM layers are the resolution.
 
+> **Since written:** the [Custom Demo Cell](../profiles/demo/custom-demo-cell.md) is
+> deliberately *not* this kind of cell. It is a composition (whatever resources a demo
+> needs, built from a blueprint) with no argument in its shape. It exists because
+> presenters kept needing "a cluster, a database and two VMs, gone by Friday", and none
+> of the fixed cells could supply that. The definition below still holds for the cells
+> with a premise. A custom cell borrows only the other half of the definition: teardown
+> is inherited from each member's own path, which is what keeps it cheap.
+
 Two consequences follow, and both have teeth:
 
 - **A capability is not a cell.** An estate-wide story — cost, discovery, policy — has no

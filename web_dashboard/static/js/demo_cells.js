@@ -574,4 +574,187 @@
       },
     };
   };
+  // x-data="demoCustomPanel()" -- the hub's Custom cell panel: launch a cell from a
+  // blueprint, run the ones in your workstreams, and (with `demo_blueprints:write`)
+  // author the blueprints. Every route is /api/demo/custom-cells (api/custom_cell).
+  //
+  // An item's spec is edited as JSON, seeded from SPEC_STARTERS: the spec IS the cloud's
+  // own create request minus the name and workgroup, so a field-by-field form per cloud
+  // would be a second copy of three deploy forms. The server validates it against that
+  // request model and names the field it refuses.
+  const CUSTOM_BASE = '/api/demo/custom-cells';
+  const SPEC_STARTERS = {
+    'vm:gcp': { image_self_link: 'projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64',
+                zone: 'us-central1-a', machine_type: 'e2-medium' },
+    'vm:aws': { ami_id: '', instance_type: 't3.medium', subnet_id: '', security_group_ids: [] },
+    'vm:azure': { image_id: '', vm_size: 'Standard_B2s', subnet_id: '' },
+    'k8s:gcp': { node_count: 2 }, 'k8s:aws': { node_count: 2 }, 'k8s:azure': { node_count: 2 },
+    'database:gcp': { engine: 'mysql', tier: 'db-f1-micro' },
+    'database:aws': { engine: 'mysql', instance_class: 'db.t3.micro' },
+    'database:azure': { engine: 'mysql', sku_name: 'B_Standard_B1ms' },
+  };
+
+  window.demoCustomPanel = function demoCustomPanel() {
+    return {
+      ...demoCellHost('gcp'),
+      ...demoBookingState(),
+      blueprints: [],
+      cells: [],
+      openCell: null,
+      busy: false,
+      launch: { blueprint_id: '', name: '', workgroup: '' },
+      editor: null,          // the blueprint being edited, or null
+      editorError: '',
+
+      async init() {
+        this.loadChangeWindows();
+        this.loadWorkgroups();
+        await Promise.all([this.loadBlueprints(), this.loadCells()]);
+      },
+
+      canAuthor() {
+        const a = Alpine.store('auth');
+        return !!a && a.can('demo_blueprints', 'write');
+      },
+      canDelete() {
+        const a = Alpine.store('auth');
+        return !!a && a.can('demo', 'delete');
+      },
+
+      async loadBlueprints() {
+        try { this.blueprints = (await API.get(CUSTOM_BASE + '/blueprints')).blueprints || []; }
+        catch (e) { this.loadError = e.message || 'Could not load blueprints'; }
+      },
+      async loadCells() {
+        try { this.cells = (await API.get(CUSTOM_BASE + '/cells')).cells || []; }
+        catch (e) { this.loadError = e.message || 'Could not load custom cells'; }
+      },
+
+      // ── launch ──
+      launchProblem() {
+        if (!this.launch.blueprint_id) return 'Pick a blueprint.';
+        if (!/^[a-z][a-z0-9-]{0,23}$/.test(this.launch.name || ''))
+          return 'Name: 1-24 lowercase letters, digits and hyphens, starting with a letter.';
+        if (!this.launch.workgroup) return 'Pick a workstream.';
+        return this.demoBookingProblem();
+      },
+      async launchCell() {
+        if (this.launchProblem()) return;
+        this.busy = true;
+        try {
+          await API.post(CUSTOM_BASE + '/cells', { ...this.launch, ...this.demoBooking() });
+          toast('Cell launched.', 'success');
+          this.launch.name = '';
+          await this.loadCells();
+        } catch (e) {
+          toast(e.message || 'Could not launch the cell.', 'error');
+        } finally {
+          this.busy = false;
+        }
+      },
+
+      // ── running cells ──
+      async showCell(c) {
+        if (this.openCell && this.openCell.id === c.id) { this.openCell = null; return; }
+        try { this.openCell = await API.get(CUSTOM_BASE + '/cells/' + encodeURIComponent(c.id)); }
+        catch (e) { toast(e.message || 'Could not load the cell.', 'error'); }
+      },
+      async cellAction(c, verb) {
+        const id = encodeURIComponent(c.id);
+        try {
+          if (verb === 'destroy') {
+            if (!window.confirm(`Destroy ${c.name} and everything in it?`)) return;
+            await API.request('DELETE', `${CUSTOM_BASE}/cells/${id}`);
+          } else if (verb === 'end') {
+            const ans = window.prompt(`End ${c.name} how many hours from now?`, '4');
+            if (ans === null) return;
+            const hours = parseFloat(ans);
+            if (!(hours > 0)) { toast('Enter a number of hours.', 'error'); return; }
+            const r = await API.post(`${CUSTOM_BASE}/cells/${id}/end-at`, { ttl_hours: hours });
+            if (r.clamped) toast('Set, but shortened to the policy limit.', 'success');
+          } else {
+            await API.post(`${CUSTOM_BASE}/cells/${id}/power`, { action: verb });
+          }
+          toast('Done.', 'success');
+          this.openCell = null;
+          await this.loadCells();
+        } catch (e) {
+          toast(e.message || 'That did not work.', 'error');
+        }
+      },
+      customStamp(iso) {
+        if (!iso) return '';
+        const d = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + 'Z');
+        return isNaN(d) ? iso : d.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+      },
+
+      // ── blueprint authoring ──
+      newBlueprint() {
+        this.editorError = '';
+        this.editor = { id: '', name: '', description: '', workgroup: '', ttl_hours: '',
+                        suspend_at_local: '', resume_at_local: '', schedule_timezone: '',
+                        items: [] };
+        this.addItem('vm', 'gcp');
+      },
+      async editBlueprint(bp) {
+        this.editorError = '';
+        try {
+          const full = await API.get(CUSTOM_BASE + '/blueprints/' + encodeURIComponent(bp.id));
+          this.editor = { ...full, ttl_hours: full.ttl_hours == null ? '' : full.ttl_hours,
+                          items: (full.items || []).map(i => ({ ...i,
+                            specText: JSON.stringify(i.spec || {}, null, 2) })) };
+        } catch (e) { toast(e.message || 'Could not open the blueprint.', 'error'); }
+      },
+      addItem(kind, cloud) {
+        const n = this.editor.items.length + 1;
+        this.editor.items.push({ kind, cloud, region: kind === 'vm' ? '' : 'us-central1',
+                                 label: `${kind === 'database' ? 'db' : kind}${n}`, count: 1,
+                                 specText: JSON.stringify(SPEC_STARTERS[`${kind}:${cloud}`] || {}, null, 2) });
+      },
+      reseedSpec(item) {
+        item.specText = JSON.stringify(SPEC_STARTERS[`${item.kind}:${item.cloud}`] || {}, null, 2);
+      },
+      removeItem(i) { this.editor.items.splice(i, 1); },
+      async saveBlueprint() {
+        this.editorError = '';
+        let items;
+        try {
+          items = this.editor.items.map(i => ({ kind: i.kind, cloud: i.cloud, region: i.region,
+                                               label: i.label, count: parseInt(i.count, 10) || 1,
+                                               spec: JSON.parse(i.specText || '{}') }));
+        } catch (_) { this.editorError = 'An item spec is not valid JSON.'; return; }
+        const body = { name: this.editor.name, description: this.editor.description,
+                       workgroup: this.editor.workgroup, items,
+                       ttl_hours: this.editor.ttl_hours === '' ? null : parseFloat(this.editor.ttl_hours),
+                       suspend_at_local: this.editor.suspend_at_local,
+                       resume_at_local: this.editor.resume_at_local,
+                       schedule_timezone: this.editor.schedule_timezone };
+        try {
+          if (this.editor.id) {
+            await API.request('PUT', CUSTOM_BASE + '/blueprints/' + encodeURIComponent(this.editor.id), body);
+          } else {
+            await API.post(CUSTOM_BASE + '/blueprints', body);
+          }
+          toast('Blueprint saved.', 'success');
+          this.editor = null;
+          await this.loadBlueprints();
+        } catch (e) { this.editorError = e.message || 'Could not save the blueprint.'; }
+      },
+      async deleteBlueprint(bp) {
+        if (!window.confirm(`Delete blueprint ${bp.name}? Cells already launched from it keep running.`)) return;
+        try {
+          await API.request('DELETE', CUSTOM_BASE + '/blueprints/' + encodeURIComponent(bp.id));
+          await this.loadBlueprints();
+        } catch (e) { toast(e.message || 'Could not delete it.', 'error'); }
+      },
+
+      customStatusClass(status) {
+        if (status === 'active') return 'bg-green-100 text-green-800';
+        if (status === 'failed') return 'bg-red-100 text-red-800';
+        if (['provisioning', 'destroying', 'scheduled'].includes(status))
+          return 'bg-amber-100 text-amber-800';
+        return 'bg-gray-100 text-gray-700';
+      },
+    };
+  };
 })();

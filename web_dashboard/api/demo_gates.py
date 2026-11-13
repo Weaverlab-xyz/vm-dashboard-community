@@ -117,3 +117,49 @@ async def _require_demo_read(current_user: User = Depends(get_current_user)) -> 
 
 # The hub's own gate: `demo:read` alone. The hub is new, so there is no prior scope to OR.
 require_demo_read = _tag(_require_demo_read, "demo", "read", explicit=True)
+
+
+# ── Custom cell blueprints (api/custom_cell) ──────────────────────────────────
+#
+# `demo_blueprints` is the AUTHOR's scope -- the recipes -- and stands alone: there is no
+# older scope to OR it with, because blueprints did not exist. Launching a cell from one
+# is `demo:write` (``require_demo``), so a Demo Presenter launches what a Cell Builder
+# wrote and cannot rewrite it. One literal call per level, as with `_DEMO` above.
+_BLUEPRINTS = {
+    "read": lambda u: has_explicit_permission(u, "demo_blueprints", "read"),
+    "write": lambda u: has_explicit_permission(u, "demo_blueprints", "write"),
+    "delete": lambda u: has_explicit_permission(u, "demo_blueprints", "delete"),
+}
+
+
+def blueprints_allow(user: User, level: str) -> bool:
+    check = _BLUEPRINTS.get(level)
+    return bool(check and check(user))
+
+
+def require_blueprints(level: str):
+    """Dependency: `demo_blueprints:<level>`.
+
+    ``read`` also passes on `demo:write`: a presenter has to see the blueprint list to
+    launch from it, and seeing a recipe grants nothing a launch would not.
+    """
+    async def _check(current_user: User = Depends(get_current_user)) -> User:
+        if blueprints_allow(current_user, level):
+            return current_user
+        if level == "read" and demo_allows(current_user, "write"):
+            return current_user
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Requires 'demo_blueprints:{level}' permission.")
+    return _tag(_check, "demo_blueprints", level, explicit=True)
+
+
+def require_demo(level: str):
+    """Dependency: `demo:<level>` alone -- the custom cell routes are new, so there is no
+    prior scope to accept beside it."""
+    async def _check(current_user: User = Depends(get_current_user)) -> User:
+        if demo_allows(current_user, level):
+            return current_user
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail=f"Requires 'demo:{level}' permission.")
+    return _tag(_check, "demo", level, explicit=True)

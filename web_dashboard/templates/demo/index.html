@@ -5,6 +5,7 @@
 {% from "demo/_ot_cell_aws.html" import ot_deploy_form as aws_ot_form, ot_cells_list as aws_ot_cells with context %}
 {% from "demo/_ot_cell_azure.html" import ot_deploy_form as azure_ot_form, ot_cells_list as azure_ot_cells with context %}
 {% from "demo/_net_cell.html" import net_deploy_form, net_cells_list with context %}
+{% from "demo/_custom_cell.html" import custom_cell_panel with context %}
 {% block title %}Demo{% endblock %}
 
 {#
@@ -68,6 +69,7 @@
   {'key': 'ot',       'label': 'OT cell'},
   {'key': 'net',      'label': 'Network cell'},
   {'key': 'agent',    'label': 'Agent cell'},
+  {'key': 'custom',   'label': 'Custom cell'},
 ] | selectattr('key', 'in', build_panels) | list %}
 <div x-data='demoHub({{ tabs | map(attribute="slug") | list | tojson }}, {{ panels | map(attribute="key") | list | tojson }}, {{ ot_clouds | tojson }})'
      data-tab-forward="/workload-lab"
@@ -132,7 +134,7 @@
                 <th class="py-2 pr-4 font-medium">Cloud</th>
                 <th class="py-2 pr-4 font-medium">Status</th>
                 <th class="py-2 pr-4 font-medium" x-show="kind.kind !== 'net'"
-                    x-text="kind.kind === 'agent' ? 'Token' : 'Wiring'"></th>
+                    x-text="kind.kind === 'agent' ? 'Token' : kind.kind === 'custom' ? 'Contents' : 'Wiring'"></th>
                 <th class="py-2 pr-4 font-medium">Workstream</th>
                 <th class="py-2 pr-4 font-medium">Created by</th>
                 <th class="py-2 pr-4 font-medium" x-show="kind.kind !== 'agent'">Schedule</th>
@@ -151,7 +153,9 @@
                   <td class="py-2 pr-4 text-gray-600" x-show="kind.kind !== 'net'"
                       x-text="kind.kind === 'agent'
                                 ? (c.wired ? 'live' : 'expired or revoked')
-                                : (c.wired ? 'wired' : 'incomplete')"></td>
+                                : kind.kind === 'custom'
+                                  ? (c.summary || []).join(', ')
+                                  : (c.wired ? 'wired' : 'incomplete')"></td>
                   <td class="py-2 pr-4 text-gray-600" x-text="c.workgroup || '—'"></td>
                   <td class="py-2 pr-4 text-gray-600" x-text="c.created_by || '—'"></td>
                   <td class="py-2 pr-4 text-gray-600 text-xs" x-show="kind.kind !== 'agent'">
@@ -227,6 +231,14 @@
           </div>
           {{ net_cells_list() }}
         </div>
+      </div>
+    </template>
+    {% endif %}
+    {% if 'custom' in build_panels %}
+    <!-- Custom cells: launched from a blueprint a Cell Builder wrote (api/custom_cell). -->
+    <template x-if="activeTab === 'build' && buildPanel === 'custom'">
+      <div x-data="demoCustomPanel()" class="space-y-3">
+        {{ custom_cell_panel(booking_card) }}
       </div>
     </template>
     {% endif %}
@@ -345,6 +357,7 @@ function demoHub(tabSlugs, buildPanels, otClouds) {
     manage(event, c) {
       const key = c.kind === 'net' ? 'net'
         : c.kind === 'agent' ? 'agent'
+        : c.kind === 'custom' ? 'custom'
         : c.kind === 'ot' ? 'ot' : '';
       if (!key || !this.buildPanels.includes(key) || !this.canBuild()) return;
       if (key === 'ot' && !this.otClouds.includes(c.cloud)) return;
@@ -370,8 +383,12 @@ function demoHub(tabSlugs, buildPanels, otClouds) {
       const hours = parseFloat(ans);
       if (ans.trim() && !(hours > 0)) { toast('Enter a number of hours.', 'error'); return; }
       try {
-        const r = await API.post(`/api/demo/cells/${encodeURIComponent(c.kind)}/${encodeURIComponent(c.id)}/end-at`,
-                                 ans.trim() ? { ttl_hours: hours } : {});
+        // A custom cell has its own route, and always takes a lifetime (no policy reset).
+        if (c.kind === 'custom' && !ans.trim()) { toast('Enter a number of hours.', 'error'); return; }
+        const url = c.kind === 'custom'
+          ? `/api/demo/custom-cells/cells/${encodeURIComponent(c.id)}/end-at`
+          : `/api/demo/cells/${encodeURIComponent(c.kind)}/${encodeURIComponent(c.id)}/end-at`;
+        const r = await API.post(url, ans.trim() ? { ttl_hours: hours } : {});
         toast(r.clamped ? 'Set, but shortened to the policy limit.' : 'End time saved.', 'success');
         this.load();
       } catch (e) {
@@ -380,9 +397,9 @@ function demoHub(tabSlugs, buildPanels, otClouds) {
     },
 
     statusClass(status) {
-      if (status === 'completed') return 'bg-green-100 text-green-800';
+      if (status === 'completed' || status === 'active') return 'bg-green-100 text-green-800';
       if (status === 'failed') return 'bg-red-100 text-red-800';
-      if (['pending', 'queued', 'running', 'provisioning'].includes(status))
+      if (['pending', 'queued', 'running', 'provisioning', 'scheduled', 'destroying'].includes(status))
         return 'bg-amber-100 text-amber-800';
       return 'bg-gray-100 text-gray-700';
     },

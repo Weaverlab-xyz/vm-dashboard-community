@@ -1497,6 +1497,16 @@ except ImportError as exc:
     logger.warning("API router 'demo' not loaded: %s", exc)
 
 try:
+    # Custom demo cells: blueprints a Cell Builder authors and the cells launched from
+    # them. Same page group as the hub. No feature flag of its own: every member is
+    # provisioned through its own cloud's path, which keeps that path's own gates.
+    from .api import custom_cell as custom_cell_api  # noqa: E402
+    app.include_router(custom_cell_api.router,
+                       dependencies=[_profile_page_gate("demo_pages")])
+except ImportError as exc:
+    logger.warning("API router 'custom_cell' not loaded: %s", exc)
+
+try:
     # POV environments on a lab platform. Gated on pov_environments_enabled, which
     # feature_flags._POV_ONLY masks off entirely on a demo instance — so on the demo
     # dashboard these routes 404 naming the profile rather than half-working.
@@ -2107,6 +2117,9 @@ async def demo_page(request: Request):
         # its host is any VM the dashboard deployed. The tab's /options call lists what
         # else is missing (the MCP server, a SPIRE trust domain).
         "agent": feature_flags.enabled("agentcell_enabled"),
+        # Custom cells (api/custom_cell): offered once any cloud is configured. Each item
+        # is built through its own cloud's path, which checks that cloud when it runs.
+        "custom": any(ready.values()),
     }
     build_panels = [key for key, ok in offered.items() if ok]
     return templates.TemplateResponse(request, "demo/index.html", {

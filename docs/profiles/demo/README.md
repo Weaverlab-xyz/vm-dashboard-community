@@ -35,6 +35,7 @@ presenting: the per-role narratives and the purpose-built demo environments. Ski
 | [OT protocol clients on Windows](ot-demo-cell/ot-protocol-clients.md) | Setting up a rep machine to read that cell: the four Python clients, a runnable snippet per protocol, and why DNP3 answers nothing. |
 | [Network Demo Cell](net-demo-cell.md) | **Preview.** A VyOS router/firewall with no inbound rule, reached only through a recorded Shell Jump — the emergency rule change, made on a credential nobody sees. |
 | [Agent Demo Cell](agent-demo-cell.md) | **Preview.** A non-human principal that reads the estate through the MCP server, attested by SPIRE — and stops when you revoke its token while the room watches. |
+| [Custom Demo Cell](custom-demo-cell.md) | Whatever a demo needs — a Kubernetes cluster, a database, a few VMs, on any cloud — from a blueprint a **Cell Builder** wrote, with one lifetime, one suspend schedule and one Destroy. |
 
 ## Everything else is a capability doc
 
