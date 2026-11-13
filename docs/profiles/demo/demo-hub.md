@@ -10,7 +10,7 @@ instance. It has three tabs:
   wiring (or, for an agent, whether its token is still live), its workstream, and a
   **Manage** link that opens the cell's panel on **Build**. A cell type whose preview is
   off reads *Not available here* rather than zero.
-- **Build** deploys, probes, re-wires and destroys OT cells (GCP, AWS, Azure) and network
+- **Build** deploys, probes, re-wires and destroys OT cells (one panel with a GCP / AWS / Azure toggle) and network
   cells, and mints and revokes agent cells. Each panel is the **same form** the cloud
   page's tab or the Workload Lab's Agent tab shows, so a cell built here is identical to
   one built there. A panel appears only where that page's tab would: the cell's feature on,

@@ -2098,10 +2098,10 @@ async def demo_page(request: Request):
     """
     pra = feature_flags.enabled("pra_enabled")
     ready = {c: feature_flags.cloud_configured(c) for c in ("gcp", "aws", "azure")}
+    ot_clouds = [c for c in ("gcp", "aws", "azure") if pra and ready[c]]
     offered = {
-        "ot-gcp": pra and ready["gcp"],
-        "ot-aws": pra and ready["aws"],
-        "ot-azure": pra and ready["azure"],
+        # One OT panel with a cloud toggle: offered when any cloud is ready.
+        "ot": bool(ot_clouds),
         "net": feature_flags.enabled("netcell_enabled") and ready["gcp"],
         # The agent cell's own preview flag, as on the Workload Lab. Not tied to a cloud:
         # its host is any VM the dashboard deployed. The tab's /options call lists what
@@ -2110,7 +2110,7 @@ async def demo_page(request: Request):
     }
     build_panels = [key for key, ok in offered.items() if ok]
     return templates.TemplateResponse(request, "demo/index.html", {
-        "request": request, "build_panels": build_panels})
+        "request": request, "build_panels": build_panels, "ot_clouds": ot_clouds})
 
 
 @app.get("/pov", response_class=HTMLResponse, include_in_schema=False,
