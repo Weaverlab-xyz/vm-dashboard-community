@@ -28,7 +28,7 @@ from ..models.netcell import (
     NetCellInfo,
     NetCellListResponse,
 )
-from ..services import deploy_batch, job_service, netcell_service
+from ..services import demo_schedule, deploy_batch, job_service, netcell_service
 from .auth import get_current_user
 from .demo_gates import require_cell
 from .gcp import (
@@ -140,12 +140,18 @@ async def deploy_cell(
         count=1,
     )
 
+    sp = demo_schedule.plan(db, payload, vm_job_type="gce_deploy", workgroup=workgroup,
+                            is_admin=current_user.is_effective_admin)
     job = job_service.create_job(
         db,
         job_type="gce_deploy",
         created_by=current_user.username,
         workgroup=workgroup,
+        # The deploy row is the claimable one here (no parent), so it carries the booking.
+        **sp.sched,
+        expires_at=sp.expires_at,
         metadata={
+            **sp.meta,
             "project_id":      project_id,
             "zone":            zone,
             "region":          region,

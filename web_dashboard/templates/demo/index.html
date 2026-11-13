@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "partials/tab_bar.html" import tab_bar %}
+{% from "partials/schedule_picker.html" import schedule_picker %}
 {% from "demo/_ot_cell_gcp.html" import ot_deploy_form as gcp_ot_form, ot_cells_list as gcp_ot_cells with context %}
 {% from "demo/_ot_cell_aws.html" import ot_deploy_form as aws_ot_form, ot_cells_list as aws_ot_cells with context %}
 {% from "demo/_ot_cell_azure.html" import ot_deploy_form as azure_ot_form, ot_cells_list as azure_ot_cells with context %}
@@ -32,6 +33,30 @@
   A MASKED link carries no href, for the reason the Use cases page gives: a link the
   client merely styles as inert is one middle-click from a 404.
 #}
+
+{% macro booking_card() %}
+<div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-3 self-start mb-6">
+  <h3 class="text-sm font-semibold text-gray-700">When, and for how long</h3>
+  {{ schedule_picker('Build', compact=true) }}
+  <div>
+    <label class="block text-xs font-medium text-gray-700 mb-1">Destroy it automatically after</label>
+    <div class="flex flex-wrap gap-2 items-center">
+      <select x-model="ttlChoice"
+              class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <template x-for="o in ttlChoices" :key="o.id">
+          <option :value="o.id" x-text="o.label"></option>
+        </template>
+      </select>
+      <input type="number" min="1" step="0.5" x-model="ttlCustom" x-show="ttlChoice === 'custom'" x-cloak
+             placeholder="hours" class="w-24 border border-gray-300 rounded-lg px-3 py-2 text-sm">
+    </div>
+    <p class="text-[11px] text-gray-500 mt-1">
+      Counted from when the cell is due to start, so build time is part of it. The
+      cell and its broker are destroyed within a few minutes of the end.
+    </p>
+  </div>
+</div>
+{% endmacro %}
 
 {% block content %}
 {% set tabs = [
@@ -110,6 +135,7 @@
                     x-text="kind.kind === 'agent' ? 'Token' : 'Wiring'"></th>
                 <th class="py-2 pr-4 font-medium">Workstream</th>
                 <th class="py-2 pr-4 font-medium">Created by</th>
+                <th class="py-2 pr-4 font-medium" x-show="kind.kind !== 'agent'">Schedule</th>
                 <th class="py-2 font-medium"><span class="sr-only">Manage</span></th>
               </tr>
             </thead>
@@ -128,6 +154,13 @@
                                 : (c.wired ? 'wired' : 'incomplete')"></td>
                   <td class="py-2 pr-4 text-gray-600" x-text="c.workgroup || '—'"></td>
                   <td class="py-2 pr-4 text-gray-600" x-text="c.created_by || '—'"></td>
+                  <td class="py-2 pr-4 text-gray-600 text-xs" x-show="kind.kind !== 'agent'">
+                    <div x-show="c.scheduled_for" x-cloak>builds <span x-text="stamp(c.scheduled_for)"></span></div>
+                    <div x-show="c.end_at" x-cloak>destroys <span x-text="stamp(c.end_at)"></span></div>
+                    <button type="button" x-show="canBuild()" @click="setEnd(c)"
+                            class="text-blue-700 hover:underline"
+                            x-text="c.end_at ? 'Change end' : 'Set end'"></button>
+                  </td>
                   <td class="py-2 text-right">
                     <a :href="c.manage_href" @click="manage($event, c)"
                        class="text-blue-700 hover:underline">Manage</a>
@@ -170,7 +203,10 @@
       <div x-data='demoOTPanel({{ cloud | tojson }})' class="space-y-3">
         <p x-show="loadError" x-cloak class="text-sm text-red-700" x-text="loadError"></p>
         <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+          <div>
+          {{ booking_card() }}
           {% if cloud == 'gcp' %}{{ gcp_ot_form() }}{% elif cloud == 'aws' %}{{ aws_ot_form() }}{% else %}{{ azure_ot_form() }}{% endif %}
+          </div>
           <div class="space-y-6">
             {% if cloud == 'gcp' %}{{ gcp_ot_cells() }}{% elif cloud == 'aws' %}{{ aws_ot_cells() }}{% else %}{{ azure_ot_cells() }}{% endif %}
           </div>
@@ -185,7 +221,10 @@
       <div x-data="demoNetPanel()" class="space-y-3">
         <p x-show="loadError" x-cloak class="text-sm text-red-700" x-text="loadError"></p>
         <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+          <div>
+          {{ booking_card() }}
           {{ net_deploy_form() }}
+          </div>
           {{ net_cells_list() }}
         </div>
       </div>
@@ -313,6 +352,31 @@ function demoHub(tabSlugs, buildPanels, otClouds) {
       if (key === 'ot') this.otCloud = c.cloud;
       this.buildPanel = key;
       this.select('build');
+    },
+
+    // ISO from the server is naive UTC; show it in the viewer's zone.
+    stamp(iso) {
+      if (!iso) return '';
+      const d = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + 'Z');
+      return isNaN(d) ? iso : d.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+    },
+
+    // Hours from now. A prompt keeps this small; the server clamps to the policy
+    // ceiling and says so, and a blank answer returns the cell to the policy default.
+    async setEnd(c) {
+      const ans = window.prompt(
+        `Destroy ${c.name || c.id} in how many hours from now? (blank = policy default)`, '4');
+      if (ans === null) return;
+      const hours = parseFloat(ans);
+      if (ans.trim() && !(hours > 0)) { toast('Enter a number of hours.', 'error'); return; }
+      try {
+        const r = await API.post(`/api/demo/cells/${encodeURIComponent(c.kind)}/${encodeURIComponent(c.id)}/end-at`,
+                                 ans.trim() ? { ttl_hours: hours } : {});
+        toast(r.clamped ? 'Set, but shortened to the policy limit.' : 'End time saved.', 'success');
+        this.load();
+      } catch (e) {
+        toast(e.message || 'Could not set the end time.', 'error');
+      }
     },
 
     statusClass(status) {

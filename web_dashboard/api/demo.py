@@ -21,13 +21,15 @@ the cloud's own handler rather than re-implementing it:
   The general ``DELETE /api/<cloud>/instances/...`` routes are untouched: a presenter can
   destroy a demo cell and nothing else.
 """
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..database import Job, User, get_db
-from ..services import demo_cells, demo_launchpad
+from ..services import demo_cells, demo_launchpad, demo_schedule, expiry_policy
 from .auth import get_current_user
 from .demo_gates import may, require_cell_options, require_demo_read
 from .gcp import _accessible_workgroups
@@ -136,7 +138,8 @@ async def azure_cell_network(location: Optional[str] = None,
 _NOT_A_CELL = "{} is not a live {} cell"
 
 
-def _live_cell(db: Session, user: User, job_id: str, marker: str, kind: str) -> Job:
+def _live_cell(db: Session, user: User, job_id: str, marker: str, kind: str,
+               statuses: tuple = ("completed",)) -> Job:
     """The completed, not-destroyed cell row ``job_id``, in this caller's workstreams.
 
     Anything else is a 404, including a row in another workstream -- the same answer
@@ -146,7 +149,7 @@ def _live_cell(db: Session, user: User, job_id: str, marker: str, kind: str) -> 
     row = db.query(Job).filter(Job.id == job_id).first()
     meta = row.metadata_dict if row else {}
     if (row is None or not meta.get(marker) or meta.get("destroyed")
-            or row.status != "completed"):
+            or row.status not in statuses):
         raise HTTPException(status_code=404, detail=_NOT_A_CELL.format(job_id, kind))
     accessible = _accessible_workgroups(user)
     if accessible is not None and (row.workgroup or "").lower() not in accessible:
@@ -210,3 +213,72 @@ async def destroy_net_cell(job_id: str, db: Session = Depends(get_db),
     row = _live_cell(db, current_user, job_id, "netcell", "network")
     _require_destroy(current_user, "gcp")
     return {"cell": await _destroy_vm(db, current_user, "gcp", row.metadata_dict)}
+
+
+class EndAtRequest(BaseModel):
+    """When a cell should be destroyed. Exactly one of the two, or neither to go back to
+    the auto-delete policy's default."""
+    ttl_hours: Optional[float] = Field(default=None, gt=0, le=720)   # from now
+    end_at: str = ""                                                  # ISO 8601; UTC unless it has an offset
+
+
+def _parse_end(raw: str) -> datetime:
+    try:
+        at = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400,
+                            detail=f"{raw!r} is not a date and time (ISO 8601).")
+    if at.tzinfo is not None:
+        at = at.astimezone(timezone.utc).replace(tzinfo=None)
+    return at
+
+
+@router.post("/cells/{kind}/{job_id}/end-at")
+def set_cell_end(kind: str, job_id: str, body: EndAtRequest, db: Session = Depends(get_db),
+                 current_user: User = Depends(get_current_user)):
+    """Set, move or clear when a demo cell is destroyed, for a presenter's own cells.
+
+    This is NOT ``POST /api/expiry/set``, which authorises by who can SEE a resource and so
+    only lets a non-admin extend: a presenter must be able to set a first timer and bring
+    one forward, on a cell in their own workstream and nothing else. The ceiling still
+    applies to them (``expiry_policy.clamp_hours``), measured from when the cell was made.
+
+    A cell that has not started building yet is accepted too -- its end time then counts
+    from its booked start.
+    """
+    if kind not in ("ot", "net"):
+        raise HTTPException(status_code=404, detail=f"No such cell kind {kind!r}.")
+    marker, label = ("ot_cell", "OT") if kind == "ot" else ("netcell", "network")
+    row = _live_cell(db, current_user, job_id, marker, label,
+                     statuses=("completed", "queued", "pending"))
+    cloud = "gcp"
+    if kind == "ot":
+        from ..services import ot_service
+        cloud = ot_service.cell_cloud_for_job_type(row.job_type) or ""
+    if not cloud or not may(current_user, cloud, "write"):
+        raise HTTPException(status_code=403,
+                            detail=f"Requires '{cloud or 'cloud'}:write' or 'demo:write' permission.")
+    now = demo_schedule.utcnow()
+    if body.ttl_hours and body.end_at.strip():
+        raise HTTPException(status_code=400, detail="Send ttl_hours or end_at, not both.")
+    if not body.ttl_hours and not body.end_at.strip():
+        # Back to the policy default: no demo end time, the same timer a plain deploy gets.
+        end = expiry_policy.default_expiry_for(row.job_type, workgroup=row.workgroup, now=now)
+        demo_schedule.set_end(db, row, None, fallback_expiry=end)
+        return {"end_at": "", "expires_at": end.isoformat() if end else ""}
+    asked = _parse_end(body.end_at) if body.end_at.strip() else now + _hours(body.ttl_hours)
+    hours = max(0.0, (asked - now).total_seconds() / 3600.0)
+    clamped = expiry_policy.clamp_hours(hours, created_at=row.created_at,
+                                        is_admin=current_user.is_effective_admin, now=now)
+    end = now + _hours(clamped)
+    demo_schedule.set_end(db, row, end)
+    from ..services import job_service
+    job_service.log_audit(db, current_user.username, "demo_cell_end_at",
+                          details={"job_id": job_id, "kind": kind, "end_at": end.isoformat(),
+                                   "clamped": abs(clamped - hours) > 1e-6})
+    return {"end_at": end.isoformat(), "clamped": abs(clamped - hours) > 1e-6}
+
+
+def _hours(h: float):
+    from datetime import timedelta
+    return timedelta(hours=float(h))

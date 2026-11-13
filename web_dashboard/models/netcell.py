@@ -8,8 +8,10 @@ about it, and answering that once is cheaper than answering it three times wrong
 from typing import List, Optional
 from pydantic import BaseModel
 
+from .schedule import DemoScheduleMixin
 
-class NetCellDeployRequest(BaseModel):
+
+class NetCellDeployRequest(DemoScheduleMixin):
     """One network demo cell: a VM from the Packer-baked ``vyos-cell`` image, deployed
     down the ordinary ``gce_deploy`` path.
 

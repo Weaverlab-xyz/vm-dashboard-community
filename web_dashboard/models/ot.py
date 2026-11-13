@@ -2,6 +2,8 @@
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
+from .schedule import DemoScheduleMixin
+
 
 class OTPresetInfo(BaseModel):
     key: str            # e.g. "modbus"
@@ -57,7 +59,7 @@ class OTTunnelResponse(BaseModel):
     message: str
 
 
-class OTCellDeployRequest(BaseModel):
+class OTCellDeployRequest(DemoScheduleMixin):
     """One-click OT demo cell: a VM from the Packer-baked ``ot-sim`` image plus the
     BeyondTrust access layer (Web Jump → HMI, a protocol tunnel per brokered
     endpoint, and the Shell Jump / Password Safe onboarding the normal GCE deploy
@@ -105,7 +107,7 @@ class OTCellDeployRequest(BaseModel):
     jumpoint_name: Optional[str] = None
 
 
-class OTCellDeployRequestAWS(BaseModel):
+class OTCellDeployRequestAWS(DemoScheduleMixin):
     """AWS flavour of the OT demo cell: an EC2 instance from the ``ot-sim`` AMI.
     Mirrors ``DeployRequest`` (models/aws) where the cell has a choice to make and
     pins the rest — no public-IP knob exists on the EC2 path (the subnet decides),
@@ -144,7 +146,7 @@ class OTCellDeployRequestAWS(BaseModel):
     jumpoint_name: Optional[str] = None
 
 
-class OTCellDeployRequestAzure(BaseModel):
+class OTCellDeployRequestAzure(DemoScheduleMixin):
     """Azure flavour of the OT demo cell: a VM from the ``ot-sim`` gallery image.
     The SSH public key is resolved server-side from the configured Key Vault (the
     same key every Azure deploy injects), and the VM never gets a public IP."""

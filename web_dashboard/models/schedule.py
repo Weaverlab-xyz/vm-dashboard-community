@@ -21,7 +21,9 @@ exclude them with :data:`SCHEDULE_FIELDS`, or a replayed payload would carry the
 booking that produced it — a job that reads as scheduled for a time in the past,
 forever.
 """
-from pydantic import BaseModel
+from typing import Optional
+
+from pydantic import BaseModel, Field
 
 #: The field names this mixin contributes, for ``model_dump(exclude=...)``.
 SCHEDULE_FIELDS = frozenset({"run_at", "run_timezone", "change_window_id"})
@@ -51,3 +53,14 @@ class ScheduleRequestMixin(BaseModel):
         """Whether the caller asked for anything other than "now"."""
         return bool((self.run_at or "").strip()
                     or (self.change_window_id or "").strip())
+
+
+class DemoScheduleMixin(ScheduleRequestMixin):
+    """A demo cell's booking: when to build it (inherited) and how long it lives.
+
+    ``ttl_hours`` counts from the booked start (see ``services/demo_schedule.plan``).
+    Blank keeps the auto-delete policy's default; the floor and a non-admin ceiling
+    still apply.
+    """
+
+    ttl_hours: Optional[float] = Field(default=None, gt=0, le=720)
