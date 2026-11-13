@@ -21,6 +21,8 @@
   so a Demo Presenter -- who holds no cloud scope -- can fill them. A panel exists only
   where its cloud page's tab would (`build_panels`, from the /demo route), and each one is
   built only while it is open (`x-if`), so opening the hub does not dial three clouds.
+  The OT cell is ONE panel with a cloud toggle (`otCloud`, shown when more than one cloud
+  is ready, `ot_clouds` from the /demo route).
 
   The agent cell's panel is the Workload Lab's own Agent tab (workload_lab/_agent.html,
   split by `agent_part` so its script runs outside the x-if). A Demo Presenter mints an
@@ -38,13 +40,11 @@
   {'slug': 'launchpad', 'label': 'Launchpad'},
 ] %}
 {% set panels = [
-  {'key': 'ot-gcp',   'label': 'OT cell · GCP'},
-  {'key': 'ot-aws',   'label': 'OT cell · AWS'},
-  {'key': 'ot-azure', 'label': 'OT cell · Azure'},
+  {'key': 'ot',       'label': 'OT cell'},
   {'key': 'net',      'label': 'Network cell'},
   {'key': 'agent',    'label': 'Agent cell'},
 ] | selectattr('key', 'in', build_panels) | list %}
-<div x-data='demoHub({{ tabs | map(attribute="slug") | list | tojson }}, {{ panels | map(attribute="key") | list | tojson }})'
+<div x-data='demoHub({{ tabs | map(attribute="slug") | list | tojson }}, {{ panels | map(attribute="key") | list | tojson }}, {{ ot_clouds | tojson }})'
      data-tab-forward="/workload-lab"
      @select-tab.window="forwardTab($event.detail)"
      class="space-y-6">
@@ -152,9 +152,21 @@
       {% endfor %}
     </div>
 
-    {% for cloud in ['gcp', 'aws', 'azure'] %}
-    {% if ('ot-' ~ cloud) in build_panels %}
-    <template x-if="activeTab === 'build' && buildPanel === 'ot-{{ cloud }}'">
+    {% if 'ot' in build_panels %}
+    <!-- One OT panel, one cloud at a time: the toggle only shows when more than one cloud
+         is ready, and each cloud's form is its own x-if so only the open one is built. -->
+    <div x-show="buildPanel === 'ot'" x-cloak
+         class="flex flex-wrap gap-2" role="group" aria-label="Which cloud to build the OT cell in">
+      {% if ot_clouds | length > 1 %}
+      {% for cloud in ot_clouds %}
+      <button type="button" @click="otCloud = '{{ cloud }}'"
+              :class="otCloud === '{{ cloud }}' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'"
+              class="px-3 py-1.5 text-sm border rounded-md uppercase">{{ cloud }}</button>
+      {% endfor %}
+      {% endif %}
+    </div>
+    {% for cloud in ot_clouds %}
+    <template x-if="activeTab === 'build' && buildPanel === 'ot' && otCloud === '{{ cloud }}'">
       <div x-data='demoOTPanel({{ cloud | tojson }})' class="space-y-3">
         <p x-show="loadError" x-cloak class="text-sm text-red-700" x-text="loadError"></p>
         <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
@@ -165,8 +177,8 @@
         </div>
       </div>
     </template>
-    {% endif %}
     {% endfor %}
+    {% endif %}
 
     {% if 'net' in build_panels %}
     <template x-if="activeTab === 'build' && buildPanel === 'net'">
@@ -236,12 +248,14 @@
 {% with agent_part = 'script' %}{% include "workload_lab/_agent.html" %}{% endwith %}
 {% endif %}
 <script>
-function demoHub(tabSlugs, buildPanels) {
+function demoHub(tabSlugs, buildPanels, otClouds) {
   return {
     // The shared tab contract: select(), pickTab(), tabSlugs, activeTab (static/js/app.js).
     ...tabState(tabSlugs),
     buildPanels,
     buildPanel: buildPanels[0] || '',
+    otClouds,
+    otCloud: (otClouds || [])[0] || '',
     loading: false,
     loaded: false,
     error: '',
@@ -292,9 +306,11 @@ function demoHub(tabSlugs, buildPanels) {
     manage(event, c) {
       const key = c.kind === 'net' ? 'net'
         : c.kind === 'agent' ? 'agent'
-        : c.kind === 'ot' ? 'ot-' + c.cloud : '';
+        : c.kind === 'ot' ? 'ot' : '';
       if (!key || !this.buildPanels.includes(key) || !this.canBuild()) return;
+      if (key === 'ot' && !this.otClouds.includes(c.cloud)) return;
       event.preventDefault();
+      if (key === 'ot') this.otCloud = c.cloud;
       this.buildPanel = key;
       this.select('build');
     },

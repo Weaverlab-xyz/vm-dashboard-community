@@ -477,6 +477,16 @@ def test_the_cloud_pages_and_the_hub_render_the_same_partials():
         assert f"demo/{partial}.html" in hub, partial
 
 
+def test_the_hub_has_one_ot_panel_with_a_cloud_toggle():
+    hub = _read("web_dashboard", "templates", "demo", "index.html")
+    assert "'key': 'ot'," in hub
+    for per_cloud in ("ot-gcp", "ot-aws", "ot-azure"):
+        assert per_cloud not in hub, f"{per_cloud} panel is back -- use otCloud"
+    assert "otCloud = '{{ cloud }}'" in hub
+    main = _read("web_dashboard", "main.py")
+    assert '"ot": bool(ot_clouds)' in main and '"ot_clouds": ot_clouds' in main
+
+
 def test_cell_destroy_goes_through_the_cell_route_on_every_page():
     js = _read("web_dashboard", "static", "js", "demo_cells.js")
     assert "/api/demo/cells/ot/" in js and "/api/demo/cells/net/" in js
