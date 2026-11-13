@@ -192,7 +192,9 @@ def test_the_options_route_never_lists_an_administrator():
 def test_the_options_route_needs_the_permission_that_could_mint():
     body = _options_body().split("\n", 12)
     head = "\n".join(body)
-    assert 'require_permission("config_mgmt", "write")' in head, (
+    # require_cell: config_mgmt:write, or demo:write -- both can mint. The roster itself
+    # is withheld from a `demo` caller, who picks no user (tests/test_demo_agent_cell.py).
+    assert 'require_cell("config_mgmt", "write")' in head, (
         "the options route is not gated on the permission that can actually mint an "
         "agent, so the user list reaches callers who could not obtain it by minting")
 

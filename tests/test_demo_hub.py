@@ -109,8 +109,10 @@ def test_a_presenter_cannot_reach_the_general_cloud_routes():
     for cloud in ("aws", "azure", "gcp", "oci"):
         for level in ("write", "delete"):
             assert not has_permission(p, cloud, level), f"presenter holds {cloud}:{level}"
+    # Not config_mgmt:write either: that is the free choice of an agent's token user. A
+    # presenter mints through `demo`, as a service account the cell creates.
     assert not has_permission(p, "config_mgmt", "write"), (
-        "the presenter can mint an agent cell -- see api/demo_gates on why it must not")
+        "the presenter holds config_mgmt:write, so could mint an agent as any user")
 
 
 def test_demo_is_explicit_and_levelled():
@@ -171,11 +173,15 @@ def test_standalone_tunnels_do_not_accept_demo():
         assert "cell=True" not in ot[key] and "require_cell" not in ot[key], key
 
 
-def test_the_agent_cell_is_not_on_demo():
+def test_the_agent_cell_takes_demo_only_through_the_bounded_path():
+    """`demo` reaches the agent cell, but never the free choice of token user: the
+    presenter path makes its own service account. tests/test_demo_agent_cell.py holds
+    that behaviour; this pins that the free choice is the operator's alone."""
     src = _read("web_dashboard", "api", "agentcell.py")
-    assert "demo_gates" not in src and "require_cell" not in src, (
-        "the agent cell accepts `demo` -- minting one issues a token as any non-admin "
-        "user, so a presenter could hold a Cloud Admin user's reach")
+    assert "via_demo(current_user, \"config_mgmt\", \"write\")" in src, (
+        "create_agent no longer tells a presenter apart from an operator -- a presenter "
+        "would choose any non-admin user as the agent's token user")
+    assert "_cell_service_account(" in src
 
 
 # ── the shared list ──────────────────────────────────────────────────────────

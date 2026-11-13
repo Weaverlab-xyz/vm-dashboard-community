@@ -86,6 +86,11 @@ call — the next `/mcp` request, or the next exchange at `/api/oauth/token`, wh
 comes first. It is the recommended token user, and against a registered trust domain it
 is the one that leaves nothing on the host.
 
+**Minting from the Demo hub as a Demo Presenter**, you pick no token user: the cell creates
+a service account for the agent, with the **Demo Agent** role, in the workstream you choose,
+and disables it when you revoke the agent. It can never reach further than you can. See
+[Agent cells run as their own account](demo-hub.md#agent-cells-run-as-their-own-account).
+
 **The credential is named, not shown.** That is its *name* in the line — the PAT's name as
 **Settings → API Tokens** lists it, or the client's under **Users → Service accounts** —
 and the thing you are about to revoke. No part of the credential reaches a log, and an

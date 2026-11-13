@@ -2103,6 +2103,10 @@ async def demo_page(request: Request):
         "ot-aws": pra and ready["aws"],
         "ot-azure": pra and ready["azure"],
         "net": feature_flags.enabled("netcell_enabled") and ready["gcp"],
+        # The agent cell's own preview flag, as on the Workload Lab. Not tied to a cloud:
+        # its host is any VM the dashboard deployed. The tab's /options call lists what
+        # else is missing (the MCP server, a SPIRE trust domain).
+        "agent": feature_flags.enabled("agentcell_enabled"),
     }
     build_panels = [key for key, ok in offered.items() if ok]
     return templates.TemplateResponse(request, "demo/index.html", {

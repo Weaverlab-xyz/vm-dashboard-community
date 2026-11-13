@@ -7,7 +7,7 @@ Part of [Permissions](../permissions.md).
 A role is a named set of permissions you assign to a person or to a group, instead of
 ticking boxes for each of them. Editing the role changes it for everyone who holds it.
 
-Eleven roles ship with the dashboard:
+Twelve roles ship with the dashboard:
 
 | Role | For |
 |---|---|
@@ -15,7 +15,8 @@ Eleven roles ship with the dashboard:
 | **Operator** | Day-to-day work: deploy, run and use, but delete nothing. It does not include the audit log or change windows. |
 | **Read-Only** | Every section at its read level, and nothing else. `secrets` and `change_windows` offer no read level, so neither is included. |
 | **POV Presenter** | Run a proof of value end to end: **create POVs**, then see, set up, run, power, share and destroy **their own**, meaning ones they created or ones assigned to them in the POV access picker, and tick use cases. **Other people's POVs are not visible**, and neither are the platform-wide controls. It holds `pov:use` and `pov_own:read`/`write`/`delete`, but none of the general `pov:read`, `pov:write` or `pov:delete`. |
-| **Demo Presenter** | Run demos on an estate instance: open the [Demo hub](../../profiles/demo/demo-hub.md), and build, probe, re-wire and destroy the OT and network demo cells in their workstreams on any cloud, **without general cloud deploy rights**. It holds `demo:read`/`write`/`delete`. It cannot mint an agent cell (`config_mgmt:write`). |
+| **Demo Presenter** | Run demos on an estate instance: open the [Demo hub](../../profiles/demo/demo-hub.md), build, probe, re-wire and destroy the OT and network demo cells in their workstreams on any cloud, and mint and revoke agent cells, **without general cloud deploy rights**. It holds `demo:read`/`write`/`delete`. An agent it mints runs as a new service account with the **Demo Agent** role; it cannot choose another user, or link an agent to a Workload Lab credential (`config_mgmt:write`). |
+| **Demo Agent** | The token user of an agent cell a Demo Presenter mints, given to the service account the cell creates. Reads VMs and inventory, and only its own jobs. Not meant for people. |
 | **POV Manager** | Oversee every proof of value: see, set up, run, power, share and destroy **any** POV, and curate the POV templates. It holds every `pov` level plus `pov_templates:read`/`write`. |
 | **POV Template Builder** | Author what presenters build from: build and delete POV templates, save and delete blueprints, and maintain the BeyondTrust tenant registry. It **cannot create POVs**. It holds `pov_templates:read`/`write`/`delete` and `pov_own:read`, which opens the POV page (and its Tenants tab) without showing anyone else's POVs. Give it alongside **POV Presenter** to someone who does both. |
 | **Auditor** | The audit trail, job history and inventory. No writes. |

@@ -390,6 +390,11 @@ MIGRATIONS: tuple = (
     # of which agent got which job. NULL: shown.
     Migration("0013_agent_rollout_hidden",
               (add_column("agent_rollouts", "hidden_at", "TIMESTAMP"),)),
+    # An agent cell that CREATED its token user -- a Demo Presenter's mint makes a service
+    # account per cell (api/agentcell.create_agent), and revoking the cell disables it.
+    # Bare BOOLEAN for the users.is_admin reason; NULL reads as False, every older cell.
+    Migration("0014_agent_cell_owns_account",
+              (add_column("agent_cells", "owns_agent_account", "BOOLEAN"),)),
 )
 
 
