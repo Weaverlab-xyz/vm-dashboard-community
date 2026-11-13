@@ -116,18 +116,22 @@ def _cell_service_account(db: Session, caller: User, payload, host: dict, cell_i
 
 
 def _row_for(db: Session, user: User, agent_id: str) -> AgentCell:
-    """The cell ``agent_id``, or 404.
+    """The cell ``agent_id``, or 404 -- for every route that acts on one cell by id.
 
-    A caller who gets in through `demo` must also be able to SEE it -- workgroup or
-    creator, ``agentcell_service.visible_to``, the list's own rule -- or a presenter could
-    revoke anyone's agent by id. A `config_mgmt:write` holder keeps the unscoped lookup
-    these routes have always had.
+    The caller must be able to SEE it: workgroup or creator, ``agentcell_service.visible_to``,
+    the list's own rule, so a cell no caller can find on the page is one they cannot act on
+    either. Administrators see every cell. Anything else is the 404 ``GET /agents`` gives by
+    not listing it -- never a 403, which would confirm the id exists.
+
+    It applies to EVERY caller. These routes used to resolve the row unscoped for a
+    `config_mgmt:write` holder, so revoking, linking or opening an episode on another
+    team's agent took only its id.
     """
+    from .gcp import _accessible_workgroups
     row = db.query(AgentCell).filter(AgentCell.id == agent_id).first()
-    if row is not None and via_demo(user, "config_mgmt", "write", "delete"):
-        from .gcp import _accessible_workgroups
-        if not agentcell_service.visible_to(row, _accessible_workgroups(user), user.username):
-            row = None
+    if row is not None and not agentcell_service.visible_to(
+            row, _accessible_workgroups(user), user.username):
+        row = None
     if row is None:
         raise HTTPException(status_code=404, detail="No such agent cell.")
     return row
@@ -707,9 +711,7 @@ def link_agent(
         here** — that episode is one shot on the host — so the page must not offer a
         Request-access button for it (see ``EPISODE_MECHANISMS``).
     """
-    row = db.query(AgentCell).filter(AgentCell.id == agent_id).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="No such agent cell.")
+    row = _row_for(db, current_user, agent_id)
 
     for problem in (agentcell_service.link_problem(payload.mechanism),
                     agentcell_service.already_linked_problem(row)):
@@ -831,9 +833,7 @@ def request_cluster_access(
     non-human principal that so it could file status updates would hand it more authority
     than the cell argues for. ``journalctl -u mcp-agent`` is where the episode happens.
     """
-    row = db.query(AgentCell).filter(AgentCell.id == agent_id).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="No such agent cell.")
+    row = _row_for(db, current_user, agent_id)
 
     for problem in (agentcell_service.episode_link_problem(row),
                     agentcell_service.cluster_episode_mechanism_problem(row),
@@ -886,9 +886,7 @@ def release_cluster_access(
     released one, it lives out its TTL — this marks the episode closed and frees the
     agent to open another. Say so rather than letting "release" read as a revoke.
     """
-    row = db.query(AgentCell).filter(AgentCell.id == agent_id).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="No such agent cell.")
+    row = _row_for(db, current_user, agent_id)
     was = (row.episode_state or "").strip()
     if not was or was in agentcell_service.EPISODE_CLOSED:
         return {"id": row.id, "released": "", "message": "No episode was open."}
@@ -913,9 +911,7 @@ def unlink_agent(
 ):
     """Drop the link. Touches neither the agent nor the credential — the lab's row keeps
     its own lifecycle, and this only stops claiming a relationship between them."""
-    row = db.query(AgentCell).filter(AgentCell.id == agent_id).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="No such agent cell.")
+    row = _row_for(db, current_user, agent_id)
     was = row.linked_mechanism or ""
     # An open episode is refused rather than silently orphaned: unlinking mid-wait would
     # leave a request holding the account's concurrent slot for an identity this agent is

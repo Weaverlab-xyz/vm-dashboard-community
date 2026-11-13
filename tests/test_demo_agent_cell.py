@@ -314,6 +314,70 @@ def test_the_demo_agent_role_is_narrow_and_valid():
                 f"Demo Presenter lacks {scope}:{level}, so no presenter could mint an agent")
 
 
+# ── every by-id route, for everyone ───────────────────────────────────────────
+
+OPERATOR = {"config_mgmt": ["read", "write"], "vms": ["read"]}
+
+
+def _operator_cell(db):
+    """An agent cell in `ops`, minted by an operator there against a narrow user."""
+    owner = _user(db, OPERATOR, workgroups=("ops",), name="ops-operator")
+    target = _user(db, {"vms": ["read"]}, workgroups=("ops",), name="ops-agent-user")
+    lab = _lab(db, owner.username)
+    with _World(_host(db, workgroup="ops")):
+        out = _mint(db, owner, lab_id=lab.id, pat_user_id=target.id, workgroup="ops")
+    return out.id
+
+
+def test_an_operator_cannot_act_on_a_cell_outside_their_workstreams():
+    """config_mgmt:write used to reach every agent cell by id -- revoke, link, unlink,
+    open or close an episode -- whoever owned it. The row is resolved with the list's own
+    visibility rule now (workgroup or creator), for every caller."""
+    from web_dashboard.models.agentcell import AgentCellEpisodeRequest, AgentCellLinkRequest
+    db = _fresh()
+    try:
+        cid = _operator_cell(db)
+        other = _user(db, OPERATOR, workgroups=("demo",), name="demo-operator")
+        calls = {
+            "revoke": lambda: agentcell.revoke_agent(cid, db=db, current_user=other),
+            "spire": lambda: agentcell.remove_spire_identity(cid, db=db, current_user=other),
+            "link": lambda: agentcell.link_agent(
+                cid, AgentCellLinkRequest(mechanism="cloud", credential_id="x"),
+                db=db, current_user=other),
+            "unlink": lambda: agentcell.unlink_agent(cid, db=db, current_user=other),
+            "episode": lambda: agentcell.request_cluster_access(
+                cid, AgentCellEpisodeRequest(), db=db, current_user=other),
+            "release": lambda: agentcell.release_cluster_access(cid, db=db, current_user=other),
+        }
+        for name, call in calls.items():
+            assert _status(call) == 404, f"{name}: an operator reached another team's agent"
+        assert db.query(AgentCell).filter(AgentCell.id == cid).first().status != "revoked"
+    finally:
+        db.close()
+
+
+def test_an_operator_in_the_workstream_and_an_admin_still_can():
+    db = _fresh()
+    try:
+        cid = _operator_cell(db)
+        teammate = _user(db, OPERATOR, workgroups=("ops",), name="ops-teammate")
+        assert _status(lambda: agentcell.revoke_agent(cid, db=db, current_user=teammate)) == 200
+        cid2 = _operator_cell_again(db)
+        admin = _user(db, {}, workgroups=(), name="root", admin=True)
+        assert _status(lambda: agentcell.revoke_agent(cid2, db=db, current_user=admin)) == 200
+    finally:
+        db.close()
+
+
+def _operator_cell_again(db):
+    owner = db.query(User).filter(User.username == "ops-operator").first()
+    target = db.query(User).filter(User.username == "ops-agent-user").first()
+    lab = _lab(db, owner.username)
+    with _World(_host(db, workgroup="ops", name="worker-2")):
+        return _mint(db, owner, lab_id=lab.id, pat_user_id=target.id, workgroup="ops",
+                     name="watcher-2", host_ref="worker-2").id
+
+
 if __name__ == "__main__":
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]
