@@ -492,8 +492,11 @@ async def _create_member(db: Session, user, cell: CustomCell, item: dict, rname:
 
 
 def _stamp_member(db: Session, cell: CustomCell, member: CustomCellMember) -> None:
-    """The member's own timer (the backstop) and, for a VM, the cell's suspend schedule
-    on its deploy row -- which is all ``suspend_sweeper`` needs to stop and start it."""
+    """The member's own timer (the backstop), and the cell's id on a VM's deploy row.
+
+    The cell's suspend schedule is deliberately NOT copied onto the VM: the cell's own
+    sweep powers every member (see "Whole-cell power" below), and a second owner of the
+    same schedule would stop each VM twice at every boundary."""
     from ..database import CloudDatabase, Job, K8sCluster
     backstop = cell.expires_at + BACKSTOP if cell.expires_at else None
     if member.kind == "vm":
@@ -501,9 +504,6 @@ def _stamp_member(db: Session, cell: CustomCell, member: CustomCellMember) -> No
         if row is None:
             return
         row.expires_at = backstop
-        for col in ("suspend_at_local", "resume_at_local", "schedule_timezone",
-                    "schedule_days"):
-            setattr(row, col, getattr(cell, col))
         meta = row.metadata_dict or {}
         meta["custom_cell_id"] = cell.id
         row.metadata_dict = meta
@@ -589,7 +589,10 @@ def _member_state(db: Session, m: CustomCellMember) -> str:
         return "destroying"
     if row.status == "failed":
         return "failed"
-    if row.status in ("registered", "managed", "available", "running", "stopped"):
+    # A stopped (or stopping/starting) cluster or database is built: the power state is
+    # tracked on the member, not by pretending it is still provisioning.
+    if row.status in ("registered", "managed", "available", "running", "stopped",
+                      "stopping", "starting"):
         return "ready"
     return "provisioning"
 
@@ -740,6 +743,10 @@ async def sweep(db: Session, now=None) -> list:
                 refresh(db, cell)
             else:
                 refresh(db, cell)
+                if cell.status in ("active", "suspended"):
+                    note = _sweep_schedule(db, cell, now)
+                    if note:
+                        out.append(note)
         except Exception:  # noqa: BLE001
             logger.warning("custom cell sweep: %s failed", cell.id, exc_info=True)
             db.rollback()
@@ -780,3 +787,114 @@ def list_cells(db: Session, accessible: Optional[Iterable[str]], *,
         q = q.filter(CustomCell.status != "destroyed")
     return [c for c in q.order_by(CustomCell.created_at.desc()).all()
             if cell_visible(c, accessible)]
+
+
+# ── Whole-cell power: suspend and resume every member ────────────────────────
+#
+# A VM is stopped by the same ``<cloud>_power`` job its Stop button and the suspend
+# sweeper create (``suspend_sweeper._power_meta`` builds the identical row). A cluster or
+# a database goes through ``k8s_service.start_power`` / ``cloud_database_service.
+# start_power`` -- scale node pools to zero (AKS: managed stop) and stop the instance.
+# Those two are looked up rather than imported: on an install without them the cell
+# still suspends its VMs and says, per member, why the rest kept running.
+#
+# The cell's suspend schedule is driven HERE for every member, VMs included, and is NOT
+# copied onto the VM deploy rows: the VM sweeper runs only behind its own flag, and two
+# owners of one schedule would act twice at every boundary.
+
+_POWER_ENTRY = {"k8s": ("k8s_service", "start_power"),
+                "database": ("cloud_database_service", "start_power")}
+
+
+def _start_power_fn(kind: str):
+    import importlib
+    mod_name, fn_name = _POWER_ENTRY[kind]
+    mod = importlib.import_module(f"{__package__}.{mod_name}")
+    return getattr(mod, fn_name, None)
+
+
+def _power_member(db: Session, m: CustomCellMember, verb: str, actor: str,
+                  *, restop: bool = False) -> None:
+    from ..database import Job
+    from . import job_service
+    if m.kind == "vm":
+        from . import suspend_sweeper
+        job = db.query(Job).filter(Job.id == m.ref_id).first()
+        cloud = {v: k for k, v in _VM_JOB_TYPES.items()}.get(job.job_type) if job else None
+        if job is None or cloud is None:
+            m.last_error = "no deploy record to power"
+            return
+        job_service.create_job(db, job_type=suspend_sweeper._POWER_JOB[cloud],
+                               created_by=actor, workgroup=job.workgroup,
+                               metadata=suspend_sweeper._power_meta(
+                                   cloud, job, job.metadata_dict or {}, verb))
+    else:
+        fn = _start_power_fn(m.kind)
+        if fn is None:
+            m.last_error = (f"{m.kind} power ops are not available on this install, so it "
+                            "keeps running while the cell is suspended")
+            return
+        try:
+            if m.kind == "database":
+                fn(db, m.ref_id, verb, actor, restop=restop)
+            else:
+                fn(db, m.ref_id, verb, actor)
+        except Exception as exc:  # noqa: BLE001 — PowerRefused / PowerUnsupported / ...
+            m.last_error = f"{verb}: {exc}"
+            return
+    m.power_state = "stopped" if verb == "stop" else "running"
+    m.last_error = None
+
+
+def power(db: Session, cell: CustomCell, action: str, *, actor: str) -> CustomCell:
+    """Suspend (``stop``) or resume (``start``) every built member of the cell."""
+    if action not in ("stop", "start"):
+        raise CellError("action must be stop or start")
+    refresh(db, cell)
+    if action == "stop" and cell.status != "active":
+        raise CellError(f"Only an active cell can be suspended; this one is {cell.status}.")
+    if action == "start" and cell.status != "suspended":
+        raise CellError(f"Only a suspended cell can be resumed; this one is {cell.status}.")
+    for m in members_of(db, cell.id):
+        if m.status == "ready" and m.ref_id:
+            _power_member(db, m, action, actor)
+    cell.status = "suspended" if action == "stop" else "active"
+    db.commit()
+    return cell
+
+
+def _sweep_schedule(db: Session, cell: CustomCell, now) -> str:
+    """Apply the cell's suspend schedule (``suspend_schedule.due_action``), and re-stop a
+    database its cloud restarted on its own while the cell sleeps (RDS does after 7 days)."""
+    from datetime import timezone
+
+    from . import suspend_schedule
+    now_utc = now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now
+    action = suspend_schedule.due_action(cell, now_utc)
+    cell.schedule_last_checked_at = now_utc.replace(tzinfo=None)
+    db.commit()
+    actor = cell.created_by or "custom-cell"
+    if action == suspend_schedule.SUSPEND and cell.status == "active":
+        power(db, cell, "stop", actor=actor)
+        return f"{cell.name}: suspended on schedule"
+    if action == suspend_schedule.RESUME and cell.status == "suspended":
+        power(db, cell, "start", actor=actor)
+        return f"{cell.name}: resumed on schedule"
+    if cell.status == "suspended":
+        _restop_databases(db, cell, actor)
+    return ""
+
+
+def _restop_databases(db: Session, cell: CustomCell, actor: str) -> None:
+    from ..database import CloudDatabase
+    try:
+        from . import clouddb_power
+    except ImportError:
+        return
+    for m in members_of(db, cell.id):
+        if m.kind != "database" or not m.ref_id:
+            continue
+        row = db.query(CloudDatabase).filter(CloudDatabase.id == m.ref_id).first()
+        if row is not None and clouddb_power.needs_restop(row):
+            _power_member(db, m, "stop", actor, restop=True)
+    db.commit()

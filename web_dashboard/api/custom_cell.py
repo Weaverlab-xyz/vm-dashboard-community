@@ -14,6 +14,8 @@ Gates (api/demo_gates):
 | POST /cells (launch)         | `demo:write`                                      |
 | GET  /cells[/{id}]           | `demo:read`                                       |
 | POST /cells/{id}/end-at      | `demo:write`                                      |
+| POST /cells/{id}/power       | `demo:write` (suspend / resume every member)      |
+| PUT  /cells/{id}/schedule    | `demo:write` (the recurring suspend schedule)     |
 | DELETE /cells/{id}           | `demo:delete`                                     |
 
 A cell is visible to its workgroup; anything else is a 404.
@@ -239,4 +241,48 @@ def destroy_cell(cell_id: str, db: Session = Depends(get_db),
     cell = svc.start_destroy(db, cell, actor=current_user.username)
     job_service.log_audit(db, current_user.username, "custom_cell.destroy",
                           details={"cell": cell.name, "id": cell.id})
+    return svc.serialize_cell(db, cell)
+
+
+class PowerRequest(BaseModel):
+    action: str        # stop | start
+
+
+@router.post("/cells/{cell_id}/power")
+def power_cell(cell_id: str, body: PowerRequest, db: Session = Depends(get_db),
+               current_user: User = Depends(require_demo("write"))):
+    """Suspend or resume the whole cell: VMs stop, clusters scale to zero, databases stop.
+    A member that cannot be powered says why on its row and keeps running."""
+    from ..services import job_service
+    cell = _cell_or_404(db, current_user, cell_id)
+    try:
+        cell = svc.power(db, cell, body.action, actor=current_user.username)
+    except svc.CellError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    job_service.log_audit(db, current_user.username, f"custom_cell.{body.action}",
+                          details={"cell": cell.name, "id": cell.id})
+    return svc.serialize_cell(db, cell)
+
+
+class ScheduleRequest(BaseModel):
+    suspend_at_local: str = ""
+    resume_at_local: str = ""
+    schedule_timezone: str = ""
+    schedule_days: str = ""
+
+
+@router.put("/cells/{cell_id}/schedule")
+def set_cell_schedule(cell_id: str, body: ScheduleRequest, db: Session = Depends(get_db),
+                      current_user: User = Depends(require_demo("write"))):
+    """Set or clear (all blank) the cell's recurring suspend schedule."""
+    cell = _cell_or_404(db, current_user, cell_id)
+    try:
+        stored = svc.validate_schedule(body.model_dump())
+    except svc.CellError as exc:
+        _bad(exc)
+    for k, v in stored.items():
+        setattr(cell, k, v)
+    # Re-arm the latch: a new schedule must not act on boundaries crossed before it existed.
+    cell.schedule_last_checked_at = svc._now()
+    db.commit()
     return svc.serialize_cell(db, cell)

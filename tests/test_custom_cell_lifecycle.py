@@ -176,7 +176,7 @@ def test_a_booked_cell_builds_nothing_until_its_start():
     assert len(CALLS["created"]) == 4 and cell.status == "provisioning"
 
 
-def test_members_carry_the_backstop_timer_and_the_vm_suspend_schedule():
+def test_members_carry_the_backstop_timer_and_the_cell_owns_the_schedule():
     db = _db()
     me = _user(db, "demo-presenter")
     bp = _bp(db, suspend_at_local="19:00", resume_at_local="07:00",
@@ -186,7 +186,8 @@ def test_members_carry_the_backstop_timer_and_the_vm_suspend_schedule():
     for m in _members(db, cell):
         if m.kind == "vm":
             row = db.query(Job).filter(Job.id == m.ref_id).first()
-            assert row.suspend_at_local == "19:00" and row.resume_at_local == "07:00"
+            # The cell's sweep powers its VMs; a copy here would be a second owner.
+            assert not row.suspend_at_local and not row.resume_at_local
             assert row.metadata_dict["custom_cell_id"] == cell.id
         else:
             model = K8sCluster if m.kind == "k8s" else CloudDatabase
@@ -355,6 +356,112 @@ def test_moving_the_end_moves_every_members_backstop():
         model = {"vm": Job, "k8s": K8sCluster}.get(m.kind, CloudDatabase)
         assert db.query(model).filter(model.id == m.ref_id).first().expires_at == \
             new_end + svc.BACKSTOP
+
+
+# ── whole-cell power ─────────────────────────────────────────────────────────
+
+POWERED = []
+
+
+def _fake_power(kind):
+    def _f(db, rid, action, actor="", **kw):
+        POWERED.append((kind, rid, action, actor, kw.get("restop", False)))
+        return {"job_id": "p"}
+    return _f
+
+
+k8s_service.start_power = _fake_power("k8s")
+cloud_database_service.start_power = _fake_power("database")
+
+
+def _active_cell(db, me, **bp_kw):
+    cell = _launch(db, me, _bp(db, **bp_kw))
+    _finish(db, cell)
+    svc.refresh(db, cell)
+    assert cell.status == "active"
+    POWERED.clear()
+    return cell
+
+
+def test_suspend_stops_every_member_through_its_own_power_path():
+    db = _db()
+    me = _user(db, "demo-presenter")
+    cell = _active_cell(db, me)
+    svc.power(db, cell, "stop", actor=me.username)
+    assert cell.status == "suspended"
+    assert sorted(k for k, *_ in POWERED) == ["database", "k8s"]
+    assert all(a == "stop" for _, _, a, _, _ in POWERED)
+    vm_ids = {m.ref_id for m in _members(db, cell) if m.kind == "vm"}
+    power_jobs = [j for j in db.query(Job).filter(Job.job_type == "gce_power").all()
+                  if j.metadata_dict.get("deploy_job_id") in vm_ids]
+    assert len(power_jobs) == 2 and all(j.metadata_dict["action"] == "stop"
+                                        for j in power_jobs)
+    assert svc.refresh(db, cell).status == "suspended", "the roll-up woke a suspended cell"
+
+    svc.power(db, cell, "start", actor=me.username)
+    assert cell.status == "active"
+    assert [a for _, _, a, _, _ in POWERED[-2:]] == ["start", "start"]
+
+
+def test_suspend_and_resume_refuse_the_wrong_state():
+    db = _db()
+    me = _user(db, "demo-presenter")
+    cell = _active_cell(db, me)
+    for action in ("start",):
+        try:
+            svc.power(db, cell, action, actor=me.username)
+            raise AssertionError("resumed an active cell")
+        except svc.CellError:
+            pass
+
+
+def test_a_member_whose_power_op_is_missing_says_so_and_the_rest_still_stop():
+    db = _db()
+    me = _user(db, "demo-presenter")
+    cell = _active_cell(db, me)
+    saved = k8s_service.start_power
+    del k8s_service.start_power
+    try:
+        svc.power(db, cell, "stop", actor=me.username)
+    finally:
+        k8s_service.start_power = saved
+    k8s = [m for m in _members(db, cell) if m.kind == "k8s"][0]
+    assert "not available" in (k8s.last_error or "")
+    assert [k for k, *_ in POWERED] == ["database"]
+
+
+def test_the_schedule_suspends_and_resumes_the_whole_cell():
+    db = _db()
+    me = _user(db, "demo-presenter")
+    cell = _active_cell(db, me, suspend_at_local="19:00", resume_at_local="07:00",
+                        schedule_timezone="UTC")
+    day = utcnow().replace(hour=18, minute=50, second=0, microsecond=0) - timedelta(days=1)
+    cell.expires_at = day + timedelta(days=5)
+    cell.schedule_last_checked_at = day
+    db.commit()
+    asyncio.run(svc.sweep(db, now=day + timedelta(minutes=20)))      # crossed 19:00
+    db.refresh(cell)
+    assert cell.status == "suspended", cell.status
+    asyncio.run(svc.sweep(db, now=day + timedelta(hours=12, minutes=20)))  # crossed 07:00
+    db.refresh(cell)
+    assert cell.status == "active", cell.status
+
+
+def test_a_database_its_cloud_restarted_is_stopped_again_while_suspended():
+    db = _db()
+    me = _user(db, "demo-presenter")
+    cell = _active_cell(db, me)
+    svc.power(db, cell, "stop", actor=me.username)
+    POWERED.clear()
+    import types
+    fake = types.ModuleType("web_dashboard.services.clouddb_power")
+    fake.needs_restop = lambda row, now=None: True
+    sys.modules["web_dashboard.services.clouddb_power"] = fake
+    try:
+        svc._restop_databases(db, cell, me.username)
+    finally:
+        del sys.modules["web_dashboard.services.clouddb_power"]
+    assert [(k, a, r) for k, _, a, _, r in POWERED] == [("database", "stop", True)]
 
 
 # ── the real seam and the routes ─────────────────────────────────────────────
