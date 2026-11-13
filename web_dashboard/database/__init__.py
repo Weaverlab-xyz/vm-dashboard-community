@@ -68,7 +68,7 @@ from .models.jobs import (  # noqa: E402,F401  (re-exported: callers import thes
 )
 
 from .models.access import (  # noqa: E402,F401  (re-exported: callers import these from web_dashboard.database)
-    OAuthGroupMapping, AccessRole, Workgroup,
+    OAuthGroupMapping, AccessRole, UserAccessRole, Workgroup,
     StorageAssetScope, VMWorkgroupOverride, Approval,
     EntitleActivation,
 )

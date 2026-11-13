@@ -27,9 +27,17 @@ Twelve roles ship with the dashboard:
 **Built-in roles cannot be edited or deleted.** Use **Clone** and change the copy — that
 keeps what the shipped roles mean stable, so a support conversation about "the Auditor
 role" is about the same thing on every install. A custom role can be edited and deleted
-freely; deleting one that is still assigned asks first, and the people who held it keep
-only whatever their own permission grid grants. They then show **No role**, and the next
-edit to each of them has to choose one.
+freely. Deleting one that is still assigned asks first. Anyone who held it keeps their
+other roles and their own permission grid. Anyone it was the only role for shows **No
+role**, and the next edit to that person has to choose one.
+
+**A person can hold several roles.** On the user form, pick the main **Role**, then tick
+any others under **Also holds**. For example, a Sales Engineer who presents demos and also
+builds demo cells gets Demo Presenter plus Cell Builder. They get everything **any** of
+their roles grants, so adding a role never takes access away. Administrator can't be
+ticked under *Also holds*: it already grants everything, so pick it as the main role
+instead. Group mappings still name one role each, but someone in several mapped groups gets
+all of those groups' roles together.
 
 **A role and the grid add up.** The grid on a user or a group mapping is an *override*
 layered on top of their role, not a replacement for it — so the usual shape is "give them

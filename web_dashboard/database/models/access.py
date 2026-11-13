@@ -94,6 +94,35 @@ class AccessRole(Base):
         self.permissions = json.dumps(value) if value else None
 
 
+class UserAccessRole(Base):
+    """One access role a user holds directly. A user may hold several.
+
+    The record of WHICH roles, for the editor, the assignee lists and the delete guard.
+    It is never read to decide access: `users.role_permissions` stays the one materialised
+    copy -- now the UNION of every role here -- because `effective_permissions_dict` is
+    read on a DETACHED User (`api/mcp_server`), where a query or relationship would raise.
+    `users.role_id` stays too, as the first-assigned role and the "holds a role" marker
+    the `_ROLE_UNRESOLVED` guard reads.
+
+    `services/role_service.apply_roles_to_user` is the only writer of this table and of
+    those two columns, and writes all three together.
+
+    No ForeignKeys, for the reasons on `users.role_id` (identity.py): a constraint that
+    exists on some installs and not others, tested on a SQLite that enforces none. The
+    integrity rules live in role_service: `delete` strips the role from every holder and
+    `reconcile` drops rows whose role or user is gone.
+    """
+    __tablename__ = "user_access_roles"
+    __table_args__ = (UniqueConstraint("user_id", "role_id", name="uq_user_access_role"),)
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), nullable=False, index=True)
+    role_id = Column(String(36), nullable=False, index=True)
+    # Ordering only: the earliest row is the one mirrored into `users.role_id`.
+    position = Column(Integer, nullable=False, default=0)
+    assigned_at = Column(DateTime, default=utcnow, nullable=False)
+
+
 class Workgroup(Base):
     """User-managed workgroup: scopes RBAC + cloud resource visibility.
 
