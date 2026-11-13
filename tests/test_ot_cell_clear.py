@@ -252,8 +252,9 @@ def test_gcp_can_still_see_its_gateway_when_the_launch_never_returned():
 def test_every_cell_page_offers_clear_on_a_failed_cell():
     """The half that was actually missing: the row was already listed, and both
     of its buttons were gated on `completed`, so the card had no action at all."""
-    for cloud, path in _PAGES.items():
-        html = open(path, encoding="utf-8").read()
+    from _cell_sources import cell_page_source
+    for cloud in _PAGES:
+        html = cell_page_source(cloud)   # page + its cell partial + demo_cells.js
         assert "clearOTCell(c)" in html, f"{cloud} page has no Clear button"
         assert 'x-show="c.status !== \'completed\'"' in html, \
             f"{cloud} page's Clear is not offered on a non-completed cell"

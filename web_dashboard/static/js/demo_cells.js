@@ -135,7 +135,7 @@
     }],
   };
 
-  window.otCellMixin = function (cloud) {
+  window.otCellMixin = function otCellMixin(cloud) {
     if (!OT_FORMS[cloud]) throw new Error('otCellMixin: unknown cloud ' + cloud);
     return {
       otCloud:         cloud,
@@ -333,7 +333,7 @@
   };
 
   // The network (VyOS) cell. GCP only. Host provides the GCP names listed above.
-  window.netCellMixin = function () {
+  window.netCellMixin = function netCellMixin() {
     return {
       netLoaded:        false,
       netCells:         [],
@@ -508,7 +508,7 @@
   }
 
   // x-data="demoOTPanel('aws')" -- one OT cell form on the hub.
-  window.demoOTPanel = function (cloud) {
+  window.demoOTPanel = function demoOTPanel(cloud) {
     return {
       ...demoCellHost(cloud),
       ...window.otCellMixin(cloud),
@@ -520,7 +520,7 @@
   };
 
   // x-data="demoNetPanel()" -- the network cell form on the hub.
-  window.demoNetPanel = function () {
+  window.demoNetPanel = function demoNetPanel() {
     return {
       ...demoCellHost('gcp'),
       ...window.netCellMixin(),

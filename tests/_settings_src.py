@@ -46,4 +46,14 @@ def page_for(rel, text):
     """The page a template renders in, for checks that look names up page-wide: the
     whole Settings page for one of its panels (``rel`` relative to templates/), else
     the template's own ``text``."""
-    return settings_source() if rel.replace("\\", "/").startswith("settings/panels/") else text
+    rel = rel.replace("\\", "/")
+    if rel.startswith("settings/panels/"):
+        return settings_source()
+    # A demo-cell form partial renders inside a component built from demo_cells.js (on
+    # the cloud page and on the Demo hub alike), so its helpers are defined there.
+    if rel.startswith("demo/_"):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "web_dashboard", "static", "js", "demo_cells.js"),
+                  encoding="utf-8") as fh:
+            return text + "\n" + fh.read()
+    return text

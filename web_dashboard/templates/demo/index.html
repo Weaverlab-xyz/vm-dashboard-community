@@ -150,7 +150,7 @@
     {% for cloud in ['gcp', 'aws', 'azure'] %}
     {% if ('ot-' ~ cloud) in build_panels %}
     <template x-if="activeTab === 'build' && buildPanel === 'ot-{{ cloud }}'">
-      <div x-data="demoOTPanel('{{ cloud }}')" class="space-y-3">
+      <div x-data='demoOTPanel({{ cloud | tojson }})' class="space-y-3">
         <p x-show="loadError" x-cloak class="text-sm text-red-700" x-text="loadError"></p>
         <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
           {% if cloud == 'gcp' %}{{ gcp_ot_form() }}{% elif cloud == 'aws' %}{{ aws_ot_form() }}{% else %}{{ azure_ot_form() }}{% endif %}
