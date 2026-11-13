@@ -118,11 +118,11 @@ def build_request(kind: str, cloud: str, region: str, spec: dict, *, name: str,
 
 
 def _short_validation(exc) -> str:
-    errors = getattr(exc, "errors", None)
-    if callable(errors):
+    from pydantic import ValidationError
+    if isinstance(exc, ValidationError):
         try:
             parts = []
-            for e in errors()[:4]:
+            for e in exc.errors()[:4]:
                 loc = ".".join(str(x) for x in e.get("loc", ()))
                 parts.append(f"{loc}: {e.get('msg', 'invalid')}")
             return "; ".join(parts) or str(exc)
@@ -156,7 +156,7 @@ def validate_item(item: dict) -> dict:
     bad = sorted(set(spec) & _FORBIDDEN | ({name_field(kind, cloud)} & set(spec)))
     if bad:
         raise CellError(
-            f"{label}: a blueprint cannot set {', '.join(bad)}. Names and the workgroup come "
+            f"{label}: a blueprint cannot set {', '.join(bad)}. Names and the workstream come "
             "from the cell; credential and integration overrides resolve from "
             "configuration at launch; the cell is scheduled as a whole.")
     if kind != "vm" and not region:

@@ -28,7 +28,7 @@ from fastapi import HTTPException  # noqa: E402
 from web_dashboard.api import custom_cell as api  # noqa: E402
 from web_dashboard.api.demo_gates import require_demo  # noqa: E402
 from web_dashboard.database import (Base, CloudDatabase, CustomCell,  # noqa: E402
-                                    CustomCellMember, Job, K8sCluster, SessionLocal, User,
+                                    Job, K8sCluster, SessionLocal, User,
                                     Workgroup, engine)
 from web_dashboard.services import custom_cell_service as svc  # noqa: E402
 from web_dashboard.services import role_service  # noqa: E402

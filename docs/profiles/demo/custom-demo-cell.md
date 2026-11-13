@@ -40,7 +40,7 @@ blueprint **cannot** set any of these:
 - **The resource name, the workstream or a schedule.** The cell supplies these when it is
   launched.
 - **Credential or integration overrides.** That means an SSH key secret, a PRA credential
-  reference, a Jumpoint or Asset Group, a Password Safe vault account group, or a managed
+  reference, a Gateway or Asset Group, a Password Safe vault account group, or a managed
   directory. Other people launch the blueprint, so these resolve from configuration at
   launch, exactly as a plain deploy does without an override.
 
