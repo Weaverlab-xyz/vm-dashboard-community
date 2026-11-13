@@ -146,9 +146,11 @@ def test_the_wired_predicate_has_exactly_one_definition():
     out of the raw metadata keys."""
     api = open(os.path.join(_ROOT, "web_dashboard", "api", "ot.py"),
                encoding="utf-8").read()
-    tile = open(os.path.join(_ROOT, "web_dashboard", "api", "dashboard.py"),
+    # The home-page tile and the Demo hub both read services/demo_cells now, so that
+    # is where the tile's half of the predicate lives.
+    tile = open(os.path.join(_ROOT, "web_dashboard", "services", "demo_cells.py"),
                 encoding="utf-8").read()
-    for name, src in (("api/ot.py", api), ("api/dashboard.py", tile)):
+    for name, src in (("api/ot.py", api), ("services/demo_cells.py", tile)):
         assert "cell_wiring_complete" in src, (
             f"{name} no longer asks ot_service whether a cell is wired")
         assert "ot_web_jump_tf_state" not in src, (

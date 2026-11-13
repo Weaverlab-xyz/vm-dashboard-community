@@ -7,7 +7,7 @@ instance. It has two tabs:
 
 - **Cells** lists every demo cell you can see: [OT](ot-demo-cell.md),
   [Network](net-demo-cell.md) and [Agent](agent-demo-cell.md). Each shows its state, its
-  wiring (or, for an agent, whether its token is still live), its workgroup, and a
+  wiring (or, for an agent, whether its token is still live), its workstream, and a
   **Manage** link to the page that builds and tears it down. A cell type whose preview is
   off reads *Not available here* rather than zero.
 - **Launchpad** links to every page a demo runs from: the cloud consoles, the Workload Lab,
@@ -35,7 +35,7 @@ building an OT cell needed `gcp:write` (or `aws` / `azure`), and that is also wh
 
 | A Demo Presenter can | Because the route accepts |
 |---|---|
-| Open the hub and see cells on every cloud, in their workgroups | `demo:read` |
+| Open the hub and see cells on every cloud, in their workstreams | `demo:read` |
 | Build an OT cell on AWS, Azure or GCP, and probe or re-wire it | `demo:write` beside `<cloud>:write` / `ot:write` |
 | Build a network cell | `demo:write` beside `gcp:write` |
 | Clear a **failed** OT cell's record | `demo:delete` beside `<cloud>:delete` |
@@ -51,7 +51,7 @@ And deliberately **cannot**:
   `config_mgmt:write`.
 - **Run standalone OT protocol tunnels**, which wire real plant gear rather than a cell.
 
-Cells stay scoped to the presenter's workgroups, exactly as on the cloud pages.
+Cells stay scoped to the presenter's workstreams, exactly as on the cloud pages.
 
 ### What changes on upgrade
 
