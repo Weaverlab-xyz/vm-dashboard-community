@@ -372,6 +372,15 @@ PERMISSION_SCOPE_LEVELS = {
     # api/pov_gates.py.
     "pov_own": ["read", "write", "delete"],
     "pov_templates": _RWD,
+    # The Demo hub (/demo) and the demo cells it gathers, on an estate instance.
+    #   read    open the hub; see every demo cell (OT, network, agent) in the caller's
+    #           workgroups, whichever cloud it is on
+    #   write   build, probe and re-wire an OT cell on any cloud, and build a network cell
+    #   delete  clear a failed OT cell's record
+    # ALWAYS an ALTERNATIVE to the scope a cell route already took (`gcp:write`, `ot:read`,
+    # ...), never a replacement -- see api/demo_gates.py. So it narrows nothing, which is
+    # why it has no backfill. Checked in the explicit form throughout.
+    "demo": _RWD,
     # Managed Active Directory: build/register (write), destroy/unregister (delete).
     # Reading the stored admin password is write, as on the cloud pages.
     "directories": _RWD,
@@ -457,6 +466,9 @@ EXPLICIT_ONLY_LEVELS = {
     "change_windows": ("write", "use"),
     "connections": ("read", "write", "delete"),
     "costs": ("read", "write"),
+    # A new authority (api/demo_gates): nobody held it, so "Full access" must not invent
+    # it. A full-access map already passes every cell route on the cloud scopes anyway.
+    "demo": ("read", "write", "delete"),
     "directories": ("read", "write", "delete"),
     # `can_audit_jobs` -- everyone's jobs, not just your own -- never read an empty map as
     # unrestricted either. The MCP job tools also gate on it, and those an empty map did
@@ -501,6 +513,7 @@ PERMISSION_SCOPE_GROUPS = {
     "Platform": ["images", "containers", "k8s", "cloud_function", "cloud_database",
                  "directories", "storage", "secrets", "config_mgmt"],
     "POV": ["pov", "pov_own", "pov_templates"],
+    "Demo": ["demo"],
     "Operations": ["gateways", "agents", "notifications", "epml", "ot",
                    "change_windows"],
 }

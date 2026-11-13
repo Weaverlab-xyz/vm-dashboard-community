@@ -126,7 +126,7 @@ _BUILTIN_ROLES = (
             "connections": _R,
             "images": _R, "containers": _R, "k8s": _R, "cloud_function": _R,
             "cloud_database": _R, "directories": _R, "storage": _R, "config_mgmt": _R,
-            "pov": _R, "pov_own": _R, "pov_templates": _R,
+            "pov": _R, "pov_own": _R, "pov_templates": _R, "demo": _R,
             "gateways": _R, "agents": _R, "notifications": _R, "epml": _R, "ot": _R,
         },
     },
@@ -148,6 +148,27 @@ _BUILTIN_ROLES = (
         "permissions": {
             "pov": _U, "pov_templates": _R,
             "pov_own": ["read", "write", "delete"],
+            "vms": _R, "jobs": _R, "inventory": _R, "connections": _R,
+        },
+    },
+    {
+        "slug": "demo-presenter",
+        "name": "Demo Presenter",
+        "description": "Run demos on an estate instance: open the Demo hub, and build, "
+                       "probe, re-wire and clear the OT and network demo cells in your "
+                       "workgroups on any cloud -- without general cloud deploy rights.",
+        # `demo` at every level and nothing that deploys anything else: it is the
+        # ALTERNATIVE a cell route accepts beside `<cloud>:write` (api/demo_gates.py),
+        # so this role builds cells and cannot reach POST /api/gcp/deploy. Same read-only
+        # support set as the POV Presenter, for the same reason: the cells land as jobs
+        # and inventory rows, and the wiring reads connections.
+        #
+        # NOT the agent cell. Minting one issues a token that acts as any non-admin user
+        # the caller picks, so it stays on `config_mgmt:write` -- see api/demo_gates.py.
+        # And not tearing a COMPLETED OT or network cell down, which is still the cloud's
+        # own Destroy and so still `<cloud>:delete`.
+        "permissions": {
+            "demo": _RWD,
             "vms": _R, "jobs": _R, "inventory": _R, "connections": _R,
         },
     },

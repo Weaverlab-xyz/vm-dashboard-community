@@ -51,6 +51,7 @@ from ..services import deploy_batch, job_service, ot_service
 from ..services.ot_service import OTError
 from ..services.terraform_pra_service import TerraformPRAError
 from .auth import get_current_user, require_permission
+from .demo_gates import demo_allows, require_cell
 from .gcp import (
     _accessible_workgroups,
     _gcp_project,
@@ -66,21 +67,30 @@ logger = logging.getLogger(__name__)
 # ot:read is the floor for the whole module. The cell-build routes below keep their
 # per-cloud write dependency on top of it: those provision real VMs in a real cloud
 # account, and that is the cloud scope's decision, not this one's.
+#
+# `demo:read` passes the floor too, and every CELL route accepts `demo:<level>` beside
+# its cloud level (api/demo_gates.py). The standalone-tunnel routes do not: they wire
+# real plant gear rather than a demo cell, and keep `ot:*` plus the cloud level.
 router = APIRouter(prefix="/api/ot", tags=["ot"],
-    dependencies=[Depends(require_permission("ot", "read"))],
+    dependencies=[Depends(require_cell("ot", "read"))],
 )
 
 
-def _require_cloud(user: User, cloud: str, level: str) -> str:
+def _require_cloud(user: User, cloud: str, level: str, *, cell: bool = False) -> str:
     """Validate ``cloud`` and enforce ``<cloud>:<level>`` the way
     require_permission would — admins pass, everyone else needs the level in their
     effective permissions (an empty map grants nothing).
+
+    ``cell=True`` on the routes that act on a demo CELL, where ``demo:<level>`` passes
+    as well (api/demo_gates.py). Never on a standalone tunnel.
     Returns the normalised cloud name."""
     cloud = (cloud or "gcp").strip().lower()
     if cloud not in ot_service.CELL_CHILD_JOB_TYPE:
         raise HTTPException(status_code=400, detail=f"unknown cloud {cloud!r} — "
                             "one of gcp, aws, azure")
     if user.is_effective_admin:
+        return cloud
+    if cell and demo_allows(user, level):
         return cloud
     perms = user.effective_permissions_dict or {}
     if level not in perms.get(cloud, []):
@@ -246,7 +256,7 @@ async def delete_tunnel(
 def deploy_cell(
     payload: OTCellDeployRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("gcp", "write")),
+    current_user: User = Depends(require_cell("gcp", "write")),
 ):
     """Deploy a GCP OT demo cell: one queued ``gce_deploy`` child (the runner
     claims only ``pending``, so the ``ot_cell_deploy`` parent created below is the
@@ -452,7 +462,7 @@ def deploy_cell(
 def deploy_cell_aws(
     payload: OTCellDeployRequestAWS,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("aws", "write")),
+    current_user: User = Depends(require_cell("aws", "write")),
 ):
     """Deploy an AWS OT demo cell: one queued ``ec2_deploy`` child plus the
     ``ot_cell_deploy`` parent. Same validation and admission gate as the plain
@@ -614,7 +624,7 @@ def deploy_cell_aws(
 async def deploy_cell_azure(
     payload: OTCellDeployRequestAzure,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("azure", "write")),
+    current_user: User = Depends(require_cell("azure", "write")),
 ):
     """Deploy an Azure OT demo cell: one queued ``azure_deploy`` child plus the
     ``ot_cell_deploy`` parent. Same validation and admission gate as the plain
@@ -829,7 +839,7 @@ async def deploy_cell_azure(
 async def probe_cell_egress(
     vm_job_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("ot", "write")),
+    current_user: User = Depends(require_cell("ot", "write")),
 ):
     """Run the agent play's egress probe against this cell's DMZ broker, and nothing else.
 
@@ -848,7 +858,7 @@ async def probe_cell_egress(
     cloud = ot_service.cell_cloud_for_job_type(child.job_type) if child else ""
     if child is None or not cloud or not child.metadata_dict.get("ot_cell"):
         raise HTTPException(status_code=404, detail=f"{vm_job_id} is not an OT cell VM job")
-    _require_cloud(current_user, cloud, "write")
+    _require_cloud(current_user, cloud, "write", cell=True)
     if child.metadata_dict.get("destroyed"):
         raise HTTPException(status_code=400, detail="This cell has been destroyed.")
     if child.status != "completed":
@@ -872,7 +882,7 @@ async def probe_cell_egress(
 def rewire_cell(
     vm_job_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("ot", "write")),
+    current_user: User = Depends(require_cell("ot", "write")),
 ):
     """Re-run only the missing wiring steps (Web Jump / tunnel / checkout pair) of
     an existing cell — the recovery path a failed ``ot_cell_deploy`` names in its
@@ -881,7 +891,7 @@ def rewire_cell(
     cloud = ot_service.cell_cloud_for_job_type(child.job_type) if child else ""
     if child is None or not cloud or not child.metadata_dict.get("ot_cell"):
         raise HTTPException(status_code=404, detail=f"{vm_job_id} is not an OT cell VM job")
-    _require_cloud(current_user, cloud, "write")
+    _require_cloud(current_user, cloud, "write", cell=True)
     if child.metadata_dict.get("destroyed"):
         raise HTTPException(status_code=400, detail="This cell has been destroyed.")
     if child.status != "completed":
@@ -953,7 +963,7 @@ async def clear_cell(
     cloud = ot_service.cell_cloud_for_job_type(child.job_type) if child else ""
     if child is None or not cloud or not child.metadata_dict.get("ot_cell"):
         raise HTTPException(status_code=404, detail=f"{vm_job_id} is not an OT cell VM job")
-    _require_cloud(current_user, cloud, "delete")
+    _require_cloud(current_user, cloud, "delete", cell=True)
 
     accessible = _accessible_workgroups(current_user)
     if accessible is not None and (child.workgroup or "").lower() not in accessible:
@@ -1063,7 +1073,7 @@ def list_cells(
 ):
     """Every non-destroyed OT cell on ``cloud`` (its VM-deploy child row is the
     record). Defaults to GCP so pre-multi-cloud callers see what they always saw."""
-    cloud = _require_cloud(current_user, cloud, "read")
+    cloud = _require_cloud(current_user, cloud, "read", cell=True)
     job_type = ot_service.CELL_CHILD_JOB_TYPE[cloud]
     accessible = _accessible_workgroups(current_user)
     rows = (db.query(Job)

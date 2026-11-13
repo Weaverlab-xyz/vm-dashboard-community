@@ -1488,6 +1488,15 @@ except ImportError as exc:
     logger.warning("API router 'agentcell' not loaded: %s", exc)
 
 try:
+    # The Demo hub's API. The estate profile's page group, as /demo is -- on a POV
+    # instance it 404s naming the profile. Every route on it is `demo:read`.
+    from .api import demo as demo_api  # noqa: E402
+    app.include_router(demo_api.router,
+                       dependencies=[_profile_page_gate("demo_pages")])
+except ImportError as exc:
+    logger.warning("API router 'demo' not loaded: %s", exc)
+
+try:
     # POV environments on a lab platform. Gated on pov_environments_enabled, which
     # feature_flags._POV_ONLY masks off entirely on a demo instance — so on the demo
     # dashboard these routes 404 naming the profile rather than half-working.
@@ -2068,6 +2077,22 @@ async def agents_page(request: Request):
     """
     return templates.TemplateResponse(
         request, "agents/index.html", {"request": request, "initial_tab": "agents"})
+
+
+@app.get("/demo", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_profile_page_gate("demo_pages")])
+async def demo_page(request: Request):
+    """The Demo hub: every demo cell and every page a demo runs from, on one page.
+
+    The estate instance's counterpart to /pov, and profile-gated the same way in the other
+    direction -- a POV instance hosts its cells inside a POV, not here.
+
+    It is NOT /use-cases, and must not grow into it. Use cases is the catalog of scripts,
+    deliberately ungated and curated by persona; this is the operational view -- what is
+    deployed, in what state, and where to manage it -- behind `demo:read` on its API. The
+    page links there for the scripts.
+    """
+    return templates.TemplateResponse(request, "demo/index.html", {"request": request})
 
 
 @app.get("/pov", response_class=HTMLResponse, include_in_schema=False,

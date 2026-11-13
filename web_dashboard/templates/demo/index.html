@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+{% from "partials/tab_bar.html" import tab_bar %}
+{% block title %}Demo{% endblock %}
+
+{#
+  The Demo hub: the estate instance's counterpart to /pov.
+
+  Two tabs. CELLS is what is deployed: every demo cell this caller may see, by kind, with
+  its state and a link to the page that manages it. LAUNCHPAD is where a demo runs from:
+  every page, grouped, each resolved ready / needs_flag / masked by the same reader the
+  Use cases page uses (services/demo_launchpad).
+
+  THIS PAGE READS. It builds nothing and destroys nothing -- every action stays on the
+  cell's own page and route, which accept `demo:<level>` beside the scope they always
+  took (api/demo_gates). A deploy button here would be a second, differently-gated way to
+  spend money.
+
+  A MASKED link carries no href, for the reason the Use cases page gives: a link the
+  client merely styles as inert is one middle-click from a 404.
+#}
+
+{% block content %}
+{% set tabs = [
+  {'slug': 'cells',     'label': 'Cells'},
+  {'slug': 'launchpad', 'label': 'Launchpad'},
+] %}
+<div x-data='demoHub({{ tabs | map(attribute="slug") | list | tojson }})' x-init="init()"
+     class="space-y-6">
+
+  <div class="flex flex-wrap items-start justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold text-gray-900">Demo</h1>
+      <p class="text-sm text-gray-500 mt-1">
+        Every demo cell, and every page a demo runs from. The scripts live in
+        <a href="/use-cases" class="text-blue-700 hover:underline">Use cases</a>.
+      </p>
+    </div>
+    <button @click="load()" type="button" :disabled="loading"
+            class="px-3 py-1.5 text-sm border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50 disabled:opacity-50">
+      <span x-text="loading ? 'Refreshing…' : 'Refresh'"></span>
+    </button>
+  </div>
+
+  <div x-show="error" x-cloak class="bg-white rounded-xl shadow-sm border border-red-200 p-4">
+    <p class="text-sm text-red-700" x-text="error"></p>
+  </div>
+
+  <div x-show="loading && !loaded" class="text-sm text-gray-400">Loading…</div>
+
+  {{ tab_bar(tabs, "Demo sections", class="") }}
+
+  <!-- ── Cells ───────────────────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'cells'" x-cloak role="tabpanel" class="space-y-4">
+    <template x-for="kind in cells" :key="kind.kind">
+      <section class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 class="text-lg font-semibold text-gray-900" x-text="kind.title"></h2>
+            <p class="text-sm text-gray-500" x-text="kind.blurb"></p>
+          </div>
+          <div class="text-right text-sm" x-show="kind.state === 'ok'">
+            <span class="text-2xl font-semibold text-gray-900" x-text="kind.total"></span>
+            <span class="text-gray-500" x-text="kind.total === 1 ? ' cell' : ' cells'"></span>
+            <div class="text-gray-500" x-show="kind.total">
+              <span x-text="kind.running"></span> deployed
+            </div>
+          </div>
+        </div>
+
+        <p x-show="kind.state === 'unavailable'" class="mt-3 text-sm text-gray-500">
+          Not available here: <span x-text="kind.note"></span>.
+        </p>
+        <p x-show="kind.state === 'forbidden'" class="mt-3 text-sm text-gray-500">
+          You do not have permission to see these cells.
+        </p>
+        <p x-show="kind.state === 'ok' && !kind.total" class="mt-3 text-sm text-gray-500">
+          None in your workgroups yet.
+        </p>
+
+        <div x-show="kind.state === 'ok' && kind.total" class="mt-4 overflow-x-auto">
+          <table class="min-w-full text-sm">
+            <thead>
+              <tr class="text-left text-xs uppercase tracking-wide text-gray-500 border-b border-gray-200">
+                <th class="py-2 pr-4 font-medium">Name</th>
+                <th class="py-2 pr-4 font-medium">Cloud</th>
+                <th class="py-2 pr-4 font-medium">Status</th>
+                <th class="py-2 pr-4 font-medium" x-show="kind.kind !== 'net'"
+                    x-text="kind.kind === 'agent' ? 'Token' : 'Wiring'"></th>
+                <th class="py-2 pr-4 font-medium">Workgroup</th>
+                <th class="py-2 pr-4 font-medium">Created by</th>
+                <th class="py-2 font-medium"><span class="sr-only">Manage</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="c in kind.cells" :key="c.id">
+                <tr class="border-b border-gray-100 last:border-0">
+                  <td class="py-2 pr-4 font-medium text-gray-900" x-text="c.name || c.id"></td>
+                  <td class="py-2 pr-4 uppercase text-gray-600" x-text="c.cloud || '—'"></td>
+                  <td class="py-2 pr-4">
+                    <span class="px-2 py-0.5 rounded-full text-xs font-medium"
+                          :class="statusClass(c.status)" x-text="c.status"></span>
+                  </td>
+                  <td class="py-2 pr-4 text-gray-600" x-show="kind.kind !== 'net'"
+                      x-text="kind.kind === 'agent'
+                                ? (c.wired ? 'live' : 'expired or revoked')
+                                : (c.wired ? 'wired' : 'incomplete')"></td>
+                  <td class="py-2 pr-4 text-gray-600" x-text="c.workgroup || '—'"></td>
+                  <td class="py-2 pr-4 text-gray-600" x-text="c.created_by || '—'"></td>
+                  <td class="py-2 text-right">
+                    <a :href="c.manage_href" class="text-blue-700 hover:underline">Manage</a>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </template>
+  </div>
+
+  <!-- ── Launchpad ───────────────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'launchpad'" x-cloak role="tabpanel" class="space-y-6">
+    <template x-for="group in launchpad" :key="group.label">
+      <section>
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-gray-500 mb-2"
+            x-text="group.label"></h2>
+        <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <template x-for="link in group.links" :key="link.id">
+            <div class="bg-white rounded-xl shadow-sm border p-4"
+                 :class="link.state === 'ready' ? 'border-gray-200' : 'border-dashed border-gray-300'">
+              <template x-if="link.target">
+                <a :href="link.target" class="font-medium text-blue-700 hover:underline"
+                   x-text="link.title"></a>
+              </template>
+              <template x-if="!link.target">
+                <span class="font-medium text-gray-500" x-text="link.title"></span>
+              </template>
+              <p class="text-sm text-gray-500 mt-1" x-text="link.summary"></p>
+              <p x-show="link.state === 'needs_flag'" class="text-xs text-amber-700 mt-2">
+                Needs <span x-text="link.needs.join(', ')"></span> —
+                <a :href="link.settings_link" class="underline">Settings</a>
+              </p>
+              <p x-show="link.state === 'masked'" class="text-xs text-gray-500 mt-2">
+                Not available on this instance.
+              </p>
+            </div>
+          </template>
+        </div>
+      </section>
+    </template>
+  </div>
+</div>
+
+<script>
+function demoHub(tabSlugs) {
+  return {
+    // The shared tab contract: select(), pickTab(), tabSlugs, activeTab (static/js/app.js).
+    ...tabState(tabSlugs),
+    loading: false,
+    loaded: false,
+    error: '',
+    cells: [],
+    launchpad: [],
+
+    init() {
+      this.pickTab();
+      this.load();
+    },
+
+    async load() {
+      this.loading = true;
+      this.error = '';
+      try {
+        const r = await API.get('/api/demo/summary');
+        this.cells = r.cells || [];
+        this.launchpad = r.launchpad || [];
+        this.loaded = true;
+      } catch (e) {
+        this.error = (e && e.message) || 'Could not load the demo hub.';
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    statusClass(status) {
+      if (status === 'completed') return 'bg-green-100 text-green-800';
+      if (status === 'failed') return 'bg-red-100 text-red-800';
+      if (['pending', 'queued', 'running', 'provisioning'].includes(status))
+        return 'bg-amber-100 text-amber-800';
+      return 'bg-gray-100 text-gray-700';
+    },
+  };
+}
+</script>
+{% endblock %}

@@ -264,134 +264,67 @@ def _db_tiles(db: Session, user: User) -> dict:
                      secondary=sum(1 for g in rows if g.get("status") == "running"))
     _safe("gateways", _gateways)
 
-    def _ot_cells():
-        # Every href this tile can produce is /{cloud}#ot, and
-        # main._profile_page_gate("cloud_pages") 404s all four of those pages on a POV
-        # instance. So the COUNT would be honest and the only link to it dead -- the
-        # dead-tile shape feature_flags._PROFILE_PAGES exists to stop, arriving by a
-        # third route. Resolved through the SAME reader as the nav link and the route,
-        # which is the rule profile_page_allowed was written to enforce. The client
-        # hides the tile for the same reason; this stops the endpoint computing a number
-        # nobody can follow.
-        from ..services import feature_flags
-        if not feature_flags.profile_page_allowed("cloud_pages"):
-            return _unavailable("the cloud consoles are not served on this instance")
-        # OT demo cells across all three clouds. A cell's VM-deploy child row IS
-        # its inventory record (metadata ot_cell=True), so this is a Job-table
-        # read — never a cloud call, which is the whole contract of this endpoint.
-        # Same filters and workgroup scoping as GET /api/ot/cells, summed over the
-        # clouds this caller may read; secondary counts fully wired cells.
-        from ..services import ot_service
-        perms = user.effective_permissions_dict or {}
-        readable = [
-            job_type for cloud, job_type in ot_service.CELL_CHILD_JOB_TYPE.items()
-            if user.is_effective_admin or "read" in perms.get(cloud, [])
-        ]
-        if not readable:
+    # ── the three demo cells ─────────────────────────────────────────────────
+    # Rows from services/demo_cells, the same list the Demo hub (/demo) renders, so the
+    # count here and the cards there cannot disagree. Readable on `<cloud>:read` or
+    # `demo:read` (api/demo_gates). Each keeps its tile-specific shape below: what the
+    # secondary number means, and where the one link goes.
+    from ..services import demo_cells, feature_flags
+    from .demo_gates import demo_allows, may
+
+    def _may_read(scope):
+        return may(user, scope, "read")
+
+    # Whoever can open the Demo hub is sent there -- it lists every cell on every cloud,
+    # so one link is right for all three tiles. Everyone else keeps the cell's own page.
+    hub = feature_flags.profile_page_allowed("demo_pages") and demo_allows(user, "read")
+
+    def _cell_tile(res, *, secondary=None, href=None):
+        if res["state"] == "unavailable":
+            return _unavailable(res["note"])
+        if res["state"] == "forbidden":
             return _forbidden()
-        accessible = _accessible_for("gcp", user)   # same workgroup rule on every cloud module
-        per_cloud = {}
-        total = wired = 0
-        for row in db.query(Job).filter(Job.job_type.in_(readable)).all():
-            meta = row.metadata_dict
-            if not meta.get("ot_cell") or meta.get("destroyed") or row.status == "cancelled":
-                continue
-            if accessible is not None and (row.workgroup or "").lower() not in accessible:
-                continue
-            total += 1
-            cloud = ot_service.cell_cloud_for_job_type(row.job_type)
-            if cloud:
-                per_cloud[cloud] = per_cloud.get(cloud, 0) + 1
-            # ot_service owns "is this cell fully wired" — this tile and
-            # GET /api/ot/cells used to carry a copy each, which disagreed the
-            # moment a cell had more than one protocol tunnel (both went green
-            # on the first of several).
-            if row.status == "completed" and ot_service.cell_wiring_complete(meta):
-                wired += 1
+        return _tile(len(res["cells"]), secondary=secondary,
+                     href="/demo#cells" if hub else href)
+
+    def _ot_cells():
+        # Every href this tile can produce is /{cloud}#ot, which main._profile_page_gate
+        # ("cloud_pages") 404s on a POV instance -- demo_cells reports `unavailable` there
+        # rather than an honest count whose only link is dead.
+        from ..services import ot_service
+        res = demo_cells.ot_cells(db, _may_read, _accessible_for("gcp", user))
+        if res["state"] != "ok":
+            return _cell_tile(res)
+        cells = res["cells"]
+        per_cloud: dict = {}
+        for c in cells:
+            per_cloud[c["cloud"]] = per_cloud.get(c["cloud"], 0) + 1
         # The count spans three clouds but the tile is one link, so send the caller
-        # where their cells actually are: the cloud holding the most. With no cells
-        # (or none readable) fall back to a cloud this caller may READ — linking to
-        # /gcp unconditionally handed a GCP-less or GCP-forbidden operator a dead end.
+        # where their cells actually are: the cloud holding the most. With none, fall
+        # back to a cloud this caller may READ -- linking to /gcp unconditionally handed a
+        # GCP-less or GCP-forbidden operator a dead end.
         busiest = max(per_cloud, key=lambda c: (per_cloud[c], c)) if per_cloud else ""
         if not busiest:
-            readable_clouds = [c for c, jt in ot_service.CELL_CHILD_JOB_TYPE.items()
-                               if jt in readable]
-            busiest = "gcp" if "gcp" in readable_clouds else (
-                readable_clouds[0] if readable_clouds else "gcp")
-        return _tile(total, secondary=wired, href=f"/{busiest}#ot")
+            readable = [c for c in ot_service.CELL_CHILD_JOB_TYPE if _may_read(c)]
+            busiest = "gcp" if "gcp" in readable else (readable[0] if readable else "gcp")
+        return _cell_tile(res, secondary=sum(1 for c in cells if c["wired"]),
+                          href=f"/{busiest}#ot")
     _safe("ot_cells", _ot_cells)
 
     def _net_cells():
-        # Same profile gate as _ot_cells, for the same reason: the only href this tile
-        # can produce is /gcp#net, and main._profile_page_gate("cloud_pages") 404s that
-        # page on a POV instance -- leaving an honest count whose only link is dead.
-        from ..services import feature_flags
-        if not feature_flags.profile_page_allowed("cloud_pages"):
-            return _unavailable("the cloud consoles are not served on this instance")
-        # Preview feature, off by default. Reported as unavailable rather than as a zero:
-        # a zero says "no cells yet" and invites the operator to go make one, on a page
-        # whose tab is not rendered and whose router 404s.
-        if not feature_flags.enabled("netcell_enabled"):
-            return _unavailable("the Network Demo Cell preview is off")
-        # Network cells, GCP only. A cell IS its gce_deploy row (metadata netcell=True)
-        # -- there is no parent job and no separate record -- so this is a Job-table
-        # read, never a cloud call, which is the whole contract of this endpoint.
-        #
-        # No secondary count, deliberately. The OT tile reports "wired" because a cell
-        # there is wired incrementally and can be half-done; a network cell has nothing
-        # to wire beyond what the deploy itself does, so "wired" would either always
-        # equal the total or restate the job status.
-        from ..services import netcell_service
-        perms = user.effective_permissions_dict or {}
-        if not (user.is_effective_admin or "read" in perms.get("gcp", [])):
-            return _forbidden()
-        accessible = _accessible_for("gcp", user)
-        total = 0
-        for row in db.query(Job).filter(Job.job_type == "gce_deploy").all():
-            meta = row.metadata_dict
-            if not netcell_service.is_cell(meta) or meta.get("destroyed") or row.status == "cancelled":
-                continue
-            if accessible is not None and (row.workgroup or "").lower() not in accessible:
-                continue
-            total += 1
-        return _tile(total, href="/gcp#net")
+        # No secondary count, deliberately: a network cell has nothing to wire beyond
+        # what the deploy itself does, so "wired" would restate the job status.
+        res = demo_cells.net_cells(db, _may_read, _accessible_for("gcp", user))
+        return _cell_tile(res, href="/gcp#net")
     _safe("net_cells", _net_cells)
 
     def _agent_cells():
-        # NO `cloud_pages` gate, unlike the two tiles above, and the difference is the
-        # href rather than an oversight: this one points at /workload-lab#agent, which
-        # is not a cloud console. That page is gated on the DERIVED
-        # `workload_lab_enabled`, and `agentcell_enabled` is one of its constituents --
-        # so wherever this tile renders, its link resolves. That is the same property
-        # `anyFlag: ['cloud_pages']` buys the OT and network tiles, obtained from the
-        # flag graph instead of from a second condition that could drift out of step.
-        from ..services import agentcell_service, feature_flags
-        if not feature_flags.enabled("agentcell_enabled"):
-            # Reported as unavailable rather than as a zero, exactly as _net_cells does:
-            # a zero says "no agents yet" and invites the operator to go mint one, on a
-            # tab that is not rendered and behind a router that 404s.
-            return _unavailable("the Agent Demo Cell preview is off")
-        # A DB read of the cell's own table -- never an MCP call and never a cloud call,
-        # which is the contract of this endpoint. No permission branch, because
-        # GET /api/agentcell/agents has none either: it takes any authenticated caller
-        # and scopes by row. A _forbidden() here would hide a tile whose link works.
-        from ..database import AgentCell
-        accessible = _accessible_for("gcp", user)   # same workgroup rule on every module
-        total = live = 0
-        for row in db.query(AgentCell).all():
-            if not agentcell_service.visible_to(row, accessible, user.username):
-                continue
-            total += 1
-            if agentcell_service.token_live(row):
-                live += 1
-        # `authorized`, NOT `wired`. The OT tile's secondary is how many cells are fully
-        # wired; the equivalent here would be `is_wired`, which is derived from
-        # `stages_done` -- and nothing writes that, because the two playbooks are runs
-        # the operator makes and the dashboard neither starts nor watches them. So it
-        # would read 0 forever beside a working agent. What the row DOES know is whether
-        # the token it issued would still be accepted, and that is the number worth
-        # having: total minus authorized is how many of these principals have stopped.
-        return _tile(total, secondary=live)
+        # Secondary is `authorized` -- tokens still accepted -- not `wired`, which
+        # nothing writes (see services/demo_cells.agent_cells).
+        res = demo_cells.agent_cells(db, _accessible_for("gcp", user), user.username)
+        if res["state"] != "ok":
+            return _cell_tile(res)
+        return _cell_tile(res, secondary=sum(1 for c in res["cells"] if c["wired"]))
     _safe("agent_cells", _agent_cells)
 
     out.update(_pov_tiles(db, user))

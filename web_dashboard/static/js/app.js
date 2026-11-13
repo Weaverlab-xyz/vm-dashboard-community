@@ -1754,6 +1754,7 @@ function permissionScopeLabel(scope) {
         pov:            'POV',
         pov_own:        'POV — your own',
         pov_templates:  'POV Templates',
+        demo:           'Demo hub',
         proxmox:        'Proxmox',
         vsphere:        'vSphere',
         hyperv:         'Hyper-V',

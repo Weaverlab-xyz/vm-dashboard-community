@@ -29,7 +29,8 @@ from ..models.netcell import (
     NetCellListResponse,
 )
 from ..services import deploy_batch, job_service, netcell_service
-from .auth import get_current_user, require_permission
+from .auth import get_current_user
+from .demo_gates import require_cell
 from .gcp import (
     _accessible_workgroups,
     _gcp_project,
@@ -69,7 +70,7 @@ async def _functional_account_platform() -> str:
 async def deploy_cell(
     payload: NetCellDeployRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("gcp", "write")),
+    current_user: User = Depends(require_cell("gcp", "write")),
 ):
     """Deploy a GCP network cell: one ordinary ``gce_deploy`` job carrying the netcell
     marker and a forced Password Safe onboarding method.
