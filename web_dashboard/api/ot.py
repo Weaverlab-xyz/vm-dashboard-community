@@ -47,7 +47,7 @@ from ..models.ot import (
 )
 from ..models.gcp import GCPDeployRequest
 from ..models.azure import AzureDeployRequest
-from ..services import deploy_batch, job_service, ot_service
+from ..services import demo_schedule, deploy_batch, job_service, ot_service
 from ..services.ot_service import OTError
 from ..services.terraform_pra_service import TerraformPRAError
 from .auth import get_current_user, require_permission
@@ -313,6 +313,8 @@ def deploy_cell(
         jumpoint_name=payload.jumpoint_name,
         count=1,
     )
+    sp = demo_schedule.plan(db, payload, vm_job_type="gce_deploy", workgroup=workgroup,
+                            is_admin=current_user.is_effective_admin)
     child = job_service.create_job(
         db,
         job_type="gce_deploy",
@@ -321,7 +323,9 @@ def deploy_cell(
         # `queued`, not `pending`: the runner claims on status='pending', so a
         # pending child would be deployed a second time alongside its parent.
         status="queued",
+        expires_at=sp.expires_at,
         metadata={
+            **sp.meta,
             "project_id":      project_id,
             "zone":            zone,
             "region":          region,
@@ -408,6 +412,7 @@ def deploy_cell(
             # whose Entitle grants quietly stop working.
             expires_at=child.expires_at,
             metadata={
+                **sp.meta,
                 "project_id":      project_id,
                 "zone":            zone,
                 "region":          region,
@@ -439,6 +444,7 @@ def deploy_cell(
     parent = job_service.create_job(
         db,
         job_type="ot_cell_deploy",
+        **sp.sched,
         created_by=current_user.username,
         workgroup=workgroup,
         metadata={
@@ -495,6 +501,8 @@ def deploy_cell_aws(
 
     # The child's metadata is exactly what aws_vm_service.run() rebuilds an
     # ec2_deploy from — anything omitted is silently skipped at deploy time.
+    sp = demo_schedule.plan(db, payload, vm_job_type="ec2_deploy", workgroup=workgroup,
+                            is_admin=current_user.is_effective_admin)
     child = job_service.create_job(
         db,
         job_type="ec2_deploy",
@@ -502,7 +510,9 @@ def deploy_cell_aws(
         workgroup=workgroup,
         # `queued`, not `pending` — see deploy_cell above.
         status="queued",
+        expires_at=sp.expires_at,
         metadata={
+            **sp.meta,
             "ami_id":                   payload.ami_id,
             "image_name":               payload.ami_name,
             "instance_name":            payload.instance_name,
@@ -565,6 +575,7 @@ def deploy_cell_aws(
             # whose Entitle grants quietly stop working.
             expires_at=child.expires_at,
             metadata={
+                **sp.meta,
                 "ami_id":                   payload.broker_ami_id,
                 "image_name":               payload.broker_ami_name,
                 "instance_name":            broker_name,
@@ -603,6 +614,7 @@ def deploy_cell_aws(
     parent = job_service.create_job(
         db,
         job_type="ot_cell_deploy",
+        **sp.sched,
         created_by=current_user.username,
         workgroup=workgroup,
         metadata={
@@ -694,6 +706,8 @@ async def deploy_cell_azure(
         jumpoint_name=payload.jumpoint_name,
         count=1,
     )
+    sp = demo_schedule.plan(db, payload, vm_job_type="azure_deploy", workgroup=workgroup,
+                            is_admin=current_user.is_effective_admin)
     child = job_service.create_job(
         db,
         job_type="azure_deploy",
@@ -701,7 +715,9 @@ async def deploy_cell_azure(
         workgroup=workgroup,
         # `queued`, not `pending` — see deploy_cell above.
         status="queued",
+        expires_at=sp.expires_at,
         metadata={
+            **sp.meta,
             "image_id":       payload.image_id,
             "image_name":     payload.image_name,
             "vm_name":        payload.vm_name,
@@ -785,6 +801,7 @@ async def deploy_cell_azure(
             # whose Entitle grants quietly stop working.
             expires_at=child.expires_at,
             metadata={
+                **sp.meta,
                 "image_id":         payload.broker_image_id,
                 "image_name":       payload.broker_image_name,
                 "vm_name":          broker_name,
@@ -817,6 +834,7 @@ async def deploy_cell_azure(
     parent = job_service.create_job(
         db,
         job_type="ot_cell_deploy",
+        **sp.sched,
         created_by=current_user.username,
         workgroup=workgroup,
         metadata={

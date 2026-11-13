@@ -62,6 +62,7 @@ and schedules you are allowed to see.
 | Power — Nutanix | no, never | no |
 | Image export, capture, AMI copy | yes — dialog | exports only |
 | Image promotion | yes — Promote dialog (automated path) | yes |
+| Demo cells (OT, network) | yes — Demo hub, Build tab | no: each booking is a new cell |
 | Packer builds | yes — Build tab | no: a provisioner variable may hold a literal value |
 | Kubernetes cluster / cloud database provisioning | no | no |
 | EPM for Linux package sync | — | yes |

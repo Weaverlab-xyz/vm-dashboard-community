@@ -268,8 +268,14 @@
         this.otError = '';
         this.otSubmitting = true;
         try {
+          // The hub's panels book a build time and a lifetime (demoBooking); the cloud
+          // pages do not define it and post exactly what they always did.
+          if (typeof this.demoBookingProblem === 'function' && this.demoBookingProblem()) {
+            throw new Error(this.demoBookingProblem());
+          }
+          const booking = typeof this.demoBooking === 'function' ? this.demoBooking() : {};
           const [url, body] = OT_SUBMIT[cloud](this, this.otForm);
-          const res = await API.post(url, body);
+          const res = await API.post(url, { ...body, ...booking });
           window.location.href = '/jobs/' + res.job_id;
         } catch (e) {
           this.otError = e.message || 'Deploy failed';
@@ -379,9 +385,13 @@
         this.netError = '';
         this.netSubmitting = true;
         try {
+          if (typeof this.demoBookingProblem === 'function' && this.demoBookingProblem()) {
+            throw new Error(this.demoBookingProblem());
+          }
           const r = await API.post('/api/netcell/cell', {
             ...this.netForm,
             image_name: nameOf(this, 'gcp', this.netForm.image_self_link),
+            ...(typeof this.demoBooking === 'function' ? this.demoBooking() : {}),
           });
           // The notes carry the caveats the form cannot: which onboarding method was
           // forced, and that this is checkout rather than rotation.
@@ -507,13 +517,45 @@
     };
   }
 
+  // The hub's "when" and "for how long", shared by both build panels. Spreads the same
+  // scheduleState() every run form uses (so the picker partial and the change-window
+  // list work unchanged) and adds the lifetime. The server reads a blank/absent ttl as
+  // "the auto-delete policy's default", never "forever".
+  function demoBookingState() {
+    return {
+      ...scheduleState(),
+      ttlChoice: '8',
+      ttlCustom: '',
+      ttlChoices: [
+        { id: '', label: 'Policy default' }, { id: '4', label: '4 hours' },
+        { id: '8', label: '8 hours' }, { id: '24', label: '24 hours' },
+        { id: 'custom', label: 'Custom' },
+      ],
+      ttlHours() {
+        const raw = this.ttlChoice === 'custom' ? this.ttlCustom : this.ttlChoice;
+        const n = parseFloat(raw);
+        return n > 0 ? n : null;
+      },
+      demoBookingProblem() {
+        if (!this.scheduleReady()) return 'Pick a time (or a change window) for the build.';
+        if (this.ttlChoice === 'custom' && !this.ttlHours()) return 'Enter the lifetime in hours.';
+        return '';
+      },
+      demoBooking() {
+        return { ...this.schedulePayload(), ttl_hours: this.ttlHours() };
+      },
+    };
+  }
+
   // x-data="demoOTPanel('aws')" -- one OT cell form on the hub.
   window.demoOTPanel = function demoOTPanel(cloud) {
     return {
       ...demoCellHost(cloud),
       ...window.otCellMixin(cloud),
+      ...demoBookingState(),
       async init() {
         await this.hostInit();
+        this.loadChangeWindows();
         this.loadOTData();
       },
     };
@@ -524,7 +566,9 @@
     return {
       ...demoCellHost('gcp'),
       ...window.netCellMixin(),
+      ...demoBookingState(),
       async init() {
+        this.loadChangeWindows();
         this.loadWorkgroups();
         this.loadNetData();
       },

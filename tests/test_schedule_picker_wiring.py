@@ -55,6 +55,12 @@ def _templates():
                 yield os.path.relpath(full, _TPL).replace(os.sep, "/"), full
 
 
+# A page whose Alpine state lives in a shared script rather than its own <script>: the
+# Demo hub's panels are components in demo_cells.js, the file the cloud pages share. The
+# chain is the same; it is just checked against template + script together.
+_STATE_IN_SCRIPT = {"demo/index.html": "static/js/demo_cells.js"}
+
+
 def _pages_with_picker():
     """Templates that RENDER the picker (importing the macro is not enough)."""
     out = {}
@@ -63,6 +69,9 @@ def _pages_with_picker():
             continue
         src = _read(full)
         if _PICKER_CALL.search(src):
+            if rel in _STATE_IN_SCRIPT:
+                src += chr(10) + _read(os.path.join(_ROOT, "web_dashboard",
+                                                 _STATE_IN_SCRIPT[rel]))
             out[rel] = src
     return out
 

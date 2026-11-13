@@ -175,6 +175,11 @@ def has_work(db: Session) -> bool:
                .first())
     if rolling:
         return True
+    # A demo cell with an end time: nothing else is pending while it runs, and this pass
+    # is what destroys it when the meeting is over.
+    from . import demo_schedule
+    if demo_schedule.has_work(db):
+        return True
     # Attested agents that re-attest while running: the pass checks they still do.
     from . import agent_assurance_service
     return agent_assurance_service.has_work(db)
@@ -402,6 +407,18 @@ def _sweep_rollouts(db: Session) -> int:
         return 0
 
 
+def _sweep_demo_cells(db: Session, now: datetime) -> list:
+    """Destroy the demo cells whose end time has passed. Isolated like the others: a cell
+    that will not destroy must not stop missed windows being reaped."""
+    from . import demo_schedule
+    try:
+        return [f"{name}: {jid}" for name, jid in demo_schedule.sweep(db, now)]
+    except Exception as exc:  # noqa: BLE001
+        logger.error("schedule sweep: demo cell pass failed: %s", exc)
+        db.rollback()
+        return []
+
+
 async def run(db: Session, *, job_id: str, meta: dict) -> None:
     """One pass: reap missed windows, materialise due schedules, record outcomes."""
     job_service.set_running(db, job_id)
@@ -414,6 +431,7 @@ async def run(db: Session, *, job_id: str, meta: dict) -> None:
         hosts = _sweep_agent_hosts(db, now)
         rollouts = _sweep_rollouts(db)
         stale_keys = _sweep_assurance(db)
+        demo_ended = _sweep_demo_cells(db, now)
         # This sweep writes a row per pass whether or not it found anything, so it prunes
         # its own history the way the auto-delete sweep does — otherwise it would push
         # real deploys off the first page of /jobs within days. Shares that feature's
@@ -429,6 +447,7 @@ async def run(db: Session, *, job_id: str, meta: dict) -> None:
             "agent_hosts": hosts,
             "agent_rollouts": rollouts,
             "agent_stale_keys": stale_keys,
+            "demo_cells_ended": demo_ended,
         })
     except Exception as exc:
         logger.error("schedule sweep failed: %s", exc)

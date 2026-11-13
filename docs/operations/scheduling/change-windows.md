@@ -43,6 +43,7 @@ work to stop at the boundary, make the window long enough for the work, or split
 | Image promotion | **When to run** in the Promote dialog on **Images** — the automated promote only; *Show manual steps* creates no job |
 | Packer image builds — AWS, Azure, GCP, OCI | **When to run** on each cloud page's **Build** tab |
 | Image export / capture / AMI copy — export and capture on AWS, Azure, GCP; AMI copy on AWS | **When to run** in the Export VHD, Capture/Create Image and Copy to Private AMI dialogs |
+| Demo cells — OT cells on AWS, Azure, GCP; network cells on GCP | **When, and for how long** on the Demo hub's **Build** tab; the cell is also destroyed at its end time, see [Demo hub](../../profiles/demo/demo-hub.md) |
 | Bulk power — cloud: AWS, Azure, GCP, OCI | **Schedule** on the selection toolbar |
 | Bulk power — on-premises: Proxmox, vSphere, Hyper-V, XCP-ng, VMware Workstation | **Schedule** on the selection toolbar — **agent-bound connections only**; see [below](#scheduling-power-operations) |
 | Cloud VM destroys — AWS, Azure, GCP, OCI | offered when a window refuses one; or `?run_at=` on the API |

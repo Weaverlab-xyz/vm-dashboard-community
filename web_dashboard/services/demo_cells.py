@@ -44,6 +44,15 @@ def _in_workgroup(row_workgroup, accessible: Optional[Iterable[str]]) -> bool:
     return accessible is None or (row_workgroup or "").lower() in accessible
 
 
+def _booked_start(row, meta: dict) -> str:
+    """When a cell that has not started building is due to, else "" -- so a booked cell
+    reads "scheduled", not "queued" (an unclaimable child looks the same as a busy one)."""
+    if row.status not in ("queued", "pending"):
+        return ""
+    at = row.scheduled_for.isoformat() if row.scheduled_for else (meta.get("demo_start_at") or "")
+    return at
+
+
 def ot_cells(db: Session, may_read: Callable[[str], bool],
              accessible: Optional[Iterable[str]]) -> dict:
     """Live OT cells across every cloud this caller may read, newest first.
@@ -83,6 +92,8 @@ def ot_cells(db: Session, may_read: Callable[[str], bool],
             "workgroup": row.workgroup or "",
             "created_by": row.created_by or "",
             "created_at": _iso(row.created_at),
+            "scheduled_for": _booked_start(row, meta),
+            "end_at": meta.get("demo_end_at") or "",
             "manage_href": f"/{cloud}#ot",
         })
     return _result("ok", cells=cells)
@@ -120,6 +131,8 @@ def net_cells(db: Session, may_read: Callable[[str], bool],
             "workgroup": row.workgroup or "",
             "created_by": row.created_by or "",
             "created_at": _iso(row.created_at),
+            "scheduled_for": _booked_start(row, meta),
+            "end_at": meta.get("demo_end_at") or "",
             "manage_href": "/gcp#net",
         })
     return _result("ok", cells=cells)

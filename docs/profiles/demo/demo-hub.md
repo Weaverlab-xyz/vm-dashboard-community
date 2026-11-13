@@ -16,6 +16,15 @@ instance. It has three tabs:
   one built there. A panel appears only where that page's tab would: the cell's feature on,
   and for OT and network cells the cloud's credentials present. The tab shows to anyone
   who can build a cell.
+- **Scheduling.** The OT and network forms start with **When, and for how long**. Build
+  *Now*, *At a time* or in a *Change window*, and pick how long the cell lives (4, 8 or 24
+  hours, a custom number, or the auto-delete policy's default). The lifetime counts from
+  when the cell is due to start, so build time is part of it. A cell is destroyed, with its
+  DMZ broker a couple of minutes later, within about five minutes of its end, as the person
+  who built it; it does not depend on the auto-delete feature being on. **Set end** /
+  **Change end** on the Cells list moves or sets the end of a cell you can see, and a
+  non-admin's end is held to the policy ceiling. A cell that has not started building
+  shows *builds <time>*. Agent cells already expire with their token (8 hours by default).
 - **Launchpad** links to every page a demo runs from: the cloud consoles, the Workload Lab,
   Kubernetes, databases, the hypervisors and more. Each entry is *ready*, *needs* a feature
   turned on (with a link to Settings), or *not available on this instance*. Nothing is ever
