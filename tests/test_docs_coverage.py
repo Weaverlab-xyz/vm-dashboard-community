@@ -95,6 +95,9 @@ for _path, _cls, _word in (("web_dashboard/models/aws.py", "CreateImageRequest",
                            ("web_dashboard/models/aws.py", "CopyAMIRequest", "AMI copy")):
     _SCHEDULABLE[(_path, _cls)] = ("Image export", _word)
 
+# The Demo hub's cell forms share one mixin (booking + lifetime) across OT and network cells.
+_SCHEDULABLE[("web_dashboard/models/schedule.py", "DemoScheduleMixin")] = ("Demo cells", "GCP")
+
 _HUBS = ("operations/scheduling.md", "operations/inventory.md")
 
 
