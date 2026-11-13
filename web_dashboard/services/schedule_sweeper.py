@@ -180,6 +180,11 @@ def has_work(db: Session) -> bool:
     from . import demo_schedule
     if demo_schedule.has_work(db):
         return True
+    # A custom demo cell that is booked, running or being torn down: this pass builds it
+    # at its start, rolls its members' status up, and ends it at its end time.
+    from . import custom_cell_service
+    if custom_cell_service.has_work(db):
+        return True
     # Attested agents that re-attest while running: the pass checks they still do.
     from . import agent_assurance_service
     return agent_assurance_service.has_work(db)
@@ -419,6 +424,18 @@ def _sweep_demo_cells(db: Session, now: datetime) -> list:
         return []
 
 
+async def _sweep_custom_cells(db: Session, now: datetime) -> list:
+    """Start booked custom cells, end expired ones, refresh the rest. Isolated like the
+    others; custom_cell_service.sweep isolates each cell again inside."""
+    from . import custom_cell_service
+    try:
+        return await custom_cell_service.sweep(db, now)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("schedule sweep: custom cell pass failed: %s", exc)
+        db.rollback()
+        return []
+
+
 async def run(db: Session, *, job_id: str, meta: dict) -> None:
     """One pass: reap missed windows, materialise due schedules, record outcomes."""
     job_service.set_running(db, job_id)
@@ -432,6 +449,7 @@ async def run(db: Session, *, job_id: str, meta: dict) -> None:
         rollouts = _sweep_rollouts(db)
         stale_keys = _sweep_assurance(db)
         demo_ended = _sweep_demo_cells(db, now)
+        custom_cells = await _sweep_custom_cells(db, now)
         # This sweep writes a row per pass whether or not it found anything, so it prunes
         # its own history the way the auto-delete sweep does — otherwise it would push
         # real deploys off the first page of /jobs within days. Shares that feature's
@@ -448,6 +466,7 @@ async def run(db: Session, *, job_id: str, meta: dict) -> None:
             "agent_rollouts": rollouts,
             "agent_stale_keys": stale_keys,
             "demo_cells_ended": demo_ended,
+            "custom_cells": custom_cells,
         })
     except Exception as exc:
         logger.error("schedule sweep failed: %s", exc)

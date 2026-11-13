@@ -170,3 +170,34 @@ def agent_cells(db: Session, accessible: Optional[Iterable[str]],
             "manage_href": "/workload-lab#agent",
         })
     return _result("ok", cells=cells)
+
+
+def custom_cells(db: Session, accessible: Optional[Iterable[str]]) -> dict:
+    """Live custom cells (services/custom_cell_service) in this caller's workgroups.
+
+    No flag and no cloud gate of their own: each member was built through its own cloud's
+    path, which checked that cloud when it ran. The row is the cell; its members are on
+    ``GET /api/demo/custom-cells/cells/{id}``.
+    """
+    from . import custom_cell_service
+    cells = []
+    for row in custom_cell_service.list_cells(db, accessible):
+        items = row.snapshot
+        cells.append({
+            "id": row.id,
+            "kind": "custom",
+            "cloud": ",".join(sorted({i.get("cloud", "") for i in items})),
+            "name": row.name or "",
+            "status": row.status or "",
+            "wired": row.status == "active",
+            "workgroup": row.workgroup or "",
+            "created_by": row.created_by or "",
+            "created_at": _iso(row.created_at),
+            "scheduled_for": _iso(row.scheduled_for) if row.status == "scheduled" else "",
+            "end_at": _iso(row.expires_at),
+            "blueprint_name": row.blueprint_name or "",
+            "summary": [f"{i['count']}x {i['kind']}" if i.get("count", 1) > 1 else i["kind"]
+                        for i in items],
+            "manage_href": "/demo#cells",
+        })
+    return _result("ok", cells=cells)

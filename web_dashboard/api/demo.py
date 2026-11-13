@@ -44,6 +44,8 @@ _CELLS = (
      "A VyOS router with no inbound rule, managed through PRA and Password Safe."),
     ("agent", "Agent demo cells",
      "A non-human worker: SPIFFE identity, scoped token, and an off switch."),
+    ("custom", "Custom demo cells",
+     "Whatever the demo needs -- clusters, databases, VMs -- built from a blueprint."),
 )
 
 
@@ -67,6 +69,7 @@ def summary(
         "ot": demo_cells.ot_cells(db, _may_read, accessible),
         "net": demo_cells.net_cells(db, _may_read, accessible),
         "agent": demo_cells.agent_cells(db, accessible, current_user.username),
+        "custom": demo_cells.custom_cells(db, accessible),
     }
     cells = []
     for kind, title, blurb in _CELLS:
@@ -79,7 +82,7 @@ def summary(
             "state": res["state"],
             "note": res["note"],
             "total": len(rows),
-            "running": sum(1 for r in rows if r["status"] == "completed"),
+            "running": sum(1 for r in rows if r["status"] in ("completed", "active")),
             "cells": rows,
         })
     return {"cells": cells, "launchpad": demo_launchpad.describe()}
