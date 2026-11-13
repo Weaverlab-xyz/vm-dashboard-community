@@ -15,8 +15,14 @@ import os
 import re
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_PAGES = [os.path.join(_ROOT, "web_dashboard", "templates", c, "index.html")
-          for c in ("azure", "aws", "gcp")]
+sys_path = os.path.dirname(os.path.abspath(__file__))
+import sys  # noqa: E402
+if sys_path not in sys.path:
+    sys.path.insert(0, sys_path)
+from _cell_sources import cell_page_source  # noqa: E402
+
+# The pickers live in static/js/demo_cells.js now; each page's source includes it.
+_PAGES = ("azure", "aws", "gcp")
 
 
 def _method(src, name):
@@ -27,14 +33,14 @@ def _method(src, name):
 
 def test_broker_picker_matches_broker_anywhere():
     for page in _PAGES:
-        body = _method(open(page, encoding="utf-8").read(), "otBrokerImages")
+        body = _method(cell_page_source(page), "otBrokerImages")
         assert ".toLowerCase().includes('broker')" in body, page
         assert "includes('ot" + "-broker')" not in body, page
 
 
 def test_cell_picker_hides_broker_images():
     for page in _PAGES:
-        body = _method(open(page, encoding="utf-8").read(), "otImages")
+        body = _method(cell_page_source(page), "otImages")
         assert "includes('ot-sim')" in body, page
         assert "!n.includes('broker')" in body, page
         assert "toLowerCase()" in body, page

@@ -393,7 +393,13 @@ def test_the_server_half_of_the_ot_gate_exists():
     number nobody can follow. Same reader as the nav link and the route."""
     m = re.search(r"def _ot_cells\(\):(.*?)_safe\(\"ot_cells\"", STATS, re.S)
     assert m, "_ot_cells moved or changed shape"
-    assert 'profile_page_allowed("cloud_pages")' in m.group(1), (
+    # The tile reads services/demo_cells.ot_cells (shared with the Demo hub), which is
+    # where the profile check now lives -- once, for both readers.
+    assert "demo_cells.ot_cells(" in m.group(1), "_ot_cells no longer reads demo_cells"
+    cells = open(os.path.join(_ROOT, "web_dashboard", "services", "demo_cells.py"),
+                 encoding="utf-8").read()
+    body = cells.split("def ot_cells(", 1)[1].split("\ndef ", 1)[0]
+    assert 'profile_page_allowed("cloud_pages")' in body, (
         "_ot_cells does not resolve the profile page group, so on a POV instance it "
         "computes a count whose only link 404s")
 

@@ -107,10 +107,12 @@ def test_the_tile_names_the_flag():
 def test_the_collector_reports_unavailable_when_the_preview_is_off():
     """A zero says 'no cells yet' and invites the operator to go make one, on a page
     whose tab is not rendered and whose router 404s."""
-    src = _read("web_dashboard", "api", "dashboard.py")
-    body = src.split("def _net_cells():", 1)[1].split("_safe(\"net_cells\"", 1)[0]
+    # The collector reads services/demo_cells, which the Demo hub shares -- so the
+    # preview check lives there, once, for both.
+    src = _read("web_dashboard", "services", "demo_cells.py")
+    body = src.split("def net_cells(", 1)[1].split("\ndef ", 1)[0]
     assert _FLAG in body, "the net_cells collector never consults the preview flag"
-    assert "_unavailable" in body, \
+    assert '"unavailable"' in body, \
         "the collector returns a count rather than 'unavailable' when the preview is off"
 
 

@@ -136,9 +136,9 @@ def test_the_cell_form_offers_only_simulated_protocols():
     """The picker is fed by cellPresets(), which filters on the `cell` flag the
     presets endpoint sends. Offering an unsimulated protocol would provision a
     tunnel to a dead port — a session failure that reads as a firewall block."""
+    from _cell_sources import cell_page_source
     for page in ("gcp", "aws", "azure"):
-        tmpl = open(os.path.join(_ROOT, "web_dashboard", "templates", page, "index.html"),
-                    encoding="utf-8").read()
+        tmpl = cell_page_source(page)   # page + its cell partial + demo_cells.js
         assert "cellPresets()" in tmpl, (
             f"{page}: the cell protocol picker no longer filters to simulated protocols")
         assert "p.cell" in tmpl, (
@@ -184,14 +184,15 @@ def test_the_default_machine_type_is_e2_medium_everywhere():
         "OTCellDeployRequestAWS.instance_type is no longer t3.medium")
     assert 'vm_size: str = "Standard_B2s"' in models, (
         "OTCellDeployRequestAzure.vm_size is no longer Standard_B2s")
-    gcp_tmpl = open(os.path.join(_ROOT, "web_dashboard", "templates", "gcp", "index.html"),
-                    encoding="utf-8").read()
+    # The form's state lives in static/js/demo_cells.js now (OT_FORMS), one per cloud.
+    from _cell_sources import cell_page_source, demo_cells_js
+    gcp_tmpl = demo_cells_js()
     # Scoped to otForm rather than swept over the whole page. The absence check was
     # written when the OT form was the only cell form on /gcp; the network cell added a
     # second one, and e2-small is the RIGHT default there -- VyOS routes and filters, it
     # does not run a control plane and four simulators. A page-wide sweep would have
     # forced an unrelated form to carry the OT cell's memory budget.
-    ot_form = gcp_tmpl.split("otForm: {", 1)[1].split("},", 1)[0]
+    ot_form = gcp_tmpl.split("gcp: () => ({", 1)[1].split("}),", 1)[0]
     assert "e2-small" not in ot_form, (
         "the GCP OT form defaults its machine type to e2-small")
     # AWS/Azure: assert the OT form's own default is the 4 GB shape (presence, not
@@ -199,8 +200,7 @@ def test_the_default_machine_type_is_e2_medium_everywhere():
     # Packer BUILD instance).
     for page, ot_default in (("aws", "instance_type: 't3.medium'"),
                              ("azure", "vm_size: 'Standard_B2s'")):
-        tmpl = open(os.path.join(_ROOT, "web_dashboard", "templates", page, "index.html"),
-                    encoding="utf-8").read()
+        tmpl = cell_page_source(page)
         assert ot_default in tmpl, (
             f"the {page}-page OT form no longer defaults to the 4 GB cell size ({ot_default})")
 

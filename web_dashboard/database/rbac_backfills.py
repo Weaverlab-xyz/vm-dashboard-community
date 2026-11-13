@@ -91,6 +91,12 @@ _BACKFILL_V1_DELIBERATELY_EMPTY = (
     # prior access to preserve. The one place it IS added on upgrade is the built-in POV
     # Presenter role, which is the point of it -- `_grant_presenter_own_pov`.
     "pov_own",
+    # Empty for a FOURTH reason: it narrows nothing, so there is nothing to preserve. Every
+    # route `demo` reaches still accepts the scope it took before (api/demo_gates.py ORs
+    # them), and its only route of its own -- the /demo hub -- is new. A backfill would
+    # hand every explicitly-permissioned user the right to build demo cells on every cloud,
+    # which no one has today without that cloud's own write. Explicit form on every site.
+    "demo",
 )
 
 # The third category, and the only one that needs both halves spelled out: routes that

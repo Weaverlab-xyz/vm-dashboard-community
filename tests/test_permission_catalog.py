@@ -56,8 +56,10 @@ def _enforced_pairs():
     and ``require_permission(\n  "storage",\n  "read")`` is exactly the shape a formatter
     produces.
     """
+    # `require_cell` (api/demo_gates) is `require_permission(scope, level)` that ALSO passes
+    # on `demo:<level>`, so its literal pair is enforced exactly as the plain factory's is.
     wanted = {"require_permission", "require_explicit_permission",
-              "has_permission", "has_explicit_permission"}
+              "has_permission", "has_explicit_permission", "require_cell"}
     out = []
     for path in _py_files():
         try:
@@ -187,6 +189,8 @@ _NAV_SCOPE = {
     "pov_templates": "pov_templates",
     # Its endpoints' only screen was the admin-only Settings drawer until /notifications.
     "notifications": "notifications",
+    # The Demo hub. Its API is `demo:read`; the link is `$store.auth.can('demo', 'read')`.
+    "demo": "demo",
 }
 
 
@@ -310,8 +314,10 @@ def _pairs_by_form():
                 continue
             fn = node.func
             name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
+            # `require_cell` is the permissive form of its ORIGINAL scope (api/demo_gates)
+            # -- it passes wherever require_permission did -- so it is classed with it.
             if name not in {"require_permission", "require_explicit_permission",
-                            "has_permission", "has_explicit_permission"}:
+                            "has_permission", "has_explicit_permission", "require_cell"}:
                 continue
             args = [a for a in node.args
                     if isinstance(a, ast.Constant) and isinstance(a.value, str)]

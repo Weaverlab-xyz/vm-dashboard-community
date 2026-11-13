@@ -39,6 +39,16 @@
    {% if request.url.path.startswith('/pov/templates') %}{{ nav_active }}{% endif %}">Templates</a>
 {% endif %}
 
+{# Demo: the estate instance's counterpart to POV above, in the same place and the same
+   weight. `demo_pages` is a profile-owned page group (feature_flags._PROFILE_PAGES), so
+   this renders on an estate instance only -- the two links can never both appear. Keyed
+   on `demo:read`, which is what /api/demo answers to. #}
+{% if demo_pages %}
+<a x-show="$store.auth.can('demo', 'read')" data-nav="demo" href="/demo"
+   class="px-2 py-2 rounded-md text-sm font-semibold {{ nav_hover }}
+   {% if request.url.path.startswith('/demo') %}{{ nav_active }}{% endif %}">Demo</a>
+{% endif %}
+
 {# ── Groups ────────────────────────────────────────────────────────────
    Each group is a native details element the drawer shows shut, except the one holding
    the page you are on, which responsiveNav opens. The groups follow the tabs of Settings,

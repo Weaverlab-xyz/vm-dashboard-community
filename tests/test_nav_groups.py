@@ -31,7 +31,9 @@ _NAV = os.path.join(_TPL, "_nav_links.html")
 _BASE = os.path.join(_TPL, "base.html")
 _APP_JS = os.path.join(_ROOT, "web_dashboard", "static", "js", "app.js")
 
-_TOP_LEVEL = {"dashboard", "pov", "pov_templates"}
+# `demo` sits where `pov` does, for the same reason: each is the landing page its profile
+# exists for, and the two can never render on one instance (feature_flags._PROFILE_PAGES).
+_TOP_LEVEL = {"dashboard", "pov", "pov_templates", "demo"}
 _GROUPS = ("hypervisors", "clouds", "cloud_services", "preview", "operations", "admin")
 
 

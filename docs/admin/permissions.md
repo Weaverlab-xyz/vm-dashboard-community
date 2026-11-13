@@ -41,7 +41,7 @@ so tighten them there.
 
 **"Full access"** in the grid is no longer stored as an empty map. It is written out as
 every section and level, except the authorities that only an administrator could grant
-before: `agents`, `audit`, `change_windows`, `connections`, `costs`, `directories`,
+before: `agents`, `audit`, `change_windows`, `connections`, `costs`, `demo`, `directories`,
 `notifications`, `pov_own`, the `write` and `delete` levels of `pov_templates`, and
 `jobs:read` (seeing everyone's jobs, not just your own). An empty map never granted those
 either. A scope added in a later release is **not** included in a map written earlier:
@@ -227,6 +227,7 @@ enough; nobody has to know a URL.
 | Menu link | Shown to |
 |---|---|
 | **Templates** (POV) | `pov_templates` **write**. `read` alone is what lets a POV Presenter pick a template when building a POV, so it does not open the builder. |
+| **Demo** | `demo` read, on an estate instance only |
 | **Agents** | `agents` read |
 | **Audit** | `audit` read |
 | **Storage** | `storage` read |

@@ -114,7 +114,10 @@ _PROFILE_OF.update({f: "pov" for f in _POV_ONLY})
 # already exists while one defaulting to True would be a toggle nobody should ever turn
 # off. A profile is not a preference, so this maps a NAME to its owning profile and reads
 # nothing from config at all.
-_PROFILE_PAGES = {"cloud_pages": "demo"}
+# `demo_pages` is the Demo hub (/demo, /api/demo): the estate instance's counterpart to /pov,
+# gathering the demo cells that only the cloud consoles host. Not a flag for the same reason
+# -- a hub is not an integration anybody switches on.
+_PROFILE_PAGES = {"cloud_pages": "demo", "demo_pages": "demo"}
 
 
 def install_profile() -> str:
@@ -297,6 +300,7 @@ def flags() -> dict:
         # _nav_links.html already spreads it, so the nav link and main._profile_page_gate
         # keep reading the same answer. See _PROFILE_PAGES.
         "cloud_pages":          profile_page_allowed("cloud_pages"),
+        "demo_pages":           profile_page_allowed("demo_pages"),
     }
 
 def _keyless_aws() -> bool:
@@ -435,4 +439,5 @@ def feature_map() -> dict:
         # reader of a question that is deliberately allowed only one. See
         # _PROFILE_PAGES.
         "cloud_pages":  raw["cloud_pages"],
+        "demo_pages":   raw["demo_pages"],
     }

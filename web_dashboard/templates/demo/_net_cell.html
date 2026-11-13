@@ -1,0 +1,146 @@
+{#
+  The network (VyOS) demo cell -- deploy form and cell list -- as macros, because TWO pages render it: /gcp#net,
+  and the Demo hub (/demo). Both spread the same logic, from static/js/demo_cells.js; see the
+  header there for the names the host component must provide.
+
+  Imported `with context`, so the {% if password_safe_enabled %}-style switches inside
+  read the importing page's context exactly as they did inline.
+#}
+{% macro net_deploy_form() %}
+      <!-- Deploy form -->
+      <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-4 self-start">
+        <h3 class="text-sm font-semibold text-gray-700">Deploy a cell</h3>
+
+        <div>
+          <div class="flex flex-wrap items-center justify-between mb-1">
+            <label class="block text-sm font-medium text-gray-700">Image <span class="text-red-500">*</span></label>
+            <label class="flex items-center gap-1.5 text-xs text-gray-500">
+              <input type="checkbox" x-model="netShowAllImages" class="rounded border-gray-300 h-3.5 w-3.5">
+              show all custom images
+            </label>
+          </div>
+          <select x-model="netForm.image_self_link"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">— pick the vyos-cell image —</option>
+            <template x-for="img in netImages()" :key="img.self_link">
+              <option :value="img.self_link" x-text="img.name"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-400 mt-1" x-show="!imagesLoading && netImages().length === 0">
+            No <span class="font-mono">vyos</span> image yet — import one into this project, then bake it
+            on the <em>Build Image</em> tab with source <em>Custom image</em> (an imported image has no
+            family, so the family field cannot name it), or tick "show all".
+          </p>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Instance name <span class="text-red-500">*</span></label>
+          <input type="text" x-model="netForm.instance_name" placeholder="vyos-cell-01"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Machine type</label>
+            <input type="text" x-model="netForm.machine_type"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Zone</label>
+            <input type="text" x-model="netForm.zone" placeholder="blank = the configured default"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">VyOS release</label>
+            <select x-model="netForm.vyos_release"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="1.4">1.4 and later — <span class="font-mono">set firewall ipv4 name</span></option>
+              <option value="1.3">1.3 — <span class="font-mono">set firewall name</span></option>
+            </select>
+            <p class="text-xs text-gray-400 mt-1">
+              Your assertion about the image, not something the dashboard can read off it. The firewall
+              tree moved in 1.4, so the commands you are about to type differ by train.
+            </p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Baseline ruleset</label>
+            <input type="text" x-model="netForm.ruleset"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <p class="text-xs text-gray-400 mt-1">Where the demo's DROP rule lands. Must match the bake's <span class="font-mono">VYOS_RULESET</span>.</p>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Workstream <span class="text-red-500">*</span></label>
+          <select x-model="netForm.workgroup"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">— select —</option>
+            <template x-for="wg in availableWorkgroups" :key="wg">
+              <option :value="wg" x-text="wg"></option>
+            </template>
+          </select>
+        </div>
+
+        <label class="flex items-start gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="netForm.register_in_passwordsafe" class="rounded border-gray-300 mt-0.5">
+          <span>
+            Onboard into Password Safe
+            <span class="block text-xs text-gray-400">
+              Forced to the SSH method — the cloud-native plugins manage a guest through an agent
+              VyOS does not run. Storage and checkout, not rotation: see
+              <span class="font-mono">provisioners/net/README.md</span>.
+            </span>
+          </span>
+        </label>
+
+        <div class="text-xs text-red-600" x-show="netError" x-text="netError" x-cloak></div>
+
+        <button @click="deployNetCell()" :disabled="netSubmitting"
+                class="w-full bg-blue-600 text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
+          <span x-show="!netSubmitting">Deploy cell</span>
+          <span x-show="netSubmitting" x-cloak>Deploying…</span>
+        </button>
+      </div>
+{% endmacro %}
+
+{% macro net_cells_list() %}
+      <!-- Cells -->
+      <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 self-start">
+        <h3 class="text-sm font-semibold text-gray-700 mb-3">Cells</h3>
+        <p class="text-sm text-gray-400" x-show="!netCells.length">No network cells yet.</p>
+        <div class="space-y-2">
+          <template x-for="c in netCells" :key="c.job_id">
+            <div class="border border-gray-200 rounded-lg px-3 py-2">
+              <div class="flex items-center justify-between">
+                <span class="font-mono text-sm text-gray-800" x-text="c.instance_name"></span>
+                <span class="text-xs text-gray-500" x-text="c.status"></span>
+              </div>
+              <div class="text-xs text-gray-400 mt-1">
+                <span x-text="c.zone"></span>
+                <span class="ml-2" x-show="c.private_ip" x-text="c.private_ip"></span>
+                <span class="ml-2" x-show="c.vyos_release" x-text="'VyOS ' + c.vyos_release"></span>
+                <span class="ml-2" x-show="c.ruleset" x-text="c.ruleset"></span>
+              </div>
+              <div class="text-xs text-gray-400 mt-1" x-show="c.shell_jump_id">
+                Shell Jump <span class="font-mono" x-text="c.shell_jump_id"></span>
+              </div>
+              <!-- DELETE /api/demo/cells/net/{id}: the GCE destroy, for this cell only. -->
+              <div class="flex justify-end mt-2" x-show="c.status === 'completed'" x-cloak>
+                <button @click="destroyNetCell(c)"
+                        class="text-xs px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded-md transition">
+                  Destroy
+                </button>
+              </div>
+            </div>
+          </template>
+        </div>
+        <p class="text-xs text-gray-400 mt-3">
+          A cell is an ordinary GCE deploy row, so Destroy here, Destroy on the GCP
+          <em>Instances</em> tab and the auto-delete timer all reap the whole thing — VM,
+          Shell Jump and Password Safe registration.
+        </p>
+      </div>
+{% endmacro %}

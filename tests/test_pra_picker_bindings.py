@@ -68,7 +68,10 @@ def _read(path):
 
 
 # `{% from "partials/x.html" import ... %}` — the markup a page renders from a macro.
-_IMPORT = re.compile(r'\{%\s*from\s+"(partials/[^"]+)"\s+import')
+# The demo-cell forms are macros too, under demo/ (templates/demo/_ot_cell_*.html).
+_IMPORT = re.compile(r'\{%\s*from\s+"((?:partials|demo)/[^"]+)"\s+import')
+# A page that spreads the shared demo-cell components keeps their state in this file.
+_DEMO_CELLS_JS = os.path.join(_ROOT, "web_dashboard", "static", "js", "demo_cells.js")
 
 
 def _with_partials(src):
@@ -76,7 +79,12 @@ def _with_partials(src):
     dropdown that moved into a macro is still checked against the page state it reads.
     (vm_pra_modal keeps its own state, ``vmPraOpts``, and is left out.)"""
     parts = (_read(os.path.join(_TEMPLATES, p)) for p in _IMPORT.findall(src))
-    return src + "".join(p for p in parts if "praPickers" in p)
+    out = src + "".join(p for p in parts if "praPickers" in p)
+    # The Demo hub's cell panels take their state from demo_cells.js (demoOTPanel), not
+    # from the page. A cloud page keeps its own praPickers, so it needs nothing added.
+    if "demoOTPanel(" in src or "demoNetPanel(" in src:
+        out += _read(_DEMO_CELLS_JS)
+    return out
 
 
 def _forms():
@@ -88,6 +96,10 @@ def _forms():
         if os.path.basename(dp) == "partials":
             continue
         for f in sorted(files):
+            # demo/_*.html are partials too (the demo-cell forms), checked through the
+            # pages that import them.
+            if os.path.basename(dp) == "demo" and f.startswith("_"):
+                continue
             if f.endswith(".html"):
                 p = os.path.join(dp, f)
                 src = _with_partials(_read(p))
@@ -177,7 +189,9 @@ def test_the_select_still_posts_jumpoint_name():
     above it is what says Gateway."""
     for path, src in _forms():
         cloud = path.split("/")[-2]
-        model = os.path.join(_ROOT, "web_dashboard", "models", f"{cloud}.py")
+        # The Demo hub's forms are the OT cell's, which post to models/ot.py.
+        model = os.path.join(_ROOT, "web_dashboard", "models",
+                             "ot.py" if cloud == "demo" else f"{cloud}.py")
         assert "jumpoint_name" in _read(model), (
             f"models/{cloud}.py no longer accepts jumpoint_name, but the form posts it")
         assert ">Gateway</label>" in src, f"{path}: the dropdown's label stopped saying Gateway"

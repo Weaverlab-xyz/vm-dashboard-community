@@ -1,0 +1,362 @@
+{#
+  The AWS OT demo cell -- deploy form and cell list -- as macros, because TWO pages render it: /aws#ot,
+  and the Demo hub (/demo). Both spread the same logic, from static/js/demo_cells.js; see the
+  header there for the names the host component must provide.
+
+  Imported `with context`, so the {% if password_safe_enabled %}-style switches inside
+  read the importing page's context exactly as they did inline.
+#}
+{% macro ot_deploy_form() %}
+      <!-- Deploy form -->
+      <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-4 self-start">
+        <h3 class="text-sm font-semibold text-gray-700">Deploy a cell</h3>
+
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <label class="block text-sm font-medium text-gray-700">AMI <span class="text-red-500">*</span></label>
+            <label class="flex items-center gap-1.5 text-xs text-gray-500">
+              <input type="checkbox" x-model="otShowAllImages" class="rounded border-gray-300 h-3.5 w-3.5">
+              show all private AMIs
+            </label>
+          </div>
+          <select x-model="otForm.ami_id"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">— pick the ot-sim AMI —</option>
+            <template x-for="img in otImages()" :key="img.ami_id">
+              <option :value="img.ami_id" x-text="img.name || img.ami_id"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-400 mt-1" x-show="!loadingAmis && otImages().length === 0">
+            No <span class="font-mono">ot-sim</span> AMI yet — build one on the <em>Build Image</em> tab, or tick "show all".
+          </p>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Instance Name <span class="text-red-500">*</span></label>
+            <input type="text" x-model="otForm.instance_name" placeholder="ot-cell-01"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Instance Type</label>
+            <select x-model="otForm.instance_type"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <template x-for="t in (networkOpts.instance_types && networkOpts.instance_types.length ? networkOpts.instance_types : ['t3.medium'])" :key="t">
+                <option :value="t" x-text="t"></option>
+              </template>
+            </select>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Region</label>
+            <select x-model="otForm.region" @change="onOTRegionChange()"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <template x-for="r in regionCatalog" :key="r.id">
+                <option :value="r.id" x-text="r.label ? (r.id + ' — ' + r.label) : r.id"></option>
+              </template>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Workstream <span class="text-red-500">*</span></label>
+            <select x-model="otForm.workgroup"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="">— select a workstream —</option>
+              <template x-for="wg in availableWorkgroups" :key="wg">
+                <option :value="wg" x-text="wg"></option>
+              </template>
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Subnet <span class="text-red-500">*</span></label>
+          <select x-model="otForm.subnet_id"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">Select subnet…</option>
+            <template x-for="s in networkOpts.subnets || []" :key="s.id">
+              <option :value="s.id" x-text="s.name"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-400 mt-1">Pick the PRIVATE sandbox subnet — EC2 has no per-instance
+            public-IP switch here, and a public cell deflates the air-gap story.</p>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Security Groups <span class="text-red-500">*</span></label>
+          <div class="border border-gray-300 rounded-lg max-h-36 overflow-y-auto p-2 space-y-1">
+            <p x-show="(networkOpts.security_groups || []).length === 0"
+               class="text-xs text-gray-400 p-1">No security groups found.</p>
+            <template x-for="sg in networkOpts.security_groups || []" :key="sg.id">
+              <label class="flex items-center gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer">
+                <input type="checkbox" :value="sg.id"
+                       @change="toggleOTSG($event, sg.id)"
+                       :checked="otForm.security_group_ids.includes(sg.id)"
+                       class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                <span class="text-xs text-gray-700" x-text="sg.name"></span>
+              </label>
+            </template>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Protocols to broker (one tunnel each)</label>
+            <div class="border border-gray-300 rounded-lg p-2 space-y-1">
+              <template x-for="p in cellPlcPresets()" :key="p.key">
+                <label class="flex items-center gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer">
+                  <input type="checkbox" :value="p.key"
+                         @change="toggleOTProtocol($event, p.key)"
+                         :checked="otForm.protocols.includes(p.key)"
+                         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                  <span class="text-xs text-gray-700" x-text="p.label + ' (:' + p.port + ')'"></span>
+                </label>
+              </template>
+        <div class="mb-2">
+          <label class="block text-xs font-medium text-gray-600 mb-1">Image runtime</label>
+          <select x-model="otForm.runtime" @change="onOTRuntimeChange()"
+                  class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+            <option value="k3s">k3s (the default bake)</option>
+            <option value="docker">docker compose (OT_RUNTIME=docker)</option>
+          </select>
+          <p class="text-xs text-gray-400 mt-1">
+            What the image you picked was baked with. The dashboard cannot read this off
+            an image — both runtimes produce an <span class="font-mono">ot-sim</span>
+            image — so it is your assertion, and it decides whether the cell's own
+            platform endpoints can be brokered at all.
+          </p>
+        </div>
+              <template x-if="cellPlatformPresets().length">
+                <div class="pt-1 mt-1 border-t border-gray-200 space-y-1">
+                  <p class="text-[10px] uppercase tracking-wide text-gray-400">The cell itself</p>
+                  <template x-for="p in cellPlatformPresets()" :key="p.key">
+                    <label class="flex items-center gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer">
+                      <input type="checkbox" :value="p.key"
+                             @change="toggleOTProtocol($event, p.key)"
+                             :checked="otForm.protocols.includes(p.key)"
+                             class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                      <span class="text-xs text-gray-700" x-text="p.label + ' (:' + p.port + ')'"></span>
+                    </label>
+                  </template>
+                </div>
+              </template>
+            </div>
+            <p class="text-xs text-gray-400 mt-1">
+              The cell simulates every PLC protocol at once — each gets its own PRA protocol
+              tunnel, so access can be granted per vendor. It also runs those simulators on
+              k3s, so the cell's own Kubernetes API can be brokered the same way: a
+              recorded <span class="font-mono">kubectl</span> into the plant cluster, with no
+              other route in. Protocols the image does not simulate (e.g. DNP3) stay available
+              on the standalone tunnel card below.
+            </p>
+          </div>
+        </div>
+
+        <!-- BeyondTrust PRA placement — same pickers as the VM deploy modal. All three
+             jump items (Web Jump, tunnel, Shell Jump) land in this Asset Group and ride
+             this Gateway, so pick the pair that matches the cell's region rather than
+             letting a us-east-2 cell wire into another region's defaults. -->
+        <div class="pt-1 space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <p class="text-xs font-semibold text-gray-600">BeyondTrust PRA placement
+            <span class="font-normal text-gray-400">— where the cell's jump items land; defaults are the configured bt_jump_group_name / bt_jumpoint_name.</span>
+          </p>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Asset group</label>
+              <select x-model="otForm.jump_group" :disabled="!praPickers.jump_groups.length"
+                      class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+                <option value="">(configured default)</option>
+                <template x-for="g in praPickers.jump_groups || []" :key="g.id">
+                  <option :value="g.name" x-text="g.name"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
+              <select x-model="otForm.jumpoint_name" :disabled="!praPickers.gateways.length"
+                      class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+                <option value="">(configured default)</option>
+                <template x-for="j in praPickers.gateways || []" :key="j.id">
+                  <option :value="j.name" x-text="j.name"></option>
+                </template>
+              </select>
+            </div>
+          </div>
+          <p class="text-xs text-gray-400">Pick the pair matching the cell's region. With a Gateway
+            override the deploy skips the shared-gateway size check — the host behind that Gateway
+            needs ≥2 GB RAM for the Web Jump.</p>
+        </div>
+
+        {% if password_safe_enabled %}
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="otForm.register_in_passwordsafe"
+                 class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+          Onboard the cell's admin account into Password Safe
+          <span class="text-xs text-gray-400">(+ a synced PRA Vault account for checkout/injection)</span>
+        </label>
+        {% endif %}
+        {% if entitle_enabled %}
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="otForm.register_in_entitle"
+                 class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+          Register the VM in Entitle for just-in-time SSH access
+        </label>
+        <div x-show="otForm.register_in_entitle" x-cloak
+             class="ml-6 space-y-2 p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <p class="text-xs text-gray-600">
+            The agent that brokers this access runs <strong>in the plant</strong>, on its own
+            industrial-DMZ host deployed beside the cell — not in a cluster somewhere else.
+            On AWS the two zones are security groups, and the cell's <em>replaces</em> the
+            ones you picked above: groups union their allows, so a zone that merely joined
+            them would restrict nothing. Needs the Purdue zoning on
+            (<span class="font-mono">ot_purdue_firewall_enabled</span>) and the Gateway
+            host's group in <span class="font-mono">bt_ecs_jumpoint_security_group_id</span>;
+            the deploy refuses with the remedy if anything is missing.
+          </p>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">DMZ broker AMI <span class="text-red-500">*</span></label>
+            <select x-model="otForm.broker_ami_id"
+                    class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+              <option value="">— pick the ot-broker AMI —</option>
+              <template x-for="img in otBrokerImages()" :key="img.ami_id">
+                <option :value="img.ami_id" x-text="img.name"></option>
+              </template>
+            </select>
+            <p class="text-xs text-gray-400 mt-1" x-show="otBrokerImages().length === 0">
+              No AMI with <span class="font-mono">broker</span> in its name yet — bake one with
+              <span class="font-mono">OT_ROLE=broker</span> and name it e.g. <span class="font-mono">ot-broker</span>
+              (see provisioners/ot/README.md),
+              or tick "show all".
+            </p>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">DMZ broker instance type</label>
+            <input type="text" x-model="otForm.broker_instance_type"
+                   class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm font-mono"
+                   placeholder="t3.large">
+            <p class="text-xs text-gray-400 mt-1">8 GB or more: the agent requests 1Gi on its own.</p>
+          </div>
+        </div>
+        {% endif %}
+
+        <div x-show="otError" x-cloak
+             class="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700" x-text="otError"></div>
+
+        <button @click="submitOTCell()"
+                :disabled="otSubmitting || !otForm.ami_id || !otForm.instance_name || !otForm.workgroup || !otForm.subnet_id || !otForm.security_group_ids.length || !otForm.protocols.length"
+                class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition">
+          <span x-show="!otSubmitting">Deploy OT Cell</span>
+          <span x-show="otSubmitting" x-cloak>Queuing…</span>
+        </button>
+        <p class="text-xs text-gray-400">
+          The gateway backing the Web Jump needs ≥2 GB RAM (<span class="font-mono">bt_ecs_host_instance_type</span>
+          t3.small minimum, t3.medium preferred — Settings → Integrations → Privileged Remote Access) —
+          the deploy checks and refuses early with the remedy otherwise.
+        </p>
+      </div>
+{% endmacro %}
+
+{% macro ot_cells_list() %}
+        <!-- Live cells -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-sm font-semibold text-gray-700">Cells</h3>
+            <button @click="loadOTCells()" class="text-xs text-gray-500 hover:text-gray-700">Refresh</button>
+          </div>
+          <p class="text-sm text-gray-400" x-show="!otCells.length">No OT cells yet.</p>
+          <div class="space-y-3">
+            <template x-for="c in otCells" :key="c.vm_job_id">
+              <div class="border border-gray-200 rounded-lg p-3">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-2">
+                    <span class="font-mono text-sm text-gray-800" x-text="c.instance_name"></span>
+                    <span class="text-xs px-1.5 py-0.5 rounded-full"
+                          :class="c.status === 'completed' ? 'bg-green-50 text-green-700' :
+                                  c.status === 'failed' ? 'bg-red-50 text-red-700' : 'bg-amber-50 text-amber-700'"
+                          x-text="c.status"></span>
+                    <span x-show="c.status === 'completed' && !c.wiring_complete" x-cloak
+                          class="text-xs px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-700">wiring incomplete</span>
+                  </div>
+                  <a :href="'/jobs/' + c.vm_job_id" class="text-xs text-blue-600 hover:underline">job →</a>
+                </div>
+                <div class="mt-2 text-xs text-gray-500 space-y-0.5">
+                  <div x-show="c.private_ip"><span class="text-gray-400">IP:</span> <span class="font-mono" x-text="c.private_ip"></span>
+                    <span class="text-gray-400 ml-2">region:</span> <span class="font-mono" x-text="c.zone"></span></div>
+                  <div x-show="c.web_jump_id"><span class="text-gray-400">HMI Web Jump:</span>
+                    <span class="font-mono" x-text="c.web_jump_id"></span>
+                    <span class="text-gray-400" x-text="' (' + c.hmi_url + ')'"></span></div>
+                  <template x-for="t in (c.tunnels || [])" :key="t.jump_id || t.protocol">
+                    <div><span class="text-gray-400">Tunnel:</span>
+                      <span class="font-mono" x-text="t.protocol + ' 127.0.0.1:' + t.local_port + ' → :' + t.remote_port"></span></div>
+                  </template>
+                  <div x-show="c.shell_jump_id"><span class="text-gray-400">Shell Jump:</span>
+                    <span class="font-mono" x-text="c.shell_jump_id"></span></div>
+                  <div x-show="c.vault_account_name"><span class="text-gray-400">PRA checkout:</span>
+                    <span class="font-mono" x-text="c.vault_account_name"></span>
+                    <span :class="c.ps_checkout_synced ? 'text-green-600' : 'text-amber-600'"
+                          x-text="c.ps_checkout_synced ? 'synced' : 'not synced'"></span></div>
+                  <div x-show="c.broker_instance_name"><span class="text-gray-400">Plant DMZ broker:</span>
+                    <span class="font-mono" x-text="c.broker_instance_name + (c.broker_private_ip ? ' (' + c.broker_private_ip + ')' : '')"></span>
+                    <span :class="c.agent_installed ? 'text-green-600' : 'text-amber-600'"
+                          x-text="c.agent_installed ? 'agent installed' : 'agent installing'"></span></div>
+                  <div x-show="c.agent_token_name"><span class="text-gray-400">Entitle agent:</span>
+                    <span class="font-mono" x-text="c.agent_token_name"></span>
+                    <span class="text-gray-400">— this plant's own</span></div>
+                  <!-- The plant's one way out, in the words it is entitled to. An
+                       open-ports broker is called out in amber rather than described
+                       the same way as a pinned one: the demo's central sentence is
+                       different in that case, and nobody should have to check a
+                       setting to find out which sentence they are allowed to say. -->
+                  <div x-show="c.egress_kind">
+                    <span class="text-gray-400">Plant egress:</span>
+                    <span class="font-mono"
+                          :class="c.egress_kind === 'open' ? 'text-amber-600 font-semibold'
+                                  : (c.egress_kind === 'pinned' ? 'text-green-700' : 'text-gray-700')"
+                          x-text="c.egress_kind === 'open' ? 'not pinned'
+                                  : (c.egress_kind === 'pinned' ? 'pinned' : 'resolved once')"></span>
+                    <span class="text-gray-500" x-text="c.egress_text"></span>
+                  </div>
+                  <div x-show="c.egress_drift" class="text-amber-700">
+                    <span class="font-semibold">Egress drift:</span>
+                    <span x-text="c.egress_drift"></span>
+                  </div>
+                  <div x-show="c.expires_at"><span class="text-gray-400">Expires:</span>
+                    <span x-text="(c.expires_at || '').replace('T', ' ').slice(0, 16) + ' UTC'"></span></div>
+                </div>
+                <div class="mt-2 flex gap-2">
+                  <button x-show="c.status === 'completed' && !c.wiring_complete" x-cloak
+                          @click="rewireOTCell(c)"
+                          class="text-xs px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-md transition">
+                    Re-wire
+                  </button>
+                  <button x-show="c.status === 'completed' && c.broker_instance_name" x-cloak
+                          @click="probeOTEgress(c)"
+                          :disabled="c.probing"
+                          class="text-xs px-2.5 py-1 bg-slate-600 hover:bg-slate-700 disabled:opacity-50 text-white rounded-md transition"
+                          title="Run the agent's own egress probe from a pod on the DMZ broker — changes nothing">
+                    <span x-show="!c.probing">Probe egress</span>
+                    <span x-show="c.probing" x-cloak>Queuing…</span>
+                  </button>
+                  <button x-show="c.status === 'completed' && c.instance_id" x-cloak
+                          @click="destroyOTCell(c)"
+                          class="text-xs px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded-md transition">
+                    Destroy
+                  </button>
+                  <!-- A cell whose VM deploy failed has no Destroy: the cloud's destroy
+                       route only resolves completed deploys (and EC2's keys on an
+                       instance id a failed RunInstances never produced), so before this
+                       the card could never be retired. Clear checks the instance is
+                       really gone — by NAME tag, which a failed row does have — then
+                       retires the record. -->
+                  <button x-show="c.status !== 'completed'" x-cloak
+                          @click="clearOTCell(c)"
+                          class="text-xs px-2.5 py-1 bg-gray-600 hover:bg-gray-700 text-white rounded-md transition">
+                    Clear
+                  </button>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+{% endmacro %}
