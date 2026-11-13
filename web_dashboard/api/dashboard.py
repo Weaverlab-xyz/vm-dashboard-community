@@ -305,8 +305,9 @@ def _db_tiles(db: Session, user: User) -> dict:
         # GCP-less or GCP-forbidden operator a dead end.
         busiest = max(per_cloud, key=lambda c: (per_cloud[c], c)) if per_cloud else ""
         if not busiest:
-            readable = [c for c in ot_service.CELL_CHILD_JOB_TYPE if _may_read(c)]
-            busiest = "gcp" if "gcp" in readable else (readable[0] if readable else "gcp")
+            readable_clouds = [c for c in ot_service.CELL_CHILD_JOB_TYPE if _may_read(c)]
+            busiest = "gcp" if "gcp" in readable_clouds else (
+                readable_clouds[0] if readable_clouds else "gcp")
         return _cell_tile(res, secondary=sum(1 for c in cells if c["wired"]),
                           href=f"/{busiest}#ot")
     _safe("ot_cells", _ot_cells)

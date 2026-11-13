@@ -1,6 +1,6 @@
 # Demo hub
 
-> **Audience:** presenter, admin · **Profile:** `demo` · **Read this when:** you want one page for every demo cell and every page a demo runs from, or you are giving someone the Demo Presenter role.
+> **Audience:** presenter · **Profile:** `demo` · **Read this when:** you want one page for every demo cell and every page a demo runs from, or you are giving someone the Demo Presenter role.
 
 **Demo** in the menu (`/demo`) is the estate instance's counterpart to **POV** on a POV
 instance. It has two tabs:
