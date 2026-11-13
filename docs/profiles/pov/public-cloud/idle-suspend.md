@@ -9,6 +9,13 @@ On AWS the dashboard also runs an **idle timer**, the nearest thing to Skytap's
 default) or change it later from the *Sleeps* column. Allowed values are 30 minutes to
 24 hours, or off.
 
+The window is on unless somebody turns it off. A POV created without one — through the API,
+or from a blueprint that leaves *Suspend when idle* blank — gets the one-hour default; only
+an explicit `0` leaves it off. The value is stored on the POV when it is created, so the
+timer does not depend on the provision job reaching any particular step. POVs created
+before this default keep whatever they had: check the *Sleeps* column for any that show
+"no idle stop".
+
 **Idle means every VM was quiet for the whole window.** On each ten-minute reconcile pass
 the dashboard reads the free five-minute EC2 metrics from CloudWatch for every running POV
 that has a window set. It stops the POV only when, for every VM, each period in the window

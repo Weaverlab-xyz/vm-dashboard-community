@@ -149,9 +149,12 @@ class ProvisionRequest(BaseModel):
     blueprint_id: str = ""
     workgroup: str = ""
     project_id: str = ""
-    # 0 disables it. Defaulted by the caller rather than here so the value that reaches
-    # the platform is always one somebody chose.
-    suspend_on_idle_seconds: int = 0
+    # 0 disables it; ABSENT means "not chosen", which `provision` resolves to the blueprint's
+    # value and then, on a cloud whose idle timer the dashboard runs, to a one-hour window.
+    # It used to default to 0 here, so any caller that did not pre-fill the form (the API, a
+    # blueprint that left it blank) built a cloud POV that was never stopped -- and the only
+    # symptom was the invoice.
+    suspend_on_idle_seconds: int | None = None
     # Which VM in the template runs the agent. Per-POV rather than a global setting:
     # templates come from wherever the SE got them, and one account can hold two that name
     # it differently.
@@ -803,6 +806,25 @@ async def provision(payload: ProvisionRequest,
 
     name, mod = _adapter(payload.platform)
 
+    # Fail closed on cost: a cloud POV whose idle timer the dashboard runs gets one unless
+    # somebody explicitly sent 0. Skytap keeps its own behaviour (nothing pushed when unset).
+    if (payload.suspend_on_idle_seconds is None
+            and lab_platforms.supports(name, "dashboard_idle_suspend")):
+        from ..services import pov_cloud_env
+        payload.suspend_on_idle_seconds = pov_cloud_env.DEFAULT_IDLE_WINDOW_S
+    elif payload.suspend_on_idle_seconds is not None and lab_platforms.supports(
+            name, "dashboard_idle_suspend"):
+        from ..services import pov_cloud_env
+        if payload.suspend_on_idle_seconds and not (
+                pov_cloud_env.IDLE_MIN_WINDOW_S <= payload.suspend_on_idle_seconds
+                <= pov_cloud_env.IDLE_MAX_WINDOW_S):
+            raise HTTPException(
+                status_code=400,
+                detail="the idle window must be between "
+                       f"{pov_cloud_env.IDLE_MIN_WINDOW_S // 60} minutes and "
+                       f"{pov_cloud_env.IDLE_MAX_WINDOW_S // 3600} hours, or 0 to turn "
+                       "it off")
+
     if db.query(PovEnvironment).filter(
             PovEnvironment.name == payload.name,
             PovEnvironment.status != pov_env_service.STATUS_DESTROYED).first():
@@ -901,6 +923,11 @@ async def provision(payload: ProvisionRequest,
     # exists. A POV gets its own much longer default than a cloud VM — see
     # expiry_policy.pov_default_hours.
     env.expires_at = expiry_policy.default_expiry_for_kind("pov")
+    # Armed on the row at creation, not only inside the provision job: the dashboard's idle
+    # sweep reads the window from here, so it must not depend on a job step having run.
+    if (payload.suspend_on_idle_seconds
+            and lab_platforms.supports(name, "dashboard_idle_suspend")):
+        env.suspend_on_idle_seconds = int(payload.suspend_on_idle_seconds)
     # A blueprint may shorten or lengthen that. Applied only when the feature is on — a
     # blueprint must not be able to stamp a timer on an instance where expiry is off, or
     # the "NULL means never, so enabling it later acts on nothing that already exists"
