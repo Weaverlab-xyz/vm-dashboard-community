@@ -3966,7 +3966,9 @@ async def run_ps_register(db: Session, *, db_id: str, job_id: str,
             if row.status != "available":
                 raise CloudDatabaseError(
                     f"database is {row.status!r} — Password Safe onboarding needs a "
-                    f"database that has finished provisioning")
+                    + ("running database; start it first"
+                       if row.status in ("stopped", "stopping", "starting")
+                       else "database that has finished provisioning"))
             if not row.private_host:
                 raise CloudDatabaseError("database has no endpoint yet")
             if row.ps_managed_system_id:
@@ -4597,6 +4599,26 @@ async def _teardown_ps_onboarding(db: Session, *, row: Optional[CloudDatabase],
     return errors
 
 
+def start_power(db: Session, db_id: str, action: str, actor: str = "", *,
+                restop: bool = False) -> dict:
+    """Stop or start a provisioned database's instance: queues a ``clouddb_power`` job.
+
+    The state machine, the per-cloud calls and the refusals live in
+    :mod:`services.clouddb_power`; this is the entry point every caller (the API, a demo
+    cell's suspend) uses, next to :func:`start_decommission`. Raises
+    ``CloudDatabaseError`` for an unknown id, ``clouddb_power.PowerUnsupported`` for a
+    database that can never be powered and ``clouddb_power.PowerRefused`` for one that
+    cannot be right now (provisioning, decommissioning, another power job running)."""
+    from . import clouddb_power
+    return clouddb_power.start_power(db, db_id, action, actor, restop=restop)
+
+
+async def run_power(db: Session, *, db_id: str, job_id: str, action: str) -> None:
+    """Worker body of a ``clouddb_power`` job -- see :mod:`services.clouddb_power`."""
+    from . import clouddb_power
+    await clouddb_power.run_power(db, db_id=db_id, job_id=job_id, action=action)
+
+
 def start_decommission(db: Session, db_id: str, created_by: str = "") -> dict:
     """Synchronously record the intent to decommission and schedule the work:
     flip the row to ``decommissioning`` and create a ``clouddb_decommission``
@@ -4608,6 +4630,15 @@ def start_decommission(db: Session, db_id: str, created_by: str = "") -> dict:
     row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
     if not row:
         raise CloudDatabaseError(f"database {db_id} not found")
+
+    # A stop/start in flight would race the destroy for the instance. A STOPPED row is
+    # fine -- run_decommission starts it first where the cloud needs that (see
+    # clouddb_power.ensure_running_for_teardown); power_state keeps the fact that it
+    # was stopped after the status below is overwritten.
+    from . import clouddb_power
+    if row.status in clouddb_power.TRANSITIONAL:
+        raise clouddb_power.PowerRefused(
+            f"database is {row.status} — wait for that to finish before deleting it")
 
     # Already in flight — return the existing job rather than starting a second.
     # Only short-circuit on an ACTIVE (pending/running) job; a cancelled/failed
@@ -4720,6 +4751,15 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
     errors += await _teardown_ps_onboarding(
         db, row=row, prov_job=deploy_job, progress_job_id=job_id, progress=50)
     meta = (deploy_job.metadata_dict or {}) if deploy_job else {}
+
+    # 3c. A STOPPED instance: GCP and Azure destroy its databases/users through the
+    #     instance, and refuse that while it is stopped, so start it first. AWS deletes
+    #     a stopped RDS instance as it is. A failed start is a warning -- the destroy
+    #     below still runs, and its own error is the one that fails the job.
+    from . import clouddb_power
+    power_warning = await clouddb_power.ensure_running_for_teardown(db, row, job_id)
+    if power_warning:
+        warnings.append(power_warning)
 
     # 4. The RDS instance itself (the long step).
     job_service.update_progress(db, job_id, 60, "Destroying the database instance…")
@@ -5301,11 +5341,26 @@ async def ansible_connection_vars(db: Session, db_id: str) -> dict:
     }
 
 
+def _power_unsupported(r) -> Optional[str]:
+    from . import clouddb_power
+    return clouddb_power.unsupported_reason(r)
+
+
+def _power_state(r) -> dict:
+    from . import clouddb_power
+    return clouddb_power.read_state(r)
+
+
 def _serialize(r: CloudDatabase) -> dict:
     return {
         "id": r.id, "engine": r.engine, "provider": r.provider, "cloud": r.cloud,
         "region": r.region, "instance_id": r.instance_id, "private_host": r.private_host,
         "port": r.port, "status": r.status, "jump_item_id": r.jump_item_id,
+        # Stop/start (services/clouddb_power). powerable is the structural gate for the
+        # Stop/Start buttons, from the same function the API refuses with.
+        "powerable": _power_unsupported(r) is None,
+        "stopped_at": _power_state(r).get("stopped_at"),
+        "power_error": _power_state(r).get("last_error") or "",
         # Drives the delete verb (deregister vs decommission) and the UI badge.
         "source": r.source or "provisioned", "db_name": r.db_name,
         # db_name is the raw catalog (NULL where no user database exists);

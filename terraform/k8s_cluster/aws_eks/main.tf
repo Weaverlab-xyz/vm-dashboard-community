@@ -472,6 +472,13 @@ resource "aws_eks_node_group" "this" {
     max_size     = var.node_max
   }
 
+  # A dashboard STOP drops min and desired to 0, and a START restores what it recorded
+  # (web_dashboard/services/k8s_power.py). Out-of-band by design: without this a later
+  # apply would scale a stopped cluster's nodes straight back up. A destroy is unaffected.
+  lifecycle {
+    ignore_changes = [scaling_config[0].desired_size, scaling_config[0].min_size]
+  }
+
   tags = var.tags
 
   depends_on = [

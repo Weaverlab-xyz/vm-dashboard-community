@@ -143,6 +143,16 @@ def _row_oidc_provider(r: K8sCluster) -> str:
         return ""
 
 
+def _power_unsupported(r):
+    from . import k8s_power
+    return k8s_power.unsupported_reason(r)
+
+
+def _power_state(r) -> dict:
+    from . import k8s_power
+    return k8s_power.read_state(r)
+
+
 def _serialize(r: K8sCluster) -> dict:
     from . import config_service
     return {
@@ -195,6 +205,10 @@ def _serialize(r: K8sCluster) -> dict:
         # The deployed agent its Kubernetes work runs on, or "" for the remote worker
         # (k8s_executor_service). As set — whether it still qualifies is read per use.
         "executor_agent_id":     getattr(r, "executor_agent_id", None) or "",
+        # Stop/start (services/k8s_power). getattr for the stand-in reason above.
+        "powerable":             _power_unsupported(r) is None,
+        "stopped_at":            _power_state(r).get("stopped_at"),
+        "power_error":           _power_state(r).get("last_error") or "",
         "created_by":            r.created_by,
         "created_at":            r.created_at.isoformat() if r.created_at else "",
     }
@@ -1258,6 +1272,22 @@ async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
         logger.exception("k8s provision failed cluster_id=%s: %s", cluster_id, exc)
 
 
+def start_power(db: Session, cluster_id: str, action: str, actor: str = "") -> dict:
+    """Stop or start a provisioned cluster: queues a ``k8s_power`` job. GKE/EKS scale
+    every node pool to 0 and remember the sizes; AKS uses its managed stop. The logic
+    lives in :mod:`services.k8s_power`; this is the entry point, next to
+    :func:`start_decommission`. Raises ``K8sError`` for an unknown id,
+    ``k8s_power.PowerUnsupported`` and ``k8s_power.PowerRefused``."""
+    from . import k8s_power
+    return k8s_power.start_power(db, cluster_id, action, actor)
+
+
+async def run_power(db: Session, *, cluster_id: str, job_id: str, action: str) -> None:
+    """Worker body of a ``k8s_power`` job -- see :mod:`services.k8s_power`."""
+    from . import k8s_power
+    await k8s_power.run_power(db, cluster_id=cluster_id, job_id=job_id, action=action)
+
+
 def start_decommission(db: Session, cluster_id: str, created_by: str = "") -> dict:
     """Record intent to decommission a **provisioned** cluster + schedule teardown:
     flip to ``decommissioning`` and create a ``k8s_decommission`` Job. The teardown
@@ -1272,6 +1302,12 @@ def start_decommission(db: Session, cluster_id: str, created_by: str = "") -> di
     # external GCE COS node (not a K8sCluster row), so decommissioning a cluster
     # only removes its own import. The "don't orphan imports" guard now lives at
     # NODE teardown (see rancher_node_service.run_teardown + count_rancher_imports).
+    # A stop/start in flight would race the destroy. A STOPPED cluster is fine:
+    # run_decommission starts an AKS one first (k8s_power.ensure_running_for_teardown).
+    from . import k8s_power
+    if row.status in k8s_power.TRANSITIONAL:
+        raise k8s_power.PowerRefused(f"cluster is {row.status} — wait for that to "
+                                     f"finish before deleting it")
     if row.status == "decommissioning":
         # Only short-circuit if a teardown is actually still in flight. A prior
         # decommission that was cancelled/failed (e.g. the worker was busy and the
@@ -1320,6 +1356,14 @@ async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None
 
     errors: list = []
     token_kept = ""
+
+    # 0. A stopped AKS cluster has no API server, and step 1 talks to it. GKE/EKS keep
+    #    theirs when stopped (only the nodes are gone), so this is a no-op for them.
+    from . import k8s_power
+    power_warning = await k8s_power.ensure_running_for_teardown(db, row, job_id)
+    if power_warning:
+        logger.warning("k8s decommission %s: %s", cluster_id, power_warning)
+        job_service.append_job_log(db, job_id, f"WARNING: {power_warning}")
 
     # 1. PRA tunnels + Entra wiring (best-effort; clears the k8s tunnel's pra_jump_id /
     #    state on the row and the config_service keys). disable_entra_federation matters
