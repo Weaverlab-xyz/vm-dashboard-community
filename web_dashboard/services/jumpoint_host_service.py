@@ -778,8 +778,11 @@ def _active_db_count(db, cloud: Optional[str] = None) -> int:
     # NULL-tolerantly is the safe direction — under-counting would reap the gateway from
     # under a live DB.
     from ..database import CloudDatabase
+    # A STOPPED database still has its PRA tunnel through the Gateway and comes back on
+    # start -- reaping the Gateway under it would leave a started database unreachable.
     q = (db.query(CloudDatabase)
-           .filter(CloudDatabase.status.in_(["available", "provisioning"])))
+           .filter(CloudDatabase.status.in_(["available", "provisioning",
+                                             "stopped", "stopping", "starting"])))
     if cloud:
         q = q.filter(CloudDatabase.cloud == cloud)
     return sum(1 for r in q.all() if (r.source or "provisioned") != "registered")

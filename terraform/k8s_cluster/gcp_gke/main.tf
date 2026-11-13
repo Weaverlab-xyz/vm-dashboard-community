@@ -357,6 +357,14 @@ resource "google_container_node_pool" "this" {
   cluster    = google_container_cluster.this.name
   node_count = var.node_count
 
+  # A dashboard STOP scales this pool to 0 with autoscaling off, and a START puts back
+  # the size it recorded (web_dashboard/services/k8s_power.py). Both are out-of-band
+  # changes by design: without this a later apply would "fix" a stopped cluster back to
+  # var.node_count and start billing for nodes nobody asked for. A destroy is unaffected.
+  lifecycle {
+    ignore_changes = [node_count, autoscaling]
+  }
+
   node_config {
     machine_type = var.machine_type
     disk_size_gb = var.disk_size_gb

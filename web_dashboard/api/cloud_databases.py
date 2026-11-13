@@ -9,6 +9,7 @@ Database infrastructure API — Phase 1 (gated by ``cloud_database_enabled``).
   DELETE /api/databases/{id}            — decommission, or deregister if registered
   POST   /api/databases/{id}/ps-register — onboard into Password Safe (or remove that)
   POST   /api/databases/{id}/adapter-pair — deploy the db_grant Entitle adapter beside it
+  POST   /api/databases/{id}/power      — stop / start the instance (clouddb_power)
   POST   /api/databases/dbops/deploy    — deploy the Password Safe DB-Ops service (per region)
   POST   /api/databases/dbops/invokers  — re-apply roles/run.invoker from config, in place
   GET    /api/databases/dbops/status    — per-region DB-Ops services + resolved audience
@@ -39,7 +40,7 @@ from ..config import settings
 from ..database import CloudDatabase, User, get_db
 from ..services import (aws_service, azure_service, cache_service,
                         cloud_database_service, cloud_db_adapter_service,
-                        cloud_function_service, clouddb_dbops_service,
+                        cloud_function_service, clouddb_dbops_service, clouddb_power,
                         config_service, inventory_service, job_service,
                         ps_api_service, ps_database_catalog, region_catalog,
                         workgroup_service)
@@ -940,6 +941,40 @@ def decommission_database(
         # rebuilds the destroy vars from the row + config).
         result = cloud_database_service.start_decommission(db, db_id, created_by=current_user.username)
         return result
+    except clouddb_power.PowerRefused as exc:     # mid stop/start
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except cloud_database_service.CloudDatabaseError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class PowerRequest(BaseModel):
+    action: str   # stop | start
+
+
+@router.post("/{db_id}/power", status_code=202)
+def power_database(
+    db_id: str,
+    payload: PowerRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("cloud_database", "write")),
+):
+    """Stop or start a provisioned database's instance -- enqueues a ``clouddb_power``
+    job (RDS stop/start, Cloud SQL activationPolicy, Azure Flexible Server stop/start).
+
+    ``{"noop": true}`` with no job when it is already where it was asked to be. 400 for
+    a database that can never be powered (registered, Atlas, Azure SQL Database, OCI
+    Autonomous), 409 for one that cannot be now (provisioning, decommissioning, a power
+    job already running). AWS and Azure start a stopped instance again by themselves
+    after 7 days -- see clouddb_power.needs_restop."""
+    _require_enabled()
+    _visible_or_404(db, db_id, current_user)
+    try:
+        return cloud_database_service.start_power(db, db_id, payload.action,
+                                                  current_user.username)
+    except clouddb_power.PowerUnsupported as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except clouddb_power.PowerRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except cloud_database_service.CloudDatabaseError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -1055,7 +1090,9 @@ def register_database_in_password_safe(
             raise HTTPException(
                 status_code=409,
                 detail=f"database is {row.status!r} — Password Safe onboarding needs a "
-                       f"database that has finished provisioning")
+                       + ("running database; start it first"
+                          if row.status in clouddb_power.POWER_STATUSES
+                          else "database that has finished provisioning"))
         if row.ps_managed_system_id:
             raise HTTPException(
                 status_code=409,
@@ -1118,8 +1155,10 @@ def pair_database_with_adapter(
     if row.status != "available":
         raise HTTPException(
             status_code=409,
-            detail=f"database is {row.status!r} — pairing an adapter needs a database "
-                   f"that has finished provisioning")
+            detail=f"database is {row.status!r} — pairing an adapter needs a "
+                   + ("running database; start it first"
+                      if row.status in clouddb_power.POWER_STATUSES
+                      else "database that has finished provisioning"))
     # Refuse rather than redeploy. cloud_function_service.deploy does not look the name
     # up and every deploy starts from an empty Terraform directory, so a second pairing
     # leaves a duplicate row wedged in 'deploying' and an "already exists" apply failure.

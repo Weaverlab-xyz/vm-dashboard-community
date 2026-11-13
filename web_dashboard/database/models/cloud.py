@@ -493,3 +493,9 @@ class CloudDatabase(Base):
     # than no timer at all.
     expires_at = Column(DateTime, nullable=True, index=True)
     expiry_warned_at = Column(DateTime, nullable=True)
+    # Stop/start bookkeeping (services/clouddb_power), JSON: the status to return to on
+    # start, when it was stopped (AWS RDS and Azure Flexible Server restart a stopped
+    # instance on their own after 7 days -- clouddb_power.needs_restop reads this), the
+    # last power job and its error. NULL means never powered, which reads as running.
+    # Migration 0015.
+    power_state = Column(Text, nullable=True)
