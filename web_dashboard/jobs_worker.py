@@ -57,11 +57,12 @@ HANDLED_TYPES = (
     "k8s_provision", "k8s_decommission",
     "k8s_management", "k8s_secret_delivery", "k8s_entitle_agent", "k8s_entitle_register",
     "k8s_tunnel", "k8s_api_tunnel", "k8s_group_binding", "k8s_impersonator_binding",
-    "k8s_entra_federation", "k8s_ps_token",
+    "k8s_entra_federation", "k8s_ps_token", "k8s_power",
     "rancher_node_deploy", "rancher_node_teardown", "rancher_entitle_register",
     "portainer_node_deploy", "portainer_node_teardown", "portainer_import",
     "portainer_adapter_pair",
     "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
+    "clouddb_power",
     "pov_env_provision", "pov_env_destroy", "pov_env_power", "pov_env_broker",
     "pov_env_wireup", "pov_env_jump_group_move", "pov_template_build",
     "pov_env_reconcile", "pov_env_add_vms", "pov_env_ready_check", "pov_env_seed",
@@ -158,6 +159,13 @@ MEDIUM_TYPES = (
     # terraform per Password Safe managed system (ps_resource_service) and — on the
     # register path — a re-broker of the DB's PRA tunnel. No streaming, no long process.
     "clouddb_ps_register",
+    # Stop/start of a cloud database or a cluster's nodes, by the cloud SDK directly
+    # (services/clouddb_power, services/k8s_power). No local process and no terraform,
+    # but each holds a k8s/clouddb pool thread for a GKE/EKS node-pool walk that waits
+    # out every operation in turn, and an AKS stop runs ten minutes or more. MEDIUM
+    # rather than LIGHT so a demo-cell suspend that fans out across a dozen cells does
+    # not take every light slot the image polls and sweeps rely on.
+    "clouddb_power", "k8s_power",
     # One short terraform for the Password Safe managed system (ps_resource_service),
     # plus a ps-cli round trip to create the Secrets Safe folder the plugin writes into.
     "cert_ps_register",
@@ -483,6 +491,9 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
         elif job_type == "k8s_decommission":
             await k8s_service.run_decommission(
                 db, cluster_id=meta["cluster_id"], job_id=job_id)
+        elif job_type == "k8s_power":
+            await k8s_service.run_power(
+                db, cluster_id=meta["cluster_id"], job_id=job_id, action=meta["action"])
         elif job_type == "k8s_management":
             await k8s_service.run_management_plane(
                 db, cluster_id=meta["cluster_id"], job_id=job_id,
@@ -600,6 +611,9 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             await cloud_database_service.run_ps_register(
                 db, db_id=meta["db_id"], job_id=job_id,
                 action=meta.get("action", "register"))
+        elif job_type == "clouddb_power":
+            await cloud_database_service.run_power(
+                db, db_id=meta["db_id"], job_id=job_id, action=meta["action"])
         elif job_type == "certca_provision":
             from .services import cert_lab_service
             await cert_lab_service.run_provision_apply(

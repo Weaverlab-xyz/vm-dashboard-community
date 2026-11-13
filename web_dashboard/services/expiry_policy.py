@@ -124,7 +124,9 @@ _REAPABLE_STATES = {
     # inventory_service._vm_item hardcodes "active" for every live deploy job.
     "vm":       frozenset({"active"}),
     # cloud_database_service marks a finished provision "available".
-    "database": frozenset({"available"}),
+    # "stopped" too: a suspended database still expires. Not stopping/starting -- a
+    # power job is in flight, and start_decommission refuses those.
+    "database": frozenset({"available", "stopped"}),
     # cert_lab_service marks a finished CA build "available". "failed" is deliberately
     # NOT here even though a half-built pool can still bill: a failed apply may have
     # left a CA mid-creation, and a destroy racing that is how a pool ends up
@@ -151,7 +153,8 @@ _REAPABLE_STATES = {
     "workloadcloud": frozenset({"registered", "issued"}),
     # k8s_service lands a finished provision on "registered", and the management-plane
     # path also produces "managed" / "awaiting_agent".
-    "k8s":      frozenset({"registered", "managed", "awaiting_agent"}),
+    # "stopped" for the database's reason above.
+    "k8s":      frozenset({"registered", "managed", "awaiting_agent", "stopped"}),
     # Exactly `pov_env_service._ACTIONABLE` — the set that module already uses to decide
     # whether a POV may be destroyed at all. Written out here rather than imported because
     # this module must stay loadable by file path with nothing but stdlib and the config

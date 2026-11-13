@@ -162,6 +162,31 @@ stays reachable through config. Shapes are ordered free-tier first, bare metal l
 (`BM.Standard.E5.192` is a 192-OCPU machine billed whole, and the picker is where a lab cluster
 gets sized).
 
+## Stopping and starting a cluster
+
+`POST /api/k8s/clusters/{id}/power` with `{"action": "stop"}` or `{"action": "start"}`
+(scope `k8s:write`) queues a `k8s_power` job for a **provisioned** cluster. It calls the
+cloud directly, not Terraform, and is what a demo cell's auto-suspend uses.
+
+| Cloud | Stop | Start | What still bills while stopped |
+|---|---|---|---|
+| AKS | managed stop (`managedClusters/stop`) | managed start | the disks Azure keeps |
+| GKE | autoscaling off, every node pool scaled to 0 | the recorded sizes, then autoscaling back on | the control plane's flat fee |
+| EKS | every nodegroup's min and desired set to 0 | the recorded min / desired / max | the control plane's flat fee |
+
+GKE and EKS have no managed stop, so a stop records every pool's size and autoscaling
+bounds on the row **before** it touches the first one, and the start puts back exactly
+those. A stop that fails halfway keeps the sizes it recorded, and a retry never records a
+0 over them. The GKE and EKS modules `ignore_changes` the node counts, so a later apply
+does not scale a stopped cluster back up. The control plane of a stopped GKE or EKS
+cluster keeps running, so `kubectl` still answers — there is just nowhere to run pods.
+
+The row goes from `registered`, `managed` or `awaiting_agent` → `stopping` → `stopped` →
+`starting` → back to the status it was stopped from. A failed job puts the row back.
+Deleting a stopped cluster works: an AKS cluster is started first, because the teardown
+revokes in-cluster ServiceAccounts through its API server. A cluster in `stopping` or
+`starting` cannot be deleted until that finishes. Registered and OKE clusters are refused.
+
 ### Sandbox prerequisites
 
 The sandbox scripts no longer create k8s subnets — clusters own their networks. The scripts

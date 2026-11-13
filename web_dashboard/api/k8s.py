@@ -13,6 +13,7 @@ registered cluster. See docs/cloud-services/kubernetes.md.
   DELETE /api/k8s/clusters/{id}            — deregister (registered) / decommission+destroy (provisioned)
   POST   /api/k8s/clusters/{id}/management — launch a management plane (Phase 2)
   PATCH  /api/k8s/clusters/{id}/workgroup  — retag into a workgroup, or clear it (admin)
+  POST   /api/k8s/clusters/{id}/power      — stop / start a provisioned cluster (k8s_power)
 
 Every route naming a {cluster_id} additionally passes through :func:`_visible_or_404`,
 which refuses — with a 404 — a cluster the caller's workgroup does not cover. The
@@ -38,8 +39,8 @@ from ..models.k8s import (
     PSTokenRegisterRequest,
     SecretDeliveryRequest,
 )
-from ..services import (k8s_service, job_service, cache_service, pra_api_service,
-                        inventory_service, workgroup_service)
+from ..services import (k8s_service, k8s_power, job_service, cache_service,
+                        pra_api_service, inventory_service, workgroup_service)
 from ..services.aws_service import AWSError
 from ..services.k8s_service import K8sCredentialRefused, K8sError
 from .auth import require_admin, require_permission
@@ -276,7 +277,11 @@ async def delete_cluster(
     if info.get("source") == "provisioned":
         # start_decommission flips the row to decommissioning + creates the pending
         # k8s_decommission job; the job runner claims it and drives the teardown.
-        result = k8s_service.start_decommission(db, cluster_id, created_by=current_user.username)
+        try:
+            result = k8s_service.start_decommission(db, cluster_id,
+                                                    created_by=current_user.username)
+        except k8s_power.PowerRefused as e:      # mid stop/start
+            raise HTTPException(status_code=409, detail=str(e)) from e
         return {"status": "decommissioning", **result}
 
     # Password Safe registration first, for the same reason as run_decommission: it
@@ -294,6 +299,38 @@ async def delete_cluster(
         return k8s_service.delete_cluster(db, cluster_id)
     except K8sError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+class PowerRequest(BaseModel):
+    action: str   # stop | start
+
+
+@router.post("/clusters/{cluster_id}/power", status_code=202)
+def power_cluster(
+    cluster_id: str,
+    payload: PowerRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("k8s", "write")),
+):
+    """Stop or start a **provisioned** cluster -- enqueues a ``k8s_power`` job.
+
+    GKE and EKS have no managed stop, so a stop scales every node pool / nodegroup to 0
+    (autoscaling off first) and records the sizes; the start puts those back. AKS uses
+    its managed stop/start. The control plane of a stopped GKE/EKS cluster keeps running.
+
+    ``{"noop": true}`` with no job when the cluster is already where it was asked to be.
+    400 for a cluster that can never be powered (registered, on-prem, OKE), 409 for one
+    that cannot be now (provisioning, decommissioning, a power job already running)."""
+    _visible_or_404(db, cluster_id, current_user)
+    try:
+        return k8s_service.start_power(db, cluster_id, payload.action,
+                                       current_user.username)
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except k8s_power.PowerUnsupported as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except k8s_power.PowerRefused as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
 
 @router.get("/clusters/{cluster_id}/console")

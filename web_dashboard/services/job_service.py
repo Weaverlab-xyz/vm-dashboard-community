@@ -1199,6 +1199,21 @@ def _flip_resource_row(db: Session, job: Job) -> None:
             row = db.query(CloudDatabase).filter(CloudDatabase.id == did).first() if did else None
             if row and row.status in ("provisioning", "decommissioning"):
                 row.status = "failed"
+        elif job.job_type in ("clouddb_power", "k8s_power"):
+            # A dead stop/start says nothing about the instance, so the row goes back
+            # to the status it had, not to `failed`; the next power job reads the
+            # instance's real state before it acts.
+            if job.job_type == "clouddb_power":
+                from ..database import CloudDatabase as _M
+                from . import clouddb_power as _p
+                rid = meta.get("db_id")
+            else:
+                from ..database import K8sCluster as _M
+                from . import k8s_power as _p
+                rid = meta.get("cluster_id")
+            row = db.query(_M).filter(_M.id == rid).first() if rid else None
+            if row is not None:
+                _p.revert_stale(row)
     except Exception:
         pass
 

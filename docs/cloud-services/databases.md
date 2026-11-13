@@ -345,6 +345,38 @@ See [Permissions](../admin/permissions.md) for how workgroups sit alongside perm
   **function** is reported as a warning, since it holds no credential and has its own
   **Delete** on the Cloud Functions page. A database that was never paired has nothing to
   retire and records neither.
+- **Stop / start:** `POST /api/databases/{id}/power` with `{"action": "stop"}` or
+  `{"action": "start"}` (scope `cloud_database:write`) queues a `clouddb_power` job. It
+  calls the cloud directly — no Terraform — and is what a demo cell's auto-suspend uses.
+  See [Stopping and starting a database](#stopping-and-starting-a-database) below.
+
+### Stopping and starting a database
+
+| Cloud | Stop | Start | Stops on its own? |
+|---|---|---|---|
+| AWS RDS | `stop_db_instance` | `start_db_instance` | **AWS starts it again after 7 days** |
+| GCP Cloud SQL | `activationPolicy = NEVER` | `activationPolicy = ALWAYS` | no — stays stopped |
+| Azure Flexible Server (PostgreSQL, MySQL) | `flexibleServers/stop` | `flexibleServers/start` | **Azure starts it again after 7 days** |
+
+Not supported, and refused with the reason: Azure SQL Database (it has no stop), OCI
+Autonomous Database, MongoDB Atlas, and any **registered** database.
+
+The row goes `available` → `stopping` → `stopped` → `starting` → `available`. The
+in-between status is written when the job is *queued*, so Password Safe onboarding,
+Entitle registration and the adapter pairing all refuse a database that is about to go
+down. A failed job puts the row back where it was; the error is on the job and in the
+row's `power_error`.
+
+- **The 7-day restart.** A stopped RDS or Flexible Server instance comes back on its own,
+  and bills again, a week later — neither cloud lets you stop it for longer. The row
+  still says `stopped`. `clouddb_power.needs_restop(row)` tells a reconcile loop when
+  that has probably happened, and `start_power(…, restop=True)` queues the stop again.
+- **Deleting a stopped database works.** On GCP and Azure the decommission starts the
+  instance first, because both clouds refuse to drop its databases and users while it is
+  stopped. AWS deletes a stopped RDS instance as it is. A database in `stopping` or
+  `starting` cannot be deleted until that finishes.
+- **A stopped database still expires,** and still keeps its Gateway alive: its PRA
+  tunnel comes back with it on start.
 
 ---
 

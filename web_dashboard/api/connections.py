@@ -187,7 +187,7 @@ def list_config_routes(db: Session = Depends(get_db),
     dbs_without_ranges = 0
     for row in (db.query(CloudDatabase)
                 .filter(CloudDatabase.cloud.in_(cmr.CLOUD_SCOPES),
-                        CloudDatabase.status == "available").all()):
+                        CloudDatabase.status.in_(("available", "stopped"))).all()):
         scope, _region, _ws, network, cidrs = cmr.scope_of_database(row)
         if not cidrs:
             dbs_without_ranges += (row.source or "provisioned") == "provisioned"

@@ -124,6 +124,12 @@ class K8sCluster(Base):
     # (k8s_service.agent_qualifies); one that stops qualifying sends the work back to the
     # worker. Migration 0009.
     executor_agent_id = Column(String(36), nullable=True)
+    # Stop/start bookkeeping (services/k8s_power), JSON. ``restore`` holds what a stop
+    # changed -- every GKE node pool's / EKS nodegroup's size and autoscaling bounds --
+    # so a start puts back exactly that rather than the Terraform defaults. AKS keeps
+    # its node pools across a managed stop, so its ``restore`` is empty. NULL means never
+    # powered, which reads as running. Migration 0015.
+    power_state = Column(Text, nullable=True)
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
     # Auto-delete timer — NULL = never (see Job.expires_at). Only ever stamped on a

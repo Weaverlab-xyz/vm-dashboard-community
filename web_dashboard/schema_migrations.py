@@ -395,6 +395,11 @@ MIGRATIONS: tuple = (
     # Bare BOOLEAN for the users.is_admin reason; NULL reads as False, every older cell.
     Migration("0014_agent_cell_owns_account",
               (add_column("agent_cells", "owns_agent_account", "BOOLEAN"),)),
+    # Stop/start for cloud databases and Kubernetes clusters (services/clouddb_power,
+    # services/k8s_power): what a stop changed and when, as JSON. NULL: never powered.
+    Migration("0015_db_k8s_power_state",
+              (add_column("cloud_databases", "power_state", "TEXT"),
+               add_column("k8s_clusters", "power_state", "TEXT"))),
 )
 
 
