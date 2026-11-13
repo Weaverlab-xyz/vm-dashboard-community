@@ -375,8 +375,10 @@ PERMISSION_SCOPE_LEVELS = {
     # The Demo hub (/demo) and the demo cells it gathers, on an estate instance.
     #   read    open the hub; see every demo cell (OT, network, agent) in the caller's
     #           workgroups, whichever cloud it is on
-    #   write   build, probe and re-wire an OT cell on any cloud, and build a network cell
-    #   delete  clear a failed OT cell's record
+    #   write   build, probe and re-wire an OT cell on any cloud, and build a network
+    #           cell -- including listing that cloud's images and networks for the form
+    #   delete  destroy a running OT or network cell (the cell's VM and DMZ broker only,
+    #           through /api/demo/cells), and clear a failed OT cell's record
     # ALWAYS an ALTERNATIVE to the scope a cell route already took (`gcp:write`, `ot:read`,
     # ...), never a replacement -- see api/demo_gates.py. So it narrows nothing, which is
     # why it has no backfill. Checked in the explicit form throughout.

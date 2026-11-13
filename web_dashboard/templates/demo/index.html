@@ -1,19 +1,29 @@
 {% extends "base.html" %}
 {% from "partials/tab_bar.html" import tab_bar %}
+{% from "demo/_ot_cell_gcp.html" import ot_deploy_form as gcp_ot_form, ot_cells_list as gcp_ot_cells with context %}
+{% from "demo/_ot_cell_aws.html" import ot_deploy_form as aws_ot_form, ot_cells_list as aws_ot_cells with context %}
+{% from "demo/_ot_cell_azure.html" import ot_deploy_form as azure_ot_form, ot_cells_list as azure_ot_cells with context %}
+{% from "demo/_net_cell.html" import net_deploy_form, net_cells_list with context %}
 {% block title %}Demo{% endblock %}
 
 {#
   The Demo hub: the estate instance's counterpart to /pov.
 
-  Two tabs. CELLS is what is deployed: every demo cell this caller may see, by kind, with
-  its state and a link to the page that manages it. LAUNCHPAD is where a demo runs from:
-  every page, grouped, each resolved ready / needs_flag / masked by the same reader the
-  Use cases page uses (services/demo_launchpad).
+  Three tabs. CELLS is what is deployed: every demo cell this caller may see, by kind,
+  with its state. BUILD is where an OT or network cell is deployed, probed, re-wired and
+  destroyed. LAUNCHPAD is where a demo runs from: every page, grouped, each resolved
+  ready / needs_flag / masked by the same reader the Use cases page uses
+  (services/demo_launchpad).
 
-  THIS PAGE READS. It builds nothing and destroys nothing -- every action stays on the
-  cell's own page and route, which accept `demo:<level>` beside the scope they always
-  took (api/demo_gates). A deploy button here would be a second, differently-gated way to
-  spend money.
+  BUILD IS NOT A SECOND FORM. Its panels are the cloud pages' own, from the partials in
+  this folder, driven by the same logic (static/js/demo_cells.js) against the same cell
+  routes. What differs is only where the pickers come from: /api/demo/cells/<cloud>/...,
+  so a Demo Presenter -- who holds no cloud scope -- can fill them. A panel exists only
+  where its cloud page's tab would (`build_panels`, from the /demo route), and each one is
+  built only while it is open (`x-if`), so opening the hub does not dial three clouds.
+
+  The agent cell has no Build panel: minting one issues a token as any non-admin user
+  (api/demo_gates), so it stays on the Workload Lab and its own permission.
 
   A MASKED link carries no href, for the reason the Use cases page gives: a link the
   client merely styles as inert is one middle-click from a 404.
@@ -22,9 +32,16 @@
 {% block content %}
 {% set tabs = [
   {'slug': 'cells',     'label': 'Cells'},
+  {'slug': 'build',     'label': 'Build', 'show': 'canBuild()'},
   {'slug': 'launchpad', 'label': 'Launchpad'},
 ] %}
-<div x-data='demoHub({{ tabs | map(attribute="slug") | list | tojson }})'
+{% set panels = [
+  {'key': 'ot-gcp',   'label': 'OT cell · GCP'},
+  {'key': 'ot-aws',   'label': 'OT cell · AWS'},
+  {'key': 'ot-azure', 'label': 'OT cell · Azure'},
+  {'key': 'net',      'label': 'Network cell'},
+] | selectattr('key', 'in', build_panels) | list %}
+<div x-data='demoHub({{ tabs | map(attribute="slug") | list | tojson }}, {{ panels | map(attribute="key") | list | tojson }})'
      class="space-y-6">
 
   <div class="flex flex-wrap items-start justify-between gap-4">
@@ -107,7 +124,8 @@
                   <td class="py-2 pr-4 text-gray-600" x-text="c.workgroup || '—'"></td>
                   <td class="py-2 pr-4 text-gray-600" x-text="c.created_by || '—'"></td>
                   <td class="py-2 text-right">
-                    <a :href="c.manage_href" class="text-blue-700 hover:underline">Manage</a>
+                    <a :href="c.manage_href" @click="manage($event, c)"
+                       class="text-blue-700 hover:underline">Manage</a>
                   </td>
                 </tr>
               </template>
@@ -116,6 +134,53 @@
         </div>
       </section>
     </template>
+  </div>
+
+  <!-- ── Build ───────────────────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'build'" x-cloak role="tabpanel" class="space-y-4">
+    {% if panels %}
+    <div class="flex flex-wrap gap-2" role="group" aria-label="Which cell to build">
+      {% for p in panels %}
+      <button type="button" @click="buildPanel = '{{ p.key }}'"
+              :class="buildPanel === '{{ p.key }}' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'"
+              class="px-3 py-1.5 text-sm border rounded-md">{{ p.label }}</button>
+      {% endfor %}
+    </div>
+
+    {% for cloud in ['gcp', 'aws', 'azure'] %}
+    {% if ('ot-' ~ cloud) in build_panels %}
+    <template x-if="activeTab === 'build' && buildPanel === 'ot-{{ cloud }}'">
+      <div x-data="demoOTPanel('{{ cloud }}')" class="space-y-3">
+        <p x-show="loadError" x-cloak class="text-sm text-red-700" x-text="loadError"></p>
+        <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+          {% if cloud == 'gcp' %}{{ gcp_ot_form() }}{% elif cloud == 'aws' %}{{ aws_ot_form() }}{% else %}{{ azure_ot_form() }}{% endif %}
+          <div class="space-y-6">
+            {% if cloud == 'gcp' %}{{ gcp_ot_cells() }}{% elif cloud == 'aws' %}{{ aws_ot_cells() }}{% else %}{{ azure_ot_cells() }}{% endif %}
+          </div>
+        </div>
+      </div>
+    </template>
+    {% endif %}
+    {% endfor %}
+
+    {% if 'net' in build_panels %}
+    <template x-if="activeTab === 'build' && buildPanel === 'net'">
+      <div x-data="demoNetPanel()" class="space-y-3">
+        <p x-show="loadError" x-cloak class="text-sm text-red-700" x-text="loadError"></p>
+        <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+          {{ net_deploy_form() }}
+          {{ net_cells_list() }}
+        </div>
+      </div>
+    </template>
+    {% endif %}
+    {% else %}
+    <p class="text-sm text-gray-500">
+      No cell can be built here yet: the OT cell needs Privileged Remote Access and a cloud's
+      credentials, and the network cell needs its preview turned on and GCP.
+      <a href="/settings" class="text-blue-700 hover:underline">Settings</a>
+    </p>
+    {% endif %}
   </div>
 
   <!-- ── Launchpad ───────────────────────────────────────────────────────── -->
@@ -152,10 +217,12 @@
 </div>
 
 <script>
-function demoHub(tabSlugs) {
+function demoHub(tabSlugs, buildPanels) {
   return {
     // The shared tab contract: select(), pickTab(), tabSlugs, activeTab (static/js/app.js).
     ...tabState(tabSlugs),
+    buildPanels,
+    buildPanel: buildPanels[0] || '',
     loading: false,
     loaded: false,
     error: '',
@@ -180,6 +247,25 @@ function demoHub(tabSlugs) {
       } finally {
         this.loading = false;
       }
+    },
+
+    // Build is for whoever can build a cell: `demo:write`, or any cloud's own write (the
+    // cell routes accept either). The routes decide regardless; this only hides a tab of
+    // buttons that would all 403.
+    canBuild() {
+      const a = Alpine.store('auth');
+      return !!a && this.buildPanels.length > 0 &&
+        ['demo', 'gcp', 'aws', 'azure'].some(s => a.can(s, 'write'));
+    },
+
+    // A cell with a Build panel is managed there; anything else (the agent cell, or a
+    // cloud with no panel) follows its link to the page that owns it.
+    manage(event, c) {
+      const key = c.kind === 'net' ? 'net' : (c.kind === 'ot' ? 'ot-' + c.cloud : '');
+      if (!key || !this.buildPanels.includes(key) || !this.canBuild()) return;
+      event.preventDefault();
+      this.buildPanel = key;
+      this.select('build');
     },
 
     statusClass(status) {

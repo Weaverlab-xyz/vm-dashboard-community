@@ -29,6 +29,9 @@
      and would not be for a script body. #}
   <meta name="display-timezone" content="{{ display_timezone }}">
   <script src="{{ static_url('js/app.js') }}"></script>
+  {# The demo cells' shared form logic: the cloud pages and the Demo hub spread it into
+     their components, so it must exist before Alpine (deferred above) builds them. #}
+  <script src="{{ static_url('js/demo_cells.js') }}"></script>
   <style>
     [x-cloak] { display: none !important; }
     .progress-bar-fill { transition: width 0.4s ease; }

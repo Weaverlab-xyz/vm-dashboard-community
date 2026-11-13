@@ -17,10 +17,11 @@ authority nobody held before, so it must only ever be what an administrator name
 
 What `demo` deliberately does NOT reach:
 
-* **The cloud's own routes.** ``POST /api/gcp/deploy`` and every other general cloud
-  route keep their gate. That includes the cloud's instance Destroy, which is how a
-  COMPLETED OT or network cell is torn down today -- so a Demo Presenter can clear a
-  failed cell but not destroy a running one until cells get a destroy route of their own.
+* **The cloud's own routes.** ``POST /api/gcp/deploy``, the cloud's instance Destroy and
+  every other general cloud route keep their gate. A cell is destroyed through
+  ``DELETE /api/demo/cells/<kind>/<id>`` instead, which checks the row IS a live cell and
+  then runs the cloud's destroy handler on that one VM; and the cell forms read their
+  pickers through ``/api/demo/cells/<cloud>/...`` (``require_cell_options`` below).
 * **The agent cell** (api/agentcell). Minting one issues an API token that acts as any
   non-admin user the caller picks, and every MCP tool applies that user's permissions.
   With `demo:write` on it, a presenter could mint a token as a Cloud Admin user and hold
@@ -69,6 +70,23 @@ def require_cell(scope: str, level: str):
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Requires '{scope}:{level}' or 'demo:{level}' permission.")
     return _tag(_check, scope, level, explicit=False)
+
+
+def require_cell_options(cloud: str):
+    """Dependency for a cell form's pickers: `<cloud>:read`, or `demo:write`.
+
+    `demo:write` and not `demo:read`, because the only reason to list a cloud's images,
+    subnets and security groups here is to BUILD a cell -- a hub reader who cannot build
+    one has no use for an inventory of the account it would land in. The cloud-scope half
+    is the scope the cloud's own picker route already takes, so nothing narrows.
+    """
+    async def _check(current_user: User = Depends(get_current_user)) -> User:
+        if has_permission(current_user, cloud, "read") or demo_allows(current_user, "write"):
+            return current_user
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Requires '{cloud}:read' or 'demo:write' permission.")
+    return _tag(_check, cloud, "read", explicit=False)
 
 
 async def _require_demo_read(current_user: User = Depends(get_current_user)) -> User:

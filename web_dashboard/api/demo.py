@@ -2,18 +2,34 @@
 
 The estate instance's counterpart to /pov. Mounted in main.py behind
 ``_profile_page_gate("demo_pages")``, so on a POV instance it 404s naming the profile, as
-the page does. Every route here is `demo:read`, explicit form (api/demo_gates).
+the page does. The summary is `demo:read`, explicit form (api/demo_gates); the cell routes
+below each name their own gate.
 
-Read-only, by design. Building and managing a cell stays on the cell's own routes
-(/api/ot, /api/netcell, /api/agentcell), which accept `demo:<level>` beside the scope they
-always took -- so the hub never becomes a second, differently-gated way to deploy.
+Building, probing and re-wiring a cell stay on the cell's own routes (/api/ot,
+/api/netcell), which accept `demo:<level>` beside the scope they always took. This router
+adds only the two things those routes never had, both cell-scoped and both DELEGATING to
+the cloud's own handler rather than re-implementing it:
+
+* **The pickers a cell form needs** (``/cells/<cloud>/...``): images and network options,
+  answered by the cloud module's own handler, so the response is byte-for-byte what the
+  cloud page reads. A shared form only swaps its URL prefix. ``<cloud>:read`` or
+  ``demo:write`` -- see ``demo_gates.require_cell_options``.
+* **Destroying a cell** (``DELETE /cells/ot/{id}``, ``/cells/net/{id}``): the row is
+  checked to BE a live, completed cell in the caller's workstreams, and then the cloud's
+  own destroy handler runs on it -- so the PRA, Password Safe and Gateway teardown is
+  exactly the one the cloud page's Destroy runs. ``<cloud>:delete`` or ``demo:delete``.
+  The general ``DELETE /api/<cloud>/instances/...`` routes are untouched: a presenter can
+  destroy a demo cell and nothing else.
 """
-from fastapi import APIRouter, Depends
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from ..database import User, get_db
+from ..database import Job, User, get_db
 from ..services import demo_cells, demo_launchpad
-from .demo_gates import may, require_demo_read
+from .auth import get_current_user
+from .demo_gates import may, require_cell_options, require_demo_read
 from .gcp import _accessible_workgroups
 
 router = APIRouter(prefix="/api/demo", tags=["demo"])
@@ -65,3 +81,132 @@ def summary(
             "cells": rows,
         })
     return {"cells": cells, "launchpad": demo_launchpad.describe()}
+
+
+# ── The pickers a cell form needs ───────────────────────────────────────────────
+#
+# Each one is the cloud module's own handler, called with every parameter passed
+# explicitly: a FastAPI `Query(...)` default left unpassed is a truthy object, not its
+# value, and `bust=Query(False)` would silently bust the cache on every call.
+
+@router.get("/cells/gcp/custom-images")
+async def gcp_cell_images(current_user: User = Depends(require_cell_options("gcp"))):
+    from . import gcp
+    return await gcp.list_custom_images(current_user=current_user)
+
+
+@router.get("/cells/gcp/network-options")
+async def gcp_cell_network(zone: Optional[str] = None,
+                           current_user: User = Depends(require_cell_options("gcp"))):
+    from . import gcp
+    return await gcp.network_options(zone=zone, bust=False, current_user=current_user)
+
+
+@router.get("/cells/aws/amis")
+async def aws_cell_images(region: Optional[str] = None,
+                          current_user: User = Depends(require_cell_options("aws"))):
+    from . import aws
+    return await aws.list_amis(region=region, current_user=current_user)
+
+
+@router.get("/cells/aws/network-options")
+async def aws_cell_network(region: Optional[str] = None,
+                           current_user: User = Depends(require_cell_options("aws"))):
+    from . import aws
+    return await aws.network_options(region=region, current_user=current_user)
+
+
+@router.get("/cells/azure/images")
+async def azure_cell_images(location: Optional[str] = None,
+                            current_user: User = Depends(require_cell_options("azure"))):
+    from . import azure
+    return await azure.list_images(location=location, current_user=current_user)
+
+
+@router.get("/cells/azure/network-options")
+async def azure_cell_network(location: Optional[str] = None,
+                             current_user: User = Depends(require_cell_options("azure"))):
+    from . import azure
+    return await azure.network_options(location=location, bust=False,
+                                       current_user=current_user)
+
+
+# ── Destroying a cell ───────────────────────────────────────────────────────────
+
+_NOT_A_CELL = "{} is not a live {} cell"
+
+
+def _live_cell(db: Session, user: User, job_id: str, marker: str, kind: str) -> Job:
+    """The completed, not-destroyed cell row ``job_id``, in this caller's workstreams.
+
+    Anything else is a 404, including a row in another workstream -- the same answer
+    GET /api/ot/cells gives by not listing it. ``completed`` only: a failed cell has no
+    VM to destroy and is retired with Clear (DELETE /api/ot/cell/{id}) instead.
+    """
+    row = db.query(Job).filter(Job.id == job_id).first()
+    meta = row.metadata_dict if row else {}
+    if (row is None or not meta.get(marker) or meta.get("destroyed")
+            or row.status != "completed"):
+        raise HTTPException(status_code=404, detail=_NOT_A_CELL.format(job_id, kind))
+    accessible = _accessible_workgroups(user)
+    if accessible is not None and (row.workgroup or "").lower() not in accessible:
+        raise HTTPException(status_code=404, detail=_NOT_A_CELL.format(job_id, kind))
+    return row
+
+
+def _require_destroy(user: User, cloud: str) -> None:
+    if not may(user, cloud, "delete"):
+        raise HTTPException(status_code=403,
+                            detail=f"Requires '{cloud}:delete' or 'demo:delete' permission.")
+
+
+async def _destroy_vm(db: Session, user: User, cloud: str, meta: dict) -> dict:
+    """Run the cloud's own destroy handler on one VM, identified the way it wants."""
+    blank = {"run_at": "", "run_timezone": "", "change_window_id": ""}
+    if cloud == "gcp":
+        from . import gcp
+        return gcp.destroy_instance(instance_name=meta.get("instance_name") or "",
+                                    zone=meta.get("zone") or "", current_user=user,
+                                    db=db, **blank)
+    if cloud == "aws":
+        from . import aws
+        return aws.destroy_instance(instance_id=str(meta.get("instance_id") or ""),
+                                    db=db, current_user=user, **blank)
+    from . import azure
+    return await azure.destroy_vm(vm_name=meta.get("instance_name") or meta.get("vm_name") or "",
+                                  db=db, current_user=user, **blank)
+
+
+@router.delete("/cells/ot/{vm_job_id}")
+async def destroy_ot_cell(vm_job_id: str, db: Session = Depends(get_db),
+                          current_user: User = Depends(get_current_user)):
+    """Destroy a running OT cell, and its DMZ broker when it has one.
+
+    The cell first, the broker second, as the cloud pages do: the cell's teardown is
+    the one that destroys the plant's Entitle agent token, and a broker deleted first
+    would leave that agent pointing at nothing while it ran.
+    """
+    from ..services import ot_service
+    row = _live_cell(db, current_user, vm_job_id, "ot_cell", "OT")
+    cloud = ot_service.cell_cloud_for_job_type(row.job_type)
+    if not cloud:
+        raise HTTPException(status_code=404, detail=_NOT_A_CELL.format(vm_job_id, "OT"))
+    _require_destroy(current_user, cloud)
+    meta = row.metadata_dict
+    out = {"cell": await _destroy_vm(db, current_user, cloud, meta)}
+    broker_id = meta.get("ot_broker_job_id") or ""
+    if broker_id:
+        broker = db.query(Job).filter(Job.id == broker_id).first()
+        bmeta = (broker.metadata_dict if broker else None) or {}
+        if broker is not None and broker.status == "completed" and not bmeta.get("destroyed"):
+            out["broker"] = await _destroy_vm(db, current_user, cloud, bmeta)
+    return out
+
+
+@router.delete("/cells/net/{job_id}")
+async def destroy_net_cell(job_id: str, db: Session = Depends(get_db),
+                           current_user: User = Depends(get_current_user)):
+    """Destroy a network cell. GCP only; the deploy row IS the cell."""
+    row = _live_cell(db, current_user, job_id, "netcell", "network")
+    _require_destroy(current_user, "gcp")
+    return {"cell": await _destroy_vm(db, current_user, "gcp", row.metadata_dict)}

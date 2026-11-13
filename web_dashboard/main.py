@@ -2091,8 +2091,22 @@ async def demo_page(request: Request):
     deliberately ungated and curated by persona; this is the operational view -- what is
     deployed, in what state, and where to manage it -- behind `demo:read` on its API. The
     page links there for the scripts.
+
+    ``build_panels`` is which cell forms the Build tab offers: the cell's flag AND its
+    cloud's credentials, the same two conditions the cloud page's tab renders on. Resolved
+    here because cloud credentials are not in the shared template context.
     """
-    return templates.TemplateResponse(request, "demo/index.html", {"request": request})
+    pra = feature_flags.enabled("pra_enabled")
+    ready = {c: feature_flags.cloud_configured(c) for c in ("gcp", "aws", "azure")}
+    offered = {
+        "ot-gcp": pra and ready["gcp"],
+        "ot-aws": pra and ready["aws"],
+        "ot-azure": pra and ready["azure"],
+        "net": feature_flags.enabled("netcell_enabled") and ready["gcp"],
+    }
+    build_panels = [key for key, ok in offered.items() if ok]
+    return templates.TemplateResponse(request, "demo/index.html", {
+        "request": request, "build_panels": build_panels})
 
 
 @app.get("/pov", response_class=HTMLResponse, include_in_schema=False,
