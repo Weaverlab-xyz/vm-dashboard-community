@@ -34,7 +34,10 @@ class AgentCellCreateRequest(BaseModel):
     worker_uid: int = Field(default=0, ge=0, le=2**31 - 1)
     # The user the agent's token is minted against. This is the agent's blast radius:
     # every MCP tool applies this user's RBAC, so the cell refuses an administrator.
-    pat_user_id: str = Field(min_length=1)
+    # Required for a `config_mgmt:write` caller, who chooses the token user. Must be EMPTY
+    # for a caller who gets in through `demo`: the cell creates the user itself
+    # (api/agentcell.create_agent, presenter path).
+    pat_user_id: str = ""
     # Always bounded. The model allows a non-expiring PAT; this cell does not, because a
     # non-human principal whose authorization never ends is what the demo argues against.
     pat_hours: int = Field(default=DEFAULT_PAT_HOURS, ge=1, le=MAX_PAT_HOURS)

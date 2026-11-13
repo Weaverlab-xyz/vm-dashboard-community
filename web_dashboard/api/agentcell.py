@@ -31,7 +31,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from ..database import AgentCell, PersonalAccessToken, SpireLab, User, get_db
+from ..database import AgentCell, Job, PersonalAccessToken, SpireLab, User, get_db
 from ..models.agentcell import (
     AgentCellCreateRequest,
     AgentCellCreateResponse,
@@ -43,7 +43,8 @@ from ..models.agentcell import (
     AgentCellEpisodeResponse,
 )
 from ..services import agentcell_service
-from .auth import get_current_user, require_permission
+from .auth import get_current_user, has_permission, require_permission
+from .demo_gates import require_cell, via_demo
 from .tokens import _generate_raw, hash_pat
 from ..utils.clock import utcnow
 
@@ -55,19 +56,111 @@ def _iso(value) -> str:
     return value.isoformat() if value else ""
 
 
+DEMO_AGENT_ROLE = "demo-agent"
+
+
+def _cell_service_account(db: Session, caller: User, payload, host: dict, cell_id: str):
+    """The token user a Demo Presenter's agent runs as: a service account made for this cell.
+
+    Four refusals, each closing a way the agent could reach past the presenter:
+
+    * **The workstream** must be one of the caller's, and is the account's only one.
+    * **The host** must be a VM in the caller's workstreams. ``resolve_host`` already
+      refuses an address the dashboard did not deploy; this adds "and that you can see",
+      or a presenter could put an agent on anyone's VM.
+    * **The role** is the built-in Demo Agent, never a choice.
+    * **The subset guarantee**: the caller must hold every grant the role carries. A
+      presenter mints an agent no stronger than themselves, whatever an administrator
+      later does to either role.
+    """
+    from ..services import role_service, service_accounts, spire_lab_service
+    from .gcp import _accessible_workgroups, _validate_workgroup
+
+    if not (payload.workgroup or "").strip():
+        raise HTTPException(status_code=400, detail=(
+            "Pick a workstream: the agent's service account is created in it, and only it."))
+    workgroup = _validate_workgroup(db, caller, payload.workgroup)
+
+    accessible = _accessible_workgroups(caller)
+    job = db.query(Job).filter(Job.id == host.get("deploy_job_id")).first()
+    if accessible is not None and (not job or (job.workgroup or "").lower() not in accessible):
+        raise HTTPException(status_code=400, detail=(
+            f"{payload.host_ref!r} is not a VM in your workstreams. Deploy one there first, "
+            "or ask whoever owns that VM."))
+
+    role = role_service.get_by_slug(db, DEMO_AGENT_ROLE)
+    if role is None:
+        role_service.seed_builtins(db)
+        role = role_service.get_by_slug(db, DEMO_AGENT_ROLE)
+    if role is None:
+        raise HTTPException(status_code=500, detail="The Demo Agent role is missing.")
+    missing = sorted(f"{scope}:{level}"
+                     for scope, levels in (role.permissions_dict or {}).items()
+                     for level in levels if not has_permission(caller, scope, level))
+    if missing:
+        raise HTTPException(status_code=403, detail=(
+            "The agent would hold " + ", ".join(missing) + ", which you do not. An agent "
+            "you mint can reach no further than you can -- ask an administrator to add "
+            "those to your role, or to mint this one."))
+
+    username = f"agent-{spire_lab_service._slug(payload.name)[:32]}-{cell_id[:8]}"
+    try:
+        account = service_accounts.create_service_account(
+            db, username=username, full_name=f"Agent cell {payload.name}",
+            workgroups=[workgroup])
+    except service_accounts.ServiceAccountError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    role_service.apply_role_to_user(db, account, role)
+    payload.workgroup = workgroup          # the row's workstream is the account's
+    return account
+
+
+def _row_for(db: Session, user: User, agent_id: str) -> AgentCell:
+    """The cell ``agent_id``, or 404.
+
+    A caller who gets in through `demo` must also be able to SEE it -- workgroup or
+    creator, ``agentcell_service.visible_to``, the list's own rule -- or a presenter could
+    revoke anyone's agent by id. A `config_mgmt:write` holder keeps the unscoped lookup
+    these routes have always had.
+    """
+    row = db.query(AgentCell).filter(AgentCell.id == agent_id).first()
+    if row is not None and via_demo(user, "config_mgmt", "write", "delete"):
+        from .gcp import _accessible_workgroups
+        if not agentcell_service.visible_to(row, _accessible_workgroups(user), user.username):
+            row = None
+    if row is None:
+        raise HTTPException(status_code=404, detail="No such agent cell.")
+    return row
+
+
 @router.post("/agent", response_model=AgentCellCreateResponse)
 def create_agent(
     payload: AgentCellCreateRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("config_mgmt", "write")),
+    current_user: User = Depends(require_cell("config_mgmt", "write")),
 ):
     """Mint an agent's authorization and record what was issued.
 
     Permission is ``config_mgmt:write`` rather than a scope of this cell's own: what this
     ultimately does is run two playbooks against a host, which is the config-management
     capability wearing a different form.
+
+    **Or `demo:write`, and then the caller chooses no token user** (``_cell_service_account``).
+    The credential returned here acts as the token user, so a free choice would let anyone
+    who can mint hold any non-admin user's reach. A `config_mgmt:write` holder could
+    already do that and still can; a Demo Presenter gets a service account this cell
+    creates, with the Demo Agent role, in the cell's workstream, on a host and a SPIRE lab
+    the presenter can see -- and only while holding every grant that role carries.
     """
     from ..services import feature_flags, spire_lab_service
+
+    presenter = via_demo(current_user, "config_mgmt", "write")
+    if presenter and (payload.pat_user_id or "").strip():
+        raise HTTPException(status_code=400, detail=(
+            "Leave the token user empty: the cell creates its own service account, with the "
+            "Demo Agent role, so the agent never reaches further than you do."))
+    if not presenter and not (payload.pat_user_id or "").strip():
+        raise HTTPException(status_code=400, detail="Pick the user to mint the token against.")
 
     for problem in (agentcell_service.host_problem(payload.host_ref),
                     agentcell_service.mcp_problem(
@@ -91,7 +184,10 @@ def create_agent(
     else:
         lab = (db.query(SpireLab).filter(SpireLab.id == payload.spire_lab_id).first()
                if payload.spire_lab_id else None)
-        if not lab:
+        # A presenter attests to a lab they can see on the SPIRE tab, or not at all -- the
+        # same filter /options applies to the list it offers.
+        from .spire_lab import _visible as _lab_visible
+        if not lab or (presenter and not _lab_visible(lab, current_user)):
             raise HTTPException(status_code=404, detail="No such SPIRE lab.")
         trust_domain = lab.trust_domain
         spiffe_id = agentcell_service.spiffe_id_for(lab.trust_domain)
@@ -111,9 +207,15 @@ def create_agent(
                     "records — it does not create one, and it will not run playbooks "
                     "against an address it was simply handed."))
 
-    agent_user = db.query(User).filter(User.id == payload.pat_user_id).first()
-    if not agent_user:
-        raise HTTPException(status_code=404, detail="No such user to mint the token against.")
+    if presenter:
+        # Created in this session and committed with the row; any refusal below raises
+        # before the commit, so a failed mint leaves no account behind.
+        agent_user = _cell_service_account(db, current_user, payload, host, cell_id)
+    else:
+        agent_user = db.query(User).filter(User.id == payload.pat_user_id).first()
+        if not agent_user:
+            raise HTTPException(status_code=404,
+                                detail="No such user to mint the token against.")
     problem = agentcell_service.pat_user_problem(
         bool(getattr(agent_user, "is_effective_admin", False)), agent_user.username)
     if problem:
@@ -187,6 +289,7 @@ def create_agent(
         pat_user_id=agent_user.id,
         pat_expires_at=expires_at,
         oauth_client_id=oauth_client.id if oauth_client else None,
+        owns_agent_account=True if presenter else None,
     )
     db.add(row)
     db.commit()
@@ -328,7 +431,7 @@ def _lease_state(db: Session, row) -> str:
 @router.get("/options")
 def build_options(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("config_mgmt", "write")),
+    current_user: User = Depends(require_cell("config_mgmt", "write")),
 ):
     """What the Agent tab's forms need, and an honest list of what is not ready yet.
 
@@ -421,8 +524,12 @@ def build_options(
     # Candidate token users. Non-admin and active only; see the docstring. Service
     # accounts first: they are what an agent should run as (an OAuth client and
     # short-lived tokens rather than a PAT on a person-shaped row).
+    #
+    # NONE for a caller who gets in through `demo`: they choose no token user (the cell
+    # makes one -- create_agent), so the roster would be a disclosure with no use.
+    presenter = via_demo(current_user, "config_mgmt", "write")
     users = []
-    for row in db.query(User).order_by(User.username.asc()).all():
+    for row in ([] if presenter else db.query(User).order_by(User.username.asc()).all()):
         if not bool(getattr(row, "is_active", True)):
             continue
         if bool(getattr(row, "is_effective_admin", False)):
@@ -433,7 +540,7 @@ def build_options(
                       "full_name": getattr(row, "full_name", "") or "",
                       "is_service_account": bool(getattr(row, "is_service_account", False))})
     users.sort(key=lambda u: (not u["is_service_account"], u["username"]))
-    if not users:
+    if not users and not presenter:
         missing.append(
             "every active user on this instance is an administrator, and the cell "
             "refuses to mint against one — the token user IS the agent's blast radius. "
@@ -536,6 +643,12 @@ def build_options(
         # None when the dashboard's own SPIRE server is not running; see `missing`.
         "dashboard_spire": dashboard_option,
         "users": users,
+        # How the token user is chosen: "pick" from `users`, or "cell_service_account" --
+        # a Demo Presenter's mint, which creates one with the Demo Agent role.
+        "mint_as": "cell_service_account" if presenter else "pick",
+        # Linking to a Workload Lab credential and opening a cluster-access episode stay on
+        # `config_mgmt:write`; the tab hides those controls when this is False.
+        "can_link": not presenter,
         # Through the same service /api/groups/workgroups reads, so the picker here and
         # the one on every other page cannot offer different names — but NARROWED to the
         # caller's own for a non-admin, which the global endpoint is not. Tagging a row
@@ -828,7 +941,7 @@ def unlink_agent(
 def revoke_agent(
     agent_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("config_mgmt", "write")),
+    current_user: User = Depends(require_cell("config_mgmt", "write", demo_level="delete")),
 ):
     """Revoke the agent's authorization and mark the row.
 
@@ -838,9 +951,7 @@ def revoke_agent(
     watching. The host is an ordinary VM, so destroying it reaps the worker whenever the
     operator chooses.
     """
-    row = db.query(AgentCell).filter(AgentCell.id == agent_id).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="No such agent cell.")
+    row = _row_for(db, current_user, agent_id)
 
     revoked = False
     if row.oauth_client_id:
@@ -857,6 +968,12 @@ def revoke_agent(
         if pat and pat.is_active:
             pat.is_active = False
             revoked = True
+    if row.owns_agent_account and row.pat_user_id:
+        # The cell made this account (a Demo Presenter's mint) and nothing else owns it.
+        # Disabled rather than deleted, so its jobs and audit rows keep a name.
+        owned = db.query(User).filter(User.id == row.pat_user_id).first()
+        if owned is not None and bool(getattr(owned, "is_service_account", False)):
+            owned.is_active = False
     row.pat_revoked_at = utcnow()
     row.status = "revoked"
     db.commit()
@@ -876,7 +993,7 @@ def revoke_agent(
 def remove_spire_identity(
     agent_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("config_mgmt", "write")),
+    current_user: User = Depends(require_cell("config_mgmt", "write", demo_level="delete")),
 ):
     """Delete a revoked cell's entry on the dashboard's SPIRE server and evict its node.
 
@@ -888,9 +1005,7 @@ def remove_spire_identity(
     and removing a live cell's identity would turn "revoked" into "unattested" by accident.
     """
     from ..services import dashboard_spire
-    row = db.query(AgentCell).filter(AgentCell.id == agent_id).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="No such agent cell.")
+    row = _row_for(db, current_user, agent_id)
     if row.spire_lab_id:
         raise HTTPException(status_code=409, detail=(
             "This cell is attested by a SPIRE lab, which owns its entries. Destroy the lab, "

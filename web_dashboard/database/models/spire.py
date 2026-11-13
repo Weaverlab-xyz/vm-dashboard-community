@@ -306,6 +306,11 @@ class AgentCell(Base):
     # a PAT. Its id only -- the secret was returned once and is not here. Revoking the cell
     # deactivates that client, which ends every access token it issued on the next call.
     oauth_client_id = Column(String(36), nullable=True)
+    # True when the cell CREATED its token user -- the per-cell service account a Demo
+    # Presenter's mint makes (api/agentcell.create_agent). Revoking the cell then disables
+    # that account too, since nothing else owns it. Bare BOOLEAN, no default, for the
+    # PostgreSQL reason on users.is_admin; NULL reads as False, every existing row.
+    owns_agent_account = Column(Boolean, nullable=True)
 
     # ── What this agent is answerable for in the Workload Lab ───────────────
     # Which lab identity an operator has made this agent answerable for, so that "what

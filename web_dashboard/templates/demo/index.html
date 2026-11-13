@@ -22,8 +22,10 @@
   where its cloud page's tab would (`build_panels`, from the /demo route), and each one is
   built only while it is open (`x-if`), so opening the hub does not dial three clouds.
 
-  The agent cell has no Build panel: minting one issues a token as any non-admin user
-  (api/demo_gates), so it stays on the Workload Lab and its own permission.
+  The agent cell's panel is the Workload Lab's own Agent tab (workload_lab/_agent.html,
+  split by `agent_part` so its script runs outside the x-if). A Demo Presenter mints an
+  agent that runs as a service account the cell creates, never a user they pick, and
+  cannot link it to a Workload Lab credential (api/agentcell, api/demo_gates).
 
   A MASKED link carries no href, for the reason the Use cases page gives: a link the
   client merely styles as inert is one middle-click from a 404.
@@ -40,8 +42,11 @@
   {'key': 'ot-aws',   'label': 'OT cell · AWS'},
   {'key': 'ot-azure', 'label': 'OT cell · Azure'},
   {'key': 'net',      'label': 'Network cell'},
+  {'key': 'agent',    'label': 'Agent cell'},
 ] | selectattr('key', 'in', build_panels) | list %}
 <div x-data='demoHub({{ tabs | map(attribute="slug") | list | tojson }}, {{ panels | map(attribute="key") | list | tojson }})'
+     data-tab-forward="/workload-lab"
+     @select-tab.window="forwardTab($event.detail)"
      class="space-y-6">
 
   <div class="flex flex-wrap items-start justify-between gap-4">
@@ -174,6 +179,16 @@
       </div>
     </template>
     {% endif %}
+    {% if 'agent' in build_panels %}
+    <!-- The Workload Lab's own Agent tab: same component, same routes. For a Demo
+         Presenter /api/agentcell/options answers mint_as "cell_service_account", so the
+         agent runs as a service account the cell creates, and linking is hidden. -->
+    <template x-if="activeTab === 'build' && buildPanel === 'agent'">
+      <div>
+        {% with agent_part = 'markup' %}{% include "workload_lab/_agent.html" %}{% endwith %}
+      </div>
+    </template>
+    {% endif %}
     {% else %}
     <p class="text-sm text-gray-500">
       No cell can be built here yet: the OT cell needs Privileged Remote Access and a cloud's
@@ -216,6 +231,10 @@
   </div>
 </div>
 
+{% if 'agent' in build_panels %}
+{# The agent tab's component function, once, outside the x-if that holds its markup. #}
+{% with agent_part = 'script' %}{% include "workload_lab/_agent.html" %}{% endwith %}
+{% endif %}
 <script>
 function demoHub(tabSlugs, buildPanels) {
   return {
@@ -255,13 +274,25 @@ function demoHub(tabSlugs, buildPanels) {
     canBuild() {
       const a = Alpine.store('auth');
       return !!a && this.buildPanels.length > 0 &&
-        ['demo', 'gcp', 'aws', 'azure'].some(s => a.can(s, 'write'));
+        ['demo', 'gcp', 'aws', 'azure', 'config_mgmt'].some(s => a.can(s, 'write'));
     },
 
     // A cell with a Build panel is managed there; anything else (the agent cell, or a
     // cloud with no panel) follows its link to the page that owns it.
+    // The Agent panel is the Workload Lab's own tab, and its prose links to that page's
+    // sibling tabs (SPIRE, Cloud, ...) with $dispatch('select-tab', slug). Those tabs are
+    // not the hub's, so a slug this page does not own opens it where it lives -- otherwise
+    // select() would refuse it and the link would do nothing. `data-tab-forward` on the
+    // root names that page for tests/test_tab_contract.py.
+    forwardTab(slug) {
+      if (this.tabSlugs.includes(slug)) { this.select(slug); return; }
+      window.location.href = '/workload-lab#' + encodeURIComponent(slug);
+    },
+
     manage(event, c) {
-      const key = c.kind === 'net' ? 'net' : (c.kind === 'ot' ? 'ot-' + c.cloud : '');
+      const key = c.kind === 'net' ? 'net'
+        : c.kind === 'agent' ? 'agent'
+        : c.kind === 'ot' ? 'ot-' + c.cloud : '';
       if (!key || !this.buildPanels.includes(key) || !this.canBuild()) return;
       event.preventDefault();
       this.buildPanel = key;

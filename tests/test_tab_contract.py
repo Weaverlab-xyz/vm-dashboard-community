@@ -24,6 +24,9 @@ _SLUG = re.compile(r"'slug':\s*'([\w-]+)'")
 _SELECT = re.compile(r"\bselect\('([\w-]+)'")
 _DISPATCH = re.compile(r"\$dispatch\('select-tab',\s*'([\w-]+)'\)")
 _INCLUDE = re.compile(r'{%\s*include\s+"([^"]+)"')
+# A page that forwards slugs it does not own to another page (see the named-tab test).
+_FORWARD = re.compile(r'data-tab-forward="(/[\w-]+)"')
+_FORWARD_PAGES = {"/workload-lab": "workload_lab/index.html"}
 
 
 def _read(rel: str) -> str:
@@ -96,7 +99,19 @@ def test_every_named_tab_exists_on_its_page():
                           if os.path.exists(os.path.join(_TEMPLATES, inc))]
         for p in panels:
             named |= set(_DISPATCH.findall(p))
-        for slug in sorted(named - slugs):
+        # A page that embeds another page's panel may forward that panel's cross-tab
+        # links to where those tabs live (the Demo hub embeds the Workload Lab's Agent tab).
+        # It declares the target with data-tab-forward="/<page>"; a slug it does not own
+        # must then exist on THAT page, so a forwarded link is still checked, not excused.
+        fwd = _FORWARD.search(src)
+        target = set()
+        if fwd:
+            page = _FORWARD_PAGES.get(fwd.group(1))
+            target = set(_SLUG.findall(_read(page))) if page else set()
+            if not target:
+                failures.append(f"{rel}: forwards tabs to {fwd.group(1)}, whose tab list "
+                                "this test cannot find -- add it to _FORWARD_PAGES")
+        for slug in sorted(named - slugs - target):
             failures.append(f"{rel}: names tab '{slug}', which its tab list does not have")
     assert not failures, "\n  ".join([""] + failures)
 

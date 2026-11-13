@@ -155,20 +155,37 @@ _BUILTIN_ROLES = (
         "slug": "demo-presenter",
         "name": "Demo Presenter",
         "description": "Run demos on an estate instance: open the Demo hub, and build, "
-                       "probe, re-wire and destroy the OT and network demo cells in your "
-                       "workstreams on any cloud -- without general cloud deploy rights.",
+                       "probe, re-wire and destroy the OT and network demo cells, and mint "
+                       "and revoke agent cells, in your workstreams on any cloud -- without "
+                       "general cloud deploy rights.",
         # `demo` at every level and nothing that deploys anything else: it is the
         # ALTERNATIVE a cell route accepts beside `<cloud>:write` (api/demo_gates.py),
         # so this role builds cells and cannot reach POST /api/gcp/deploy. Same read-only
         # support set as the POV Presenter, for the same reason: the cells land as jobs
         # and inventory rows, and the wiring reads connections.
         #
-        # NOT the agent cell. Minting one issues a token that acts as any non-admin user
-        # the caller picks, so it stays on `config_mgmt:write` -- see api/demo_gates.py.
+        # Agent cells too, but bounded: the agent runs as a service account the cell
+        # creates with the Demo Agent role, never a user the presenter picks; linking it
+        # to a Workload Lab credential stays on `config_mgmt:write` (api/demo_gates.py).
         "permissions": {
             "demo": _RWD,
             "vms": _R, "jobs": _R, "inventory": _R, "connections": _R,
         },
+    },
+    {
+        "slug": "demo-agent",
+        "name": "Demo Agent",
+        "description": "The token user of an agent demo cell a Demo Presenter mints: a "
+                       "service account per cell, created with the cell. Reads VMs and "
+                       "inventory, and only its own jobs.",
+        # What the worker reads through /mcp and nothing more: `dashboard_summary` (its
+        # default tool) and the inventory tools. No `jobs:read`, so it sees only the jobs
+        # it created (auth.can_audit_jobs) -- an agent that could read everyone's job
+        # history would be a broader principal than the demo argues for.
+        #
+        # A presenter may mint one only while holding every grant here
+        # (api/agentcell.create_agent), so the agent never reaches past the presenter.
+        "permissions": {"vms": _R, "inventory": _R},
     },
     {
         "slug": "pov-manager",

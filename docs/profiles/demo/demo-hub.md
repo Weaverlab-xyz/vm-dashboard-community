@@ -8,13 +8,14 @@ instance. It has three tabs:
 - **Cells** lists every demo cell you can see: [OT](ot-demo-cell.md),
   [Network](net-demo-cell.md) and [Agent](agent-demo-cell.md). Each shows its state, its
   wiring (or, for an agent, whether its token is still live), its workstream, and a
-  **Manage** link: OT and network cells open on **Build**, agent cells on the Workload
-  Lab. A cell type whose preview is off reads *Not available here* rather than zero.
+  **Manage** link that opens the cell's panel on **Build**. A cell type whose preview is
+  off reads *Not available here* rather than zero.
 - **Build** deploys, probes, re-wires and destroys OT cells (GCP, AWS, Azure) and network
-  cells. Each panel is the **same form** the cloud page's tab shows, so a cell built here
-  is identical to one built there. A panel appears only where that cloud page's tab would:
-  the cell's feature on, and the cloud's credentials present. The tab shows to anyone who
-  can build a cell.
+  cells, and mints and revokes agent cells. Each panel is the **same form** the cloud
+  page's tab or the Workload Lab's Agent tab shows, so a cell built here is identical to
+  one built there. A panel appears only where that page's tab would: the cell's feature on,
+  and for OT and network cells the cloud's credentials present. The tab shows to anyone
+  who can build a cell.
 - **Launchpad** links to every page a demo runs from: the cloud consoles, the Workload Lab,
   Kubernetes, databases, the hypervisors and more. Each entry is *ready*, *needs* a feature
   turned on (with a link to Settings), or *not available on this instance*. Nothing is ever
@@ -46,6 +47,8 @@ building an OT cell needed `gcp:write` (or `aws` / `azure`), and that is also wh
 | Fill the Build forms: the cloud's images, machine types, zones, subnets and security groups | `demo:write` beside `<cloud>:read` |
 | Destroy a running OT cell (and its DMZ broker) or network cell | `demo:delete` beside `<cloud>:delete` |
 | Clear a **failed** OT cell's record | `demo:delete` beside `<cloud>:delete` |
+| Mint an agent cell, on a VM and SPIRE lab they can see, running as a new service account ([below](#agent-cells-run-as-their-own-account)) | `demo:write` beside `config_mgmt:write` |
+| Revoke their agent cell, and remove its SPIRE identity | `demo:delete` beside `config_mgmt:write` |
 
 And deliberately **cannot**:
 
@@ -53,13 +56,32 @@ And deliberately **cannot**:
   Destroy goes through a cell-only route that checks the target *is* a live cell in the
   presenter's workstreams, then runs the cloud's own teardown on it: VM, PRA jump items,
   Password Safe registration, and the DMZ broker last.
-- **Mint an agent cell.** Minting issues an API token that acts as whichever non-admin user
-  the caller picks, and every MCP tool applies that user's permissions. A presenter could
-  pick a Cloud Admin user and hold that user's reach, so the agent cell stays on
-  `config_mgmt:write`.
+- **Choose who an agent runs as**, or link an agent to a Workload Lab credential, or open
+  a Kubernetes access request for one. Those stay on `config_mgmt:write`.
 - **Run standalone OT protocol tunnels**, which wire real plant gear rather than a cell.
 
 Cells stay scoped to the presenter's workstreams, exactly as on the cloud pages.
+
+### Agent cells run as their own account
+
+Minting an agent issues a credential that acts as a user, and every MCP tool applies that
+user's permissions, so the user *is* the agent's reach. An operator with
+`config_mgmt:write` picks any non-admin user. A Demo Presenter picks nobody: the cell
+creates a **service account for that agent alone**, which
+
+- holds the built-in **Demo Agent** role: it reads VMs and inventory, and only its own jobs;
+- lives in the one workstream the presenter chose for the cell;
+- is **disabled when the agent is revoked**, and kept so its jobs and audit rows keep a name.
+
+The mint is refused, and nothing is created, unless:
+
+- the workstream is one of the presenter's;
+- the host is a VM in the presenter's workstreams;
+- the SPIRE lab, if one is used, is one the presenter can see;
+- the presenter already holds every grant the Demo Agent role carries.
+
+The last check means an agent can never reach further than the presenter who minted it.
+A presenter can revoke only agents they can see.
 
 ### What changes on upgrade
 
@@ -70,6 +92,7 @@ maps are written once. Add `demo:read` to it there if you want it.
 
 ### A presenter never needs a cloud page
 
-Everything a cell needs is on the hub. The Build forms read their pickers through
+Everything a cell needs is on the hub. Installing an agent is still the two playbooks you
+run yourself, as on the Workload Lab. The Build forms read their pickers through
 `/api/demo/cells/<cloud>/...`, which runs the cloud page's own lookup, so the lists match
 exactly. The cloud's general read routes stay closed to the role.
