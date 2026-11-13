@@ -383,6 +383,15 @@ PERMISSION_SCOPE_LEVELS = {
     # ...), never a replacement -- see api/demo_gates.py. So it narrows nothing, which is
     # why it has no backfill. Checked in the explicit form throughout.
     "demo": _RWD,
+    # Custom demo cell BLUEPRINTS -- the recipes a Cell Builder authors (a GKE cluster, a
+    # MySQL database, two Ubuntu VMs) and anyone with `demo:write` launches.
+    #   read    list and open blueprints
+    #   write   create and edit blueprints
+    #   delete  delete blueprints (cells already launched from one are unaffected)
+    # Launching, scheduling, suspending and destroying a CELL is `demo`, not this: the
+    # split is author versus presenter, the same one pov_templates draws beside pov_own.
+    # Brand-new authority over brand-new routes, so explicit form and no backfill.
+    "demo_blueprints": _RWD,
     # Managed Active Directory: build/register (write), destroy/unregister (delete).
     # Reading the stored admin password is write, as on the cloud pages.
     "directories": _RWD,
@@ -471,6 +480,8 @@ EXPLICIT_ONLY_LEVELS = {
     # A new authority (api/demo_gates): nobody held it, so "Full access" must not invent
     # it. A full-access map already passes every cell route on the cloud scopes anyway.
     "demo": ("read", "write", "delete"),
+    # Same reason: nobody authored a cell blueprint before the routes existed.
+    "demo_blueprints": ("read", "write", "delete"),
     "directories": ("read", "write", "delete"),
     # `can_audit_jobs` -- everyone's jobs, not just your own -- never read an empty map as
     # unrestricted either. The MCP job tools also gate on it, and those an empty map did
@@ -515,7 +526,7 @@ PERMISSION_SCOPE_GROUPS = {
     "Platform": ["images", "containers", "k8s", "cloud_function", "cloud_database",
                  "directories", "storage", "secrets", "config_mgmt"],
     "POV": ["pov", "pov_own", "pov_templates"],
-    "Demo": ["demo"],
+    "Demo": ["demo", "demo_blueprints"],
     "Operations": ["gateways", "agents", "notifications", "epml", "ot",
                    "change_windows"],
 }

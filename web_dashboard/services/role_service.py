@@ -129,6 +129,7 @@ _BUILTIN_ROLES = (
             "images": _R, "containers": _R, "k8s": _R, "cloud_function": _R,
             "cloud_database": _R, "directories": _R, "storage": _R, "config_mgmt": _R,
             "pov": _R, "pov_own": _R, "pov_templates": _R, "demo": _R,
+            "demo_blueprints": _R,
             "gateways": _R, "agents": _R, "notifications": _R, "epml": _R, "ot": _R,
         },
     },
@@ -170,6 +171,28 @@ _BUILTIN_ROLES = (
         # creates with the Demo Agent role, never a user the presenter picks; linking it
         # to a Workload Lab credential stays on `config_mgmt:write` (api/demo_gates.py).
         "permissions": {
+            "demo": _RWD,
+            "vms": _R, "jobs": _R, "inventory": _R, "connections": _R,
+        },
+    },
+    {
+        "slug": "cell-builder",
+        "name": "Cell Builder",
+        "description": "Author custom demo cells: build and edit the blueprints a cell is "
+                       "launched from -- a k8s cluster, a database, a few VMs, on any "
+                       "cloud -- and launch, schedule and destroy cells from them, without "
+                       "general cloud deploy rights.",
+        # Everything the Demo Presenter holds, plus authoring the recipes. Presenter's set
+        # is repeated rather than referenced because built-ins are frozen literals (see
+        # the note above _ALL). Most SEs will hold both roles anyway -- a user may hold
+        # several, and they union -- but this one stands on its own for someone who only
+        # builds.
+        #
+        # Authoring is bounded by launch, not here: a blueprint is inert data, and every
+        # item still goes through admission policy and the workgroup check when a cell is
+        # launched from it (services/custom_cell_service.launch).
+        "permissions": {
+            "demo_blueprints": _RWD,
             "demo": _RWD,
             "vms": _R, "jobs": _R, "inventory": _R, "connections": _R,
         },

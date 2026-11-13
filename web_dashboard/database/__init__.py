@@ -95,6 +95,10 @@ from .models.spire import (  # noqa: E402,F401  (re-exported: callers import the
     WorkloadCloudCredential,
 )
 
+from .models.demo_cell import (  # noqa: E402,F401  (re-exported: callers import these from web_dashboard.database)
+    CellBlueprint, CellBlueprintItem, CustomCell, CustomCellMember,
+)
+
 from .models.infrastructure import (  # noqa: E402,F401  (re-exported: callers import these from web_dashboard.database)
     CloudFunction, K8sCluster, Gateway,
 )

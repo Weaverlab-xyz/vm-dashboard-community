@@ -97,6 +97,10 @@ _BACKFILL_V1_DELIBERATELY_EMPTY = (
     # hand every explicitly-permissioned user the right to build demo cells on every cloud,
     # which no one has today without that cloud's own write. Explicit form on every site.
     "demo",
+    # Brand-new authority over brand-new routes (api/custom_cell's blueprint CRUD): nobody
+    # authored a cell blueprint yesterday, so a backfill would grant, not preserve. The
+    # Read-Only and Cell Builder built-ins carry it from their literals.
+    "demo_blueprints",
 )
 
 # The third category, and the only one that needs both halves spelled out: routes that
