@@ -15,9 +15,11 @@ hazard: ``api/auth.has_permission`` reads an EMPTY permission map as UNRESTRICTE
    missing map outright instead of defaulting one, because a defaulted role would silently
    grant everything to everyone assigned it.
 
-2. **``apply_role_to_user`` is the ONLY writer of ``users.role_id`` /
-   ``users.role_permissions``, and it always writes both.** The second column is a
-   materialised copy of the role's map, which exists because ``effective_permissions_dict``
+2. **``apply_roles_to_user`` is the ONLY writer of ``users.role_id`` /
+   ``users.role_permissions`` and the ``user_access_roles`` rows, and it always writes all
+   three.** A user may hold SEVERAL roles: the rows say which, ``role_id`` mirrors the first
+   (the "holds a role" marker), and ``role_permissions`` is a materialised copy of the
+   UNION of their maps, which exists because ``effective_permissions_dict``
    is read on a DETACHED User by ``api/mcp_server`` -- a relationship read there raises, and
    the natural ``except: return {}`` around it is a total authorization bypass. A
    half-written pair (an id with no copy) is caught by ``database._ROLE_UNRESOLVED`` and
@@ -340,6 +342,60 @@ def list_all(db: Session) -> List[AccessRole]:
     return sorted(rows, key=lambda r: (not bool(r.is_builtin), (r.name or "").lower()))
 
 
+def _holder_ids(db: Session, role_id: str) -> set:
+    """Ids of every user holding ``role_id`` directly.
+
+    The ``user_access_roles`` rows, plus any ``users.role_id`` match that has no row yet --
+    a row written before multi-role assignment existed, before the first ``reconcile``
+    backfilled it. Reading both is what keeps the delete guard honest in that window.
+    """
+    from ..database import UserAccessRole
+    ids = {uid for (uid,) in db.query(UserAccessRole.user_id)
+           .filter(UserAccessRole.role_id == role_id).all()}
+    ids |= {uid for (uid,) in db.query(User.id).filter(User.role_id == role_id).all()}
+    return ids
+
+
+def role_ids_of(db: Session, user: User) -> List[str]:
+    """The ids of every role ``user`` holds directly, first-assigned first.
+
+    Falls back to ``users.role_id`` for a row with no ``user_access_roles`` entries yet,
+    so a user saved before multi-role assignment reads as holding exactly the role they
+    always held.
+    """
+    from ..database import UserAccessRole
+    if user is None:
+        return []
+    if not user.id:
+        return [user.role_id] if user.role_id else []
+    rows = (db.query(UserAccessRole.role_id).filter(UserAccessRole.user_id == user.id)
+            .order_by(UserAccessRole.position, UserAccessRole.assigned_at).all())
+    ids = [rid for (rid,) in rows]
+    if not ids and user.role_id:
+        ids = [user.role_id]
+    return ids
+
+
+def roles_of(db: Session, user: User) -> List[AccessRole]:
+    """The roles ``user`` holds directly, in assignment order. Unknown ids are skipped."""
+    out = []
+    for rid in role_ids_of(db, user):
+        role = get(db, rid)
+        if role is not None:
+            out.append(role)
+    return out
+
+
+def role_ids_by_user(db: Session) -> dict:
+    """``{user_id: [role id, ...]}`` for every user with a row -- one query for a list page."""
+    from ..database import UserAccessRole
+    out: dict = {}
+    for row in (db.query(UserAccessRole)
+                .order_by(UserAccessRole.position, UserAccessRole.assigned_at).all()):
+        out.setdefault(row.user_id, []).append(row.role_id)
+    return out
+
+
 def assignees(db: Session, role_id: str) -> dict:
     """Who holds this role -- users and group mappings, listed separately.
 
@@ -347,78 +403,192 @@ def assignees(db: Session, role_id: str) -> dict:
     remedies: a user is reassigned here and now, while a group mapping's members only change
     at their next sign-in.
     """
-    users = (db.query(User).filter(User.role_id == role_id)
-             .order_by(User.username).all())
+    ids = _holder_ids(db, role_id)
+    users = (db.query(User).filter(User.id.in_(ids)).order_by(User.username).all()
+             if ids else [])
     mappings = (db.query(OAuthGroupMapping).filter(OAuthGroupMapping.role_id == role_id)
                 .order_by(OAuthGroupMapping.display_name).all())
     return {"users": users, "group_mappings": mappings}
 
 
 def assignee_counts(db: Session, role_id: str) -> tuple:
-    """``(user_count, group_mapping_count)`` without loading the rows."""
+    """``(user_count, group_mapping_count)``."""
     return (
-        db.query(User).filter(User.role_id == role_id).count(),
+        len(_holder_ids(db, role_id)),
         db.query(OAuthGroupMapping).filter(OAuthGroupMapping.role_id == role_id).count(),
     )
 
 
 # ── The single writer ─────────────────────────────────────────────────────────
 
-def apply_role_to_user(db: Session, user: User, role: Optional[AccessRole]) -> None:
-    """Assign ``role`` to ``user``, or clear the assignment when ``role`` is None.
+def union_of(roles) -> dict:
+    """The union of several roles' maps -- THE rule, via ``merge_permission_maps``.
 
-    THE only place ``users.role_id`` and ``users.role_permissions`` are written, and it
-    always writes both. Setting the id without the copy leaves a principal whose role cannot
-    be resolved; ``database._ROLE_UNRESOLVED`` makes that deny rather than open, but it is
-    still a user who can do nothing and an admin with nothing to look at.
+    One role is its own map, verbatim: exactly what the single-role writer stored, so the
+    boot ``reconcile`` after upgrading finds nothing to rewrite for anyone holding one.
+    """
+    from ..database import merge_permission_maps
+    roles = list(roles)
+    if len(roles) == 1:
+        return roles[0].permissions_dict
+    return merge_permission_maps(*[r.permissions_dict for r in roles])
+
+
+def apply_roles_to_user(db: Session, user: User, roles) -> None:
+    """Assign exactly ``roles`` to ``user`` (an empty list clears every assignment).
+
+    THE only place ``users.role_id``, ``users.role_permissions`` and the
+    ``user_access_roles`` rows are written, and it always writes all three. Setting the id
+    without the copy leaves a principal whose role cannot be resolved;
+    ``database._ROLE_UNRESOLVED`` makes that deny rather than open, but it is still a user
+    who can do nothing and an admin with nothing to look at.
+
+    Duplicates are dropped and order is kept: the first role is the one mirrored into
+    ``role_id``. The copy is the UNION of every role's map, so holding Demo Presenter and
+    Cell Builder grants what either grants.
 
     Does not commit -- the caller owns the transaction, so an assignment and the rest of a
-    user update land together.
+    user update land together. A brand-new user is given its id here, so its rows can name
+    it before the first flush.
     """
-    if role is None:
+    from ..database import UserAccessRole
+    seen, ordered = set(), []
+    for r in roles or []:
+        if r is not None and r.id not in seen:
+            seen.add(r.id)
+            ordered.append(r)
+
+    if not user.id:
+        user.id = str(uuid.uuid4())
+    # ORM deletes and adds, never a bulk DELETE: those stay PENDING until the caller's
+    # flush, so this writes nothing when the caller never commits -- the contract the
+    # single-role version had, where assigning was two attribute sets. no_autoflush keeps
+    # the read below from flushing a half-built new user early.
+    with db.no_autoflush:
+        existing = (db.query(UserAccessRole).filter(UserAccessRole.user_id == user.id)
+                    .order_by(UserAccessRole.position, UserAccessRole.assigned_at).all())
+    # Reconciled in place -- kept rows re-ordered, missing ones added, the rest deleted --
+    # rather than delete-all-then-insert. The unit of work flushes INSERTs before DELETEs
+    # within a table, so re-inserting a role the user already held collides with its own
+    # old row on the (user_id, role_id) unique constraint.
+    by_role = {row.role_id: row for row in existing}
+    want_ids = {r.id for r in ordered}
+    for row in existing:
+        if row.role_id not in want_ids:
+            db.delete(row)
+    now = utcnow()
+    for pos, r in enumerate(ordered):
+        row = by_role.get(r.id)
+        if row is None:
+            db.add(UserAccessRole(id=str(uuid.uuid4()), user_id=user.id, role_id=r.id,
+                                  position=pos, assigned_at=now))
+        elif row.position != pos:
+            row.position = pos
+
+    if not ordered:
         user.role_id = None
         user.role_permissions = None
         return
-    user.role_id = role.id
-    user.role_permissions_dict = role.permissions_dict
+    user.role_id = ordered[0].id
+    user.role_permissions_dict = union_of(ordered)
+
+
+def apply_role_to_user(db: Session, user: User, role: Optional[AccessRole]) -> None:
+    """Assign exactly one role, or clear every assignment when ``role`` is None.
+
+    The single-role form every caller predating multi-role assignment uses; it is
+    ``apply_roles_to_user`` with a one-item list, so the three-column rule holds here too.
+    """
+    apply_roles_to_user(db, user, [role] if role is not None else [])
 
 
 def fan_out(db: Session, role: AccessRole) -> int:
-    """Push a role's current map onto every user holding it. Returns the row count.
+    """Rebuild the copy on every user holding ``role``. Returns the row count.
 
     Called from the role PATCH in the SAME transaction as the edit, so there is no window on
-    PostgreSQL in which half the assignees hold the old map. The blast radius is returned so
-    the API can tell the admin how many people they just changed.
+    PostgreSQL in which half the assignees hold the old map. Each holder's copy is rebuilt
+    as the union of ALL their roles, not overwritten with this one's map -- which would
+    silently strip whatever their other roles grant. The blast radius is returned so the
+    API can tell the admin how many people they just changed.
     """
-    rows = db.query(User).filter(User.role_id == role.id).all()
+    ids = _holder_ids(db, role.id)
+    rows = db.query(User).filter(User.id.in_(ids)).all() if ids else []
     for u in rows:
-        u.role_permissions_dict = role.permissions_dict
+        held = roles_of(db, u)
+        u.role_permissions_dict = union_of(held) if held else None
     return len(rows)
 
 
 def reconcile(db: Session) -> int:
-    """Rewrite every role-bearing user's copy from its role. Returns rows changed.
+    """Rewrite every role-bearing user's assignment rows and copy from their roles.
+    Returns rows changed.
 
     The repair half of the materialised copy: a hand-edited database, a restore, or an
-    interrupted deploy can leave a copy that no longer matches its role, and nothing else
+    interrupted deploy can leave a copy that no longer matches its roles, and nothing else
     would ever notice. Runs once per boot.
 
-    Not marker-gated, unlike ``_backfill_new_permission_scopes``. A marker exists to stop a
-    backfill re-granting something an admin deliberately removed; this writes only what the
-    role already says, so running it twice is the same as running it once. A user whose
-    ``role_id`` points at a role that no longer exists is CLEARED rather than left dangling
-    -- the deny is correct either way, but an admin can act on "no role" and cannot act on
-    an id with nothing behind it.
+    Also the backfill for multi-role assignment: a user with ``role_id`` set and no
+    ``user_access_roles`` row gets one. That writes only what ``role_id`` already says, so
+    -- like the rest of this pass -- running it twice is running it once, and it needs no
+    marker. Rows whose role no longer exists are DROPPED, and a user left with no role is
+    CLEARED rather than left dangling -- the deny is correct either way, but an admin can
+    act on "no role" and cannot act on an id with nothing behind it.
     """
+    from ..database import UserAccessRole
     changed = 0
-    for u in db.query(User).filter(User.role_id.isnot(None)).all():
-        role = get(db, u.role_id)
-        if role is None:
-            u.role_id = None
-            u.role_permissions = None
+    by_user: dict = {}
+    for row in (db.query(UserAccessRole)
+                .order_by(UserAccessRole.position, UserAccessRole.assigned_at).all()):
+        by_user.setdefault(row.user_id, []).append(row)
+
+    users = {u.id: u for u in db.query(User).filter(User.role_id.isnot(None)).all()}
+    if by_user:
+        users.update({u.id: u for u in
+                      db.query(User).filter(User.id.in_(list(by_user))).all()})
+    # Rows naming a user that is gone.
+    for uid, rows in by_user.items():
+        if uid not in users:
+            for row in rows:
+                db.delete(row)
+                changed += 1
+
+    for u in users.values():
+        rows = by_user.get(u.id, [])
+        # A `role_id` the rows do not contain was written by something other than the
+        # single writer -- a hand edit, a restore, a release predating the rows. It wins:
+        # the rows are replaced by it, exactly as the single-role reconcile treated it, so
+        # a dangling id still clears to "no role" below rather than being papered over by
+        # whatever the rows happened to say.
+        if u.role_id and u.role_id not in {row.role_id for row in rows}:
+            for row in rows:
+                db.delete(row)
+                changed += 1
+            rows = []
+        if not rows and u.role_id:
+            row = UserAccessRole(id=str(uuid.uuid4()), user_id=u.id, role_id=u.role_id,
+                                 position=0, assigned_at=utcnow())
+            db.add(row)
+            rows = [row]
             changed += 1
+        held = []
+        for row in rows:
+            role = get(db, row.role_id)
+            if role is None:
+                # Expunge rather than delete a row added just above: it was never stored.
+                (db.expunge if row in db.new else db.delete)(row)
+                changed += 1
+            else:
+                held.append(role)
+        if not held:
+            if u.role_id is not None or u.role_permissions is not None:
+                u.role_id = None
+                u.role_permissions = None
+                changed += 1
             continue
-        want = role.permissions_dict
+        if u.role_id != held[0].id:
+            u.role_id = held[0].id
+            changed += 1
+        want = union_of(held)
         if u.role_permissions_dict != want:
             u.role_permissions_dict = want
             changed += 1
@@ -526,10 +696,12 @@ def delete(db: Session, role: AccessRole, *, force: bool = False) -> dict:
         raise RoleError(
             f"{role.name!r} is still assigned to {' and '.join(parts)}. Reassign them, or "
             "delete it with force to clear the assignment.")
-    # Clear both columns together, for the reason in the docstring above.
-    for u in db.query(User).filter(User.role_id == role.id).all():
-        u.role_id = None
-        u.role_permissions = None
+    # Strip this one role from each holder and rebuild from what is left, through the
+    # single writer -- so a user who also holds another role keeps it, and every column
+    # moves together, for the reason in the docstring above.
+    holder_ids = _holder_ids(db, role.id)
+    for u in (db.query(User).filter(User.id.in_(holder_ids)).all() if holder_ids else []):
+        apply_roles_to_user(db, u, [r for r in roles_of(db, u) if r.id != role.id])
     for m in db.query(OAuthGroupMapping).filter(OAuthGroupMapping.role_id == role.id).all():
         m.role_id = None
     db.delete(role)

@@ -59,6 +59,11 @@ class UserResponse(BaseModel):
     # the per-user override alone, while `/api/auth/me` returns the merged effective set.
     role_id: str = ""
     role_name: str = ""
+    # EVERY role held directly, primary first -- a user may hold several (an SE who is a
+    # Demo Presenter and a Cell Builder). `role_id`/`role_name` above are the first entry,
+    # kept for clients that predate multi-role assignment. Access is the UNION.
+    role_ids: List[str] = []
+    role_names: List[str] = []
 
     class Config:
         from_attributes = True

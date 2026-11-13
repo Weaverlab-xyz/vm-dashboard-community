@@ -80,7 +80,7 @@
               <!-- Withheld for an admin rather than shown alongside: the flag bypasses the
                    permission grid, so naming a role there would suggest it still applies. -->
               <div x-show="!u.is_admin && u.role_name" class="text-xs text-gray-500 mt-0.5"
-                   x-text="u.role_name"></div>
+                   x-text="(u.role_names && u.role_names.length ? u.role_names : [u.role_name]).join(' + ')"></div>
               <!-- A person's account saved before roles were required. It keeps working;
                    the next edit has to choose a role (api/users.ROLE_REQUIRED). Same
                    exemptions as roleRequired(), minus your own row, which can't fix it. -->
@@ -271,6 +271,25 @@
             </template>
           </select>
           <p class="text-xs text-gray-500 mb-3" x-text="roleHint()"></p>
+          <!-- More roles on top of the primary one: an SE who is a Demo Presenter AND a
+               Cell Builder. Access is the UNION (role_service.apply_roles_to_user). Only
+               offered once a primary role is chosen, and never Administrator -- that one is
+               the whole grant and stays the primary pick. -->
+          <div x-show="form.role_id && extraRoleChoices().length" class="mb-3">
+            <label class="block text-xs font-medium text-gray-600 mb-1">
+              Also holds
+              <span class="text-gray-400 font-normal">(optional &mdash; access is the union of every role)</span>
+            </label>
+            <div class="flex flex-wrap gap-x-4 gap-y-1">
+              <template x-for="r in extraRoleChoices()" :key="r.id">
+                <label class="inline-flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" :value="r.id" x-model="form.extra_role_ids"
+                         class="rounded border-gray-300">
+                  <span x-text="r.name + (r.is_builtin ? '' : ' (custom)')"></span>
+                </label>
+              </template>
+            </div>
+          </div>
         </div>
 
         <div x-show="!form.is_admin">
@@ -829,6 +848,22 @@ function usersPage() {
       return roles.filter(r => !(r.permissions && r.permissions.is_admin));
     },
 
+    // The roles offerable IN ADDITION to the primary pick: not the primary itself, and
+    // not Administrator, which bypasses the grid and so has nothing to add to.
+    extraRoleChoices() {
+      return this.selectableRoles().filter(
+        r => r.id !== this.form.role_id && !(r.permissions && r.permissions.is_admin));
+    },
+
+    // Every role to assign, primary first -- api/users reads `role_ids` over `role_id`.
+    // No primary means no roles at all, whatever is still ticked underneath it.
+    roleIdsPayload() {
+      if (!this.form.role_id) return [];
+      const extra = (this.form.extra_role_ids || []).filter(
+        id => id !== this.form.role_id && !this.isAdminRole(id));
+      return [this.form.role_id, ...extra];
+    },
+
     isAdminRole(id) {
       const r = (this.availableRoles || []).find(x => x.id === id);
       return !!(r && r.permissions && r.permissions.is_admin);
@@ -931,6 +966,7 @@ function usersPage() {
         // Nothing pre-selected: a person's account must have a role CHOSEN (roleRequired),
         // never defaulted, and the grid starts at nothing granted on top of it.
         role_id: '',
+        extra_role_ids: [],
         is_service_account: false,
       };
       this.permFilter = '';
@@ -964,6 +1000,8 @@ function usersPage() {
         // The role they hold, if any. The grid beside it holds their per-user override, so
         // both are editable independently and neither implies the other.
         role_id: u.role_id || '',
+        // Every other role they hold. The primary is `role_id`; these are added on top.
+        extra_role_ids: (u.role_ids || []).filter(id => id !== u.role_id),
       };
       this.roleWasAdmin = this.isAdminRole(this.form.role_id);
       this.permFilter = '';
@@ -1061,6 +1099,7 @@ function usersPage() {
             // Always sent, for the same reason as persona: "" clears the assignment, and
             // without the empty string an admin could assign a role but never remove one.
             role_id: this.form.role_id || '',
+            role_ids: this.roleIdsPayload(),
           };
           if (this.form.password) body.password = this.form.password;
           // Only for an account single sign-on has not claimed yet: see ssoSwitchVisible.
@@ -1085,6 +1124,7 @@ function usersPage() {
             workgroups: this.form.workgroups,
             permissions: this.buildPermissionsPayload(),
             role_id: this.form.role_id || '',
+            role_ids: this.roleIdsPayload(),
           });
           toast('Service account created — add an OAuth client next', 'success');
         } else {
@@ -1101,6 +1141,7 @@ function usersPage() {
             // Omitted as "" rather than null: the API reads null as "no change", which on
             // create means no role, so either works -- but "" says it on purpose.
             role_id: this.form.role_id || '',
+            role_ids: this.roleIdsPayload(),
             // Reachable on create now that the grid is: ticking POV read shows the
             // picker. Focus is not -- it stays edit-only, as its comment above says.
             pov_env_ids: this.form.povEnvIds || [],

@@ -38,6 +38,9 @@ class UserCreateRequest(BaseModel):
     # The access role to assign. REQUIRED unless `is_admin` is set -- see ROLE_REQUIRED.
     # Typed Optional only so a missing one gets that sentence, not pydantic's generic 422.
     role_id: Optional[str] = None
+    # EVERY role to assign, when a user holds several (an SE who is both a Demo Presenter
+    # and a Cell Builder). Wins over `role_id` when sent; the first entry is the primary.
+    role_ids: Optional[List[str]] = None
 
 
 class UserUpdateRequest(BaseModel):
@@ -62,6 +65,10 @@ class UserUpdateRequest(BaseModel):
     # and for the same reason: None = no change, "" = clear the assignment, an id = set it.
     # Without the empty-string case an admin could assign a role and never remove one.
     role_id: Optional[str] = None
+    # The FULL set of roles this user holds, when they hold several. None = no change
+    # (then `role_id` above decides), [] = clear every role, a list = exactly those, the
+    # first being the primary. Wins over `role_id` when both are sent.
+    role_ids: Optional[List[str]] = None
     # Let this LOCAL account be claimed by single sign-on. None = no change. True marks it
     # api/auth.SSO_PENDING: password login stops, and the next SSO login whose verified
     # email matches links the account to that IdP identity. False undoes it while it has
@@ -151,7 +158,7 @@ def _refuse_accessor(user: User) -> None:
 
 
 def _refuse_service_account_escalation(db: Session, user: User, *, is_admin=None,
-                                       password=None, role_id=None) -> None:
+                                       password=None, roles=None) -> None:
     """A service account never becomes an administrator and never gets a password.
 
     ``User.is_effective_admin`` already answers False for one whatever its columns say,
@@ -168,12 +175,10 @@ def _refuse_service_account_escalation(db: Session, user: User, *, is_admin=None
             status_code=400,
             detail="A service account has no password. It authenticates with an OAuth "
                    "client — manage those under its OAuth clients.")
-    if role_id:
-        role = _resolve_role(db, role_id)
-        if role is not None and role.permissions_dict.get("is_admin"):
-            raise HTTPException(
-                status_code=400,
-                detail="A service account cannot hold an administrator role.")
+    if any(r.permissions_dict.get("is_admin") for r in (roles or [])):
+        raise HTTPException(
+            status_code=400,
+            detail="A service account cannot hold an administrator role.")
 
 
 # A person's account holds a role. The grid is an addition on top of it, not a
@@ -192,7 +197,8 @@ _SSO_PROVIDERS = ("azure_ad", "oidc")
 _OPERATIONAL_FIELDS = frozenset({"is_active", "password", "sso_sign_in"})
 
 
-def _would_leave_without_role(user: User, body: "UserUpdateRequest", admin: User) -> bool:
+def _would_leave_without_role(user: User, body: "UserUpdateRequest", admin: User,
+                              requested=None) -> bool:
     """True if this PATCH would leave a person's account with no role.
 
     Judged on the state the request LEAVES, so clearing a role, unticking Admin without
@@ -208,8 +214,9 @@ def _would_leave_without_role(user: User, body: "UserUpdateRequest", admin: User
     if (is_admin or user.is_service_account or user.accessor_env_id
             or (user.auth_provider or "local") in _SSO_PROVIDERS):
         return False
-    role_id = user.role_id if body.role_id is None else body.role_id.strip()
-    return not role_id
+    if requested is None:          # no role field sent: what the row already holds
+        return not user.role_id
+    return not requested
 
 
 def _resolve_role(db: Session, raw: Optional[str]):
@@ -228,6 +235,45 @@ def _resolve_role(db: Session, raw: Optional[str]):
     return role
 
 
+def _requested_roles(db: Session, role_id: Optional[str], role_ids: Optional[List[str]]):
+    """The roles a request body asks for, or None when it names none.
+
+    ``role_ids`` wins when sent; otherwise a ``role_id`` is a one-role request ("" = none).
+    Order is kept and repeats dropped, so the first id stays the primary. Each id resolves
+    through `_resolve_role`, so an unknown one is a 422 rather than a stored dangling id.
+    """
+    if role_ids is not None:
+        ids = [str(x).strip() for x in role_ids if x is not None and str(x).strip()]
+    elif role_id is not None:
+        ids = [role_id.strip()] if role_id.strip() else []
+    else:
+        return None
+    out, seen = [], set()
+    for rid in ids:
+        if rid not in seen:
+            seen.add(rid)
+            out.append(_resolve_role(db, rid))
+    return out
+
+
+def _role_fields(db: Session, user: User, names: Optional[dict] = None,
+                 ids_by_user: Optional[dict] = None) -> dict:
+    """The role half of a `UserResponse`: the primary id/name plus every role held."""
+    if names is None:
+        names = {r.id: r.name for r in role_service.list_all(db)}
+    if ids_by_user is not None:
+        ids = ids_by_user.get(user.id) or ([user.role_id] if user.role_id else [])
+    else:
+        ids = role_service.role_ids_of(db, user)
+    ids = [i for i in ids if i in names]
+    return dict(
+        role_id=user.role_id or "",
+        role_name=names.get(user.role_id, ""),
+        role_ids=ids,
+        role_names=[names[i] for i in ids],
+    )
+
+
 @router.get("", response_model=List[UserResponse])
 def list_users(
     _admin: User = Depends(require_admin),
@@ -237,6 +283,7 @@ def list_users(
     # One lookup for the whole page rather than one per row: the list is the only place
     # where a per-user role fetch would be an N+1.
     _role_names = {r.id: r.name for r in role_service.list_all(db)}
+    _ids_by_user = role_service.role_ids_by_user(db)
     return [
         UserResponse(
             id=u.id,
@@ -251,10 +298,9 @@ def list_users(
             is_service_account=bool(u.is_service_account),
             permissions=u.permissions_dict or None,
             pov_env_ids=u.pov_env_ids_list,
-            # The role's NAME as well as its id, so the list renders the assignment
+            # The role NAMES as well as the ids, so the list renders every assignment
             # without a second request per row.
-            role_id=u.role_id or "",
-            role_name=_role_names.get(u.role_id, ""),
+            **_role_fields(db, u, _role_names, _ids_by_user),
             # The ASSIGNED value, not the resolved one: an admin editing this row needs to
             # see what is stored here, and `persona_source` tells them when the focus a
             # user actually gets comes from their group instead.
@@ -277,8 +323,8 @@ def create_user(
         raise HTTPException(status_code=409, detail="Username already exists")
     if password_length_error(body.password):
         raise HTTPException(status_code=400, detail=password_length_error(body.password))
-    role = _resolve_role(db, body.role_id)
-    if role is None and not body.is_admin:
+    roles = _requested_roles(db, body.role_id, body.role_ids) or []
+    if not roles and not body.is_admin:
         raise HTTPException(status_code=422, detail=ROLE_REQUIRED)
     user = User(
         username=body.username,
@@ -303,11 +349,11 @@ def create_user(
         user.permissions_dict = _nothing_granted()
     if body.pov_env_ids is not None:
         user.pov_env_ids_list = body.pov_env_ids
-    if role is not None:
-        # Assigned through role_service, which is the single writer of the two role columns
+    if roles:
+        # Assigned through role_service, which is the single writer of the role columns
         # and always writes them together -- an id without its materialised copy is a user
         # who can do nothing, by way of the deny sentinel in database.py.
-        role_service.apply_role_to_user(db, user, role)
+        role_service.apply_roles_to_user(db, user, roles)
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -323,8 +369,7 @@ def create_user(
         mfa_required=user.mfa_required,
         permissions=user.permissions_dict or None,
         pov_env_ids=user.pov_env_ids_list,
-        role_id=user.role_id or "",
-        role_name=getattr(role_service.get(db, user.role_id), "name", ""),
+        **_role_fields(db, user),
     )
 
 
@@ -341,14 +386,15 @@ def update_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     _refuse_accessor(user)
+    requested = _requested_roles(db, body.role_id, body.role_ids)
     _refuse_service_account_escalation(db, user, is_admin=body.is_admin,
-                                       password=body.password, role_id=body.role_id)
+                                       password=body.password, roles=requested)
     # Prevent admins from removing their own admin flag
     if user.id == admin.id and body.is_admin is False:
         raise HTTPException(status_code=400, detail="Cannot remove your own admin privilege")
     if body.password and password_length_error(body.password):
         raise HTTPException(status_code=400, detail=password_length_error(body.password))
-    if _would_leave_without_role(user, body, admin):
+    if _would_leave_without_role(user, body, admin, requested):
         raise HTTPException(status_code=422, detail=ROLE_REQUIRED)
     was_admin = _admin_here(user)
 
@@ -401,7 +447,7 @@ def update_user(
     # The form sends the role on every save, so only a CHANGE is a role edit. Comparing
     # here is what lets an admin edit their own name: the refusal below used to fire on the
     # unchanged role the form always carries.
-    if body.role_id is not None and body.role_id.strip() != (user.role_id or ""):
+    if requested is not None and [r.id for r in requested] != role_service.role_ids_of(db, user):
         # Refuse an admin changing their OWN role, mirroring the is_admin guard above and
         # for a strictly stronger reason: a role can be what confers their admin, so
         # swapping it can lock them out of this very page with no way back short of the
@@ -414,8 +460,8 @@ def update_user(
         # confined by a path allowlist no permission can widen, so a role on that row would
         # be a second, contradictory statement about access.
         _refuse_accessor(user)
-        # "" clears, an id sets. role_service writes both columns together.
-        role_service.apply_role_to_user(db, user, _resolve_role(db, body.role_id))
+        # [] clears, a list sets exactly those. role_service writes every column together.
+        role_service.apply_roles_to_user(db, user, requested)
     if body.pov_env_ids is not None:
         # An accessor is already bound to exactly one POV by accessor_env_id, and confined
         # by a path allowlist that no permission can widen. A second, contradictory POV
@@ -448,8 +494,7 @@ def update_user(
         is_service_account=bool(user.is_service_account),
         permissions=user.permissions_dict or None,
         pov_env_ids=user.pov_env_ids_list,
-        role_id=user.role_id or "",
-        role_name=getattr(role_service.get(db, user.role_id), "name", ""),
+        **_role_fields(db, user),
     )
 
 
@@ -643,6 +688,7 @@ class ServiceAccountCreateRequest(BaseModel):
     # person, where they mean unrestricted. Grant with a map or a role.
     permissions: Optional[dict] = None
     role_id: Optional[str] = None
+    role_ids: Optional[List[str]] = None
 
 
 class OAuthClientCreateRequest(BaseModel):
@@ -721,8 +767,8 @@ def create_service_account(
 
     if body.permissions:
         validate_permissions_payload(body.permissions)
-    role = _resolve_role(db, body.role_id)
-    if role is not None and role.permissions_dict.get("is_admin"):
+    roles = _requested_roles(db, body.role_id, body.role_ids) or []
+    if any(r.permissions_dict.get("is_admin") for r in roles):
         raise HTTPException(status_code=400,
                             detail="A service account cannot hold an administrator role.")
     try:
@@ -731,19 +777,19 @@ def create_service_account(
             workgroups=body.workgroups, permissions=body.permissions or None)
     except service_accounts.ServiceAccountError as exc:
         raise HTTPException(status_code=409 if "taken" in str(exc) else 400, detail=str(exc))
-    if role is not None:
-        role_service.apply_role_to_user(db, user, role)
+    if roles:
+        role_service.apply_roles_to_user(db, user, roles)
     db.commit()
     db.refresh(user)
     job_service.log_audit(db, admin.username, "service_account.create",
                           details={"service_account": user.username,
-                                   "role": role.name if role else ""})
+                                   "role": ", ".join(r.name for r in roles)})
     return UserResponse(
         id=user.id, username=user.username, full_name=user.full_name, email=user.email,
         workgroups=user.workgroups_list, is_active=user.is_active, is_admin=False,
         auth_provider=user.auth_provider, mfa_required=False, is_service_account=True,
         permissions=user.permissions_dict or None, pov_env_ids=[],
-        role_id=user.role_id or "", role_name=role.name if role else "",
+        **_role_fields(db, user),
     )
 
 
