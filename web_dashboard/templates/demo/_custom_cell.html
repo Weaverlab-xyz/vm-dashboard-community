@@ -1,0 +1,223 @@
+{#
+  The Demo hub's Custom cell panel (x-data="demoCustomPanel()", static/js/demo_cells.js).
+
+  A custom cell is a COMPOSITION -- a k8s cluster, a database, some VMs, each on its own
+  cloud -- launched from a blueprint a Cell Builder wrote (api/custom_cell). Three cards:
+  launch one, the ones running in your workstreams, and (only with demo_blueprints:write)
+  the blueprints themselves. The `booking` argument is the hub's own "when, and for how
+  long" card, passed in so this partial does not import index.html.
+#}
+{% macro custom_cell_panel(booking) %}
+<p x-show="loadError" x-cloak class="text-sm text-red-700" x-text="loadError"></p>
+<div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+  <div>
+    {{ booking() }}
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-3 self-start">
+      <h3 class="text-sm font-semibold text-gray-700">Launch a custom cell</h3>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Blueprint <span class="text-red-500">*</span></label>
+        <select x-model="launch.blueprint_id"
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <option value="">— choose a blueprint —</option>
+          <template x-for="bp in blueprints" :key="bp.id">
+            <option :value="bp.id" x-text="bp.name + ' (' + bp.summary.join(', ') + ')'"></option>
+          </template>
+        </select>
+        <p x-show="!blueprints.length" class="text-xs text-gray-400 mt-1">
+          No blueprints yet. A Cell Builder writes them below.
+        </p>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Cell name <span class="text-red-500">*</span></label>
+          <input type="text" x-model="launch.name" placeholder="acme-demo"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <p class="text-xs text-gray-400 mt-1">Prefixes every resource, e.g. acme-demo-web-1.</p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Workstream <span class="text-red-500">*</span></label>
+          <select x-model="launch.workgroup"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">— choose —</option>
+            <template x-for="wg in availableWorkgroups" :key="wg">
+              <option :value="wg" x-text="wg"></option>
+            </template>
+          </select>
+        </div>
+      </div>
+      <p class="text-xs text-red-600" x-show="launchProblem()" x-text="launchProblem()"></p>
+      <button type="button" @click="launchCell()" :disabled="busy || !!launchProblem()"
+              class="w-full bg-blue-600 text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
+        <span x-text="busy ? 'Launching…' : (runAt || changeWindowId ? 'Book the cell' : 'Launch now')"></span>
+      </button>
+      <p class="text-xs text-gray-400">
+        Each resource is built through its own cloud's deploy path, as you. The blueprint's
+        suspend schedule applies to the whole cell: VMs stop, clusters scale to zero and
+        databases stop.
+      </p>
+    </div>
+  </div>
+
+  <div class="space-y-6">
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+      <div class="flex items-center justify-between">
+        <h3 class="text-sm font-semibold text-gray-700">Custom cells</h3>
+        <button type="button" @click="loadCells()" class="text-xs text-blue-700 hover:underline">Refresh</button>
+      </div>
+      <p x-show="!cells.length" class="text-sm text-gray-400 mt-3">None in your workstreams.</p>
+      <div class="space-y-2 mt-3">
+        <template x-for="c in cells" :key="c.id">
+          <div class="border border-gray-200 rounded-lg p-3">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <span class="font-mono text-sm text-gray-800" x-text="c.name"></span>
+                <span class="px-2 py-0.5 rounded-full text-xs font-medium ml-2"
+                      :class="customStatusClass(c.status)" x-text="c.status"></span>
+                <div class="text-xs text-gray-500" x-text="c.blueprint_name + ' · ' + c.workgroup"></div>
+                <div class="text-xs text-gray-500" x-show="c.scheduled_for" x-cloak>
+                  builds <span x-text="customStamp(c.scheduled_for)"></span></div>
+                <div class="text-xs text-gray-500" x-show="c.end_at" x-cloak>
+                  destroys <span x-text="customStamp(c.end_at)"></span></div>
+              </div>
+              <div class="flex flex-wrap items-center gap-2">
+                <button type="button" @click="showCell(c)" class="text-xs text-blue-700 hover:underline"
+                        x-text="openCell && openCell.id === c.id ? 'Hide' : 'Members'"></button>
+                <button type="button" x-show="c.status === 'active'" @click="cellAction(c, 'stop')"
+                        class="text-xs text-blue-700 hover:underline">Suspend</button>
+                <button type="button" x-show="c.status === 'suspended'" @click="cellAction(c, 'start')"
+                        class="text-xs text-blue-700 hover:underline">Resume</button>
+                <button type="button" x-show="!['destroying', 'destroyed'].includes(c.status)"
+                        @click="cellAction(c, 'end')" class="text-xs text-blue-700 hover:underline">Change end</button>
+                <button type="button" x-show="canDelete() && c.status !== 'destroying'"
+                        @click="cellAction(c, 'destroy')"
+                        class="text-xs px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded-md transition">Destroy</button>
+              </div>
+            </div>
+            <p class="text-xs text-red-600 mt-1" x-show="c.status_message" x-text="c.status_message"></p>
+            <template x-if="openCell && openCell.id === c.id">
+              <table class="min-w-full text-sm mt-2">
+                <tbody>
+                  <template x-for="m in openCell.members" :key="m.id">
+                    <tr class="border-b border-gray-100 last:border-0">
+                      <td class="py-1 pr-3 font-mono text-xs" x-text="m.label"></td>
+                      <td class="py-1 pr-3 text-xs uppercase text-gray-600" x-text="m.kind + ' · ' + m.cloud"></td>
+                      <td class="py-1 pr-3 text-xs" x-text="m.status + (m.power_state ? ' · ' + m.power_state : '')"></td>
+                      <td class="py-1 text-xs text-red-600" x-text="m.last_error"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </template>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- Blueprints: authoring is demo_blueprints:write (the Cell Builder role). -->
+    <div x-show="canAuthor()" x-cloak class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-3">
+      <div class="flex items-center justify-between">
+        <h3 class="text-sm font-semibold text-gray-700">Blueprints</h3>
+        <button type="button" x-show="!editor" @click="newBlueprint()" class="text-xs text-blue-700 hover:underline">New blueprint</button>
+      </div>
+      <div x-show="!editor" class="space-y-2">
+        <template x-for="bp in blueprints" :key="bp.id">
+          <div class="flex items-center justify-between text-sm">
+            <span><span class="font-medium text-gray-800" x-text="bp.name"></span>
+              <span class="text-xs text-gray-500 ml-2" x-text="bp.summary.join(', ')"></span></span>
+            <span class="flex items-center gap-2">
+              <button type="button" @click="editBlueprint(bp)" class="text-xs text-blue-700 hover:underline">Edit</button>
+              <button type="button" @click="deleteBlueprint(bp)" class="text-xs text-red-600 hover:underline">Delete</button>
+            </span>
+          </div>
+        </template>
+      </div>
+
+      <template x-if="editor">
+        <div class="space-y-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Name <span class="text-red-500">*</span></label>
+              <input type="text" x-model="editor.name"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Workstream</label>
+              <select x-model="editor.workgroup"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="">Everyone who can launch</option>
+                <template x-for="wg in availableWorkgroups" :key="wg">
+                  <option :value="wg" x-text="wg"></option>
+                </template>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+            <input type="text" x-model="editor.description"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Default lifetime (hours)</label>
+              <input type="number" min="1" step="0.5" x-model="editor.ttl_hours" placeholder="policy default"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Suspend / resume (HH:MM)</label>
+              <div class="flex items-center gap-2">
+                <input type="text" x-model="editor.suspend_at_local" placeholder="19:00"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <input type="text" x-model="editor.resume_at_local" placeholder="07:00"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+              </div>
+              <input type="text" x-model="editor.schedule_timezone" placeholder="Time zone, e.g. America/Chicago"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mt-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+          </div>
+
+          <template x-for="(item, idx) in editor.items" :key="idx">
+            <div class="border border-gray-200 rounded-lg p-3 space-y-2">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <select x-model="item.kind" @change="reseedSpec(item)"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="vm">VM</option><option value="k8s">Kubernetes cluster</option>
+                  <option value="database">Database</option>
+                </select>
+                <select x-model="item.cloud" @change="reseedSpec(item)"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="gcp">GCP</option><option value="aws">AWS</option><option value="azure">Azure</option>
+                </select>
+                <input type="text" x-model="item.label" placeholder="label (web, db, gke)"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                <input type="text" x-model="item.region" :placeholder="item.kind === 'vm' ? 'region (GCE uses the zone in the spec)' : 'region'"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+              </div>
+              <div x-show="item.kind === 'vm'" class="flex items-center gap-2 text-sm text-gray-700">
+                How many <input type="number" min="1" max="10" x-model="item.count"
+                                class="w-24 border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              </div>
+              <textarea x-model="item.specText" rows="5"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea>
+              <div class="flex items-center justify-between">
+                <p class="text-xs text-gray-400">The cloud's own create fields, minus the name and workstream.</p>
+                <button type="button" @click="removeItem(idx)" class="text-xs text-red-600 hover:underline">Remove</button>
+              </div>
+            </div>
+          </template>
+          <div class="flex flex-wrap gap-2">
+            <button type="button" @click="addItem('vm', 'gcp')" class="px-3 py-1.5 text-sm border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50">+ VM</button>
+            <button type="button" @click="addItem('k8s', 'gcp')" class="px-3 py-1.5 text-sm border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50">+ K8s cluster</button>
+            <button type="button" @click="addItem('database', 'gcp')" class="px-3 py-1.5 text-sm border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50">+ Database</button>
+          </div>
+          <p class="text-xs text-red-600" x-show="editorError" x-text="editorError"></p>
+          <div class="flex justify-end gap-2">
+            <button type="button" @click="editor = null" class="px-3 py-1.5 text-sm border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50">Cancel</button>
+            <button type="button" @click="saveBlueprint()"
+                    class="bg-blue-600 text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50">Save blueprint</button>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+</div>
+{% endmacro %}

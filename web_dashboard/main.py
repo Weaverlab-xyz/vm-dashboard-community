@@ -2117,6 +2117,9 @@ async def demo_page(request: Request):
         # its host is any VM the dashboard deployed. The tab's /options call lists what
         # else is missing (the MCP server, a SPIRE trust domain).
         "agent": feature_flags.enabled("agentcell_enabled"),
+        # Custom cells (api/custom_cell): offered once any cloud is configured. Each item
+        # is built through its own cloud's path, which checks that cloud when it runs.
+        "custom": any(ready.values()),
     }
     build_panels = [key for key, ok in offered.items() if ok]
     return templates.TemplateResponse(request, "demo/index.html", {

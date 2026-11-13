@@ -6,12 +6,15 @@
 instance. It has three tabs:
 
 - **Cells** lists every demo cell you can see: [OT](ot-demo-cell.md),
-  [Network](net-demo-cell.md) and [Agent](agent-demo-cell.md). Each shows its state, its
+  [Network](net-demo-cell.md), [Agent](agent-demo-cell.md) and
+  [Custom](custom-demo-cell.md). Each shows its state, its
   wiring (or, for an agent, whether its token is still live), its workstream, and a
   **Manage** link that opens the cell's panel on **Build**. A cell type whose preview is
   off reads *Not available here* rather than zero.
 - **Build** deploys, probes, re-wires and destroys OT cells (one panel with a GCP / AWS / Azure toggle) and network
-  cells, and mints and revokes agent cells. Each panel is the **same form** the cloud
+  cells, mints and revokes agent cells, and launches **custom cells** from a blueprint
+  (a **Cell Builder** writes the blueprints on the same panel; see
+  [Custom Demo Cell](custom-demo-cell.md)). Each panel is the **same form** the cloud
   page's tab or the Workload Lab's Agent tab shows, so a cell built here is identical to
   one built there. A panel appears only where that page's tab would: the cell's feature on,
   and for OT and network cells the cloud's credentials present. The tab shows to anyone

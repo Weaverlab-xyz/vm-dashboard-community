@@ -517,6 +517,7 @@ _TITLE_OVERRIDES = {
     "profiles/demo/ot-demo-cell":        "OT Demo Cell",
     "profiles/demo/net-demo-cell":       "Network Demo Cell",
     "profiles/demo/agent-demo-cell":     "Agent Demo Cell",
+    "profiles/demo/custom-demo-cell":    "Custom Demo Cell",
     "profiles/pov/first-pov":            "Your first POV, end to end",
     "profiles/pov/standing-one-up":      "Standing up a POV instance",
     "profiles/pov/public-cloud":         "Running POVs on a public cloud",
