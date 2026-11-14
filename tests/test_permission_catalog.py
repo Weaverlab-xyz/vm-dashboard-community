@@ -136,6 +136,10 @@ def test_the_catalog_and_its_list_form_agree():
 _NAV_EXEMPT = {
     # Gating the home page locks every user out of the dashboard.
     "dashboard": "aggregate landing page",
+    # A per-role landing page every signed-in user has. Curation only: each panel is
+    # filtered by the reader that owns its data (inventory:read, the caller's own jobs),
+    # so a scope on the page itself would gate nothing those do not already.
+    "workspace": "per-role landing page; each panel keeps its own data's gate",
     # ONE nav link over FOUR tabs, and they do not share a gate -- which is why this sits
     # here rather than in _NAV_SCOPE below.
     #

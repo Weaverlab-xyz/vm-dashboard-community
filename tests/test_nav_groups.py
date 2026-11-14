@@ -33,7 +33,8 @@ _APP_JS = os.path.join(_ROOT, "web_dashboard", "static", "js", "app.js")
 
 # `demo` sits where `pov` does, for the same reason: each is the landing page its profile
 # exists for, and the two can never render on one instance (feature_flags._PROFILE_PAGES).
-_TOP_LEVEL = {"dashboard", "pov", "pov_templates", "demo"}
+# `workspace` sits beside `demo`: the estate's other landing page, one per role.
+_TOP_LEVEL = {"dashboard", "pov", "pov_templates", "demo", "workspace"}
 _GROUPS = ("hypervisors", "clouds", "cloud_services", "preview", "operations", "admin")
 
 

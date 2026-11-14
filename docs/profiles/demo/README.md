@@ -25,11 +25,16 @@ rotating its credential and reaping it are the same pages whether the estate is 
 production. This folder holds only the material that exists *because* somebody is
 presenting: the per-role narratives and the purpose-built demo environments. Skip it.
 
+The one exception is the [Workspace](workspace.md): the **Workspace** page in the menu, a
+landing page per role (Cloud Ops, DevOps, DBA, ...) with a getting-started checklist that
+ticks itself off as you work. It exists for exactly this reader.
+
 ## Pages
 
 | Page | What's in it |
 |---|---|
 | [Demo hub](demo-hub.md) | The **Demo** page: every demo cell you can see and every page a demo runs from, plus the **Demo Presenter** role that runs cells without general cloud deploy rights. |
+| [Workspace](workspace.md) | The **Workspace** page: one landing page per role for the people who do the job — a getting-started checklist ticked by their own jobs, their resources, and the pages the role uses — and how to onboard a Cloud Ops or DevOps user onto it. |
 | [Personas](personas/README.md) | One page per role — what that person owns, the four-layer story in their language, and the use cases to run for them. Estate instances only: a POV instance has no focus axis. |
 | [OT Demo Cell](ot-demo-cell.md) | A simulated OT/ICS plant cell — PLC simulators and a web SCADA/HMI in an egress-less subnet, reached only through a Gateway. The air gap *is* the demo. |
 | [OT protocol clients on Windows](ot-demo-cell/ot-protocol-clients.md) | Setting up a rep machine to read that cell: the four Python clients, a runnable snippet per protocol, and why DNP3 answers nothing. |

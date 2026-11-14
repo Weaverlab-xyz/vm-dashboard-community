@@ -1,0 +1,377 @@
+{% extends "base.html" %}
+{% from "partials/tab_bar.html" import tab_bar %}
+{% block title %}Workspace{% endblock %}
+
+{#
+  The Workspace: one persona's landing page, for someone who DOES the role.
+
+  The estate instance's third hub, beside /demo (the presenter's) and /use-cases (the
+  scripts). Three tabs. START HERE is a getting-started checklist that ticks itself off from
+  the user's own completed jobs (services/workspaces.step_done). RESOURCES is what they can
+  see that belongs to the role, through the inventory page's own reader, and their recent
+  jobs. TOOLKIT is every page the role works from, resolved ready / needs_flag / masked by
+  the same reader the Demo launchpad and Use cases page use.
+
+  CURATION ONLY. Any signed-in user may open any role's workspace -- the switcher in the
+  header writes the same `persona` cookie as the dashboard lens, so the nav pins and the
+  dashboard follow, and nothing anywhere is hidden by it.
+
+  A MASKED link carries no href, for the reason the Use cases page gives: a link the
+  client merely styles as inert is one middle-click from a 404.
+#}
+
+{% block content %}
+{% set tabs = [
+  {'slug': 'start',     'label': 'Start here'},
+  {'slug': 'resources', 'label': 'Your resources'},
+  {'slug': 'toolkit',   'label': 'Toolkit'},
+] %}
+<div x-data='workspaceHub({{ tabs | map(attribute="slug") | list | tojson }})' class="space-y-6">
+
+  <div class="flex flex-wrap items-start justify-between gap-4">
+    <div class="min-w-0">
+      <h1 class="text-2xl font-semibold text-gray-900">
+        Workspace<span x-show="ws.label" x-cloak class="text-gray-400 font-normal"> · <span x-text="ws.label"></span></span>
+      </h1>
+      <p class="text-sm text-gray-500 mt-1 max-w-3xl"
+         x-text="ws.headline || 'Your role\'s landing page: where to start, what you run, and the pages you work from.'"></p>
+    </div>
+    <div class="flex items-center gap-2 shrink-0">
+      <!-- The switcher. Lists every role; picking one is the dashboard lens's pick. -->
+      <div class="relative" x-show="(ws.options || []).length" x-cloak @keydown.escape="switchOpen = false">
+        <button type="button" @click="switchOpen = !switchOpen" :aria-expanded="switchOpen"
+                class="inline-flex items-center gap-2 text-sm border border-gray-300 bg-white hover:bg-gray-50 text-gray-700 px-3 py-1.5 rounded-md">
+          <span x-text="ws.label ? 'Switch role' : 'Choose a role'"></span>
+          <span class="text-xs text-gray-400" x-show="sourceLabel()" x-text="'· ' + sourceLabel()"></span>
+        </button>
+        <div x-show="switchOpen" x-cloak @click.outside="switchOpen = false"
+             class="absolute right-0 mt-1 w-72 max-w-[calc(100vw-2rem)] bg-white border border-gray-200 rounded-lg shadow-lg z-30 py-1">
+          <p class="px-3 py-2 text-xs text-gray-400 border-b border-gray-100">
+            Also changes what the dashboard and the nav lead with. Nothing is hidden.
+          </p>
+          <template x-for="o in roleOptions()" :key="o.key">
+            <button type="button" @click="pick(o.key)"
+                    class="w-full text-left px-3 py-2 text-sm hover:bg-gray-50"
+                    :class="o.key === ws.persona ? 'text-blue-700 font-medium' : 'text-gray-700'">
+              <span x-text="o.label"></span>
+              <span x-show="o.key === ws.persona" class="text-blue-400">✓</span>
+            </button>
+          </template>
+          <div x-show="ws.source === 'cookie' || ws.source === 'url'" class="border-t border-gray-100 mt-1 pt-1">
+            <button type="button" @click="useAssigned()"
+                    class="w-full text-left px-3 py-2 text-xs text-gray-500 hover:bg-gray-50">
+              Use the role assigned to me
+            </button>
+          </div>
+        </div>
+      </div>
+      <button @click="load()" type="button" :disabled="loading"
+              class="px-3 py-1.5 text-sm border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50 disabled:opacity-50">
+        <span x-text="loading ? 'Refreshing…' : 'Refresh'"></span>
+      </button>
+    </div>
+  </div>
+
+  <div x-show="error" x-cloak class="bg-white rounded-xl shadow-sm border border-red-200 p-4">
+    <p class="text-sm text-red-700" x-text="error"></p>
+  </div>
+
+  <div x-show="loading && !loaded" class="text-sm text-gray-400">Loading…</div>
+
+  <!-- ── No role yet: the chooser ───────────────────────────────────────── -->
+  <div x-show="loaded && !ws.persona" x-cloak class="space-y-4">
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+      <h2 class="text-lg font-semibold text-gray-900">Pick your role</h2>
+      <p class="text-sm text-gray-500 mt-1">
+        Your workspace gives you a getting-started checklist, the resources you look after,
+        and the pages your role works from. You can switch at any time.
+      </p>
+      <p x-show="$store.auth && $store.auth.isAdmin" x-cloak class="text-xs text-gray-500 mt-2">
+        To have new users land in the right workspace, set a focus on the user or their
+        identity-provider group in <a href="/rbac" class="text-blue-700 hover:underline">RBAC</a>.
+        <a href="/docs/profiles/demo/workspace" class="text-blue-700 hover:underline">How workspaces work</a>
+      </p>
+    </div>
+    <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <template x-for="c in ws.chooser || []" :key="c.key">
+        <button type="button" @click="pick(c.key)"
+                class="text-left bg-white rounded-xl shadow-sm border border-gray-200 hover:border-blue-400 p-4">
+          <span class="font-medium text-blue-700" x-text="c.label"></span>
+          <p class="text-sm text-gray-500 mt-1" x-text="c.headline"></p>
+        </button>
+      </template>
+    </div>
+  </div>
+
+  <div x-show="loaded && ws.persona" x-cloak class="space-y-6">
+  {{ tab_bar(tabs, "Workspace sections", class="") }}
+
+  <!-- ── Start here ──────────────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'start'" x-cloak role="tabpanel" class="space-y-4">
+    <div x-show="prog().total" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+      <div class="flex items-baseline justify-between gap-3">
+        <h2 class="text-sm font-semibold text-gray-700">Getting started</h2>
+        <span class="text-sm text-gray-500"
+              x-text="prog().done + ' of ' + prog().total + ' done'"></span>
+      </div>
+      <div class="mt-2 h-2 rounded-full bg-gray-100 overflow-hidden"
+           role="progressbar" :aria-valuenow="prog().done" aria-valuemin="0" :aria-valuemax="prog().total">
+        <div class="h-2 bg-green-500 rounded-full transition-all" :style="'width:' + progressPct() + '%'"></div>
+      </div>
+      <p x-show="prog().total && prog().done === prog().total" class="text-sm text-green-700 mt-2">
+        All done. The Toolkit tab has everything else your role uses.
+      </p>
+    </div>
+
+    <ol class="space-y-3">
+      <template x-for="(s, i) in ws.steps || []" :key="s.id">
+        <li class="bg-white rounded-xl shadow-sm border p-4 flex gap-3"
+            :class="s.state === 'ready' ? 'border-gray-200' : 'border-dashed border-gray-300'">
+          <span class="shrink-0 mt-0.5 h-6 w-6 rounded-full flex items-center justify-center text-xs font-semibold"
+                :class="s.done ? 'bg-green-100 text-green-700' : (s.checkable ? 'bg-gray-100 text-gray-600' : 'bg-blue-50 text-blue-600')"
+                :aria-label="s.done ? 'Done' : (s.checkable ? 'Not done yet' : 'Worth knowing')">
+            <span x-text="s.done ? '✓' : (s.checkable ? (i + 1) : '•')"></span>
+          </span>
+          <div class="min-w-0 flex-1">
+            <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+              <template x-if="s.target">
+                <a :href="s.target" class="font-medium hover:underline"
+                   :class="s.done ? 'text-gray-500 line-through decoration-gray-300' : 'text-blue-700'"
+                   x-text="s.title"></a>
+              </template>
+              <template x-if="!s.target">
+                <span class="font-medium text-gray-500" x-text="s.title"></span>
+              </template>
+              <a x-show="s.docs" :href="s.docs" class="text-xs text-gray-500 hover:underline">Guide →</a>
+            </div>
+            <p class="text-sm text-gray-500 mt-1" x-text="s.summary"></p>
+            <p x-show="s.state === 'needs_flag'" class="text-xs text-amber-700 mt-2">
+              Needs <span x-text="(s.needs || []).join(', ')"></span>
+              <span x-show="$store.auth && $store.auth.isAdmin"> — <a :href="s.settings_link" class="underline">Settings</a></span>
+              <span x-show="!($store.auth && $store.auth.isAdmin)"> — ask an administrator to turn it on.</span>
+            </p>
+            <p x-show="s.state === 'masked'" class="text-xs text-gray-500 mt-2">
+              Not available on this instance.
+            </p>
+          </div>
+        </li>
+      </template>
+    </ol>
+  </div>
+
+  <!-- ── Your resources ──────────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'resources'" x-cloak role="tabpanel" class="space-y-4">
+    <section x-show="ws.resources_state !== 'none'" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+      <div class="flex flex-wrap items-baseline justify-between gap-3">
+        <h2 class="text-lg font-semibold text-gray-900">Resources</h2>
+        <a x-show="ws.resources_total > (ws.resources || []).length" :href="ws.resources_link"
+           class="text-sm text-blue-700 hover:underline"
+           x-text="'All ' + ws.resources_total + ' in Inventory →'"></a>
+      </div>
+      <p x-show="ws.resources_state === 'forbidden'" class="mt-3 text-sm text-gray-500">
+        You do not have permission to see the inventory.
+      </p>
+      <p x-show="ws.resources_state === 'ok' && !(ws.resources || []).length" class="mt-3 text-sm text-gray-500">
+        Nothing in your workstreams yet. <button type="button" class="text-blue-700 hover:underline"
+        @click="select('start')">Start here</button> walks you through your first one.
+      </p>
+      <div x-show="(ws.resources || []).length" class="mt-4 overflow-x-auto">
+        <table class="min-w-full text-sm">
+          <thead>
+            <tr class="text-left text-xs uppercase tracking-wide text-gray-500 border-b border-gray-200">
+              <th class="py-2 pr-4 font-medium">Name</th>
+              <th class="py-2 pr-4 font-medium">Where</th>
+              <th class="py-2 pr-4 font-medium">Kind</th>
+              <th class="py-2 pr-4 font-medium">Workstream</th>
+              <th class="py-2 pr-4 font-medium">Ends</th>
+              <th class="py-2 font-medium"><span class="sr-only">Manage</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="r in ws.resources || []" :key="r.id">
+              <tr class="border-b border-gray-100 last:border-0">
+                <td class="py-2 pr-4 font-medium text-gray-900" x-text="r.name || r.id"></td>
+                <td class="py-2 pr-4 text-gray-600">
+                  <span class="uppercase" x-text="r.cloud || '—'"></span>
+                  <span class="text-gray-400" x-show="r.region" x-text="' · ' + r.region"></span>
+                </td>
+                <td class="py-2 pr-4 text-gray-600" x-text="r.kind"></td>
+                <td class="py-2 pr-4 text-gray-600" x-text="r.workgroup || '—'"></td>
+                <td class="py-2 pr-4 text-gray-600 text-xs" x-text="r.expires_at ? stamp(r.expires_at) : 'no end date'"></td>
+                <td class="py-2 text-right"><a :href="r.href" class="text-blue-700 hover:underline">Manage</a></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+      <div class="flex flex-wrap items-baseline justify-between gap-3">
+        <h2 class="text-lg font-semibold text-gray-900">Your recent jobs</h2>
+        <a href="/jobs" class="text-sm text-blue-700 hover:underline">All jobs →</a>
+      </div>
+      <p x-show="!(ws.recent_jobs || []).length" class="mt-3 text-sm text-gray-500">
+        You have not run anything for this role yet.
+      </p>
+      <ul x-show="(ws.recent_jobs || []).length" class="mt-3 divide-y divide-gray-100">
+        <template x-for="j in ws.recent_jobs || []" :key="j.id">
+          <li class="py-2 flex flex-wrap items-center justify-between gap-2 text-sm">
+            <a :href="j.href" class="font-mono text-xs text-blue-700 hover:underline" x-text="j.job_type"></a>
+            <span class="flex items-center gap-3">
+              <span class="text-xs text-gray-400" x-text="stamp(j.created_at)"></span>
+              <span class="px-2 py-0.5 rounded-full text-xs font-medium" :class="statusClass(j.status)" x-text="j.status"></span>
+            </span>
+          </li>
+        </template>
+      </ul>
+    </section>
+  </div>
+
+  <!-- ── Toolkit ─────────────────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'toolkit'" x-cloak role="tabpanel" class="space-y-6">
+    <template x-for="group in ws.toolkit || []" :key="group.label">
+      <section>
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-gray-500 mb-2" x-text="group.label"></h2>
+        <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <template x-for="link in group.links" :key="link.id">
+            <div class="bg-white rounded-xl shadow-sm border p-4"
+                 :class="link.state === 'ready' ? 'border-gray-200' : 'border-dashed border-gray-300'">
+              <template x-if="link.target">
+                <a :href="link.target" class="font-medium text-blue-700 hover:underline" x-text="link.title"></a>
+              </template>
+              <template x-if="!link.target">
+                <span class="font-medium text-gray-500" x-text="link.title"></span>
+              </template>
+              <p class="text-sm text-gray-500 mt-1" x-text="link.summary"></p>
+              <p x-show="link.state === 'needs_flag'" class="text-xs text-amber-700 mt-2">
+                Needs <span x-text="link.needs.join(', ')"></span>
+              </p>
+              <p x-show="link.state === 'masked'" class="text-xs text-gray-500 mt-2">
+                Not available on this instance.
+              </p>
+            </div>
+          </template>
+        </div>
+      </section>
+    </template>
+
+    <section x-show="(ws.guides || []).length">
+      <div class="flex items-baseline justify-between mb-2">
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-gray-500">What this role can show</h2>
+        <a href="/use-cases" class="text-xs text-blue-700 hover:underline">All use cases →</a>
+      </div>
+      <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <template x-for="g in ws.guides || []" :key="g.id">
+          <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+            <template x-if="g.target">
+              <a :href="g.target" class="font-medium text-blue-700 hover:underline" x-text="g.title"></a>
+            </template>
+            <template x-if="!g.target">
+              <span class="font-medium text-gray-500" x-text="g.title"></span>
+            </template>
+            <p class="text-sm text-gray-500 mt-1" x-text="g.summary"></p>
+            <a x-show="g.docs" :href="g.docs" class="text-xs text-gray-500 hover:underline mt-2 inline-block">Guide →</a>
+          </div>
+        </template>
+      </div>
+    </section>
+
+    <p x-show="(ws.docs || []).length" class="text-sm text-gray-500">
+      The story behind this role:
+      <template x-for="d in ws.docs || []" :key="d">
+        <a :href="d" class="text-blue-700 hover:underline" x-text="'role guide'"></a>
+      </template>
+    </p>
+  </div>
+  </div>
+</div>
+
+<script>
+function workspaceHub(tabSlugs) {
+  return {
+    // The shared tab contract: select(), pickTab(), tabSlugs, activeTab (static/js/app.js).
+    ...tabState(tabSlugs),
+    loading: false,
+    loaded: false,
+    error: '',
+    switchOpen: false,
+    ws: {},
+
+    init() {
+      this.pickTab();
+      this.load();
+    },
+
+    async load() {
+      this.loading = true;
+      this.error = '';
+      try {
+        // A shared ?persona= link opens that role's workspace for this render only, as
+        // it does on the dashboard; the server validates it against the registry.
+        const asked = new URL(window.location.href).searchParams.get('persona') || '';
+        const q = asked ? '?persona=' + encodeURIComponent(asked) : '';
+        this.ws = await API.get('/api/workspace/summary' + q) || {};
+        this.loaded = true;
+      } catch (e) {
+        this.error = (e && e.message) || 'Could not load your workspace.';
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    // Every role but "no focus": a workspace is always somebody's.
+    roleOptions() {
+      return (this.ws.options || []).filter(o => o.key);
+    },
+
+    // The dashboard lens's own cookie, so one pick moves the nav, the dashboard and this
+    // page together. A reload for the same reason the lens gives: the nav is server-rendered.
+    pick(key) {
+      this.switchOpen = false;
+      document.cookie = `persona=${encodeURIComponent(key || '')}; path=/; max-age=31536000; samesite=lax`;
+      const u = new URL(window.location.href);
+      u.searchParams.delete('persona');
+      window.location.replace(u.toString());
+    },
+
+    useAssigned() {
+      this.switchOpen = false;
+      document.cookie = 'persona=; path=/; max-age=0; samesite=lax';
+      const u = new URL(window.location.href);
+      u.searchParams.delete('persona');
+      window.location.replace(u.toString());
+    },
+
+    sourceLabel() {
+      return { cookie: 'your choice', url: 'from the URL', user: 'assigned to you',
+               group: 'from your group', default: 'instance default' }[this.ws.source] || '';
+    },
+
+    // {done, total}; zeros before the first load and for the chooser, which has none.
+    prog() {
+      return this.ws.progress || { done: 0, total: 0 };
+    },
+
+    progressPct() {
+      const p = this.prog();
+      return p.total ? Math.round(100 * p.done / p.total) : 0;
+    },
+
+    // ISO from the server is naive UTC; show it in the viewer's zone.
+    stamp(iso) {
+      if (!iso) return '';
+      const d = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + 'Z');
+      return isNaN(d) ? iso : d.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+    },
+
+    statusClass(status) {
+      if (status === 'completed' || status === 'active') return 'bg-green-100 text-green-800';
+      if (status === 'failed') return 'bg-red-100 text-red-800';
+      if (['pending', 'queued', 'running'].includes(status)) return 'bg-amber-100 text-amber-800';
+      return 'bg-gray-100 text-gray-700';
+    },
+  };
+}
+</script>
+{% endblock %}

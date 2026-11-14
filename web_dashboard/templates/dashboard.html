@@ -268,6 +268,52 @@
     <a href="/health" class="text-sm text-blue-600 hover:underline shrink-0">Open Health</a>
   </div>
 
+  <!-- Your workspace: the nudge from the landing page to the role's own page.
+
+       Login still lands here; this band is how a new Cloud Ops or DevOps user finds the
+       page that tells them where to start. It renders only where /workspace exists --
+       `workspace_pages`, the profile's answer, so never on a POV instance -- and it says
+       one of two things: your role and how far through its getting-started steps you are,
+       or "pick your role". Dismissible per browser; once every step is done it shrinks to
+       a single line rather than disappearing, because it is still the way to the page. -->
+  <template x-if="features.workspace_pages">
+  <div x-show="workspace.loaded && !workspace.dismissed" x-cloak
+       class="bg-white rounded-xl shadow-sm border border-blue-200 mb-8"
+       :class="workspaceComplete() ? 'px-5 py-3' : 'p-5'">
+    <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div class="min-w-0">
+        <template x-if="workspace.persona">
+          <div>
+            <p class="text-sm font-semibold text-gray-900">
+              Your workspace: <span x-text="workspace.label"></span>
+            </p>
+            <p x-show="!workspaceComplete()" class="text-sm text-gray-500 mt-1"
+               x-text="workspace.progress && workspace.progress.total
+                 ? workspace.progress.done + ' of ' + workspace.progress.total + ' getting-started steps done. Manage your resources and pick up where you left off.'
+                 : 'Where to start, the resources you look after, and the pages your role works from.'"></p>
+          </div>
+        </template>
+        <template x-if="!workspace.persona">
+          <div>
+            <p class="text-sm font-semibold text-gray-900">Get a workspace for your role</p>
+            <p class="text-sm text-gray-500 mt-1">
+              Pick Cloud Ops, DevOps or another role for a getting-started checklist and the
+              pages you work from.
+            </p>
+          </div>
+        </template>
+      </div>
+      <div class="flex items-center gap-3 shrink-0">
+        <a href="/workspace"
+           class="inline-block bg-blue-700 hover:bg-blue-800 text-white text-sm font-medium px-4 py-2 rounded-lg transition"
+           x-text="workspace.persona ? 'Open workspace' : 'Choose your role'"></a>
+        <button type="button" @click="dismissWorkspace()"
+                class="text-xs text-gray-400 hover:text-gray-700" title="Hide this on this browser">Dismiss</button>
+      </div>
+    </div>
+  </div>
+  </template>
+
   <!-- The band below is absent on a POV instance, and by a different axis than the one
        its own comment describes.
 
@@ -483,6 +529,9 @@
       persona: { persona: '', label: '', blurb: '', source: 'none',
                  section_order: [], tile_emphasis: [], quick_deploy: [], options: [] },
       lensOpen: false,
+
+      // The workspace band, from /api/workspace/summary. Loaded only where the page exists.
+      workspace: { loaded: false, dismissed: false, persona: '', label: '', progress: null },
 
       // Which install profile this is, read from /api/features rather than from
       // /api/persona (which also carries it) because `visibleTiles` below already
@@ -726,6 +775,8 @@
         }
 
         await Promise.all([this.loadFeatures(), this.loadPersona()]);
+        // Not awaited: the band is a nudge, and the tiles must not wait on it.
+        this.loadWorkspace();
         // ONE call for almost every tile. This used to be four un-awaited section
         // fan-outs — each a Promise.all over its tiles — which put ~22 requests in flight
         // simultaneously, every one of them holding a pooled connection for its whole
@@ -825,6 +876,31 @@
           // ordering field undefined and take rankBy() with it.
           this.persona = Object.assign({}, this.persona, d || {});
         } catch (e) { /* neutral default stands */ }
+      },
+
+      // Best-effort like loadPersona: a failure leaves the band hidden, never the page.
+      async loadWorkspace() {
+        if (!this.features.workspace_pages) return;
+        try {
+          this.workspace.dismissed = localStorage.getItem('workspace_band_dismissed') === '1';
+        } catch (e) { /* storage blocked: show the band */ }
+        try {
+          const d = await API.get('/api/workspace/summary');
+          this.workspace = Object.assign({}, this.workspace, {
+            loaded: true, persona: d.persona || '', label: d.label || '',
+            progress: d.progress || null,
+          });
+        } catch (e) { /* band stays hidden */ }
+      },
+
+      workspaceComplete() {
+        const p = this.workspace.progress;
+        return !!(this.workspace.persona && p && p.total && p.done >= p.total);
+      },
+
+      dismissWorkspace() {
+        this.workspace.dismissed = true;
+        try { localStorage.setItem('workspace_band_dismissed', '1'); } catch (e) { /* session only */ }
       },
 
       // Writes the cookie services/personas.resolve() reads, then reloads.

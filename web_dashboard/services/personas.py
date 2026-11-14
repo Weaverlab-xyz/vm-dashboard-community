@@ -248,7 +248,8 @@ _CLOUDOPS = Persona(
           "— onboarded the moment it exists, and gone when it does not.",
     section_order=("cloud", "managed", "overview", "containers", "hypervisors"),
     tile_emphasis=("aws_instances", "azure_vms", "gcp_instances", "registered_images"),
-    nav_pins=("dashboard", "aws", "azure", "gcp", "images", "inventory", "jobs"),
+    nav_pins=("dashboard", "workspace",
+              "aws", "azure", "gcp", "images", "inventory", "jobs"),
     quick_deploy=("ec2", "azure_vm", "gce", "oci"),
     docs=("profiles/demo/personas/cloudops",),
     preset_flags=("pra_enabled", "password_safe_enabled"),
@@ -320,7 +321,8 @@ _DEVOPS = Persona(
           "run time, scoped to the run, and gone afterwards.",
     section_order=("managed", "containers", "cloud", "overview", "hypervisors"),
     tile_emphasis=("k8s_clusters", "cloud_run_jobs", "ecs_tasks"),
-    nav_pins=("dashboard", "config_mgmt", "secrets", "functions", "jobs", "inventory"),
+    nav_pins=("dashboard", "workspace",
+              "config_mgmt", "secrets", "functions", "jobs", "inventory"),
     quick_deploy=("k8s", "gce", "ec2"),
     docs=("profiles/demo/personas/devops",),
     preset_flags=("ansible_enabled", "password_safe_enabled", "entitle_enabled"),
@@ -457,7 +459,8 @@ _HYPERVISOR = Persona(
     # for everyone else and for an install with no agent at all), so pinning both is what
     # puts a live link in the shortlist either way. Collapsing them to one would leave the
     # other role's only route to the page unpinned. See _nav_links.html.
-    nav_pins=("dashboard", "vsphere", "proxmox", "connections", "agents", "jobs"),
+    nav_pins=("dashboard", "workspace",
+              "vsphere", "proxmox", "connections", "agents", "jobs"),
     quick_deploy=("proxmox_vm", "nutanix_vm"),
     docs=("profiles/demo/personas/hypervisor",),
     preset_flags=("pra_enabled", "vsphere_enabled", "proxmox_enabled"),
@@ -528,7 +531,7 @@ _ITOPS = Persona(
           "to be a local administrator to do it.",
     section_order=("hypervisors", "overview", "containers", "cloud", "managed"),
     tile_emphasis=("workstation_vms",),
-    nav_pins=("dashboard", "vms", "desktops", "agents", "jobs", "inventory"),
+    nav_pins=("dashboard", "workspace", "vms", "desktops", "agents", "jobs", "inventory"),
     quick_deploy=("proxmox_vm",),
     docs=("profiles/demo/personas/itops",),
     preset_flags=("epml_enabled", "pra_enabled"),
@@ -601,7 +604,7 @@ _OT = Persona(
     # `connections` is deliberately absent: an OT cell is deployed in a cloud, not on a
     # hypervisor. Pinning six links a persona never uses is how "pinned" stops meaning
     # anything.
-    nav_pins=("dashboard", "gcp", "aws", "azure", "jobs", "inventory"),
+    nav_pins=("dashboard", "workspace", "gcp", "aws", "azure", "jobs", "inventory"),
     quick_deploy=("gce", "ec2", "azure_vm"),
     # `pra_enabled` only. api/ot.py is gated on it and nothing else is required to demo a
     # cell -- a preset that ticks the union of everything a persona might touch is
@@ -693,7 +696,7 @@ _DBA = Persona(
           "that historically had a shared password and no expiry at all.",
     section_order=("managed", "cloud", "overview", "containers", "hypervisors"),
     tile_emphasis=("cloud_databases",),
-    nav_pins=("dashboard", "databases", "secrets", "jobs", "inventory"),
+    nav_pins=("dashboard", "workspace", "databases", "secrets", "jobs", "inventory"),
     quick_deploy=("database",),
     docs=("profiles/demo/personas/dba",),
     preset_flags=("cloud_database_enabled", "password_safe_enabled", "entitle_enabled"),
@@ -762,7 +765,7 @@ _SECURITY = Persona(
           "and what should have expired already.",
     section_order=("overview", "managed", "cloud", "containers", "hypervisors"),
     tile_emphasis=("active_jobs", "deployed_resources"),
-    nav_pins=("dashboard", "inventory", "jobs", "secrets", "rbac"),
+    nav_pins=("dashboard", "workspace", "inventory", "jobs", "secrets", "rbac"),
     quick_deploy=(),
     docs=("profiles/demo/personas/security",),
     preset_flags=("admission_control_enabled",),
@@ -826,7 +829,7 @@ _SRE = Persona(
           "asked for it and lasts as long as the incident.",
     section_order=("managed", "containers", "overview", "cloud", "hypervisors"),
     tile_emphasis=("k8s_clusters", "rancher_nodes", "portainer_endpoints"),
-    nav_pins=("dashboard", "k8s", "containers", "jobs", "inventory"),
+    nav_pins=("dashboard", "workspace", "k8s", "containers", "jobs", "inventory"),
     quick_deploy=("k8s",),
     docs=("profiles/demo/personas/sre",),
     preset_flags=("k8s_management_enabled", "entitle_enabled", "pra_enabled"),
@@ -896,7 +899,8 @@ _NETADMIN = Persona(
           "diff has nobody's name on it.",
     section_order=("cloud", "managed", "overview", "containers", "hypervisors"),
     tile_emphasis=("net_cells", "gateways", "active_jobs"),
-    nav_pins=("dashboard", "gcp", "containers", "inventory", "jobs", "secrets"),
+    nav_pins=("dashboard", "workspace",
+              "gcp", "containers", "inventory", "jobs", "secrets"),
     quick_deploy=("gce",),
     docs=("profiles/demo/personas/netadmin",),
     preset_flags=("pra_enabled", "password_safe_enabled"),
@@ -974,7 +978,7 @@ _FINOPS = Persona(
           "while nobody decides.",
     section_order=("overview", "cloud", "managed", "containers", "hypervisors"),
     tile_emphasis=("cloud_cost", "deployed_resources", "active_jobs"),
-    nav_pins=("dashboard", "costs", "inventory", "rbac", "audit", "jobs"),
+    nav_pins=("dashboard", "workspace", "costs", "inventory", "rbac", "audit", "jobs"),
     # Empty, like `security`. This role does not stand things up; it answers for what
     # is already standing. A quick-deploy button on the focus whose whole argument is
     # "stop accumulating infrastructure" would be arguing with itself.
@@ -1065,7 +1069,7 @@ _AIOPS = Persona(
           "say what they are allowed to do, or stop one mid-task.",
     section_order=("overview", "managed", "cloud", "containers", "hypervisors"),
     tile_emphasis=("active_jobs", "deployed_resources"),
-    nav_pins=("dashboard", "workload_lab", "rbac", "audit", "jobs", "secrets"),
+    nav_pins=("dashboard", "workspace", "workload_lab", "rbac", "audit", "jobs", "secrets"),
     # Empty, like `security` and `finops`. The agent cell ATTACHES to a VM this dashboard
     # already deployed rather than creating one -- the call spire_lab_service made first,
     # and for the same reason -- so there is no deploy button that belongs to this role.
@@ -1162,7 +1166,8 @@ _IAMOPS = Persona(
           "access — with no standing domain admin and every change on the record.",
     section_order=("overview", "managed", "cloud", "containers", "hypervisors"),
     tile_emphasis=("active_jobs", "deployed_resources"),
-    nav_pins=("dashboard", "directories", "config_mgmt", "agents", "jobs", "audit"),
+    nav_pins=("dashboard", "workspace",
+              "directories", "config_mgmt", "agents", "jobs", "audit"),
     quick_deploy=(),
     docs=("profiles/demo/personas/iamops",),
     preset_flags=("password_safe_enabled", "ansible_enabled"),
@@ -1245,7 +1250,7 @@ _IDARCH = Persona(
           "granted, and how to prove none of it is standing.",
     section_order=("overview", "managed", "cloud", "containers", "hypervisors"),
     tile_emphasis=("active_jobs", "deployed_resources"),
-    nav_pins=("dashboard", "directories", "rbac", "audit", "request_access"),
+    nav_pins=("dashboard", "workspace", "directories", "rbac", "audit", "request_access"),
     quick_deploy=(),
     docs=("profiles/demo/personas/idarch",),
     preset_flags=("entitle_enabled",),

@@ -199,18 +199,14 @@ async def _attach_ps_attributes(items: list, *, is_admin: bool) -> dict:
     return envelope
 
 
-@router.get("")
-async def list_inventory(
-    provider: Optional[str] = Query(None, description=(
-        "Filter by cloud/provider (aws, azure, gcp, oci, and the hypervisor kinds "
-        "proxmox, nutanix, vsphere, xcpng, hyperv, workstation)")),
-    kind: Optional[str] = Query(None, description=(
-        "Filter by kind (vm, database, k8s, function, certlab, spirelab, workloadk8s, "
-        "workloadcloud, pov, desktop)")),
-    current_user: User = Depends(get_current_user),
-) -> dict:
-    """Every resource visible to the caller. Cached; RBAC + optional provider/kind
-    filters applied per request."""
+async def visible_items(current_user: User) -> tuple:
+    """``(items, cached_at)``: the cached inventory, filtered to what ``current_user`` may
+    see. The ONE path every reader of the inventory goes through -- this listing and the
+    Workspace's "Your resources" (api/workspace) -- so a change to inventory RBAC cannot
+    apply to one and not the other.
+
+    The items are the SHARED cached dicts; copy before writing into them.
+    """
     cache_key = cache_service.key_global("deployment_inventory")
     ttl = cache_service.TTL["deployment_inventory"]
 
@@ -239,6 +235,22 @@ async def list_inventory(
         own = await run_in_threadpool(pov_env_scope, current_user)
         items = [i for i in items
                  if i.get("kind") != "pov" or i["id"].split(":", 1)[-1] in own]
+    return items, cached_at
+
+
+@router.get("")
+async def list_inventory(
+    provider: Optional[str] = Query(None, description=(
+        "Filter by cloud/provider (aws, azure, gcp, oci, and the hypervisor kinds "
+        "proxmox, nutanix, vsphere, xcpng, hyperv, workstation)")),
+    kind: Optional[str] = Query(None, description=(
+        "Filter by kind (vm, database, k8s, function, certlab, spirelab, workloadk8s, "
+        "workloadcloud, pov, desktop)")),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Every resource visible to the caller. Cached; RBAC + optional provider/kind
+    filters applied per request."""
+    items, cached_at = await visible_items(current_user)
     if provider:
         items = [i for i in items if i["cloud"] == provider.lower()]
     if kind:
