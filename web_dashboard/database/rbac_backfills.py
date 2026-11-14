@@ -442,6 +442,48 @@ def _grant_presenter_own_pov(db) -> int:
     return changed if _commit_marked(db, _PRESENTER_OWN_POV_MARKER) else 0
 
 
+_READ_ONLY_DEMO_MARKER = "rbac_read_only_demo_v1"
+
+# What the built-in Read-Only role gained after it was first seeded: the Demo hub (#1325)
+# and custom-cell blueprints (#1332). FROZEN, like every list in this module: a scope added
+# later needs its own marker and its own list, never a widened copy of this one.
+_READ_ONLY_DEMO_GRANTS = {"demo": ["read"], "demo_blueprints": ["read"]}
+
+
+def _grant_read_only_demo_read(db) -> int:
+    """Give the built-in Read-Only role read on the demo scopes on an existing install.
+
+    "See everything, change nothing" must cover the Demo hub and blueprints too
+    (tests/test_rbac_roles.test_the_read_only_role_covers_the_whole_catalog). New installs
+    get both from the role literal in ``services/role_service``, but ``seed_builtins`` never
+    updates an existing row, so without this an upgraded install's Read-Only role sees
+    neither -- a silent gap held by everyone assigned it.
+
+    Same shape as :func:`_grant_presenter_own_pov`: the BUILT-IN row only, by slug and
+    is_builtin (a clone is its owner's to decide); run before ``role_service.reconcile``,
+    which copies the change to every holder; marker-guarded so it runs once. Read only --
+    no level that changes anything, so nobody gains an action.
+    """
+    if db.query(SchemaMarker).filter(SchemaMarker.key == _READ_ONLY_DEMO_MARKER).first():
+        return 0
+    changed = 0
+    role = db.query(AccessRole).filter(AccessRole.slug == "read-only",
+                                       AccessRole.is_builtin.is_(True)).first()
+    if role is not None:
+        perms = role.permissions_dict
+        for scope, levels in _READ_ONLY_DEMO_GRANTS.items():
+            have = perms.get(scope)
+            have = have if isinstance(have, list) else []
+            if not set(levels) <= set(have):
+                perms[scope] = sorted(set(have) | set(levels))
+                changed = 1
+        if changed:
+            role.permissions_dict = perms
+    db.add(SchemaMarker(key=_READ_ONLY_DEMO_MARKER,
+                        detail=f"granted demo read levels to {changed} built-in role(s)"))
+    return changed if _commit_marked(db, _READ_ONLY_DEMO_MARKER) else 0
+
+
 _PRESENTER_OWN_ONLY_MARKER = "rbac_presenter_own_only_v1"
 
 
