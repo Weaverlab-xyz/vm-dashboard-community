@@ -517,3 +517,62 @@ def _narrow_presenter_to_own_povs(db) -> int:
     db.add(SchemaMarker(key=_PRESENTER_OWN_ONLY_MARKER,
                         detail=f"narrowed {changed} built-in presenter role(s) to own POVs"))
     return changed if _commit_marked(db, _PRESENTER_OWN_ONLY_MARKER) else 0
+
+
+# ── Changes to built-in roles, versioned ───────────────────────────────────────
+#
+# ``seed_builtins`` inserts a missing built-in and never updates one that exists -- the
+# property that lets it run without a marker and never re-grant something removed. The
+# cost is that changing a built-in's permissions in ``role_service._BUILTIN_ROLES`` reaches
+# NEW installs only. Every such change used to need a hand-written, one-off fix-up
+# (``_grant_presenter_own_pov``, ``_narrow_presenter_to_own_povs``,
+# ``_grant_read_only_demo_read``), and forgetting one failed silently: an upgraded install
+# simply never got the grant.
+#
+# From here on a change to a built-in's map is an ENTRY in this list instead, applied once
+# per install by ``_apply_builtin_role_changes``. ``tests/test_builtin_role_upgrades.py``
+# holds it in place: the frozen baseline (``tests/data/builtin_roles_baseline.json``, the
+# maps as of the list's creation) plus these entries, in order, must equal the literals --
+# so editing a literal without an entry fails CI, which is the point.
+#
+# Each entry: ``{"marker": "<unique, never reused>", "slug": "<built-in slug>",
+# "add": {scope: [levels]}, "remove": {scope: [levels]}}``. Entries are append-only and
+# FROZEN once shipped, like every list in this module: a marker records that an install
+# applied that exact change.
+BUILTIN_ROLE_CHANGES: tuple = ()
+
+
+def _apply_builtin_role_changes(db, changes=None) -> int:
+    """Apply every entry of ``BUILTIN_ROLE_CHANGES`` this install has not. Returns how many.
+
+    The BUILT-IN row only, by slug and is_builtin -- a clone is its owner's. Each entry has
+    its own marker, so an entry applies once even if a later one is added, and a re-run is
+    a no-op. Runs before ``role_service.reconcile`` in init_db, which copies each role to
+    its holders. ``changes`` exists for tests.
+    """
+    applied = 0
+    for change in (BUILTIN_ROLE_CHANGES if changes is None else changes):
+        marker = change["marker"]
+        if db.query(SchemaMarker).filter(SchemaMarker.key == marker).first():
+            continue
+        role = db.query(AccessRole).filter(AccessRole.slug == change["slug"],
+                                           AccessRole.is_builtin.is_(True)).first()
+        if role is not None:
+            perms = role.permissions_dict
+            for scope, levels in (change.get("add") or {}).items():
+                have = perms.get(scope) if isinstance(perms.get(scope), list) else []
+                perms[scope] = sorted(set(have) | set(levels))
+            for scope, levels in (change.get("remove") or {}).items():
+                have = perms.get(scope) if isinstance(perms.get(scope), list) else []
+                left = sorted(set(have) - set(levels))
+                if left:
+                    perms[scope] = left
+                else:
+                    perms.pop(scope, None)
+            role.permissions_dict = perms
+        db.add(SchemaMarker(key=marker,
+                            detail=f"built-in {change['slug']}: "
+                                   f"{'applied' if role is not None else 'no such row'}"))
+        if _commit_marked(db, marker):
+            applied += 1
+    return applied

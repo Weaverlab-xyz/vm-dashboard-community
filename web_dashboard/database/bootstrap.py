@@ -246,6 +246,15 @@ def init_db():
             import logging as _logging
             _logging.getLogger(__name__).warning(
                 "POV Presenter own-only narrowing skipped", exc_info=True)
+        # Every later change to a built-in's permissions, applied once each. Same placement
+        # and reason as the one-off fix-ups above: reconcile copies the roles to holders.
+        try:
+            _pkg._apply_builtin_role_changes(_seed_db)
+        except Exception:  # noqa: BLE001 — a migration must never stop the app booting
+            _seed_db.rollback()
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "built-in role changes skipped", exc_info=True)
         try:
             from ..services import role_service
             role_service.seed_builtins(_seed_db)
