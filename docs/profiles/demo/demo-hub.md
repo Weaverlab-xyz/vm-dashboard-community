@@ -3,7 +3,8 @@
 > **Audience:** presenter · **Profile:** `demo` · **Read this when:** you want one page for every demo cell and every page a demo runs from, or you are giving someone the Demo Presenter role.
 
 **Demo** in the menu (`/demo`) is the estate instance's counterpart to **POV** on a POV
-instance. It has three tabs:
+instance. It is the presenter's page; someone who does the job day to day starts from their
+[Workspace](workspace.md) instead. It has three tabs:
 
 - **Cells** lists every demo cell you can see: [OT](ot-demo-cell.md),
   [Network](net-demo-cell.md), [Agent](agent-demo-cell.md) and

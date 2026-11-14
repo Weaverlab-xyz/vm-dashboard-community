@@ -13,6 +13,10 @@ checklist there instead — see [What the customer sees](../../pov/customer-acce
 These pages are the narrative behind those cards; the registry that produces them is
 `services/personas.py`, and `tests/test_persona_docs.py` is what stops the two drifting.
 
+Each role also has a [Workspace](../workspace.md): a landing page for whoever does the job
+rather than presents it, with a getting-started checklist, their resources and the pages
+the role uses. Setting a user's or group's **Focus** decides which one they land on.
+
 ## A focus is an estate idea, and only an estate idea
 
 A persona is a **presenting** decision: which role's story you lead with, on a day you

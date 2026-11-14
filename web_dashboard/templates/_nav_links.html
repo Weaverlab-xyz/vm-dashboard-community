@@ -49,6 +49,15 @@
    {% if request.url.path.startswith('/demo') %}{{ nav_active }}{% endif %}">Demo</a>
 {% endif %}
 
+{# Workspace: each role's own landing page, beside the Demo hub and from the same
+   profile-owned page group family (`workspace_pages`, estate only). Ungated by permission
+   because every signed-in user has one -- what it shows is filtered by their own scopes. #}
+{% if workspace_pages %}
+<a data-nav="workspace" href="/workspace"
+   class="px-2 py-2 rounded-md text-sm font-semibold {{ nav_hover }}
+   {% if request.url.path.startswith('/workspace') %}{{ nav_active }}{% endif %}">Workspace</a>
+{% endif %}
+
 {# ── Groups ────────────────────────────────────────────────────────────
    Each group is a native details element the drawer shows shut, except the one holding
    the page you are on, which responsiveNav opens. The groups follow the tabs of Settings,

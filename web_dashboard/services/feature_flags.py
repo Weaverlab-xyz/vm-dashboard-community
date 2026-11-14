@@ -117,7 +117,11 @@ _PROFILE_OF.update({f: "pov" for f in _POV_ONLY})
 # `demo_pages` is the Demo hub (/demo, /api/demo): the estate instance's counterpart to /pov,
 # gathering the demo cells that only the cloud consoles host. Not a flag for the same reason
 # -- a hub is not an integration anybody switches on.
-_PROFILE_PAGES = {"cloud_pages": "demo", "demo_pages": "demo"}
+# `workspace_pages` is the Workspace (/workspace, /api/workspace): each estate role's
+# landing page. Estate-only for the same reason the role lens is -- a POV instance leads
+# with its POV, and has no role whose workspace it could show. This module still knows
+# nothing about roles: the page group is the profile's answer, nothing more.
+_PROFILE_PAGES = {"cloud_pages": "demo", "demo_pages": "demo", "workspace_pages": "demo"}
 
 
 def install_profile() -> str:
@@ -301,6 +305,7 @@ def flags() -> dict:
         # keep reading the same answer. See _PROFILE_PAGES.
         "cloud_pages":          profile_page_allowed("cloud_pages"),
         "demo_pages":           profile_page_allowed("demo_pages"),
+        "workspace_pages":      profile_page_allowed("workspace_pages"),
     }
 
 def _keyless_aws() -> bool:
@@ -440,4 +445,5 @@ def feature_map() -> dict:
         # _PROFILE_PAGES.
         "cloud_pages":  raw["cloud_pages"],
         "demo_pages":   raw["demo_pages"],
+        "workspace_pages": raw["workspace_pages"],
     }

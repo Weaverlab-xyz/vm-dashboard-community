@@ -1497,6 +1497,17 @@ except ImportError as exc:
     logger.warning("API router 'demo' not loaded: %s", exc)
 
 try:
+    # The persona Workspace's API. Estate-only, like the hub -- a POV instance has no
+    # persona axis (services/personas.applies) and so no workspace to show. No scope of
+    # its own: a workspace is curation, and each panel in it is filtered by the reader
+    # that owns its data (see api/workspace).
+    from .api import workspace as workspace_api  # noqa: E402
+    app.include_router(workspace_api.router,
+                       dependencies=[_profile_page_gate("workspace_pages")])
+except ImportError as exc:
+    logger.warning("API router 'workspace' not loaded: %s", exc)
+
+try:
     # Custom demo cells: blueprints a Cell Builder authors and the cells launched from
     # them. Same page group as the hub. No feature flag of its own: every member is
     # provisioned through its own cloud's path, which keeps that path's own gates.
@@ -2124,6 +2135,21 @@ async def demo_page(request: Request):
     build_panels = [key for key, ok in offered.items() if ok]
     return templates.TemplateResponse(request, "demo/index.html", {
         "request": request, "build_panels": build_panels, "ot_clouds": ot_clouds})
+
+
+@app.get("/workspace", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_profile_page_gate("workspace_pages")])
+async def workspace_page(request: Request):
+    """A persona's Workspace: where someone who DOES the role starts -- a getting-started
+    checklist ticked by their own jobs, their resources, and the pages the role uses.
+
+    The estate profile's page, like /demo, and gated by nothing else. NOT gated by persona:
+    a persona may never hide a page (services/personas), so any signed-in user may open any
+    role's workspace. Which one they land on is the persona's job; the API resolves it.
+
+    Login still lands on the dashboard; its workspace band points here.
+    """
+    return templates.TemplateResponse(request, "workspace/index.html", {"request": request})
 
 
 @app.get("/pov", response_class=HTMLResponse, include_in_schema=False,
