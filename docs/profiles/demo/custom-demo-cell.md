@@ -65,10 +65,15 @@ if you used that cloud's own form. The one difference is that you don't need tha
 
 A launch with problems the dashboard can detect without touching a cloud is refused at
 booking time, so you find out when you book, not on the morning of the demo. This covers a
-bad name, a field a cloud has since tightened, and Kubernetes management being off. A
-refusal that only a cloud can give (for example, a policy that forbids a region) shows up
-when the cell builds. The resource it applies to is marked **failed** with the reason, and
-the rest of the cell is still built.
+bad name, a field a cloud has since tightened, Kubernetes management being off, and the
+**admission policy**: every resource is checked against it when you book, judged as at the
+cell's start time, and a refusal names the resource and the policy's reason. A policy that
+only asks for approval doesn't stop the booking; that resource goes to approval when it is
+built.
+
+The build checks the policy again, because it can change between booking and start. A
+refusal then, or one only a cloud can give, marks that resource **failed** with the
+reason, and the rest of the cell is still built.
 
 ## While it runs
 

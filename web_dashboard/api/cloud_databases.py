@@ -354,6 +354,23 @@ async def _reject_cross_region_network(engine: str, cloud: str, region: str,
         )
 
 
+def provision_admission(payload, workgroup: str):
+    """The admission gate's ``(action, request)`` for one database provision.
+
+    One builder, called by this handler AND by a custom demo cell's booking check
+    (services/custom_cell_service.launch), so the policy judges the same request at
+    booking as at build. Resolve region exactly as the handler does; ``workgroup`` is the
+    already-validated canonical name.
+    """
+    region = (_resolve_db_region(payload.cloud, payload.region)
+              if (payload.region or "").strip() else "")
+    return "clouddb:provision", {
+        "region": region, "engine": payload.engine,
+        "cloud": payload.cloud, "name": payload.name,
+        "instance_type": payload.instance_class or payload.tier or payload.sku_name or "",
+        "workgroup": workgroup}
+
+
 @router.post("")
 async def provision_database(
     payload: ProvisionRequest,
@@ -398,14 +415,8 @@ async def provision_database(
 
     # Pre-action policy gate (inert unless enabled + this action is gated).
     from ..services import admission_service
-    admission_service.enforce(
-        "clouddb:provision",
-        request={"region": region, "engine": payload.engine,
-                 "cloud": payload.cloud, "name": payload.name,
-                 "instance_type": payload.instance_class or payload.tier or payload.sku_name or "",
-                 "workgroup": workgroup},
-        actor=current_user, db=db,
-    )
+    _action, _request = provision_admission(payload, workgroup)
+    admission_service.enforce(_action, request=_request, actor=current_user, db=db)
     try:
         result = cloud_database_service.provision(
             db, engine=payload.engine, cloud=payload.cloud, region=region,

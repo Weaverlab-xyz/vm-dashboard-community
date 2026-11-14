@@ -448,6 +448,9 @@ async def launch(db: Session, bp: CellBlueprint, *, user, name: str, workgroup: 
     sched = change_window_service.schedule_kwargs(db, **schedule_fields)
     start = sched.get("scheduled_for")
     now = _now()
+    # The admission policy, judged now rather than on the morning of the demo. Before
+    # the row exists, so a refusal books nothing.
+    _admission_preflight(db, user, items, name, workgroup, at=start or now)
     end = plan_end(start=start, ttl_hours=ttl_hours, blueprint_ttl=bp.ttl_hours,
                    is_admin=bool(getattr(user, "is_effective_admin", False)), now=now)
     suspend = validate_schedule(schedule if schedule is not None else {
@@ -464,6 +467,61 @@ async def launch(db: Session, bp: CellBlueprint, *, user, name: str, workgroup: 
     if start is None:
         await provision(db, cell)
     return cell
+
+
+# Which handler builds each member's admission request -- the SAME function that handler
+# calls before its own gate, so booking and build judge identical requests.
+_ADMISSION_BUILDERS = {
+    ("vm", "gcp"): ("gcp", "deploy_admission"),
+    ("vm", "aws"): ("aws", "deploy_admission"),
+    ("vm", "azure"): ("azure", "deploy_admission"),
+    ("k8s", None): ("k8s", "provision_admission"),
+    ("database", None): ("cloud_databases", "provision_admission"),
+}
+
+
+def admission_for(item: dict, req, workgroup: str):
+    """``(action, request)`` for one member, from its own handler's builder."""
+    import importlib
+    key = (item["kind"], item["cloud"] if item["kind"] == "vm" else None)
+    module, fn = _ADMISSION_BUILDERS[key]
+    mod = importlib.import_module(f"..api.{module}", __package__)
+    return getattr(mod, fn)(req, workgroup)
+
+
+def _admission_preflight(db: Session, user, items: List[dict], cell_name: str,
+                         workgroup: str, *, at) -> None:
+    """Run the admission gate on every member at booking. Raises CellError on a refusal.
+
+    The build still runs it again, through each handler -- the policy can change between
+    booking and start, so build time stays the authority. This only moves the refusal a
+    presenter would otherwise meet at 07:00 on the morning of the demo to the moment they
+    book.
+
+    * ``now=at``: a booked cell is judged as at its START, when its members will really be
+      built, so a weekday or time-of-day rule -- and the workstream's change window --
+      answer for then.
+    * ``approvable=True``: a needs-approval verdict does not refuse the booking; the member
+      goes to approval when it is built, as it always did.
+    * With admission control off, ``enforce`` is the change-window check alone, which the
+      build would apply identically.
+    """
+    from fastapi import HTTPException
+    from . import admission_service
+    for it in items:
+        for rname in _resource_names(cell_name, it):
+            req = build_request(it["kind"], it["cloud"], it["region"], it["spec"],
+                                name=rname, workgroup=workgroup)
+            action, request = admission_for(it, req, workgroup)
+            try:
+                admission_service.enforce(action, request=request, actor=user, db=db,
+                                          now=at, approvable=True)
+            except HTTPException as exc:
+                detail = exc.detail
+                reasons = (detail.get("reasons") if isinstance(detail, dict) else None) \
+                    or [str(detail)]
+                raise CellError(f"{rname} is refused by policy: " + "; ".join(
+                    str(r) for r in reasons)) from None
 
 
 async def _create_member(db: Session, user, cell: CustomCell, item: dict, rname: str):

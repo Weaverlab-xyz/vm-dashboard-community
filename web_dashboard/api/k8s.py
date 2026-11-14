@@ -150,6 +150,20 @@ def register_cluster(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+def provision_admission(payload, workgroup: str):
+    """The admission gate's ``(action, request)`` for one cluster provision.
+
+    One builder, called by this handler AND by a custom demo cell's booking check
+    (services/custom_cell_service.launch), so the policy judges the same request at
+    booking as at build. Resolve region exactly as the handler does; ``workgroup`` is the
+    already-validated canonical name.
+    """
+    return "k8s:provision", {
+        "region": payload.region, "instance_type": payload.node_instance_type,
+        "name": payload.name, "node_count": payload.node_count,
+        "workgroup": workgroup}
+
+
 @router.post("/clusters/provision", status_code=202)
 def provision_cluster(
     payload: ClusterProvisionRequest,
@@ -180,13 +194,8 @@ def provision_cluster(
 
     # Pre-action policy gate (inert unless enabled + this action is gated).
     from ..services import admission_service
-    admission_service.enforce(
-        "k8s:provision",
-        request={"region": payload.region, "instance_type": payload.node_instance_type,
-                 "name": payload.name, "node_count": payload.node_count,
-                 "workgroup": workgroup},
-        actor=current_user, db=db,
-    )
+    _action, _request = provision_admission(payload, workgroup)
+    admission_service.enforce(_action, request=_request, actor=current_user, db=db)
     try:
         result = k8s_service.create_cluster(
             db, cloud=payload.cloud, name=payload.name, region=payload.region,

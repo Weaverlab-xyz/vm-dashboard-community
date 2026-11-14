@@ -121,9 +121,10 @@ or `lc2-*`. Check once more after 30 minutes for anything the cloud releases slo
 If this instance runs admission control or spend caps, make one member break a rule (for
 example, a machine type or region the policy forbids) and launch a cell.
 
-**Pass:** the cell is still booked (the policy isn't checked when you book; that is a known
-gap), the offending member is **failed** with the policy's reason on its row, and the other
-members are built.
+**Pass:** the booking itself is refused, with a message naming the resource (such as
+`lc3-vm-1`) and the policy's reason, and no cell appears in the list. Then book a cell that
+passes, tighten the policy before its start, and check that the build marks that member
+**failed** with the reason while the others are still built.
 
 ## Results
 
