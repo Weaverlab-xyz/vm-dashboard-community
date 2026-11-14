@@ -422,15 +422,24 @@ async def _backend_for(db, row):
 _BACKEND_FACTORY = None
 
 
-async def drive(backend, action: str, *, call, timeout_s: float = POWER_TIMEOUT_S,
-                interval_s: float = POLL_INTERVAL_S, on_wait=None) -> str:
+async def drive(backend, action: str, *, call, timeout_s: Optional[float] = None,
+                interval_s: Optional[float] = None, on_wait=None) -> str:
     """Bring ``backend`` to the state ``action`` asks for and return it.
 
     Reads first, so a retry after a dead job -- or a stop of an instance the cloud has
     already stopped -- issues nothing. An instance mid-transition (say, RDS starting
     itself back up on day 7) is waited out before the request, because both clouds
     reject a stop of an instance that is not yet available.
+
+    The timeout and the poll interval default to the module's constants AS THEY ARE AT
+    CALL TIME. Written as ``interval_s=POLL_INTERVAL_S`` the default was fixed when the
+    module loaded, so setting ``POLL_INTERVAL_S`` afterwards changed nothing -- the test
+    suite's "never sleep for real" did exactly that and slept 15s per poll, 90s a run.
     """
+    if timeout_s is None:
+        timeout_s = POWER_TIMEOUT_S
+    if interval_s is None:
+        interval_s = POLL_INTERVAL_S
     want = "stopped" if action == "stop" else "running"
     deadline = time.monotonic() + timeout_s
     requested = False

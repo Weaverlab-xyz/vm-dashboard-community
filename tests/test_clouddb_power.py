@@ -329,6 +329,22 @@ def test_run_decommission_starts_a_stopped_gcp_instance_before_destroy():
     assert body.index("ensure_running_for_teardown") < body.index("await terraform.destroy(")
 
 
+def test_drive_reads_the_poll_interval_when_called():
+    """Setting POLL_INTERVAL_S must reach drive(). It once did not -- the default was
+    bound when the module loaded -- and this file slept 15s per poll, 90s a run."""
+    import time
+    saved = cp.POLL_INTERVAL_S
+    try:
+        cp.POLL_INTERVAL_S = 0.05
+        b = FakeBackend(["running", "transition", "transition", "stopped"])
+        t0 = time.monotonic()
+        asyncio.run(cp.drive(b, "stop", call=_sync_call))
+        took = time.monotonic() - t0
+        assert 0.1 <= took < 2.0, f"three polls took {took:.2f}s: the interval was not 0.05s"
+    finally:
+        cp.POLL_INTERVAL_S = saved
+
+
 # ── the rest of the app treats stopped as alive ──────────────────────────────
 
 def test_stopped_is_reapable_and_keeps_the_gateway():
