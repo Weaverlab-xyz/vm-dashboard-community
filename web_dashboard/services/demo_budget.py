@@ -65,7 +65,7 @@ def instance_default() -> float:
 
 def limit_for(user) -> tuple:
     """``(limit_usd or None, source)``. Source: admin | personal | default | none."""
-    if getattr(user, "is_effective_admin", False) or getattr(user, "is_admin", False):
+    if getattr(user, "is_effective_admin", False):
         return None, "admin"
     own = getattr(user, "demo_budget_usd", None)
     if own is not None:
