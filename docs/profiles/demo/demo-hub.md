@@ -60,9 +60,15 @@ them to see which cells are worth destroying, not to reconcile a bill.
   cloud. A VM stopped in the cloud's console still counts as running.
 - **A VM with a spend cap** shows the total its cap has accrued, so the hub and the VM's
   own spend panel agree.
-- **Not priced, and said so:** Kubernetes clusters and managed databases in a custom cell
-  (the app has no price source for them yet), and a VM in a region the price list can't
-  reach. Each is named under the row. None is counted as $0.
+- **A Kubernetes cluster** in a custom cell is priced as its nodes: the node count times the
+  node size's VM rate. Both come from what the cluster was built with, or the Terraform
+  module's default when the request left them out (GKE: three `e2-standard-2`; EKS: two
+  `t3.small`; AKS: two `Standard_B2s`). A stopped cluster's nodes cost nothing, because
+  stopping scales its pools to zero. The **control-plane fee is not included**, and the row
+  says so. A registered cluster is not priced, because it is billed to its own account.
+- **Not priced, and said so:** managed databases in a custom cell (the app has no price
+  source for them yet), and a VM or cluster in a region the price list can't reach. Each is
+  named under the row. None is counted as $0.
 - **Agent cells** show no cost. They build nothing; they run on an existing VM, whose cost
   is that VM's.
 - **Prices need the same access as spend caps.** On AWS that is `pricing:GetProducts`; on

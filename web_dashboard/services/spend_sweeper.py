@@ -179,9 +179,16 @@ def rate_for(row, meta: dict, *, running: bool):
     without billing, so a rate that appears later does not then charge for the blind
     period. The caller reports it rather than swallowing it.
     """
+    return rate_for_spec(vm_suspend_policy.cloud_of(row.job_type), meta, running=running,
+                         label=row.id)
+
+
+def rate_for_spec(cloud: str, meta: dict, *, running: bool, label: str = ""):
+    """``rate_for`` without a Job row: a VM described by its cloud and a deploy-shaped
+    dict. What prices a cell that is only booked, and a cluster's nodes.
+    """
     from . import pov_cloud_cost
 
-    cloud = vm_suspend_policy.cloud_of(row.job_type)
     region = meta.get("region") or meta.get("location") or meta.get("zone") or ""
     # A zone is a region plus a suffix on GCP; the price catalogue keys on the region.
     if cloud == "gcp" and region:
@@ -203,7 +210,7 @@ def rate_for(row, meta: dict, *, running: bool):
     try:
         return pov_cloud_cost.hourly_for_vm(cloud, region, vm)
     except Exception:  # noqa: BLE001 — one unpriceable shape never stops the sweep
-        logger.info("spend sweep: no rate for %s", row.id, exc_info=True)
+        logger.info("spend sweep: no rate for %s", label or cloud, exc_info=True)
         return None
 
 

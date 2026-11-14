@@ -33,7 +33,8 @@ os.environ.setdefault("DATABASE_URL", f"sqlite:///{os.path.join(_TMPDIR, 'test.d
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-demo-cell-cost")
 
 from web_dashboard.database import (AgentCell, Base, CustomCell,  # noqa: E402
-                                    CustomCellMember, Job, SessionLocal, User, engine)
+                                    CustomCellMember, Job, K8sCluster, SessionLocal, User,
+                                    engine)
 from web_dashboard.services import demo_cell_cost as cost  # noqa: E402
 from web_dashboard.services import role_service, spend_sweeper  # noqa: E402
 
@@ -51,7 +52,7 @@ def _rate(row, meta, *, running):
 
 
 def _clean(db):
-    for model in (Job, CustomCellMember, CustomCell, AgentCell):
+    for model in (Job, CustomCellMember, CustomCell, AgentCell, K8sCluster):
         db.query(model).delete()
     db.commit()
 
@@ -74,8 +75,18 @@ def _power(db, deploy, action, at):
     return j
 
 
+NODE = {"e2-standard-2": 0.08, "e2-standard-8": 0.30, "t3.small": 0.02}
+
+
+def _spec(cloud, meta, *, running):
+    """A node's rate by size; no price source in nowhere-1."""
+    if meta.get("region") == "nowhere-1":
+        return None
+    return NODE.get(meta.get("instance_type"), 0.10) if running else 0.0
+
+
 def _cost(db, kind, cell):
-    return cost.cell_cost(db, kind, cell, now=NOW, rate_for=_rate)
+    return cost.cell_cost(db, kind, cell, now=NOW, rate_for=_rate, rate_spec=_spec)
 
 
 def _close(a, b):
@@ -192,7 +203,88 @@ def test_a_custom_cell_sums_its_vms_and_lists_the_rest():
         c = _cost(db, "custom", {"id": cell.id})
         assert c["priced"] == 2 and _close(c["so_far_usd"], 1.0)
         assert sorted(u["name"] for u in c["unpriced"]) == ["db", "gke"], c["unpriced"]
-        assert all(u["reason"] == cost.UNPRICED_KIND for u in c["unpriced"])
+        reasons = {u["name"]: u["reason"] for u in c["unpriced"]}
+        assert reasons == {"db": cost.UNPRICED_KIND, "gke": cost.NO_CLUSTER_ROW}, reasons
+    finally:
+        db.close()
+
+
+def _cluster_cell(db, *, cloud="gcp", tfv=None, status="registered", source="provisioned",
+                  region="us-central1", hours_up=2.0):
+    cell = CustomCell(id=str(uuid.uuid4()), name="kc", status="active", workgroup="demo")
+    db.add(cell)
+    prov = Job(id=str(uuid.uuid4()), job_type="k8s_provision", status="completed",
+               created_by="someone")
+    prov.metadata_dict = {"tf_variables": tfv or {}}
+    db.add(prov)
+    cl = K8sCluster(id=str(uuid.uuid4()), cloud=cloud, name="gke-1", status=status,
+                    source=source, region=region, deploy_job_id=prov.id,
+                    created_at=NOW - timedelta(hours=hours_up))
+    db.add(cl)
+    db.add(CustomCellMember(cell_id=cell.id, kind="k8s", cloud=cloud, label="gke",
+                            ref_id=cl.id, status="active"))
+    db.commit()
+    return cell, cl
+
+
+def test_a_cluster_is_priced_as_its_nodes():
+    db = SessionLocal()
+    try:
+        _clean(db)
+        cell, _ = _cluster_cell(db, tfv={"machine_type": "e2-standard-8", "node_count": 4})
+        c = _cost(db, "custom", {"id": cell.id})
+        assert c["priced"] == 1 and _close(c["rate_usd_h"], 4 * 0.30), c
+        assert _close(c["so_far_usd"], 2 * 4 * 0.30), c
+        assert [u["reason"] for u in c["unpriced"]] == [cost.CONTROL_PLANE_NOTE], (
+            "the control-plane fee must be said to be left out")
+    finally:
+        db.close()
+
+
+def test_a_cluster_with_nothing_recorded_is_priced_at_the_modules_defaults():
+    db = SessionLocal()
+    try:
+        _clean(db)
+        cell, _ = _cluster_cell(db, tfv={})
+        assert _close(_cost(db, "custom", {"id": cell.id})["rate_usd_h"], 3 * 0.08), (
+            "GKE's module builds three e2-standard-2 nodes")
+        cell, _ = _cluster_cell(db, cloud="aws", tfv={}, region="us-east-1")
+        assert _close(_cost(db, "custom", {"id": cell.id})["rate_usd_h"], 2 * 0.02), (
+            "EKS's module builds two t3.small nodes")
+    finally:
+        db.close()
+
+
+def test_a_stopped_clusters_nodes_cost_nothing():
+    from web_dashboard.services import k8s_power
+    db = SessionLocal()
+    try:
+        _clean(db)
+        cell, cl = _cluster_cell(db, tfv={"node_count": 2}, status=k8s_power.STATUS_STOPPED,
+                                 hours_up=4)
+        stop = Job(id=str(uuid.uuid4()), job_type=k8s_power.JOB_TYPE, status="completed",
+                   created_by="someone", created_at=NOW - timedelta(hours=1),
+                   completed_at=NOW - timedelta(hours=1))
+        stop.metadata_dict = {"cluster_id": cl.id, "action": "stop"}
+        db.add(stop)
+        db.commit()
+        c = _cost(db, "custom", {"id": cell.id})
+        assert c["rate_usd_h"] == 0.0, c
+        assert _close(c["so_far_usd"], 3 * 2 * 0.08), "three running hours, then nothing"
+    finally:
+        db.close()
+
+
+def test_a_registered_or_unpriceable_cluster_is_listed_not_priced():
+    db = SessionLocal()
+    try:
+        _clean(db)
+        cell, _ = _cluster_cell(db, source="registered")
+        c = _cost(db, "custom", {"id": cell.id})
+        assert c["priced"] == 0 and "registered" in c["unpriced"][0]["reason"], c
+        cell, _ = _cluster_cell(db, region="nowhere-1")
+        c = _cost(db, "custom", {"id": cell.id})
+        assert c["priced"] == 0 and "gcp/nowhere-1" in c["unpriced"][0]["reason"], c
     finally:
         db.close()
 
