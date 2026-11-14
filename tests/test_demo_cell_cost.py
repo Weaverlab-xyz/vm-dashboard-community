@@ -33,8 +33,8 @@ os.environ.setdefault("DATABASE_URL", f"sqlite:///{os.path.join(_TMPDIR, 'test.d
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-demo-cell-cost")
 
 from web_dashboard.database import (AgentCell, Base, CustomCell,  # noqa: E402
-                                    CustomCellMember, Job, K8sCluster, SessionLocal, User,
-                                    engine)
+                                    CloudDatabase, CustomCellMember, Job, K8sCluster,
+                                    SessionLocal, User, engine)
 from web_dashboard.services import demo_cell_cost as cost  # noqa: E402
 from web_dashboard.services import role_service, spend_sweeper  # noqa: E402
 
@@ -52,7 +52,7 @@ def _rate(row, meta, *, running):
 
 
 def _clean(db):
-    for model in (Job, CustomCellMember, CustomCell, AgentCell, K8sCluster):
+    for model in (Job, CustomCellMember, CustomCell, AgentCell, K8sCluster, CloudDatabase):
         db.query(model).delete()
     db.commit()
 
@@ -85,8 +85,14 @@ def _spec(cloud, meta, *, running):
     return NODE.get(meta.get("instance_type"), 0.10) if running else 0.0
 
 
+def _dbr(cloud, region, spec):
+    """A database: $0.05/h compute and $0.01/h storage; no price in nowhere-1."""
+    return None if region == "nowhere-1" else (0.05, 0.01)
+
+
 def _cost(db, kind, cell):
-    return cost.cell_cost(db, kind, cell, now=NOW, rate_for=_rate, rate_spec=_spec)
+    return cost.cell_cost(db, kind, cell, now=NOW, rate_for=_rate, rate_spec=_spec,
+                          db_rates=_dbr)
 
 
 def _close(a, b):
@@ -204,7 +210,7 @@ def test_a_custom_cell_sums_its_vms_and_lists_the_rest():
         assert c["priced"] == 2 and _close(c["so_far_usd"], 1.0)
         assert sorted(u["name"] for u in c["unpriced"]) == ["db", "gke"], c["unpriced"]
         reasons = {u["name"]: u["reason"] for u in c["unpriced"]}
-        assert reasons == {"db": cost.UNPRICED_KIND, "gke": cost.NO_CLUSTER_ROW}, reasons
+        assert reasons == {"db": cost.NO_DB_ROW, "gke": cost.NO_CLUSTER_ROW}, reasons
     finally:
         db.close()
 
@@ -233,10 +239,10 @@ def test_a_cluster_is_priced_as_its_nodes():
         _clean(db)
         cell, _ = _cluster_cell(db, tfv={"machine_type": "e2-standard-8", "node_count": 4})
         c = _cost(db, "custom", {"id": cell.id})
-        assert c["priced"] == 1 and _close(c["rate_usd_h"], 4 * 0.30), c
-        assert _close(c["so_far_usd"], 2 * 4 * 0.30), c
-        assert [u["reason"] for u in c["unpriced"]] == [cost.CONTROL_PLANE_NOTE], (
-            "the control-plane fee must be said to be left out")
+        plane = cost.CONTROL_PLANE_DEFAULTS["gcp"]
+        assert c["priced"] == 1 and _close(c["rate_usd_h"], 4 * 0.30 + plane), c
+        assert _close(c["so_far_usd"], 2 * (4 * 0.30 + plane)), c
+        assert c["unpriced"] == [], "the control plane is priced now, not left out"
     finally:
         db.close()
 
@@ -246,11 +252,11 @@ def test_a_cluster_with_nothing_recorded_is_priced_at_the_modules_defaults():
     try:
         _clean(db)
         cell, _ = _cluster_cell(db, tfv={})
-        assert _close(_cost(db, "custom", {"id": cell.id})["rate_usd_h"], 3 * 0.08), (
-            "GKE's module builds three e2-standard-2 nodes")
+        assert _close(_cost(db, "custom", {"id": cell.id})["rate_usd_h"], 3 * 0.08 + 0.10), (
+            "GKE's module builds three e2-standard-2 nodes, plus the control plane")
         cell, _ = _cluster_cell(db, cloud="aws", tfv={}, region="us-east-1")
-        assert _close(_cost(db, "custom", {"id": cell.id})["rate_usd_h"], 2 * 0.02), (
-            "EKS's module builds two t3.small nodes")
+        assert _close(_cost(db, "custom", {"id": cell.id})["rate_usd_h"], 2 * 0.02 + 0.10), (
+            "EKS's module builds two t3.small nodes, plus the control plane")
     finally:
         db.close()
 
@@ -269,8 +275,8 @@ def test_a_stopped_clusters_nodes_cost_nothing():
         db.add(stop)
         db.commit()
         c = _cost(db, "custom", {"id": cell.id})
-        assert c["rate_usd_h"] == 0.0, c
-        assert _close(c["so_far_usd"], 3 * 2 * 0.08), "three running hours, then nothing"
+        assert _close(c["rate_usd_h"], 0.10), "stopped: the control plane still bills"
+        assert _close(c["so_far_usd"], 3 * (2 * 0.08 + 0.10) + 1 * 0.10), c
     finally:
         db.close()
 
@@ -287,6 +293,100 @@ def test_a_registered_or_unpriceable_cluster_is_listed_not_priced():
         assert c["priced"] == 0 and "gcp/nowhere-1" in c["unpriced"][0]["reason"], c
     finally:
         db.close()
+
+
+def _db_cell(db, *, engine="postgres", status="available", source="provisioned",
+             region="us-central1", hours_up=2.0):
+    cell = CustomCell(id=str(uuid.uuid4()), name="dc", status="active", workgroup="demo")
+    db.add(cell)
+    row = CloudDatabase(id=str(uuid.uuid4()), engine=engine, cloud="gcp", region=region,
+                        status=status, source=source, created_by="someone",
+                        created_at=NOW - timedelta(hours=hours_up))
+    db.add(row)
+    prov = Job(id=str(uuid.uuid4()), job_type="clouddb_provision", status="completed",
+               created_by="someone")
+    prov.metadata_dict = {"db_id": row.id, "engine": engine, "cloud": "gcp",
+                          "tf_variables": {"tier": "db-f1-micro", "disk_size": 20}}
+    db.add(prov)
+    db.add(CustomCellMember(cell_id=cell.id, kind="database", cloud="gcp", label="db",
+                            ref_id=row.id, job_id=prov.id, status="ready"))
+    db.commit()
+    return cell, row
+
+
+def test_a_database_is_priced_as_compute_plus_storage():
+    db = SessionLocal()
+    try:
+        _clean(db)
+        cell, _ = _db_cell(db)
+        c = _cost(db, "custom", {"id": cell.id})
+        assert c["priced"] == 1 and _close(c["rate_usd_h"], 0.06), c
+        assert _close(c["so_far_usd"], 0.12), c
+        cell, _ = _db_cell(db, status="stopped")
+        assert _close(_cost(db, "custom", {"id": cell.id})["rate_usd_h"], 0.01), (
+            "a stopped database still bills its storage, and only that")
+    finally:
+        db.close()
+
+
+def test_an_unpriced_engine_or_a_registered_database_is_listed():
+    db = SessionLocal()
+    try:
+        _clean(db)
+        cell, _ = _db_cell(db, engine="sqlserver")
+        c = _cost(db, "custom", {"id": cell.id})
+        assert c["priced"] == 0 and "PostgreSQL and MySQL" in c["unpriced"][0]["reason"], c
+        cell, _ = _db_cell(db, source="registered")
+        c = _cost(db, "custom", {"id": cell.id})
+        assert "registered" in c["unpriced"][0]["reason"], c
+        cell, _ = _db_cell(db, region="nowhere-1")
+        c = _cost(db, "custom", {"id": cell.id})
+        assert "gcp/nowhere-1" in c["unpriced"][0]["reason"], c
+    finally:
+        db.close()
+
+
+def test_the_control_plane_fee_is_an_admin_setting():
+    from web_dashboard.services import config_service
+    db = SessionLocal()
+    saved = config_service.get("k8s_control_plane_usd_per_hour_gcp", "")
+    try:
+        _clean(db)
+        cell, _ = _cluster_cell(db, tfv={"node_count": 2})
+        config_service.set("k8s_control_plane_usd_per_hour_gcp", "0.25")
+        assert _close(_cost(db, "custom", {"id": cell.id})["rate_usd_h"], 2 * 0.08 + 0.25)
+        config_service.set("k8s_control_plane_usd_per_hour_gcp", "0")
+        assert _close(_cost(db, "custom", {"id": cell.id})["rate_usd_h"], 2 * 0.08), (
+            "an explicit 0 must mean free, not the default")
+    finally:
+        config_service.set("k8s_control_plane_usd_per_hour_gcp", saved or "")
+        db.close()
+
+
+def test_a_blank_control_plane_setting_saves_as_list_price():
+    from web_dashboard.api.setup import CostExplorerFeatureConfig
+    cfg = CostExplorerFeatureConfig(k8s_control_plane_usd_per_hour_aws="",
+                                    k8s_control_plane_usd_per_hour_gcp="",
+                                    k8s_control_plane_usd_per_hour_azure="")
+    assert (cfg.k8s_control_plane_usd_per_hour_aws, cfg.k8s_control_plane_usd_per_hour_gcp,
+            cfg.k8s_control_plane_usd_per_hour_azure) == (0.10, 0.10, 0.0), (
+        "a blank panel field must keep list price, not save a free control plane")
+    html = open(os.path.join(_ROOT, "web_dashboard", "templates", "settings", "panels",
+                             "cost_explorer.html"), encoding="utf-8").read()
+    for cloud in ("aws", "gcp", "azure"):
+        assert f"panelCfg.k8s_control_plane_usd_per_hour_{cloud}" in html, cloud
+
+
+def test_a_member_records_when_it_was_destroyed():
+    m = CustomCellMember(cell_id="c", kind="k8s", cloud="gcp", label="g", status="ready")
+    assert m.ended_at is None
+    m.status = "destroying"
+    assert m.ended_at is None
+    m.status = "destroyed"
+    first = m.ended_at
+    assert first is not None
+    m.status = "destroyed"
+    assert m.ended_at == first, "a second write moved the end"
 
 
 def test_an_agent_cell_has_no_cost_and_says_why():

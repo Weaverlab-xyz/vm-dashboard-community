@@ -383,18 +383,10 @@ function demoHub(tabSlugs, buildPanels, otClouds) {
       const x = ((this.costs.cells || {})[kind] || {})[c.id];
       if (!x) return '';
       if (x.note) return x.note;
-      // A cluster's nodes are priced; only its control-plane fee is left out, which is a
-      // caveat on a priced row, not something missing from it.
-      const all = x.unpriced || [];
-      const planes = all.filter(u => u.kind === 'k8s-control-plane');
-      const missed = all.filter(u => u.kind !== 'k8s-control-plane');
-      const parts = [];
-      if (missed.length === 1) parts.push(missed[0].name + ': ' + missed[0].reason);
-      else if (missed.length) {
-        parts.push('+ ' + missed.length + ' not priced: ' + missed.map(u => u.name).join(', '));
-      }
-      if (planes.length) parts.push('excludes the control-plane fee of ' + planes.map(u => u.name).join(', '));
-      return parts.join('; ');
+      const missed = x.unpriced || [];
+      if (!missed.length) return '';
+      if (missed.length === 1) return missed[0].name + ': ' + missed[0].reason;
+      return '+ ' + missed.length + ' not priced: ' + missed.map(u => u.name).join(', ');
     },
 
     // The caller's monthly demo budget (services/demo_budget). Nothing for an admin, or

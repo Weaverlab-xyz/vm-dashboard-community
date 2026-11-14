@@ -64,11 +64,21 @@ them to see which cells are worth destroying, not to reconcile a bill.
   node size's VM rate. Both come from what the cluster was built with, or the Terraform
   module's default when the request left them out (GKE: three `e2-standard-2`; EKS: two
   `t3.small`; AKS: two `Standard_B2s`). A stopped cluster's nodes cost nothing, because
-  stopping scales its pools to zero. The **control-plane fee is not included**, and the row
-  says so. A registered cluster is not priced, because it is billed to its own account.
-- **Not priced, and said so:** managed databases in a custom cell (the app has no price
-  source for them yet), and a VM or cluster in a region the price list can't reach. Each is
-  named under the row. None is counted as $0.
+  stopping scales its pools to zero. The **control-plane fee** is added on top, running or
+  stopped. No price list returns it, so it is a setting (Settings → *Cloud Costs* →
+  *Kubernetes control-plane fee*) defaulting to list price: EKS $0.10/h, GKE $0.10/h (its
+  free-tier credit is not assumed), AKS $0 on the free tier. A registered cluster is not
+  priced, because it is billed to its own account.
+- **A managed database** in a custom cell is priced from the cloud's own price list:
+  its instance per hour plus its storage. RDS uses the Pricing API (Single-AZ); Cloud SQL
+  uses the Cloud Billing Catalog, by tier (zonal); Azure flexible servers use the public
+  Retail Prices API, by Burstable size or General Purpose vCores. A stopped database still
+  bills its storage. Only **PostgreSQL and MySQL** are priced: SQL Server and Oracle
+  licence editions change the price several-fold, and Atlas and OCI Autonomous are billed
+  by another party.
+- **Not priced, and said so:** a database engine with no price lookup, and a VM, cluster or
+  database in a region the price list can't reach. Each is named under the row. None is
+  counted as $0.
 - **Agent cells** show no cost. They build nothing; they run on an existing VM, whose cost
   is that VM's.
 - **Prices need the same access as spend caps.** On AWS that is `pricing:GetProducts`; on
@@ -97,12 +107,14 @@ Nothing is ever stopped by the budget, and administrators are never limited.
 
   A booking is refused when the three together pass the budget. This applies to OT,
   network and custom cells, and the check happens before anything is created.
-- **What isn't priced isn't counted.** Databases, a region the price list can't reach, or
-  a price lookup that times out are named in the message, and never refuse a booking by
-  themselves.
-- **It is the same list-price estimate as the cost column,** so it errs high, with one
-  gap: a cluster destroyed earlier in the month drops out of *spent* entirely, because the
-  app does not record when its nodes went.
+- **What isn't priced isn't counted.** A database engine with no price lookup, a region
+  the price list can't reach, or a price lookup that times out are named in the message,
+  and never refuse a booking by themselves.
+- **It is the same list-price estimate as the cost column,** so it errs high. A custom
+  cell's cluster or database destroyed earlier in the month still counts, up to when it
+  went: the cell records the moment each member is first seen destroyed (within a sweep of
+  the teardown), and prices it from its provisioning request. Members destroyed before
+  this was recorded are not counted.
 
 The Cells tab shows your own line: *spent + committed of your budget*. It turns amber at
 90%.

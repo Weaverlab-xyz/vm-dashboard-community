@@ -106,25 +106,29 @@ def _vm_rows(db: Session, username: str, since: datetime) -> list:
     return rows
 
 
-def _clusters(db: Session, username: str) -> list:
-    """``[(cluster, cell_end)]`` in this presenter's custom cells, not destroyed."""
-    from ..database import CustomCell, CustomCellMember, K8sCluster
+def _members(db: Session, username: str, since: datetime) -> list:
+    """``[(member, cell_end)]``: the cluster and database members of this presenter's
+    custom cells that are live, or that ended on or after ``since``."""
+    from ..database import CustomCell, CustomCellMember
     out = []
     cells = {c.id: c for c in db.query(CustomCell).filter(CustomCell.created_by == username)}
     if not cells:
         return out
     for m in db.query(CustomCellMember).filter(CustomCellMember.cell_id.in_(list(cells)),
-                                               CustomCellMember.kind == "k8s"):
-        if m.status == "destroyed" or not m.ref_id:
+                                               CustomCellMember.kind.in_(("k8s", "database"))):
+        if m.status == "destroyed":
+            ended = dcc._naive(m.ended_at)
+            # Destroyed before the column existed: no record of when, so not counted.
+            if ended is None or ended < since:
+                continue
+        elif not m.ref_id:
             continue
-        cluster = db.query(K8sCluster).filter(K8sCluster.id == m.ref_id).first()
-        if cluster is not None:
-            out.append((cluster, dcc._naive(cells[m.cell_id].expires_at)))
+        out.append((m, dcc._naive(cells[m.cell_id].expires_at)))
     return out
 
 
 def standing(db: Session, username: str, *, now: Optional[datetime] = None,
-             rate_for=None, rate_spec=None) -> dict:
+             rate_for=None, rate_spec=None, db_rates=None) -> dict:
     """``{spent_usd, committed_usd, unpriced}`` for this presenter, this month."""
     from . import spend_sweeper
     rate_for = rate_for or spend_sweeper.rate_for
@@ -155,17 +159,16 @@ def standing(db: Session, username: str, *, now: Optional[datetime] = None,
         committed += (on if running else off) * dcc._hours(now, min(end or month_end,
                                                                     month_end))
 
-    clusters = _clusters(db, username)
-    cluster_events = dcc.cluster_power_events(db, [c.id for c, _ in clusters])
-    for cluster, end in clusters:
-        on, off, _reason = dcc.cluster_rates(db, cluster, rate_spec)
-        if on is None or off is None:
-            unpriced.append(cluster.name)
+    for m, end in _members(db, username, month_start):
+        p = dcc.member_pricing(db, m, now=now, rate_spec=rate_spec, db_rates=db_rates)
+        if p["on"] is None or p["off"] is None:
+            unpriced.append(p["name"])
             continue
-        history = cluster_events.get(cluster.id) or []
-        spent += dcc.span_cost(cluster.created_at, now, history, rate_running=on,
-                               rate_stopped=off, since=month_start)
-        rate = on if dcc._cluster_running(cluster, history) else off
+        spent += dcc.span_cost(p["start"], p["end"], p["events"], rate_running=p["on"],
+                               rate_stopped=p["off"], since=month_start)
+        if m.status == "destroyed":
+            continue
+        rate = p["on"] if p["running"] else p["off"]
         committed += rate * dcc._hours(now, min(end or month_end, month_end))
 
     return {"spent_usd": round(spent, 2), "committed_usd": round(committed, 2),
@@ -190,10 +193,11 @@ def summary_for(db: Session, username: str, limit, source: str, *,
 # ── A new booking ───────────────────────────────────────────────────────────────
 
 def estimate(specs, *, start: Optional[datetime], end: Optional[datetime],
-             now: Optional[datetime] = None, rate_spec=None) -> tuple:
+             now: Optional[datetime] = None, rate_spec=None, db_rates=None) -> tuple:
     """``(usd or None, unpriced)`` for a cell of ``specs`` -- ``[(cloud, meta, count)]``,
-    each a VM described the way a deploy row is -- from ``start`` (None: now) to ``end``
-    (None: the end of the month)."""
+    each a VM described the way a deploy row is, a database (``meta["_kind"] ==
+    "database"``, its provisioning request) or a cluster's control plane (``"control_plane"``)
+    -- from ``start`` (None: now) to ``end`` (None: the end of the month)."""
     from . import spend_sweeper
     rate_spec = rate_spec or spend_sweeper.rate_for_spec
     now = dcc._naive(now or datetime.now(timezone.utc))
@@ -202,8 +206,17 @@ def estimate(specs, *, start: Optional[datetime], end: Optional[datetime],
     hours = dcc._hours(begin, finish)
     total, priced, unpriced = 0.0, 0, []
     for cloud, meta, count in specs:
-        rate = rate_spec(cloud, meta, running=True)
+        kind = meta.get("_kind")
+        if kind == "control_plane":
+            rate = dcc.control_plane_rate(cloud)
+        elif kind == "database":
+            rate = dcc.database_rates(cloud, meta.get("region") or "", meta, db_rates)[0]
+        else:
+            rate = rate_spec(cloud, meta, running=True)
         if rate is None:
+            if kind == "database":
+                unpriced.append(f"{meta.get('_label') or 'database'} ({meta.get('engine') or cloud})")
+                continue
             unpriced.append(f"{cloud} {meta.get('instance_type') or meta.get('vm_size') or meta.get('machine_type') or 'VM'}")
             continue
         priced += 1
@@ -212,19 +225,22 @@ def estimate(specs, *, start: Optional[datetime], end: Optional[datetime],
 
 
 def check_booking(db: Session, user, specs, *, start=None, end=None,
-                  now: Optional[datetime] = None, rate_for=None, rate_spec=None) -> None:
+                  now: Optional[datetime] = None, rate_for=None, rate_spec=None,
+                  db_rates=None) -> None:
     """Raise :class:`BudgetExceeded` if this booking would pass the user's budget."""
     limit, _source = limit_for(user)
     if limit is None:
         return
     _check(db, user.username, limit, specs, start=start, end=end, now=now,
-           rate_for=rate_for, rate_spec=rate_spec)
+           rate_for=rate_for, rate_spec=rate_spec, db_rates=db_rates)
 
 
 def _check(db: Session, username: str, limit: float, specs, *, start, end, now=None,
-           rate_for=None, rate_spec=None) -> None:
-    st = standing(db, username, now=now, rate_for=rate_for, rate_spec=rate_spec)
-    est, est_unpriced = estimate(specs, start=start, end=end, now=now, rate_spec=rate_spec)
+           rate_for=None, rate_spec=None, db_rates=None) -> None:
+    st = standing(db, username, now=now, rate_for=rate_for, rate_spec=rate_spec,
+                  db_rates=db_rates)
+    est, est_unpriced = estimate(specs, start=start, end=end, now=now, rate_spec=rate_spec,
+                                 db_rates=db_rates)
     total = st["spent_usd"] + st["committed_usd"] + (est or 0.0)
     if total <= limit:
         return
@@ -281,7 +297,7 @@ def check_booking_sync(db: Session, user, specs, *, start=None, end=None) -> Non
 
 def specs_for_items(items) -> tuple:
     """``(specs, unpriced)`` for a custom cell's blueprint items: each VM item at its
-    count, each cluster as its node pool. Databases cannot be priced yet."""
+    count, each cluster as its node pool and control plane, each database as itself."""
     specs, unpriced = [], []
     for it in items:
         cloud, spec = it["cloud"], dict(it.get("spec") or {})
@@ -295,6 +311,10 @@ def specs_for_items(items) -> tuple:
                 continue
             specs.append((cloud, {"region": pool["region"], "instance_type": pool["size"],
                                   "disk_gb": pool["disk_gb"]}, pool["count"]))
+            specs.append((cloud, {"_kind": "control_plane"}, 1))
+        elif it["kind"] == "database":
+            specs.append((cloud, {"_kind": "database", "_label": it.get("label") or "",
+                                  "region": it.get("region") or "", **spec}, 1))
         else:
             unpriced.append(f"{it.get('label') or it['kind']} ({it['kind']})")
     return specs, unpriced

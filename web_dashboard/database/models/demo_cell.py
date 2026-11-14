@@ -19,7 +19,7 @@ Plain string ids and no ForeignKeys, as elsewhere in this package: integrity is 
 import json
 import uuid
 
-from sqlalchemy import Column, DateTime, Float, Integer, String, Text
+from sqlalchemy import Column, DateTime, Float, Integer, String, Text, event
 
 from ...utils.clock import utcnow
 from .._engine import Base
@@ -162,3 +162,14 @@ class CustomCellMember(Base):
     power_state = Column(String(16), nullable=True)     # running | stopped
     last_error = Column(Text, nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
+    # When it was first seen destroyed (migration 0017). A cluster's own row is deleted at
+    # teardown, so this is the only record of when its nodes stopped billing -- the demo
+    # budget (services/demo_budget) counts a member gone this month up to here. Set by the
+    # listener below, whichever of the teardown paths marks it destroyed.
+    ended_at = Column(DateTime, nullable=True)
+
+
+@event.listens_for(CustomCellMember.status, "set")
+def _stamp_ended_at(target, value, oldvalue, _initiator):
+    if value == "destroyed" and oldvalue != "destroyed" and target.ended_at is None:
+        target.ended_at = utcnow()
