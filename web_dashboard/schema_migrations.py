@@ -404,6 +404,11 @@ MIGRATIONS: tuple = (
     # NULL: the instance default (demo_monthly_budget_usd); 0: no budget for this user.
     Migration("0016_user_demo_budget",
               (add_column("users", "demo_budget_usd", "FLOAT"),)),
+    # When a custom-cell member was first seen destroyed. A cluster's own row is deleted at
+    # teardown, so the demo budget counts a member gone this month up to here. NULL: still
+    # live, or destroyed before this column (and not counted).
+    Migration("0017_cell_member_ended_at",
+              (add_column("custom_cell_members", "ended_at", "TIMESTAMP"),)),
 )
 
 

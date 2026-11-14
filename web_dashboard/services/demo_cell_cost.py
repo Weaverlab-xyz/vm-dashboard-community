@@ -22,13 +22,16 @@ Three numbers per cell:
   spend panel never disagree);
 * ``to_end_usd``  -- the rate now, held until the cell's end time. ``None`` without one.
 
-**Clusters are priced as their nodes**: node count x the node size's VM rate, from what the
-provisioning request asked for or the Terraform module's default. The control-plane fee is
-not, and the row says so.
+**Clusters are priced as their nodes** (node count x the node size's VM rate, from what the
+provisioning request asked for or the Terraform module's default) plus their control plane.
 
-**What is not priced is said, never counted as zero.** Managed databases have no price
-source in the app yet; a VM in a region the catalogue cannot reach has no rate.
-Both land in ``unpriced`` with the reason. An agent cell builds nothing -- it runs on a VM
+**Databases are priced** from the same price lists (services/db_cloud_cost): PostgreSQL
+and MySQL on RDS, Cloud SQL and Azure flexible servers, compute plus storage. The control
+plane's flat fee is an admin setting (:func:`control_plane_rate`).
+
+**What is not priced is said, never counted as zero.** Another database engine, or a VM,
+cluster or database in a region the catalogue cannot reach, has no rate. Each lands in
+``unpriced`` with the reason. An agent cell builds nothing -- it runs on a VM
 that is somebody else's line -- so it carries a note and no number.
 
 Prices are fetched by blocking HTTP on a cold cache. Callers run :func:`price_cells` off
@@ -50,8 +53,9 @@ logger = logging.getLogger(__name__)
 CAVEAT = ("Estimated at list price: no Savings Plans, reservations, credits, free tier, "
           "data transfer or snapshots. Errs high.")
 AGENT_NOTE = "runs on an existing VM; its cost is that VM's"
-UNPRICED_KIND = "databases are not priced yet"
+UNPRICED_KIND = "this kind of member is not priced"
 NO_CLUSTER_ROW = "no cluster record to price"
+NO_DB_ROW = "no database record to price"
 
 RateFn = Callable[..., Optional[float]]
 
@@ -76,7 +80,8 @@ def _hours(a: datetime, b: datetime) -> float:
 # ── What a cell is made of ──────────────────────────────────────────────────────
 
 def billable(db: Session, kind: str, cell: dict) -> tuple:
-    """``(vm_rows, clusters, unpriced, note)`` for one cell, as the summary lists it."""
+    """``(vm_rows, members, unpriced, note)`` for one cell, as the summary lists it.
+    ``members`` are its live cluster and database members, priced by :func:`member_pricing`."""
     if kind == "agent":
         return [], [], [], AGENT_NOTE
     if kind in ("ot", "net"):
@@ -91,9 +96,8 @@ def billable(db: Session, kind: str, cell: dict) -> tuple:
                 rows.append(broker)
         return rows, [], [], ""
     if kind == "custom":
-        from ..database import K8sCluster
         from . import custom_cell_service
-        rows, clusters, unpriced = [], [], []
+        rows, members, unpriced = [], [], []
         for m in custom_cell_service.members_of(db, cell["id"]):
             if m.status == "destroyed":
                 continue
@@ -102,14 +106,11 @@ def billable(db: Session, kind: str, cell: dict) -> tuple:
                 if job is not None:
                     rows.append(job)
                 continue
-            if m.kind == "k8s" and m.ref_id:
-                cluster = db.query(K8sCluster).filter(K8sCluster.id == m.ref_id).first()
-                if cluster is not None:
-                    clusters.append(cluster)
-                    continue
-            unpriced.append({"name": m.label, "kind": m.kind,
-                             "reason": NO_CLUSTER_ROW if m.kind == "k8s" else UNPRICED_KIND})
-        return rows, clusters, unpriced, ""
+            if m.kind in ("k8s", "database"):
+                members.append(m)
+                continue
+            unpriced.append({"name": m.label, "kind": m.kind, "reason": UNPRICED_KIND})
+        return rows, members, unpriced, ""
     return [], [], [], ""
 
 
@@ -145,6 +146,12 @@ def cluster_power_events(db: Session, cluster_ids) -> dict:
     """The same, for clusters: the dashboard's own ``k8s_power`` jobs."""
     from . import k8s_power
     return _events_from(db, (k8s_power.JOB_TYPE,), "cluster_id", cluster_ids)
+
+
+def database_power_events(db: Session, db_ids) -> dict:
+    """The same, for databases: the dashboard's own ``clouddb_power`` jobs."""
+    from . import clouddb_power
+    return _events_from(db, (clouddb_power.JOB_TYPE,), "db_id", db_ids)
 
 
 # ── The arithmetic ──────────────────────────────────────────────────────────────
@@ -224,7 +231,26 @@ def _vm_name(row) -> str:
 # tier bills none), and the row says so. Where the provisioning request left the size or
 # the count to Terraform, the module's own default is what was built.
 
-CONTROL_PLANE_NOTE = "control-plane fee not included"
+#: List price per cluster-hour of the managed control plane, as of writing: EKS standard
+#: support, GKE's cluster management fee (the free tier's monthly credit covers one zonal
+#: cluster per billing account, which this does not assume), AKS's free tier. An admin
+#: overrides each in Settings, because these are flat fees no price list query returns.
+CONTROL_PLANE_DEFAULTS = {"aws": 0.10, "gcp": 0.10, "azure": 0.0}
+
+
+def control_plane_rate(cloud: str) -> Optional[float]:
+    """USD/hour for one cluster's control plane, or None for a cloud with no figure."""
+    if cloud not in CONTROL_PLANE_DEFAULTS:
+        return None
+    try:
+        from . import config_service
+        raw = config_service.get(f"k8s_control_plane_usd_per_hour_{cloud}", "")
+    except Exception:  # noqa: BLE001 -- the list price is still right
+        raw = ""
+    try:
+        return max(0.0, float(raw)) if str(raw).strip() != "" else CONTROL_PLANE_DEFAULTS[cloud]
+    except (TypeError, ValueError):
+        return CONTROL_PLANE_DEFAULTS[cloud]
 
 #: ``cloud -> (size key in tf_variables, count key, config default key, module size,
 #: module count, node disk GB)``, read from terraform/k8s_cluster/*.
@@ -277,19 +303,23 @@ def pool_from(cloud: str, tfv: dict, region: str) -> Optional[dict]:
 
 
 def cluster_rates(db: Session, cluster, rate_spec) -> tuple:
-    """``(rate_running, rate_stopped, reason)``. A stopped cluster's pools are at zero
-    nodes (k8s_power scales them down; AKS's managed stop deallocates them), so its node
-    cost is nothing."""
+    """``(rate_running, rate_stopped, reason)`` for a live cluster row: its nodes plus its
+    control plane while running, the control plane alone while stopped (stopping scales
+    the pools to zero; the control plane keeps billing)."""
     if (cluster.source or "") != "provisioned":
         return None, None, "a registered cluster is billed to its own account"
-    pool = node_pool(db, cluster)
+    return pool_rates(cluster.cloud or "", node_pool(db, cluster), rate_spec)
+
+
+def pool_rates(cloud: str, pool: Optional[dict], rate_spec) -> tuple:
     if pool is None:
-        return None, None, f"no node pricing for {cluster.cloud} clusters"
-    node = rate_spec(cluster.cloud, {"region": pool["region"], "instance_type": pool["size"],
-                                     "disk_gb": pool["disk_gb"]}, running=True)
-    if node is None:
-        return None, None, f"no price source for {cluster.cloud}/{pool['region'] or '?'}"
-    return node * pool["count"], 0.0, ""
+        return None, None, f"no node pricing for {cloud} clusters"
+    node = rate_spec(cloud, {"region": pool["region"], "instance_type": pool["size"],
+                             "disk_gb": pool["disk_gb"]}, running=True)
+    plane = control_plane_rate(cloud)
+    if node is None or plane is None:
+        return None, None, f"no price source for {cloud}/{pool['region'] or '?'}"
+    return node * pool["count"] + plane, plane, ""
 
 
 def _cluster_running(cluster, history) -> bool:
@@ -299,16 +329,108 @@ def _cluster_running(cluster, history) -> bool:
     return (history[-1][1] if history else "start") != "stop"
 
 
+# ── Databases ───────────────────────────────────────────────────────────────────
+
+def database_spec(db: Session, row=None, *, job_id: str = "") -> tuple:
+    """``(cloud, region, spec)`` for a database, from its provisioning ``tf_variables``:
+    the live row's own job, else the job a cell member recorded."""
+    tfv: dict = {}
+    prov = None
+    if row is not None:
+        try:
+            from . import cloud_database_service
+            prov = cloud_database_service._provision_job_for(db, row.id)
+        except Exception:  # noqa: BLE001
+            prov = None
+    if prov is None and job_id:
+        prov = db.query(Job).filter(Job.id == job_id).first()
+    meta = (prov.metadata_dict or {}) if prov else {}
+    tfv = dict(meta.get("tf_variables") or {})
+    cloud = (row.cloud if row is not None else "") or meta.get("cloud") or ""
+    region = ((row.region if row is not None else "") or tfv.get("region")
+              or tfv.get("location") or "")
+    tfv["engine"] = (row.engine if row is not None else "") or meta.get("engine") or ""
+    return cloud, region, tfv
+
+
+def database_rates(cloud: str, region: str, spec: dict, db_rates=None) -> tuple:
+    """``(rate_running, rate_stopped, reason)``: compute plus storage while running,
+    storage alone while stopped (a stopped database still bills its disk)."""
+    from . import db_cloud_cost
+    db_rates = db_rates or db_cloud_cost.rates
+    engine = (spec.get("engine") or "").lower()
+    if engine not in db_cloud_cost.PRICED_ENGINES:
+        return None, None, db_cloud_cost.engine_reason(engine)
+    found = db_rates(cloud, region, spec)
+    if found is None:
+        return None, None, f"no price source for {engine} on {cloud}/{region or '?'}"
+    compute, storage = found
+    return compute + storage, storage, ""
+
+
+# ── Any cluster or database member, live or gone ───────────────────────────────
+
+def member_pricing(db: Session, m, *, now, rate_spec, db_rates=None) -> dict:
+    """``{name, kind, on, off, start, end, events, running, reason}`` for one custom-cell
+    member that is a cluster or a database.
+
+    A live member is priced from its own row. A destroyed one -- a cluster's row is
+    deleted at teardown -- from the provisioning job the member recorded, between when the
+    member was created and its ``ended_at``. ``on``/``off`` are None with a ``reason``
+    when it cannot be priced.
+    """
+    from ..database import CloudDatabase, K8sCluster
+    out = {"name": m.label, "kind": m.kind, "on": None, "off": None, "reason": "",
+           "start": m.created_at, "end": _naive(getattr(m, "ended_at", None)) or _naive(now),
+           "events": [], "running": False}
+    gone = m.status == "destroyed"
+    if m.kind == "k8s":
+        cluster = (db.query(K8sCluster).filter(K8sCluster.id == m.ref_id).first()
+                   if m.ref_id else None)
+        if cluster is not None:
+            out["name"] = cluster.name
+            out["start"] = cluster.created_at
+            on, off, reason = cluster_rates(db, cluster, rate_spec)
+        elif gone and m.job_id:
+            prov = db.query(Job).filter(Job.id == m.job_id).first()
+            tfv = ((prov.metadata_dict or {}).get("tf_variables") or {}) if prov else {}
+            on, off, reason = pool_rates(m.cloud, pool_from(m.cloud, tfv, ""), rate_spec)
+        else:
+            on, off, reason = None, None, NO_CLUSTER_ROW
+        out["events"] = cluster_power_events(db, [m.ref_id]).get(m.ref_id, []) if m.ref_id else []
+        out["running"] = (not gone and cluster is not None
+                          and _cluster_running(cluster, out["events"]))
+    else:
+        row = (db.query(CloudDatabase).filter(CloudDatabase.id == m.ref_id).first()
+               if m.ref_id else None)
+        if row is not None and (row.source or "provisioned") != "provisioned":
+            on, off, reason = None, None, "a registered database is billed to its own account"
+        elif row is None and not (gone and m.job_id):
+            on, off, reason = None, None, NO_DB_ROW
+        else:
+            cloud, region, spec = database_spec(db, row, job_id=m.job_id or "")
+            on, off, reason = database_rates(cloud or m.cloud, region, spec, db_rates)
+            if row is not None:
+                out["start"] = row.created_at
+        out["events"] = database_power_events(db, [m.ref_id]).get(m.ref_id, []) if m.ref_id else []
+        if not gone and row is not None:
+            from . import clouddb_power
+            out["running"] = (not clouddb_power.is_stopped(row)
+                              and (out["events"][-1][1] if out["events"] else "start") != "stop")
+    out.update(on=on, off=off, reason=reason)
+    return out
+
+
 # ── One cell ────────────────────────────────────────────────────────────────────
 
 def cell_cost(db: Session, kind: str, cell: dict, *, now: datetime,
               events: Optional[dict] = None, rate_for: Optional[RateFn] = None,
-              rate_spec: Optional[RateFn] = None) -> dict:
+              rate_spec: Optional[RateFn] = None, db_rates=None) -> dict:
     """The three numbers for one cell, plus what could not be priced and why."""
     from . import spend_sweeper
     rate_for = rate_for or spend_sweeper.rate_for
     rate_spec = rate_spec or spend_sweeper.rate_for_spec
-    rows, clusters, unpriced, note = billable(db, kind, cell)
+    rows, members, unpriced, note = billable(db, kind, cell)
     if events is None:
         events = power_events(db, [r.id for r in rows])
     rate_now, so_far, priced = 0.0, 0.0, 0
@@ -328,19 +450,15 @@ def cell_cost(db: Session, kind: str, cell: dict, *, now: datetime,
         rate_now += on if running_now else off
         so_far += vm_cost(row, history, rate_running=on, rate_stopped=off, now=now)
 
-    cluster_events = cluster_power_events(db, [c.id for c in clusters]) if clusters else {}
-    for cluster in clusters:
-        on, off, reason = cluster_rates(db, cluster, rate_spec)
-        if on is None or off is None:
-            unpriced.append({"name": cluster.name, "kind": "k8s", "reason": reason})
+    for m in members:
+        p = member_pricing(db, m, now=now, rate_spec=rate_spec, db_rates=db_rates)
+        if p["on"] is None or p["off"] is None:
+            unpriced.append({"name": p["name"], "kind": p["kind"], "reason": p["reason"]})
             continue
-        history = cluster_events.get(cluster.id) or []
         priced += 1
-        rate_now += on if _cluster_running(cluster, history) else off
-        so_far += span_cost(cluster.created_at, now, history,
-                            rate_running=on, rate_stopped=off)
-        unpriced.append({"name": cluster.name, "kind": "k8s-control-plane",
-                         "reason": CONTROL_PLANE_NOTE})
+        rate_now += p["on"] if p["running"] else p["off"]
+        so_far += span_cost(p["start"], now, p["events"],
+                            rate_running=p["on"], rate_stopped=p["off"])
 
     end = _naive(cell.get("end_at"))
     to_end = None

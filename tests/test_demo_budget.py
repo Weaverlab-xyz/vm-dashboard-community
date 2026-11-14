@@ -54,14 +54,22 @@ def _spec(cloud, meta, *, running):
     return (VM if kind_vm else NODE) if running else 0.0
 
 
+DB_COMPUTE, DB_STORAGE = 0.05, 0.01
+
+
 class _Prices:
     def __enter__(self):
-        self._saved = (spend_sweeper.rate_for, spend_sweeper.rate_for_spec)
+        from web_dashboard.services import db_cloud_cost
+        self._saved = (spend_sweeper.rate_for, spend_sweeper.rate_for_spec,
+                       db_cloud_cost.rates)
         spend_sweeper.rate_for, spend_sweeper.rate_for_spec = _rate, _spec
+        db_cloud_cost.rates = lambda cloud, region, spec: (DB_COMPUTE, DB_STORAGE)
         return self
 
     def __exit__(self, *exc):
-        spend_sweeper.rate_for, spend_sweeper.rate_for_spec = self._saved
+        from web_dashboard.services import db_cloud_cost
+        (spend_sweeper.rate_for, spend_sweeper.rate_for_spec,
+         db_cloud_cost.rates) = self._saved
 
 
 class _Default:
@@ -141,6 +149,63 @@ def test_committed_stops_at_the_cells_end_or_the_months():
     assert abs(st["committed_usd"] - (VM * 6 + VM * to_month_end)) < 0.02, st
 
 
+def _cell_with_member(db, me, *, kind, ended=None, created, tfv=None):
+    from web_dashboard.database import CustomCellMember
+    cell = CustomCell(id=str(uuid.uuid4()), name="m" + uuid.uuid4().hex[:5], status="active",
+                      workgroup="demo", created_by=me)
+    db.add(cell)
+    prov = Job(id=str(uuid.uuid4()), job_type="k8s_provision" if kind == "k8s"
+               else "clouddb_provision", status="completed", created_by=me)
+    prov.metadata_dict = {"engine": "postgres", "cloud": "gcp",
+                          "tf_variables": tfv or {"node_count": 2, "region": "us-central1"}}
+    db.add(prov)
+    m = CustomCellMember(cell_id=cell.id, kind=kind, cloud="gcp", label=kind,
+                         ref_id=str(uuid.uuid4()), job_id=prov.id, status="ready",
+                         created_at=created)
+    db.add(m)
+    db.commit()
+    m.status = "destroyed"
+    m.ended_at = ended
+    db.commit()
+    return m
+
+
+def test_a_cluster_destroyed_this_month_still_counts():
+    db = life._db()
+    me = "p-" + uuid.uuid4().hex[:6]
+    first = datetime(2026, 11, 1)
+    _cell_with_member(db, me, kind="k8s", created=first + timedelta(hours=2),
+                      ended=first + timedelta(hours=12))
+    _cell_with_member(db, me, kind="k8s", created=first - timedelta(days=9),
+                      ended=first - timedelta(days=2))
+    with _Prices():
+        st = bud.standing(db, me, now=NOW)
+    plane = 0.10
+    want = 10 * (2 * NODE + plane)        # ten hours, two nodes and a control plane
+    assert abs(st["spent_usd"] - want) < 0.02, (st, want)
+    assert st["committed_usd"] == 0.0, "a destroyed cluster committed money"
+
+
+def test_a_destroyed_database_counts_from_its_provisioning_request():
+    db = life._db()
+    me = "p-" + uuid.uuid4().hex[:6]
+    first = datetime(2026, 11, 1)
+    _cell_with_member(db, me, kind="database", created=first + timedelta(hours=1),
+                      ended=first + timedelta(hours=5),
+                      tfv={"tier": "db-f1-micro", "region": "us-central1"})
+    with _Prices():
+        st = bud.standing(db, me, now=NOW)
+    assert abs(st["spent_usd"] - 4 * (DB_COMPUTE + DB_STORAGE)) < 0.02, st
+
+
+def test_a_booking_counts_its_database_and_control_plane():
+    specs, _ = bud.specs_for_items([life.GKE, life.MYSQL])
+    with _Prices():
+        est, unpriced = bud.estimate(specs, start=NOW, end=NOW + timedelta(hours=10), now=NOW)
+    want = 10 * (2 * NODE + 0.10 + DB_COMPUTE + DB_STORAGE)
+    assert abs(est - want) < 0.02 and unpriced == [], (est, want, unpriced)
+
+
 # ── a booking ────────────────────────────────────────────────────────────────
 
 def test_a_booking_over_budget_is_refused_with_every_figure():
@@ -192,9 +257,10 @@ def test_a_custom_launch_over_budget_books_nothing():
 
 def test_a_custom_launch_prices_clusters_as_nodes():
     specs, unpriced = bud.specs_for_items([life.GKE, life.MYSQL, life.UBUNTU])
-    clouds_counts = sorted((c, n) for c, _m, n in specs)
-    assert clouds_counts == [("gcp", 2), ("gcp", 2)], specs   # 2 nodes, 2 VMs
-    assert unpriced == ["db (database)"], unpriced
+    kinds = sorted((m.get("_kind") or "vm", n) for _c, m, n in specs)
+    # 2 nodes and 2 VMs (both "vm"-priced), one control plane, one database.
+    assert kinds == [("control_plane", 1), ("database", 1), ("vm", 2), ("vm", 2)], specs
+    assert unpriced == [], unpriced
 
 
 def test_a_custom_launch_under_budget_books():

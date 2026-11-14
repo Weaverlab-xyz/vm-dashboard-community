@@ -114,6 +114,11 @@ class Settings(BaseSettings):
     # A demo presenter's monthly budget for estimated cell spend (services/demo_budget):
     # a booking that would pass it is refused. 0 = none. User.demo_budget_usd overrides.
     demo_monthly_budget_usd: float = 0.0
+    # A managed Kubernetes control plane's flat fee per cluster-hour, for the demo hub's
+    # estimate (services/demo_cell_cost). No price list returns these; list price today.
+    k8s_control_plane_usd_per_hour_aws: float = 0.10
+    k8s_control_plane_usd_per_hour_gcp: float = 0.10
+    k8s_control_plane_usd_per_hour_azure: float = 0.0
     # Pushing a budget INTO the cloud (services/provider_budget.py). The address the
     # PROVIDER notifies — not a dashboard endpoint. A cloud budget cannot POST to a
     # webhook this app hosts, and the point of pushing one is that it still alerts when

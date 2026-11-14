@@ -1935,6 +1935,12 @@ class CostExplorerFeatureConfig(BaseModel):
     gcp_billing_export_table: str = ""
     # Not a bill: the demo hub's list-price estimate per presenter (services/demo_budget).
     demo_monthly_budget_usd: float = 0.0
+    # Flat control-plane fees per cluster-hour (services/demo_cell_cost). Blank reads back
+    # as the list-price default, not 0: a blank is "not overridden", and a free control
+    # plane is entered as 0 on purpose.
+    k8s_control_plane_usd_per_hour_aws: float = 0.10
+    k8s_control_plane_usd_per_hour_gcp: float = 0.10
+    k8s_control_plane_usd_per_hour_azure: float = 0.0
 
     @field_validator("cost_monthly_budget", "cost_budget_aws", "cost_budget_azure",
                      "cost_budget_gcp", "cost_budget_oci", "demo_monthly_budget_usd",
@@ -1943,6 +1949,15 @@ class CostExplorerFeatureConfig(BaseModel):
     def _blank_to_zero(cls, v):
         # An empty/blank input (no budget) round-trips as "" / null — treat as 0.
         return 0.0 if v in (None, "") else v
+
+    @field_validator("k8s_control_plane_usd_per_hour_aws", "k8s_control_plane_usd_per_hour_gcp",
+                     "k8s_control_plane_usd_per_hour_azure", mode="before")
+    @classmethod
+    def _blank_to_list_price(cls, v, info):
+        if v not in (None, ""):
+            return v
+        from ..services.demo_cell_cost import CONTROL_PLANE_DEFAULTS
+        return CONTROL_PLANE_DEFAULTS[info.field_name.rsplit("_", 1)[1]]
 
 
 class AdmissionControlFeatureConfig(BaseModel):

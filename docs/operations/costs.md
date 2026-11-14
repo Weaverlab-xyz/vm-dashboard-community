@@ -55,6 +55,7 @@ The reasoning, with the numbers, is in
 |---|---|---|---|
 | Monthly budget | `cost_monthly_budget` | `0` (off) | Overall, in the account currency. The home page's **Needs attention** panel flags *over* (spend ≥ budget) and *approaching* (projected to exceed it by month-end) |
 | Per-cloud budgets | `cost_budget_aws`, `cost_budget_azure`, `cost_budget_gcp`, `cost_budget_oci` | `0` (off) | Each cloud's spend against its own limit, as well as the overall one |
+| Kubernetes control-plane fee | `k8s_control_plane_usd_per_hour_aws`, `_gcp`, `_azure` | `0.10`, `0.10`, `0` | USD per cluster-hour, for the Demo hub's estimate. No price list returns this flat fee, so it is set here; blank means list price, 0 means free |
 | Demo presenter budget | `demo_monthly_budget_usd` | `0` (off) | Not a bill: the Demo hub's list-price estimate of each presenter's cells this month. A booking that would pass it is refused. A user's own *Demo budget* overrides it. See [Demo hub → Monthly budget](../profiles/demo/demo-hub.md#monthly-budget) |
 
 These are checked by the dashboard, against figures it fetched, so **nothing watches the
