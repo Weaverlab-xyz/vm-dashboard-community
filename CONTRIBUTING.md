@@ -238,7 +238,10 @@ version), and every CDN script or stylesheet names an exact version, which
 `web_dashboard/static/css/tailwind.css` is built by `scripts/build_css.sh` (a pinned
 tailwindcss scanning every template, script and Python file that `tailwind.config.js`
 lists) and committed. After adding a class name that appears nowhere else, run
-`scripts/build_css.sh` and commit the result; CI fails a stale file. Write class names out
+`scripts/build_css.sh` and commit the result; CI fails a stale file. To find out before
+you push rather than half an hour into CI, turn on the repo's pre-push hook once per clone:
+`git config core.hooksPath scripts/hooks` (Claude Code cloud sessions do this for you).
+Write class names out
 in full -- `'bg-' + colour` gets no rule, and `scripts/ci/css_coverage.sh` fails the smoke
 test when a page carries one. `scripts/ci/frontend_pins.py` (the weekly **Front-end pins**
 workflow) reports every one of these pins that is behind a release on its own major; to

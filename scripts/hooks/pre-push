@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Pre-push: refuse a push whose committed tailwind.css is stale.
+#
+# CI's browser-smoke job runs `scripts/build_css.sh --check` and fails when a class name
+# was added to a template, script or Python file without rebuilding the committed
+# stylesheet. It finds that about 30 minutes into a run (#1325). This finds it in seconds,
+# before the push.
+#
+# Opt in once per clone:   git config core.hooksPath scripts/hooks
+# (Claude Code cloud sessions do this in .claude/hooks/session-start.sh.)
+#
+# Runs only when the pushed commits touch web_dashboard/. Needs Node (npx); without it,
+# or if the check cannot run, it warns and lets the push through -- CI is still the
+# backstop, and a hook that blocks on a missing tool is a hook people uninstall.
+# Bypass deliberately with:  git push --no-verify
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)" || exit 0
+
+zero=0000000000000000000000000000000000000000
+touched=0
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue                 # a branch deletion
+  if [ "$remote_sha" = "$zero" ]; then                   # a new branch: against main
+    base=$(git merge-base "$local_sha" origin/main 2>/dev/null || true)
+  else
+    base=$remote_sha
+  fi
+  range=${base:+$base..}$local_sha
+  if git diff --name-only "$range" 2>/dev/null | grep -q '^web_dashboard/'; then
+    touched=1
+  fi
+done
+[ "$touched" = 1 ] || exit 0
+
+if ! command -v npx >/dev/null 2>&1; then
+  echo "pre-push: npx not found; skipping the tailwind.css freshness check (CI will run it)." >&2
+  exit 0
+fi
+
+out=$(scripts/build_css.sh --check 2>&1)
+status=$?
+if [ $status -eq 0 ]; then
+  exit 0
+fi
+if printf '%s' "$out" | grep -q "is stale"; then
+  echo "pre-push: web_dashboard/static/css/tailwind.css is stale." >&2
+  echo "Run scripts/build_css.sh, commit the result, and push again." >&2
+  exit 1
+fi
+echo "pre-push: the tailwind.css check could not run; pushing anyway (CI will run it):" >&2
+printf '%s\n' "$out" | tail -3 >&2
+exit 0
