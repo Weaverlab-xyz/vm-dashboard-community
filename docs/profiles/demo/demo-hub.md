@@ -77,6 +77,36 @@ them to see which cells are worth destroying, not to reconcile a bill.
 
 The estimate loads after the list, so a slow price lookup never holds up the page.
 
+## Monthly budget
+
+An administrator can cap what each presenter's cells cost in a month. Booking a cell that
+would take a presenter past their budget is **refused**, and the message gives the figures.
+Nothing is ever stopped by the budget, and administrators are never limited.
+
+- **Setting it:** Settings → *Cloud Costs* → **Demo cells: monthly budget per presenter**
+  (`demo_monthly_budget_usd`) is the default for everyone. It works whether or not Cloud
+  Costs itself is on. On **Users**, *Demo budget* sets one person's own budget, which wins
+  over the default. Blank uses the default, and 0 means no budget for that person. With the
+  default at 0 and no one given a budget, nothing changes.
+- **What counts, this calendar month (UTC):**
+  - **spent:** what the presenter's cells' VMs and cluster nodes have cost since the 1st,
+    including a VM destroyed this month, up to when it was destroyed;
+  - **committed:** each running resource's rate now, until its cell's end or the end of
+    the month, whichever comes first;
+  - **this cell:** the new cell's rate for its whole lifetime.
+
+  A booking is refused when the three together pass the budget. This applies to OT,
+  network and custom cells, and the check happens before anything is created.
+- **What isn't priced isn't counted.** Databases, a region the price list can't reach, or
+  a price lookup that times out are named in the message, and never refuse a booking by
+  themselves.
+- **It is the same list-price estimate as the cost column,** so it errs high, with one
+  gap: a cluster destroyed earlier in the month drops out of *spent* entirely, because the
+  app does not record when its nodes went.
+
+The Cells tab shows your own line: *spent + committed of your budget*. It turns amber at
+90%.
+
 ## Who sees it
 
 Anyone holding `demo:read`. Administrators always do. The home page's three cell tiles

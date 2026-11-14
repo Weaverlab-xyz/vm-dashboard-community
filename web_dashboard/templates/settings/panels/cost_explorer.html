@@ -45,6 +45,18 @@
             <p class="text-[11px] text-gray-400 mt-1">Each cloud's MTD spend is flagged against its own budget, in addition to the overall budget above. 0 = no per-cloud alert.</p>
           </div>
           <div class="border-t border-gray-100 pt-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Demo cells: monthly budget per presenter (USD)</label>
+            <input type="number" min="0" step="0.01" x-model.number="panelCfg.demo_monthly_budget_usd"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="0 = no budget">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Not a bill: the Demo hub's list-price estimate of what each presenter's cells cost
+              this month. Booking a cell that would take a presenter past it is refused; running
+              cells are never stopped, and administrators are never refused. A user's own budget,
+              set on Users, overrides this one. Works whether or not Cloud Costs is on.
+            </p>
+          </div>
+          <div class="border-t border-gray-100 pt-4">
             <label class="block text-sm font-medium text-gray-700 mb-1">GCP BigQuery billing-export table</label>
             <input type="text" x-model="panelCfg.gcp_billing_export_table"
                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"

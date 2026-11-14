@@ -1933,9 +1933,12 @@ class CostExplorerFeatureConfig(BaseModel):
     cost_budget_gcp: float = 0.0
     cost_budget_oci: float = 0.0
     gcp_billing_export_table: str = ""
+    # Not a bill: the demo hub's list-price estimate per presenter (services/demo_budget).
+    demo_monthly_budget_usd: float = 0.0
 
     @field_validator("cost_monthly_budget", "cost_budget_aws", "cost_budget_azure",
-                     "cost_budget_gcp", "cost_budget_oci", mode="before")
+                     "cost_budget_gcp", "cost_budget_oci", "demo_monthly_budget_usd",
+                     mode="before")
     @classmethod
     def _blank_to_zero(cls, v):
         # An empty/blank input (no budget) round-trips as "" / null — treat as 0.

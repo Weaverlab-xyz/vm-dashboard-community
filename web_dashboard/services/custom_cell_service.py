@@ -453,6 +453,13 @@ async def launch(db: Session, bp: CellBlueprint, *, user, name: str, workgroup: 
     _admission_preflight(db, user, items, name, workgroup, at=start or now)
     end = plan_end(start=start, ttl_hours=ttl_hours, blueprint_ttl=bp.ttl_hours,
                    is_admin=bool(getattr(user, "is_effective_admin", False)), now=now)
+    # The presenter's monthly budget (services/demo_budget), also before the row exists.
+    from . import demo_budget
+    specs, _unpriced = demo_budget.specs_for_items(items)
+    try:
+        await demo_budget.check_booking_async(user, specs, start=start, end=end)
+    except demo_budget.BudgetExceeded as exc:
+        raise CellError(str(exc)) from exc
     suspend = validate_schedule(schedule if schedule is not None else {
         "suspend_at_local": bp.suspend_at_local, "resume_at_local": bp.resume_at_local,
         "schedule_timezone": bp.schedule_timezone, "schedule_days": bp.schedule_days})

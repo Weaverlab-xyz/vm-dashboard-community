@@ -238,14 +238,28 @@ _NODE_SPEC = {
 
 def node_pool(db: Session, cluster) -> Optional[dict]:
     """``{size, count, disk_gb, region}`` as built, or None for a cloud with no spec."""
-    spec = _NODE_SPEC.get(cluster.cloud or "")
-    if spec is None:
-        return None
-    size_key, count_key, cfg_key, size_default, count_default, disk = spec
     tfv: dict = {}
     if cluster.deploy_job_id:
         prov = db.query(Job).filter(Job.id == cluster.deploy_job_id).first()
         tfv = ((prov.metadata_dict or {}).get("tf_variables") or {}) if prov else {}
+    return pool_from(cluster.cloud or "", tfv, cluster.region or "")
+
+
+def pool_for_request(cloud: str, region: str, spec: dict) -> Optional[dict]:
+    """The same, for a cluster only booked: its ``ClusterProvisionRequest`` fields."""
+    keys = _NODE_SPEC.get(cloud)
+    if keys is None:
+        return None
+    tfv = {keys[0]: spec.get("node_instance_type"), keys[1]: spec.get("node_count"),
+           "zone": spec.get("zone")}
+    return pool_from(cloud, {k: v for k, v in tfv.items() if v}, region)
+
+
+def pool_from(cloud: str, tfv: dict, region: str) -> Optional[dict]:
+    spec = _NODE_SPEC.get(cloud)
+    if spec is None:
+        return None
+    size_key, count_key, cfg_key, size_default, count_default, disk = spec
     size = tfv.get(size_key) or ""
     if not size:
         try:
@@ -257,7 +271,7 @@ def node_pool(db: Session, cluster) -> Optional[dict]:
         count = int(tfv.get(count_key) or count_default)
     except (TypeError, ValueError):
         count = count_default
-    region = cluster.region or tfv.get("zone") or tfv.get("region") or tfv.get("location") or ""
+    region = region or tfv.get("zone") or tfv.get("region") or tfv.get("location") or ""
     return {"size": size or size_default, "count": max(0, count), "disk_gb": disk,
             "region": region}
 

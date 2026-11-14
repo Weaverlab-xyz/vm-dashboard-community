@@ -45,6 +45,8 @@ class UserResponse(BaseModel):
     # audit rows keep a name -- but one accrues per agent, so the Users tab hides these
     # unless asked. See api/users.list_users.
     retired_agent_account: bool = False
+    # This user's own demo-cell budget, USD/month. None: the instance default applies.
+    demo_budget_usd: Optional[float] = None
     # The focus assigned to this user, and which rule produced it ("user" | "group" |
     # "default" | "none"). Returned here because /api/auth/me is the hop both login paths
     # ALREADY make for is_admin, and an HTML page load carries no identity of its own --
