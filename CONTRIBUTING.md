@@ -189,6 +189,15 @@ by calling `build_schema("<name>")` from `tests/_schema.py` at import. Without t
 file can pass only after another one, which is how ten files once leaned on a
 `./vm_cli.db` an earlier file had happened to fill.
 
+Files run **several at a time**: as many as the machine has CPUs, or `JOBS=<n>`.
+Each is still its own process, with its own directory for its database, anything the app
+writes beside it, and its `TMPDIR`. A file's output appears whole once it finishes.
+`JOBS=1` runs them one after another, in order, as CI used to. A run with `DATABASE_URL`
+set (the postgres job) is always serial, because every file shares that one database. A
+file that fails only alongside others is sharing something it shouldn't, such as a fixed
+path, port or temp file name; give it its own. The run ends by listing the ten slowest
+files.
+
 A test that reads the clock should pass at any time of day and on any date. Steer by a
 fixed `now=` where the code takes one; where it reads the real clock, build every
 timestamp the assertion depends on from `utcnow()`, never a literal date, and don't step
