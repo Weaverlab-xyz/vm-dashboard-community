@@ -543,7 +543,7 @@ async def get_instance_admin_password(
         if m.get("instance_name") == instance_name and not m.get("destroyed"):
             meta, owner = m, job
             break
-    if meta is None:
+    if meta is None or owner is None:
         raise HTTPException(status_code=404,
                             detail=f"No active deployment record for instance {instance_name}.")
     # A working administrator credential for the instance: only for its workstream.

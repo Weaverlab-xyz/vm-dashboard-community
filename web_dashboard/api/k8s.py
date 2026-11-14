@@ -991,6 +991,8 @@ def get_cluster_executor(
     from ..services import k8s_executor_service as kex
     _visible_or_404(db, cluster_id, current_user)
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:                       # deleted between the check and the read
+        raise HTTPException(status_code=404, detail="Cluster not found")
     active = kex.executor_for(db, row)
     return {"agent_id": row.executor_agent_id or "",
             "active_agent_id": active.id if active is not None else "",
@@ -1010,6 +1012,8 @@ def set_cluster_executor(
     from ..services import k8s_executor_service as kex
     _visible_or_404(db, cluster_id, current_user)
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:                       # deleted between the check and the read
+        raise HTTPException(status_code=404, detail="Cluster not found")
     try:
         kex.set_executor(db, row, req.agent_id)
     except kex.ExecutorError as exc:
