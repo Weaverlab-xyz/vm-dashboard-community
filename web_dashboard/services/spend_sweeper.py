@@ -172,7 +172,7 @@ def last_power_action(db: Session) -> dict:
     return latest
 
 
-def _rate_for(row, meta: dict, *, running: bool):
+def rate_for(row, meta: dict, *, running: bool):
     """USD/hour for one VM at list price, or ``None`` when it cannot be priced.
 
     ``None`` is meaningful and is NOT the same as zero: ``accrue`` moves the clock on
@@ -205,6 +205,10 @@ def _rate_for(row, meta: dict, *, running: bool):
     except Exception:  # noqa: BLE001 — one unpriceable shape never stops the sweep
         logger.info("spend sweep: no rate for %s", row.id, exc_info=True)
         return None
+
+
+# The sweep calls it by its old private name, which tests patch; the hub uses `rate_for`.
+_rate_for = rate_for
 
 
 async def run(db: Session, *, job_id: str, meta: dict) -> None:

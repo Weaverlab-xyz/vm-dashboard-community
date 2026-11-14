@@ -11,7 +11,8 @@ instance. It is the presenter's page; someone who does the job day to day starts
   [Custom](custom-demo-cell.md). Each shows its state, its
   wiring (or, for an agent, whether its token is still live), its workstream, and a
   **Manage** link that opens the cell's panel on **Build**. A cell type whose preview is
-  off reads *Not available here* rather than zero.
+  off reads *Not available here* rather than zero. A **Cost (est.)** column shows what
+  each cell is costing; see [What a cell costs](#what-a-cell-costs).
 - **Build** deploys, probes, re-wires and destroys OT cells (one panel with a GCP / AWS / Azure toggle) and network
   cells, mints and revokes agent cells, and launches **custom cells** from a blueprint
   (a **Cell Builder** writes the blueprints on the same panel; see
@@ -39,6 +40,36 @@ Standalone OT protocol tunnels, which wire real plant gear, stay on the cloud pa
 
 On a POV instance the hub and its API return 404. A POV hosts its cells inside the POV
 instead.
+
+## What a cell costs
+
+Each row on **Cells** shows three numbers, and each cell type's heading adds them up:
+
+- **$/h now**: what the cell costs per hour at the moment. A VM the dashboard has stopped
+  counts only its disk.
+- **so far**: the cost since each VM came up, split into running and stopped time.
+- **by end**: *so far* plus the rate now until the cell's end time. It appears only when
+  the cell has an end.
+
+These are **estimates at list price**, from the same price lookup the
+[VM spend caps](../../clouds/vms/power.md#spend-caps) use. They leave out Savings Plans,
+reservations, credits, free tier, data transfer and snapshots, so they **err high**. Use
+them to see which cells are worth destroying, not to reconcile a bill.
+
+- **Running or stopped** comes from the dashboard's own Stop and Start jobs, not from the
+  cloud. A VM stopped in the cloud's console still counts as running.
+- **A VM with a spend cap** shows the total its cap has accrued, so the hub and the VM's
+  own spend panel agree.
+- **Not priced, and said so:** Kubernetes clusters and managed databases in a custom cell
+  (the app has no price source for them yet), and a VM in a region the price list can't
+  reach. Each is named under the row. None is counted as $0.
+- **Agent cells** show no cost. They build nothing; they run on an existing VM, whose cost
+  is that VM's.
+- **Prices need the same access as spend caps.** On AWS that is `pricing:GetProducts`; on
+  GCP, the Cloud Billing API enabled on the project. Azure and OCI price lists are public.
+  Without it the column reads *—* and each VM is listed as having no price source.
+
+The estimate loads after the list, so a slow price lookup never holds up the page.
 
 ## Who sees it
 
