@@ -93,7 +93,7 @@ The mint is refused, and nothing is created, unless:
 - the presenter already holds every grant the Demo Agent role carries.
 
 The last check means an agent can never reach further than the presenter who minted it.
-A presenter can revoke only agents they can see.
+Anyone acting on an agent cell — revoking it, linking it, opening an access request — can do so only on cells they can see: their workstreams, or ones they minted. Administrators see all of them.
 
 ### What changes on upgrade
 

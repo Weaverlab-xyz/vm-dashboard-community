@@ -52,3 +52,4 @@ Entra-group path.
 |---|---|
 | [First Cloud Functions deploy](cloud-functions-first-deploy.md) | you are bringing Cloud Functions up end to end for the first time. |
 | [Entitle resource registration (E2E)](entitle-resource-registration.md) | you want to confirm built resources really do register as Entitle integrations. |
+| [Custom demo cell, first live run](custom-cell-live-check.md) | you are running a custom demo cell against a real cloud for the first time, or a custom cell misbehaves. |
