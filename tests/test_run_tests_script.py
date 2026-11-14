@@ -118,7 +118,8 @@ def _journal(paths, **kw):
     finally:
         del os.environ["JOURNAL"]
     assert rc == 0, out
-    return open(j).read().split("\n")[:-1]
+    with open(j, encoding="utf-8") as fh:
+        return fh.read().split("\n")[:-1]
 
 
 def _overlapped(events):
