@@ -40,6 +40,11 @@ class UserResponse(BaseModel):
     # an ephemeral prospect login confined to a five-route surface, this one belongs to an
     # ordinary user whose POV pages happen to show a subset.
     pov_env_ids: List[str] = []
+    # A service account an agent demo cell CREATED (a Demo Presenter's mint) whose cell has
+    # been revoked, so the account is disabled. Kept rather than deleted -- its jobs and
+    # audit rows keep a name -- but one accrues per agent, so the Users tab hides these
+    # unless asked. See api/users.list_users.
+    retired_agent_account: bool = False
     # The focus assigned to this user, and which rule produced it ("user" | "group" |
     # "default" | "none"). Returned here because /api/auth/me is the hop both login paths
     # ALREADY make for is_admin, and an HTML page load carries no identity of its own --

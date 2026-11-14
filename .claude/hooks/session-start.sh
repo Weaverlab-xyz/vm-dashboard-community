@@ -19,6 +19,10 @@ fi
 cd "$CLAUDE_PROJECT_DIR"
 VENV="$CLAUDE_PROJECT_DIR/.venv"
 
+# The repo's git hooks (scripts/hooks): a pre-push check that tailwind.css is not stale,
+# which CI otherwise reports half an hour into a run. Repo-local config, idempotent.
+git config core.hooksPath scripts/hooks || true
+
 PY=""
 for candidate in python3.12 /usr/bin/python3.12 /usr/local/bin/python3.12; do
   if command -v "$candidate" >/dev/null 2>&1; then PY="$candidate"; break; fi

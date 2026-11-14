@@ -589,9 +589,11 @@ async def provision(db: Session, cell: CustomCell) -> CustomCell:
     cell.status = "provisioning"
     cell.status_message = None
     db.commit()
-    cell_id = cell.id
+    # Read once: `cell` is re-fetched after every member (a failed member rolls back the
+    # session), and a re-fetch can find the row gone if the cell was deleted mid-build.
+    cell_id, cell_name = cell.id, cell.name
     for item in cell.snapshot:
-        for rname in _resource_names(cell.name, item):
+        for rname in _resource_names(cell_name, item):
             member = CustomCellMember(id=str(uuid.uuid4()), cell_id=cell_id,
                                       kind=item["kind"], cloud=item["cloud"], label=rname,
                                       status="provisioning")
@@ -609,9 +611,16 @@ async def provision(db: Session, cell: CustomCell) -> CustomCell:
                 logger.warning("custom cell %s: %s failed to start", cell_id, rname,
                                exc_info=True)
                 member.status, member.last_error = "failed", f"{type(exc).__name__}: {exc}"
-            cell = db.query(CustomCell).filter(CustomCell.id == cell_id).first()
+            fresh = db.query(CustomCell).filter(CustomCell.id == cell_id).first()
             db.add(member)
             db.commit()
+            if fresh is None:
+                # The cell was deleted while it was building. Build nothing more; what was
+                # built keeps its own expiry backstop, so the reaper still collects it.
+                logger.warning("custom cell %s vanished mid-build; stopping at %s",
+                               cell_id, rname)
+                return cell
+            cell = fresh
             if member.ref_id:
                 _stamp_member(db, cell, member)
     refresh(db, cell)
@@ -699,6 +708,11 @@ def _destroy_member(db: Session, cell: CustomCell, m: CustomCellMember, actor: s
         return
     if m.kind == "vm":
         job = db.query(Job).filter(Job.id == m.ref_id).first()
+        if job is None:
+            # _member_state already reads a missing deploy row as destroyed; said again here
+            # so this branch never trusts a row it did not find.
+            m.status = "destroyed"
+            return
         if job.status in ("pending", "queued"):
             job_service.set_cancelled(db, job.id)       # never started: nothing to delete
             m.status = "destroyed"
@@ -766,7 +780,7 @@ def set_end(db: Session, cell: CustomCell, end) -> None:
     cell.warned_stage_minutes = None
     backstop = end + BACKSTOP if end else None
     for m in members_of(db, cell.id):
-        model = {"vm": Job, "k8s": K8sCluster}.get(m.kind, CloudDatabase)
+        model = Job if m.kind == "vm" else K8sCluster if m.kind == "k8s" else CloudDatabase
         row = db.query(model).filter(model.id == m.ref_id).first() if m.ref_id else None
         if row is not None:
             row.expires_at = backstop

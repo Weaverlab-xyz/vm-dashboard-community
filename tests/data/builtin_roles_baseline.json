@@ -1,0 +1,474 @@
+{
+  "administrator": {
+    "is_admin": true
+  },
+  "auditor": {
+    "agents": [
+      "read"
+    ],
+    "audit": [
+      "read"
+    ],
+    "costs": [
+      "read"
+    ],
+    "inventory": [
+      "read"
+    ],
+    "jobs": [
+      "read"
+    ],
+    "notifications": [
+      "read"
+    ],
+    "vms": [
+      "read"
+    ],
+    "workgroups": [
+      "read"
+    ]
+  },
+  "cell-builder": {
+    "connections": [
+      "read"
+    ],
+    "demo": [
+      "read",
+      "write",
+      "delete"
+    ],
+    "demo_blueprints": [
+      "read",
+      "write",
+      "delete"
+    ],
+    "inventory": [
+      "read"
+    ],
+    "jobs": [
+      "read"
+    ],
+    "vms": [
+      "read"
+    ]
+  },
+  "cloud-admin": {
+    "aws": [
+      "read",
+      "write",
+      "delete"
+    ],
+    "azure": [
+      "read",
+      "write",
+      "delete"
+    ],
+    "costs": [
+      "read",
+      "write"
+    ],
+    "gcp": [
+      "read",
+      "write",
+      "delete"
+    ],
+    "images": [
+      "read",
+      "write",
+      "delete"
+    ],
+    "inventory": [
+      "read"
+    ],
+    "jobs": [
+      "read"
+    ],
+    "oci": [
+      "read",
+      "write",
+      "delete"
+    ],
+    "vms": [
+      "read",
+      "write"
+    ],
+    "workgroups": [
+      "read"
+    ]
+  },
+  "dba": {
+    "cloud_database": [
+      "read",
+      "write",
+      "delete"
+    ],
+    "connections": [
+      "read"
+    ],
+    "inventory": [
+      "read"
+    ],
+    "jobs": [
+      "read"
+    ],
+    "secrets": [
+      "use"
+    ]
+  },
+  "demo-agent": {
+    "inventory": [
+      "read"
+    ],
+    "vms": [
+      "read"
+    ]
+  },
+  "demo-presenter": {
+    "connections": [
+      "read"
+    ],
+    "demo": [
+      "read",
+      "write",
+      "delete"
+    ],
+    "inventory": [
+      "read"
+    ],
+    "jobs": [
+      "read"
+    ],
+    "vms": [
+      "read"
+    ]
+  },
+  "operator": {
+    "agents": [
+      "read",
+      "write"
+    ],
+    "aws": [
+      "read",
+      "write"
+    ],
+    "azure": [
+      "read",
+      "write"
+    ],
+    "cloud_database": [
+      "read",
+      "write"
+    ],
+    "cloud_function": [
+      "read",
+      "write"
+    ],
+    "config_mgmt": [
+      "read",
+      "write"
+    ],
+    "connections": [
+      "read",
+      "write"
+    ],
+    "containers": [
+      "read",
+      "write"
+    ],
+    "costs": [
+      "read"
+    ],
+    "epml": [
+      "read",
+      "write"
+    ],
+    "gateways": [
+      "read",
+      "write"
+    ],
+    "gcp": [
+      "read",
+      "write"
+    ],
+    "hyperv": [
+      "read",
+      "write"
+    ],
+    "images": [
+      "read",
+      "write"
+    ],
+    "inventory": [
+      "read"
+    ],
+    "jobs": [
+      "read"
+    ],
+    "k8s": [
+      "read",
+      "write"
+    ],
+    "notifications": [
+      "read",
+      "write"
+    ],
+    "nutanix": [
+      "read",
+      "write"
+    ],
+    "oci": [
+      "read",
+      "write"
+    ],
+    "ot": [
+      "read",
+      "write"
+    ],
+    "pov": [
+      "read",
+      "write",
+      "use"
+    ],
+    "pov_templates": [
+      "read"
+    ],
+    "proxmox": [
+      "read",
+      "write"
+    ],
+    "secrets": [
+      "use"
+    ],
+    "storage": [
+      "read",
+      "write"
+    ],
+    "vms": [
+      "read",
+      "write"
+    ],
+    "vsphere": [
+      "read",
+      "write"
+    ],
+    "workgroups": [
+      "read"
+    ],
+    "xcpng": [
+      "read",
+      "write"
+    ]
+  },
+  "platform-k8s": {
+    "cloud_function": [
+      "read",
+      "write",
+      "delete"
+    ],
+    "config_mgmt": [
+      "read",
+      "write"
+    ],
+    "containers": [
+      "read",
+      "write",
+      "delete"
+    ],
+    "images": [
+      "read",
+      "write",
+      "delete"
+    ],
+    "inventory": [
+      "read"
+    ],
+    "jobs": [
+      "read"
+    ],
+    "k8s": [
+      "read",
+      "write",
+      "delete"
+    ],
+    "storage": [
+      "read",
+      "write",
+      "delete"
+    ]
+  },
+  "pov-manager": {
+    "connections": [
+      "read"
+    ],
+    "inventory": [
+      "read"
+    ],
+    "jobs": [
+      "read"
+    ],
+    "pov": [
+      "read",
+      "write",
+      "delete",
+      "use"
+    ],
+    "pov_templates": [
+      "read",
+      "write"
+    ],
+    "vms": [
+      "read"
+    ]
+  },
+  "pov-presenter": {
+    "connections": [
+      "read"
+    ],
+    "inventory": [
+      "read"
+    ],
+    "jobs": [
+      "read"
+    ],
+    "pov": [
+      "use"
+    ],
+    "pov_own": [
+      "read",
+      "write",
+      "delete"
+    ],
+    "pov_templates": [
+      "read"
+    ],
+    "vms": [
+      "read"
+    ]
+  },
+  "pov-template-builder": {
+    "connections": [
+      "read"
+    ],
+    "inventory": [
+      "read"
+    ],
+    "jobs": [
+      "read"
+    ],
+    "pov_own": [
+      "read"
+    ],
+    "pov_templates": [
+      "read",
+      "write",
+      "delete"
+    ],
+    "vms": [
+      "read"
+    ]
+  },
+  "read-only": {
+    "agents": [
+      "read"
+    ],
+    "audit": [
+      "read"
+    ],
+    "aws": [
+      "read"
+    ],
+    "azure": [
+      "read"
+    ],
+    "cloud_database": [
+      "read"
+    ],
+    "cloud_function": [
+      "read"
+    ],
+    "config_mgmt": [
+      "read"
+    ],
+    "connections": [
+      "read"
+    ],
+    "containers": [
+      "read"
+    ],
+    "costs": [
+      "read"
+    ],
+    "demo": [
+      "read"
+    ],
+    "demo_blueprints": [
+      "read"
+    ],
+    "directories": [
+      "read"
+    ],
+    "epml": [
+      "read"
+    ],
+    "gateways": [
+      "read"
+    ],
+    "gcp": [
+      "read"
+    ],
+    "hyperv": [
+      "read"
+    ],
+    "images": [
+      "read"
+    ],
+    "inventory": [
+      "read"
+    ],
+    "jobs": [
+      "read"
+    ],
+    "k8s": [
+      "read"
+    ],
+    "notifications": [
+      "read"
+    ],
+    "nutanix": [
+      "read"
+    ],
+    "oci": [
+      "read"
+    ],
+    "ot": [
+      "read"
+    ],
+    "pov": [
+      "read"
+    ],
+    "pov_own": [
+      "read"
+    ],
+    "pov_templates": [
+      "read"
+    ],
+    "proxmox": [
+      "read"
+    ],
+    "storage": [
+      "read"
+    ],
+    "vms": [
+      "read"
+    ],
+    "vsphere": [
+      "read"
+    ],
+    "workgroups": [
+      "read"
+    ],
+    "xcpng": [
+      "read"
+    ]
+  }
+}

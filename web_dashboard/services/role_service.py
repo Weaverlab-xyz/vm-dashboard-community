@@ -88,6 +88,11 @@ _RWU = ["read", "write", "use"]   # `pov` still offers all four
 _RU = ["read", "use"]
 _U = ["use"]
 
+# CHANGING A BUILT-IN'S PERMISSIONS? ``seed_builtins`` never updates an existing role, so
+# the change reaches new installs only -- unless it is ALSO an entry in
+# ``database.BUILTIN_ROLE_CHANGES``, which applies it once on every upgraded install.
+# tests/test_builtin_role_upgrades.py fails until it is. (Adding a whole new built-in needs
+# no entry: the seed inserts it.)
 _BUILTIN_ROLES = (
     {
         "slug": ADMIN_ROLE_SLUG,

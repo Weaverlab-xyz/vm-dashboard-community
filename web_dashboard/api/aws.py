@@ -1554,7 +1554,7 @@ async def get_instance_admin_password(
         if m.get("instance_id") == instance_id and not m.get("destroyed"):
             meta, owner = m, job
             break
-    if meta is None:
+    if meta is None or owner is None:
         raise HTTPException(status_code=404,
                             detail=f"No active deployment record for instance {instance_id}.")
     # A working administrator credential for the instance: only for its workstream.
@@ -1620,7 +1620,7 @@ async def get_instance_ssh_key(
             key_name, owner = meta.get("key_name"), job
             break
 
-    if not key_name:
+    if not key_name or owner is None:
         raise HTTPException(
             status_code=404,
             detail="No active deployment record found for this instance, or key name is unknown.",

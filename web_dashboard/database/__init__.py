@@ -185,6 +185,7 @@ from .rbac_backfills import (  # noqa: E402,F401  (re-exported: init_db and test
     _BACKFILL_V1_DELIBERATELY_EMPTY, _BACKFILL_V1_MARKER, _BACKFILL_V1_PHANTOM_ADMIN,
     _BACKFILL_V1_SCOPES, _EMPTY_MEANS_NOTHING_MARKER, _PRESENTER_OWN_ONLY_MARKER,
     _PRESENTER_OWN_POV_MARKER, _READ_ONLY_DEMO_MARKER, _RETIRE_LEVELS_MARKER,
+    BUILTIN_ROLE_CHANGES, _apply_builtin_role_changes,
     _backfill_new_permission_scopes, _commit_marked, _grant_presenter_own_pov,
     _grant_read_only_demo_read, _materialise_empty_permission_maps,
     _narrow_presenter_to_own_povs, _retire_unenforced_levels, _strip_retired,
