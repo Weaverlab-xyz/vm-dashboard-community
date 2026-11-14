@@ -26,6 +26,14 @@
     </button>
   </div>
 
+  <!-- One disabled service account accrues per agent cell a Demo Presenter mints and
+       revokes; they are kept for their jobs' sake and hidden here unless asked for. -->
+  <label x-show="retiredAgentCount() > 0" x-cloak
+         class="flex items-center gap-2 text-xs text-gray-600 mb-2">
+    <input type="checkbox" x-model="showRetiredAgents" class="rounded border-gray-300">
+    Show retired agent accounts (<span x-text="retiredAgentCount()"></span>)
+  </label>
+
   <!-- User table -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
     <table class="w-full text-sm">
@@ -43,10 +51,10 @@
         </tr>
       </thead>
       <tbody class="divide-y divide-gray-100">
-        <template x-if="users.length === 0">
+        <template x-if="visibleUsers().length === 0">
           <tr><td colspan="9" class="px-4 py-8 text-center text-gray-400">No users found</td></tr>
         </template>
-        <template x-for="u in users" :key="u.id">
+        <template x-for="u in visibleUsers()" :key="u.id">
           <tr class="hover:bg-gray-50">
             <td class="px-4 py-3 font-medium text-gray-900" x-text="u.username"></td>
             <td class="px-4 py-3 text-gray-600" x-text="u.full_name || '—'"></td>
@@ -767,6 +775,15 @@
 function usersPage() {
   return {
     users: [],
+    showRetiredAgents: false,
+    // Hidden, never dropped: the API lists every account, and the toggle brings these back.
+    visibleUsers() {
+      return this.showRetiredAgents ? this.users
+        : this.users.filter(u => !u.retired_agent_account);
+    },
+    retiredAgentCount() {
+      return this.users.filter(u => u.retired_agent_account).length;
+    },
     currentUserId: null,
     // Fetched in init(), not injected by the route. `settings.workgroups` is a
     // bootstrap seed that is {} at runtime, so the injected version of this rendered

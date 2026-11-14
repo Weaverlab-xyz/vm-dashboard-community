@@ -378,6 +378,37 @@ def _operator_cell_again(db):
                      name="watcher-2", host_ref="worker-2").id
 
 
+def test_a_revoked_cells_own_account_is_flagged_retired_in_the_user_list():
+    """One disabled service account accrues per agent a presenter mints and revokes. The
+    list flags those -- only those -- so the Users tab can hide them by default."""
+    from web_dashboard.api import users as users_api
+    db = _fresh()
+    try:
+        p = _user(db, PRESENTER_MAP)
+        lab = _lab(db, p.username)
+        with _World(_host(db)):
+            mine = _mint(db, p, lab_id=lab.id)
+        cid = _operator_cell(db)                 # an operator's, against a chosen user
+        admin = _user(db, {}, workgroups=(), name="root2", admin=True)
+
+        def flags():
+            return {u.username: u.retired_agent_account
+                    for u in users_api.list_users(_admin=admin, db=db)}
+        sa = db.query(AgentCell).filter(AgentCell.id == mine.id).first().pat_user_id
+        sa_name = db.query(User).filter(User.id == sa).first().username
+        assert flags()[sa_name] is False, "a live agent's account was flagged retired"
+
+        agentcell.revoke_agent(mine.id, db=db, current_user=p)
+        agentcell.revoke_agent(cid, db=db, current_user=admin)
+        f = flags()
+        assert f[sa_name] is True
+        assert f["ops-agent-user"] is False, (
+            "an operator-picked token user was flagged -- the cell does not own it")
+        assert sum(f.values()) == 1
+    finally:
+        db.close()
+
+
 if __name__ == "__main__":
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]

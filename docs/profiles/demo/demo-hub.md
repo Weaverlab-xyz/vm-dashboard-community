@@ -83,7 +83,7 @@ creates a **service account for that agent alone**, which
 
 - holds the built-in **Demo Agent** role: it reads VMs and inventory, and only its own jobs;
 - lives in the one workstream the presenter chose for the cell;
-- is **disabled when the agent is revoked**, and kept so its jobs and audit rows keep a name.
+- is **disabled when the agent is revoked**, and kept so its jobs and audit rows keep a name. Users → Users hides these retired accounts unless you tick **Show retired agent accounts**.
 
 The mint is refused, and nothing is created, unless:
 

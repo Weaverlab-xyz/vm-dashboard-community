@@ -284,6 +284,12 @@ def list_users(
     # where a per-user role fetch would be an N+1.
     _role_names = {r.id: r.name for r in role_service.list_all(db)}
     _ids_by_user = role_service.role_ids_by_user(db)
+    # Service accounts an agent cell created and has since been revoked: disabled, kept
+    # for their jobs' and audit rows' sake, and one per agent ever minted. Flagged so the
+    # tab can hide them by default; never filtered here, so nothing is ever unlistable.
+    from ..database import AgentCell
+    _retired_agents = {uid for (uid,) in db.query(AgentCell.pat_user_id).filter(
+        AgentCell.owns_agent_account.is_(True), AgentCell.status == "revoked")}
     return [
         UserResponse(
             id=u.id,
@@ -306,6 +312,8 @@ def list_users(
             # user actually gets comes from their group instead.
             persona=u.persona or "",
             persona_source=("user" if u.persona else "group" if u.session_persona else ""),
+            retired_agent_account=bool(u.is_service_account and not u.is_active
+                                       and u.id in _retired_agents),
         )
         for u in users
     ]
