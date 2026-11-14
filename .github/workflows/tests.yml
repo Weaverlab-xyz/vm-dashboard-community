@@ -9,7 +9,8 @@ name: Tests
 # in one shared process could let one file's stubs leak into another. Per-file
 # subprocesses keep them isolated — and every file already ships a standalone
 # runner for exactly this reason. Each runner prints `ok`/`FAIL` per test and
-# exits non-zero on failure.
+# exits non-zero on failure. Files run four at a time (JOBS below), each still its own
+# process with its own database and directory; scripts/ci/run_tests.sh says how.
 #
 # The full app requirements are installed so nothing silently skips (a few tests
 # import the real FastAPI app / boto3 rather than stubbing them).
@@ -29,7 +30,7 @@ concurrency:
 jobs:
   tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -50,7 +51,11 @@ jobs:
       # that passed only by SKIPPING (a missing stub or dependency makes every test
       # print "SKIP" and exit 0), unless scripts/ci/skip_allowlist.txt says why that
       # skip is expected here.
+      # Pinned rather than read from the runner, so a runner image with a different CPU
+      # count does not change how the suite runs without anyone deciding it should.
       - name: Run test suite
+        env:
+          JOBS: "4"
         run: scripts/ci/run_tests.sh
 
   # ── Browser smoke ───────────────────────────────────────────────────────────

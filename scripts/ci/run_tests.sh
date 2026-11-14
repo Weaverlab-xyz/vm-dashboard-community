@@ -29,6 +29,18 @@
 # scripts/ci/coverage_summary.py combines the data files. The `tests` job never sets it;
 # only .github/workflows/coverage.yml does (nightly), so a PR's runtime is unchanged.
 #
+# PARALLEL. Files run JOBS at a time (default: the CPU count), each still its own process
+# with its own database, so the isolation above is unchanged -- only the scheduling is.
+# Each file gets its own directory, $dbdir/<n>-<name>/, holding its SQLite database, the
+# data the app writes beside it (a setup_token file, for one), and its TMPDIR: two files
+# sharing a directory could otherwise race on a fixed file name. A file's output is
+# printed whole, inside its ::group::, once it finishes, so groups never interleave. The
+# biggest files start first, so one long file does not start last and stretch the run.
+# JOBS=1 is the old serial run. A caller that sets DATABASE_URL (the postgres job) shares
+# one database between files, so the run is serial there whatever JOBS says.
+# A file that fails only when run alongside others is sharing something it should not
+# (a fixed path, port or temp name): give it its own.
+#
 # Run it with the interpreter CI uses (Python 3.12, web_dashboard/requirements.txt, and
 # NOT pytest: a skip calls pytest.skip() when pytest is importable, which a standalone
 # runner reports as an error).
@@ -84,32 +96,90 @@ for f in "${files[@]}"; do
   fi
 done
 
+# How many at once. One shared database (the caller's DATABASE_URL) means one at a time.
+if [ -n "${DATABASE_URL:-}" ]; then
+  JOBS=1
+else
+  JOBS="${JOBS:-$(nproc 2>/dev/null || echo 2)}"
+fi
+case "$JOBS" in ''|*[!0-9]*|0) echo "::error::JOBS must be a positive number, not '$JOBS'"; exit 2;; esac
+
 fail=0
 failed=()
 skipped=()
-out=$(mktemp)
-dbdir=$(mktemp -d)
-trap 'rm -f "$out"; rm -rf "$dbdir"' EXIT
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
 
+# A directory per file, keyed by its position so two arguments with one basename differ.
+declare -A dir_of
+i=0
 for f in "${files[@]}"; do
-  echo "::group::$f"
+  i=$((i + 1))
+  dir_of[$f]="$work/$i-$(basename "$f" .py)"
+done
+
+run_one() {
+  local f="$1" d="$2" t0 rc
+  mkdir -p "$d/tmp"
+  t0=$EPOCHREALTIME
   if [ -n "${DATABASE_URL:-}" ]; then
-    "${RUN[@]}" "$f" 2>&1 | tee "$out"
+    TMPDIR="$d/tmp" "${RUN[@]}" "$f" >"$d/log" 2>&1
   else
-    DATABASE_URL="sqlite:///$dbdir/$(basename "$f" .py).db" "${RUN[@]}" "$f" 2>&1 | tee "$out"
+    DATABASE_URL="sqlite:///$d/test.db" TMPDIR="$d/tmp" "${RUN[@]}" "$f" >"$d/log" 2>&1
   fi
-  rc=${PIPESTATUS[0]}
-  echo "::endgroup::"
+  rc=$?
+  echo "$rc" >"$d/rc"
+  awk -v a="$t0" -v b="$EPOCHREALTIME" 'BEGIN { printf "%.1f\n", b - a }' >"$d/secs"
+  # Whole, and one at a time: a group is never split by another file's output.
+  {
+    flock 9
+    echo "::group::$f"
+    cat "$d/log"
+    echo "::endgroup::"
+  } 9>"$work/.print-lock"
+}
+
+# Biggest first: the nearest cheap stand-in for longest first. Serial keeps the given order.
+if [ "$JOBS" -eq 1 ]; then
+  order=("${files[@]}")
+else
+  mapfile -t order < <(for f in "${files[@]}"; do printf '%s\t%s\n' "$(stat -c %s "$f")" "$f"; done \
+                       | sort -t$'\t' -k1,1nr | cut -f2-)
+fi
+
+running=0
+for f in "${order[@]}"; do
+  if [ "$running" -ge "$JOBS" ]; then
+    wait -n
+    running=$((running - 1))
+  fi
+  run_one "$f" "${dir_of[$f]}" &
+  running=$((running + 1))
+done
+wait
+
+# Judged in the order given, from what each file left behind: the rules are the serial
+# run's, read from a saved log instead of a live one.
+for f in "${files[@]}"; do
+  d="${dir_of[$f]}"
+  rc=$(cat "$d/rc" 2>/dev/null || echo 1)
   if [ "$rc" -ne 0 ]; then
     failed+=("$f")
     fail=1
-  elif grep -qE "$SKIP_RE" "$out" && ! is_allowed "$f"; then
+  elif grep -qE "$SKIP_RE" "$d/log" && ! is_allowed "$f"; then
     echo "::error file=$f::$f skipped tests in CI:"
-    grep -E "$SKIP_RE" "$out" | head -5 | sed 's/^/    /'
+    grep -E "$SKIP_RE" "$d/log" | head -5 | sed 's/^/    /'
     skipped+=("$f")
     fail=1
   fi
 done
+
+if [ "${#files[@]}" -gt 1 ]; then
+  echo "Slowest files (JOBS=$JOBS):"
+  for f in "${files[@]}"; do
+    printf '%8.1fs  %s\n' "$(cat "${dir_of[$f]}/secs" 2>/dev/null || echo 0)" "$f"
+  done | sort -rn | head -10
+fi
 
 if [ ${#failed[@]} -gt 0 ]; then
   echo "::error::${#failed[@]} test file(s) failed:"
