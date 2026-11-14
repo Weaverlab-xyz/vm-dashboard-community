@@ -74,6 +74,10 @@ class UserUpdateRequest(BaseModel):
     # email matches links the account to that IdP identity. False undoes it while it has
     # not happened yet. SSO never links a local account without this (audit H1).
     sso_sign_in: Optional[bool] = None
+    # This user's own monthly budget for estimated demo-cell spend, USD (services/
+    # demo_budget). Left out = no change; null = back to the instance default; 0 = no
+    # budget for this user. Read through model_fields_set, so null and absent differ.
+    demo_budget_usd: Optional[float] = Field(default=None, ge=0)
 
 
 def _set_sso_sign_in(db, admin, user, enable: bool) -> None:
@@ -314,6 +318,7 @@ def list_users(
             persona_source=("user" if u.persona else "group" if u.session_persona else ""),
             retired_agent_account=bool(u.is_service_account and not u.is_active
                                        and u.id in _retired_agents),
+            demo_budget_usd=u.demo_budget_usd,
         )
         for u in users
     ]
@@ -412,6 +417,9 @@ def update_user(
         user.email = body.email
     if body.workgroups is not None:
         user.workgroups_list = body.workgroups
+    if "demo_budget_usd" in body.model_fields_set:
+        # Sent as null: back to the instance default. Absent: unchanged.
+        user.demo_budget_usd = body.demo_budget_usd
     if body.is_active is not None:
         user.is_active = body.is_active
     if body.is_admin is not None:
@@ -503,6 +511,7 @@ def update_user(
         permissions=user.permissions_dict or None,
         pov_env_ids=user.pov_env_ids_list,
         **_role_fields(db, user),
+        demo_budget_usd=user.demo_budget_usd,
     )
 
 

@@ -111,6 +111,9 @@ class Settings(BaseSettings):
     cost_budget_azure: float = 0.0
     cost_budget_gcp: float = 0.0
     cost_budget_oci: float = 0.0
+    # A demo presenter's monthly budget for estimated cell spend (services/demo_budget):
+    # a booking that would pass it is refused. 0 = none. User.demo_budget_usd overrides.
+    demo_monthly_budget_usd: float = 0.0
     # Pushing a budget INTO the cloud (services/provider_budget.py). The address the
     # PROVIDER notifies — not a dashboard endpoint. A cloud budget cannot POST to a
     # webhook this app hosts, and the point of pushing one is that it still alerts when

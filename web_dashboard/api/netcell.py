@@ -142,6 +142,11 @@ async def deploy_cell(
 
     sp = demo_schedule.plan(db, payload, vm_job_type="gce_deploy", workgroup=workgroup,
                             is_admin=current_user.is_effective_admin)
+    # The presenter's monthly budget, before a single row exists (services/demo_budget).
+    from ..services import demo_budget
+    await demo_budget.enforce_async(
+        current_user, [("gcp", {"zone": zone, "machine_type": payload.machine_type,
+                                "disk_size_gb": payload.disk_size_gb}, 1)], sp)
     job = job_service.create_job(
         db,
         job_type="gce_deploy",

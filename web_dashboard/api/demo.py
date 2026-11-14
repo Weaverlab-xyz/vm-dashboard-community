@@ -24,6 +24,7 @@ the cloud's own handler rather than re-implementing it:
 ``/costs`` is a list-price estimate for exactly the cells ``/summary`` lists
 (services/demo_cell_cost), fetched separately so the list never waits on a price lookup.
 """
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -36,6 +37,8 @@ from ..services import demo_cells, demo_launchpad, demo_schedule, expiry_policy
 from .auth import get_current_user
 from .demo_gates import may, require_cell_options, require_demo_read
 from .gcp import _accessible_workgroups
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/demo", tags=["demo"])
 
@@ -112,16 +115,25 @@ async def costs(
     the event loop on its own pool, with its own session. A busy pool or a deadline
     answers 503, and the page shows no estimate rather than a wrong one.
     """
-    from ..services import cloud_executor, demo_cell_cost
+    from ..services import cloud_executor, demo_budget, demo_cell_cost
 
     visible = {kind: res["cells"] for kind, res in _visible(db, current_user).items()
                if res["state"] == "ok"}
+    # Plain values across the thread boundary, never the request's ORM row.
+    username = current_user.username
+    limit, source = demo_budget.limit_for(current_user)
 
     def _price() -> dict:
         from ..database import SessionLocal
         session = SessionLocal()
         try:
-            return demo_cell_cost.price_cells(session, visible)
+            out = demo_cell_cost.price_cells(session, visible)
+            try:
+                out["budget"] = demo_budget.summary_for(session, username, limit, source)
+            except Exception:  # noqa: BLE001 -- the costs still show without it
+                logger.warning("demo budget summary failed for %s", username, exc_info=True)
+                out["budget"] = None
+            return out
         finally:
             session.close()
 

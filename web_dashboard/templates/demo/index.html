@@ -103,6 +103,14 @@
     <p x-show="costs.caveat" x-cloak class="text-xs text-gray-500">
       Cost: <span x-text="costs.caveat"></span>
     </p>
+    <div x-show="budgetLine()" x-cloak
+         class="rounded-lg border px-4 py-2 text-sm"
+         :class="budgetOver() ? 'border-amber-300 bg-amber-50 text-amber-900' : 'border-gray-200 bg-white text-gray-700'">
+      <span x-text="budgetLine()"></span>
+      <span class="block text-xs text-gray-500" x-show="budgetOver()">
+        A new cell that would take you past it will be refused. Running cells keep running.
+      </span>
+    </div>
     <template x-for="kind in cells" :key="kind.kind">
       <section class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
         <div class="flex flex-wrap items-start justify-between gap-3">
@@ -375,10 +383,33 @@ function demoHub(tabSlugs, buildPanels, otClouds) {
       const x = ((this.costs.cells || {})[kind] || {})[c.id];
       if (!x) return '';
       if (x.note) return x.note;
-      const missed = x.unpriced || [];
-      if (!missed.length) return '';
-      if (missed.length === 1) return missed[0].name + ': ' + missed[0].reason;
-      return '+ ' + missed.length + ' not priced: ' + missed.map(u => u.name).join(', ');
+      // A cluster's nodes are priced; only its control-plane fee is left out, which is a
+      // caveat on a priced row, not something missing from it.
+      const all = x.unpriced || [];
+      const planes = all.filter(u => u.kind === 'k8s-control-plane');
+      const missed = all.filter(u => u.kind !== 'k8s-control-plane');
+      const parts = [];
+      if (missed.length === 1) parts.push(missed[0].name + ': ' + missed[0].reason);
+      else if (missed.length) {
+        parts.push('+ ' + missed.length + ' not priced: ' + missed.map(u => u.name).join(', '));
+      }
+      if (planes.length) parts.push('excludes the control-plane fee of ' + planes.map(u => u.name).join(', '));
+      return parts.join('; ');
+    },
+
+    // The caller's monthly demo budget (services/demo_budget). Nothing for an admin, or
+    // when no budget is set.
+    budgetLine() {
+      const b = this.costs.budget;
+      if (!b) return '';
+      return 'Your demo budget this month: ' + this.money(b.spent_usd) + ' spent + ' +
+        this.money(b.committed_usd) + ' committed by running cells, of ' +
+        this.money(b.limit_usd) + (b.source === 'personal' ? ' (your own budget)' : '') + '.';
+    },
+
+    budgetOver() {
+      const b = this.costs.budget;
+      return !!b && (b.spent_usd + b.committed_usd) >= b.limit_usd * 0.9;
     },
 
     kindTotal(kind) {

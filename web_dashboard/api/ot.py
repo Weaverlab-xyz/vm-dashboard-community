@@ -315,6 +315,13 @@ def deploy_cell(
     )
     sp = demo_schedule.plan(db, payload, vm_job_type="gce_deploy", workgroup=workgroup,
                             is_admin=current_user.is_effective_admin)
+    # The presenter's monthly budget, before a single row exists (services/demo_budget).
+    from ..services import demo_budget
+    specs = [("gcp", {"zone": zone, "machine_type": payload.machine_type,
+                      "disk_size_gb": payload.disk_size_gb}, 1)]
+    if payload.register_in_entitle:
+        specs.append(("gcp", {"zone": zone, "machine_type": payload.broker_machine_type}, 1))
+    demo_budget.enforce_sync(db, current_user, specs, sp)
     child = job_service.create_job(
         db,
         job_type="gce_deploy",
@@ -503,6 +510,12 @@ def deploy_cell_aws(
     # ec2_deploy from — anything omitted is silently skipped at deploy time.
     sp = demo_schedule.plan(db, payload, vm_job_type="ec2_deploy", workgroup=workgroup,
                             is_admin=current_user.is_effective_admin)
+    from ..services import demo_budget
+    specs = [("aws", {"region": region, "instance_type": payload.instance_type}, 1)]
+    if payload.register_in_entitle:
+        specs.append(("aws", {"region": region,
+                              "instance_type": payload.broker_instance_type}, 1))
+    demo_budget.enforce_sync(db, current_user, specs, sp)
     child = job_service.create_job(
         db,
         job_type="ec2_deploy",
@@ -708,6 +721,11 @@ async def deploy_cell_azure(
     )
     sp = demo_schedule.plan(db, payload, vm_job_type="azure_deploy", workgroup=workgroup,
                             is_admin=current_user.is_effective_admin)
+    from ..services import demo_budget
+    specs = [("azure", {"location": loc, "vm_size": payload.vm_size}, 1)]
+    if payload.register_in_entitle:
+        specs.append(("azure", {"location": loc, "vm_size": payload.broker_vm_size}, 1))
+    await demo_budget.enforce_async(current_user, specs, sp)
     child = job_service.create_job(
         db,
         job_type="azure_deploy",

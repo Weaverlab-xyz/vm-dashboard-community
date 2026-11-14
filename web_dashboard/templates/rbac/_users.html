@@ -226,6 +226,24 @@
         </div>
         {% endif %}
 
+        <!-- This user's own monthly budget for estimated demo-cell spend (services/
+             demo_budget). Blank sends null: the instance default (Settings, Cloud Costs). -->
+        {% if persona_focus %}
+        <div x-show="editingUser && !form.is_service_account">
+          <label class="block text-sm font-medium text-gray-700 mb-1">
+            Demo budget, USD/month <span class="text-gray-400 font-normal">(optional)</span>
+          </label>
+          <input type="number" min="0" step="0.01" x-model="form.demo_budget_usd"
+                 placeholder="Blank = the instance default"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <p class="text-xs text-gray-500 mt-1">
+            A list-price estimate of what this person's demo cells cost each month. Booking a
+            cell that would go past it is refused. 0 means no budget for this user.
+            Administrators are never limited.
+          </p>
+        </div>
+        {% endif %}
+
         <!-- Flags -->
         <div class="flex gap-6">
           <label x-show="!form.is_service_account" class="flex items-center gap-2 text-sm cursor-pointer">
@@ -1014,6 +1032,8 @@ function usersPage() {
         // The stored assignment. Empty when their focus comes from a group instead --
         // persona_source says which, and the table shows it.
         persona: u.persona || '',
+        // Blank in the input means "the instance default", stored as NULL.
+        demo_budget_usd: (u.demo_budget_usd ?? '') === '' ? '' : String(u.demo_budget_usd),
         // The role they hold, if any. The grid beside it holds their per-user override, so
         // both are editable independently and neither implies the other.
         role_id: u.role_id || '',
@@ -1117,6 +1137,9 @@ function usersPage() {
             // without the empty string an admin could assign a role but never remove one.
             role_id: this.form.role_id || '',
             role_ids: this.roleIdsPayload(),
+            // Always sent: blank is null, which hands them back to the instance default.
+            demo_budget_usd: String(this.form.demo_budget_usd ?? '').trim() === ''
+              ? null : Number(this.form.demo_budget_usd),
           };
           if (this.form.password) body.password = this.form.password;
           // Only for an account single sign-on has not claimed yet: see ssoSwitchVisible.

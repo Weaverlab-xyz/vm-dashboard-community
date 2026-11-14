@@ -2,7 +2,7 @@
 import json
 import uuid
 from typing import List
-from sqlalchemy import Column, String, Integer, DateTime, Boolean, Text, LargeBinary, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, String, Integer, DateTime, Boolean, Text, LargeBinary, ForeignKey, UniqueConstraint, Float
 from sqlalchemy.orm import relationship
 
 from ...utils.clock import utcnow
@@ -157,6 +157,9 @@ class User(Base):
     # No DEFAULT in the retrofit ALTER for the PostgreSQL reason on `is_admin`; NULL reads
     # as False everywhere, which is every existing row.
     is_service_account = Column(Boolean, default=False, nullable=True)
+    # A demo presenter's own monthly budget for estimated cell spend, USD (services/
+    # demo_budget). NULL: the instance default; 0: no budget for this user. Migration 0016.
+    demo_budget_usd = Column(Float, nullable=True)
     # When this account last completed an interactive sign-in: password (and the FIDO2
     # step when MFA applies) or SSO. Stamped when the session token is issued, never per
     # request -- a token used all afternoon is one login. NULL = never signed in since this

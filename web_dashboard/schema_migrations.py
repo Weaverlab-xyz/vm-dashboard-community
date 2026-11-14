@@ -400,6 +400,10 @@ MIGRATIONS: tuple = (
     Migration("0015_db_k8s_power_state",
               (add_column("cloud_databases", "power_state", "TEXT"),
                add_column("k8s_clusters", "power_state", "TEXT"))),
+    # A demo presenter's own monthly budget for estimated cell spend (services/demo_budget).
+    # NULL: the instance default (demo_monthly_budget_usd); 0: no budget for this user.
+    Migration("0016_user_demo_budget",
+              (add_column("users", "demo_budget_usd", "FLOAT"),)),
 )
 
 

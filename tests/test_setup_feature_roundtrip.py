@@ -366,7 +366,7 @@ def test_cost_explorer_budgets_round_trip():
     CONF.clear()
     data = _read_feature("cost_explorer", CostExplorerFeatureConfig)
     budgets = ("cost_monthly_budget", "cost_budget_aws", "cost_budget_azure",
-               "cost_budget_gcp", "cost_budget_oci")
+               "cost_budget_gcp", "cost_budget_oci", "demo_monthly_budget_usd")
     for key in budgets:
         assert key in data, f"{key} is not on CostExplorerFeatureConfig — a form field " \
                             "bound to it would be silently dropped on save"
