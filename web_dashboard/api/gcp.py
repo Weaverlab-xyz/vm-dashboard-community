@@ -877,6 +877,22 @@ async def bulk_deploy_instances(
     return GCPBulkDeployResponse(jobs=results, count=len(results), batch_id=batch_id)
 
 
+def deploy_admission(payload, workgroup: str):
+    """The admission gate's ``(action, request)`` for one GCE deploy.
+
+    One builder, called by this handler AND by a custom demo cell's booking check
+    (services/custom_cell_service.launch), so the policy judges the same request at
+    booking as at build. Resolve region exactly as the handler does; ``workgroup`` is the
+    already-validated canonical name.
+    """
+    zone = _resolve_zone(payload.zone)
+    return "gcp:gce:deploy", {
+        "region": _region_from_zone(zone), "zone": zone,
+        "instance_type": payload.machine_type, "image": payload.image_self_link,
+        "name": payload.instance_name, "count": 1, "batch": False,
+        "workgroup": workgroup}
+
+
 @router.post("/deploy", response_model=GCPDeployResponse)
 async def deploy_instance(
     payload: GCPDeployRequest,
@@ -913,12 +929,9 @@ async def deploy_instance(
     # region must come from the *requested* zone so the allowed-regions guardrail
     # checks where the VM actually lands, not the global default region.
     from ..services import admission_service
+    _action, _request = deploy_admission(payload, workgroup)
     _gate = admission_service.enforce(
-        "gcp:gce:deploy",
-        request={"region": region, "zone": zone,
-                 "instance_type": payload.machine_type, "image": payload.image_self_link,
-                 "name": payload.instance_name, "count": 1, "batch": False,
-                 "workgroup": workgroup},
+        _action, request=_request,
         actor=current_user, db=db,
         # The booking, so the gate admits a change that ACCEPTS the
         # window it would otherwise refuse for.

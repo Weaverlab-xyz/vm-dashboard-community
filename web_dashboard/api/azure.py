@@ -983,6 +983,21 @@ async def _fan_out_batch(
     )
 
 
+def deploy_admission(req, workgroup: str):
+    """The admission gate's ``(action, request)`` for one Azure VM deploy.
+
+    One builder, called by this handler AND by a custom demo cell's booking check
+    (services/custom_cell_service.launch), so the policy judges the same request at
+    booking as at build. Resolve region exactly as the handler does; ``workgroup`` is the
+    already-validated canonical name.
+    """
+    return "azure:vm:deploy", {
+        "region": _resolve_location(req.location), "instance_type": req.vm_size,
+        "image": req.image_id, "name": req.vm_name,
+        "count": 1, "batch": False,
+        "workgroup": workgroup}
+
+
 @router.post("/deploy", response_model=AzureDeployResponse)
 async def deploy_vm(
     req: AzureDeployRequest,
@@ -1022,12 +1037,9 @@ async def deploy_vm(
 
     # Pre-action policy gate (inert unless enabled + this action is gated).
     from ..services import admission_service
+    _action, _request = deploy_admission(req, workgroup)
     _gate = admission_service.enforce(
-        "azure:vm:deploy",
-        request={"region": loc, "instance_type": req.vm_size,
-                 "image": req.image_id, "name": req.vm_name,
-                 "count": 1, "batch": False,
-                 "workgroup": workgroup},
+        _action, request=_request,
         actor=current_user, db=db,
         # The booking, so the gate admits a change that ACCEPTS the
         # window it would otherwise refuse for.

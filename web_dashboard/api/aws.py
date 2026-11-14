@@ -732,6 +732,21 @@ async def _fan_out_batch(
     )
 
 
+def deploy_admission(req, workgroup: str):
+    """The admission gate's ``(action, request)`` for one EC2 deploy.
+
+    One builder, called by this handler AND by a custom demo cell's booking check
+    (services/custom_cell_service.launch), so the policy judges the same request at
+    booking as at build. Resolve region exactly as the handler does; ``workgroup`` is the
+    already-validated canonical name.
+    """
+    return "aws:ec2:deploy", {
+        "region": _resolve_region(req.region), "instance_type": req.instance_type,
+        "image": req.ami_id, "name": req.instance_name,
+        "count": 1, "batch": False,
+        "workgroup": workgroup}
+
+
 @router.post("/deploy", response_model=DeployResponse)
 async def deploy_ami(
     req: DeployRequest,
@@ -763,12 +778,9 @@ async def deploy_ami(
 
     # Pre-action policy gate (inert unless enabled + this action is gated).
     from ..services import admission_service
+    _action, _request = deploy_admission(req, workgroup)
     _gate = admission_service.enforce(
-        "aws:ec2:deploy",
-        request={"region": region, "instance_type": req.instance_type,
-                 "image": req.ami_id, "name": req.instance_name,
-                 "count": 1, "batch": False,
-                 "workgroup": workgroup},
+        _action, request=_request,
         actor=current_user, db=db,
         # The booking, so the gate admits a change that ACCEPTS the
         # window it would otherwise refuse for.
