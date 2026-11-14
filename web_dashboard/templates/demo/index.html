@@ -100,6 +100,9 @@
 
   <!-- ── Cells ───────────────────────────────────────────────────────────── -->
   <div x-show="activeTab === 'cells'" x-cloak role="tabpanel" class="space-y-4">
+    <p x-show="costs.caveat" x-cloak class="text-xs text-gray-500">
+      Cost: <span x-text="costs.caveat"></span>
+    </p>
     <template x-for="kind in cells" :key="kind.kind">
       <section class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
         <div class="flex flex-wrap items-start justify-between gap-3">
@@ -113,6 +116,8 @@
             <div class="text-gray-500" x-show="kind.total">
               <span x-text="kind.running"></span> deployed
             </div>
+            <div class="text-gray-500" x-show="kindTotal(kind.kind)" x-cloak
+                 x-text="kindTotal(kind.kind)"></div>
           </div>
         </div>
 
@@ -138,6 +143,7 @@
                 <th class="py-2 pr-4 font-medium">Workstream</th>
                 <th class="py-2 pr-4 font-medium">Created by</th>
                 <th class="py-2 pr-4 font-medium" x-show="kind.kind !== 'agent'">Schedule</th>
+                <th class="py-2 pr-4 font-medium" :title="costs.caveat">Cost (est.)</th>
                 <th class="py-2 font-medium"><span class="sr-only">Manage</span></th>
               </tr>
             </thead>
@@ -164,6 +170,11 @@
                     <button type="button" x-show="canBuild()" @click="setEnd(c)"
                             class="text-blue-700 hover:underline"
                             x-text="c.end_at ? 'Change end' : 'Set end'"></button>
+                  </td>
+                  <td class="py-2 pr-4 text-gray-600 text-xs" :title="costs.caveat">
+                    <div x-text="costLabel(kind.kind, c)"></div>
+                    <div class="text-gray-400" x-show="costNote(kind.kind, c)" x-cloak
+                         x-text="costNote(kind.kind, c)"></div>
                   </td>
                   <td class="py-2 text-right">
                     <a :href="c.manage_href" @click="manage($event, c)"
@@ -312,6 +323,7 @@ function demoHub(tabSlugs, buildPanels, otClouds) {
     error: '',
     cells: [],
     launchpad: [],
+    costs: {},
 
     init() {
       this.pickTab();
@@ -331,6 +343,48 @@ function demoHub(tabSlugs, buildPanels, otClouds) {
       } finally {
         this.loading = false;
       }
+      this.loadCosts();
+    },
+
+    // The estimate is its own request, after the list: a cold price cache means calls to
+    // each cloud's price list, and the cells must never wait on those. Best effort -- a
+    // failure leaves the column at a dash, never a wrong number.
+    async loadCosts() {
+      try {
+        this.costs = (await API.get('/api/demo/costs')) || {};
+      } catch (e) {
+        this.costs = {};
+      }
+    },
+
+    money(v) {
+      return '$' + Number(v).toFixed(2);
+    },
+
+    costLabel(kind, c) {
+      const x = ((this.costs.cells || {})[kind] || {})[c.id];
+      if (!x || x.rate_usd_h === null || x.rate_usd_h === undefined) return '—';
+      const parts = [this.money(x.rate_usd_h) + '/h now', this.money(x.so_far_usd) + ' so far'];
+      if (x.to_end_usd !== null && x.to_end_usd !== undefined) {
+        parts.push('~' + this.money(x.to_end_usd) + ' by end');
+      }
+      return parts.join(' · ');
+    },
+
+    costNote(kind, c) {
+      const x = ((this.costs.cells || {})[kind] || {})[c.id];
+      if (!x) return '';
+      if (x.note) return x.note;
+      const missed = x.unpriced || [];
+      if (!missed.length) return '';
+      if (missed.length === 1) return missed[0].name + ': ' + missed[0].reason;
+      return '+ ' + missed.length + ' not priced: ' + missed.map(u => u.name).join(', ');
+    },
+
+    kindTotal(kind) {
+      const t = (this.costs.totals || {})[kind];
+      if (!t || t.rate_usd_h === null || t.rate_usd_h === undefined) return '';
+      return this.money(t.rate_usd_h) + '/h now · ' + this.money(t.so_far_usd) + ' so far';
     },
 
     // Build is for whoever can build a cell: `demo:write`, or any cloud's own write (the

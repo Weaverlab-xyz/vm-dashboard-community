@@ -20,6 +20,9 @@ the cloud's own handler rather than re-implementing it:
   exactly the one the cloud page's Destroy runs. ``<cloud>:delete`` or ``demo:delete``.
   The general ``DELETE /api/<cloud>/instances/...`` routes are untouched: a presenter can
   destroy a demo cell and nothing else.
+
+``/costs`` is a list-price estimate for exactly the cells ``/summary`` lists
+(services/demo_cell_cost), fetched separately so the list never waits on a price lookup.
 """
 from datetime import datetime, timezone
 from typing import Optional
@@ -49,6 +52,25 @@ _CELLS = (
 )
 
 
+def _visible(db: Session, user: User) -> dict:
+    """Every cell kind's ``{state, note, cells}`` for this caller.
+
+    The one place the hub decides what a caller may see: the summary lists it, and the cost
+    estimate prices exactly it, so a cost can never appear for a cell the list hides.
+    """
+    accessible = _accessible_workgroups(user)
+
+    def _may_read(scope):
+        return may(user, scope, "read")
+
+    return {
+        "ot": demo_cells.ot_cells(db, _may_read, accessible),
+        "net": demo_cells.net_cells(db, _may_read, accessible),
+        "agent": demo_cells.agent_cells(db, accessible, user.username),
+        "custom": demo_cells.custom_cells(db, accessible),
+    }
+
+
 @router.get("/summary")
 def summary(
     db: Session = Depends(get_db),
@@ -60,17 +82,7 @@ def summary(
     the home page's tiles share, so a cell listed here is one the caller's own cloud page
     would show them.
     """
-    accessible = _accessible_workgroups(current_user)
-
-    def _may_read(scope):
-        return may(current_user, scope, "read")
-
-    results = {
-        "ot": demo_cells.ot_cells(db, _may_read, accessible),
-        "net": demo_cells.net_cells(db, _may_read, accessible),
-        "agent": demo_cells.agent_cells(db, accessible, current_user.username),
-        "custom": demo_cells.custom_cells(db, accessible),
-    }
+    results = _visible(db, current_user)
     cells = []
     for kind, title, blurb in _CELLS:
         res = results[kind]
@@ -86,6 +98,37 @@ def summary(
             "cells": rows,
         })
     return {"cells": cells, "launchpad": demo_launchpad.describe()}
+
+
+@router.get("/costs")
+async def costs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_demo_read),
+):
+    """A list-price estimate per cell: rate now, so far, and by its end time.
+
+    Its own request, after the summary, because a cold price cache means blocking HTTP to
+    each cloud's price list -- the cell list must never wait on that. The pricing runs off
+    the event loop on its own pool, with its own session. A busy pool or a deadline
+    answers 503, and the page shows no estimate rather than a wrong one.
+    """
+    from ..services import cloud_executor, demo_cell_cost
+
+    visible = {kind: res["cells"] for kind, res in _visible(db, current_user).items()
+               if res["state"] == "ok"}
+
+    def _price() -> dict:
+        from ..database import SessionLocal
+        session = SessionLocal()
+        try:
+            return demo_cell_cost.price_cells(session, visible)
+        finally:
+            session.close()
+
+    try:
+        return await cloud_executor.run("pricing", _price)
+    except cloud_executor.CloudCallError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 # ── The pickers a cell form needs ───────────────────────────────────────────────
