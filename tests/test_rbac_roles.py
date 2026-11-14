@@ -343,6 +343,43 @@ def test_the_seed_refreshes_built_in_wording_and_nothing_else():
     assert role_service.get(db, custom.id).description == "stale on purpose"
 
 
+def test_an_existing_install_gives_read_only_the_demo_read_levels():
+    """Read-Only is "every section at its read level", but seed_builtins never updates an
+    existing row, so an install seeded before the Demo hub (`demo`) and blueprints
+    (`demo_blueprints`) needs the one-time grant -- on the BUILT-IN row only, read only."""
+    from web_dashboard.database import (SchemaMarker, _READ_ONLY_DEMO_MARKER,
+                                        _grant_read_only_demo_read)
+    db = _session()
+    db.query(SchemaMarker).filter(SchemaMarker.key == _READ_ONLY_DEMO_MARKER).delete()
+    role_service.seed_builtins(db)
+    ro = role_service.get_by_slug(db, "read-only")
+    old = dict(ro.permissions_dict)
+    old.pop("demo", None)
+    old.pop("demo_blueprints", None)
+    ro.permissions_dict = old                        # as seeded by an earlier release
+    clone = role_service.create(db, name="Read Clone", description="",
+                                permissions={"vms": ["read"]})
+    db.commit()
+
+    assert _grant_read_only_demo_read(db) == 1
+    db.expire_all()
+    perms = role_service.get_by_slug(db, "read-only").permissions_dict
+    assert perms["demo"] == ["read"] and perms["demo_blueprints"] == ["read"]
+    assert "demo" not in role_service.get(db, clone.id).permissions_dict, (
+        "a clone of Read-Only is its owner's to decide")
+    assert _grant_read_only_demo_read(db) == 0, "the marker did not stop a re-run"
+
+
+def test_the_read_only_demo_grant_is_a_no_op_on_a_fresh_install():
+    from web_dashboard.database import (SchemaMarker, _READ_ONLY_DEMO_MARKER,
+                                        _grant_read_only_demo_read)
+    db = _session()
+    db.query(SchemaMarker).filter(SchemaMarker.key == _READ_ONLY_DEMO_MARKER).delete()
+    role_service.seed_builtins(db)
+    db.commit()
+    assert _grant_read_only_demo_read(db) == 0, "it changed a role already holding the grants"
+
+
 def test_an_existing_install_gives_the_presenter_its_own_pov_levels():
     """seed_builtins never updates a row's permissions, so an install seeded before
     `pov_own` existed needs the one-time grant -- on the BUILT-IN row only."""

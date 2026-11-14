@@ -99,8 +99,9 @@ Anyone acting on an agent cell — revoking it, linking it, opening an access re
 
 Nothing changes for existing users. `demo` only ever adds a path, so it has no backfill,
 and **Full access** in the grid does not include it. The new role is seeded on first boot.
-An install that already has the **Read-Only** role keeps its existing map, because built-in
-maps are written once. Add `demo:read` to it there if you want it.
+The built-in **Read-Only** role gains `demo:read` and `demo_blueprints:read` on upgrade, once,
+so it keeps covering every section at its read level. A role you cloned from it is left
+as you set it.
 
 ### A presenter never needs a cloud page
 

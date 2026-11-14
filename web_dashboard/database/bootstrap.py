@@ -233,6 +233,13 @@ def init_db():
             _logging.getLogger(__name__).warning(
                 "POV Presenter own-POV grant skipped", exc_info=True)
         try:
+            _pkg._grant_read_only_demo_read(_seed_db)
+        except Exception:  # noqa: BLE001 — a migration must never stop the app booting
+            _seed_db.rollback()
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "Read-Only demo read grant skipped", exc_info=True)
+        try:
             _pkg._narrow_presenter_to_own_povs(_seed_db)
         except Exception:  # noqa: BLE001 — a migration must never stop the app booting
             _seed_db.rollback()

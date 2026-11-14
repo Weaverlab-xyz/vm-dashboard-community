@@ -184,8 +184,9 @@ def create_admin_user(username: str, password: str, workgroups: List[str] = None
 from .rbac_backfills import (  # noqa: E402,F401  (re-exported: init_db and tests use these names)
     _BACKFILL_V1_DELIBERATELY_EMPTY, _BACKFILL_V1_MARKER, _BACKFILL_V1_PHANTOM_ADMIN,
     _BACKFILL_V1_SCOPES, _EMPTY_MEANS_NOTHING_MARKER, _PRESENTER_OWN_ONLY_MARKER,
-    _PRESENTER_OWN_POV_MARKER, _RETIRE_LEVELS_MARKER, _backfill_new_permission_scopes,
-    _commit_marked, _grant_presenter_own_pov, _materialise_empty_permission_maps,
+    _PRESENTER_OWN_POV_MARKER, _READ_ONLY_DEMO_MARKER, _RETIRE_LEVELS_MARKER,
+    _backfill_new_permission_scopes, _commit_marked, _grant_presenter_own_pov,
+    _grant_read_only_demo_read, _materialise_empty_permission_maps,
     _narrow_presenter_to_own_povs, _retire_unenforced_levels, _strip_retired,
 )
 from .bootstrap import (  # noqa: E402,F401  (re-exported: callers import init_db from here)
