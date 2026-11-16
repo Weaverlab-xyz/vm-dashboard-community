@@ -78,7 +78,7 @@ azure-mgmt-automation>=1.0.0,<2
 mcp>=1.28.1,<2
 
 # Google Cloud SDK
-google-cloud-compute>=1.56.0
+google-cloud-compute>=1.58.0
 google-cloud-secret-manager>=2.20.0
 google-cloud-storage>=3.17.1
 google-cloud-run>=0.16.2
