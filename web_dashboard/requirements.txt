@@ -20,7 +20,7 @@ gunicorn==27.0.1
 # down with it. 2.13.5 is the last version CI ran green on. Lift together with an mcp that
 # no longer imports it.
 pydantic>=2.14.2,<2.15
-pydantic-settings>=2.6.1
+pydantic-settings>=2.16.2
 
 # Authentication
 # 3.5.0 still carries GHSA-3qf3-8w2g-rqmx (HS/RS algorithm confusion, no upstream fix);
