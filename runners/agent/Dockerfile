@@ -8,7 +8,7 @@
 # operator-supplied code — a property tests/test_agent_runner_contract.py asserts
 # rather than trusts. When agent-executed Ansible lands it will spawn a one-shot
 # sibling container; the supervisor itself stays inert.
-FROM python:3.12-slim@sha256:e695ab189fa2d082b1c61c69a6b888a5adeca61ceeccad107b1ed2a125721a9e
+FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
 
 # zlib1g: Debian security update DSA-6613-1 (CVE-2026-76844, CVE-2026-85091, both
 # HIGH), fixed in trixie-security as 1:1.3.dfsg+really1.3.1-1+deb13u1. The pinned base
