@@ -2,7 +2,7 @@
 # fastapi 0.109 held starlette at 0.36, which has seven published advisories; the floor on
 # starlette is the version that fixes the last of them. pip-audit in CI (tests.yml) is
 # what notices the next one.
-fastapi==0.162.2
+fastapi==0.162.5
 starlette>=1.10.0
 uvicorn[standard]==0.54.0
 
@@ -11,7 +11,7 @@ sqlalchemy==2.1.8
 psycopg2-binary==2.9.13
 
 # WSGI server (used in Docker / Container Apps)
-gunicorn==26.2.0
+gunicorn==27.0.1
 
 # Data validation
 # Upper bound is load-bearing: pydantic 2.14.0 (2026-10) removed the private
@@ -38,7 +38,7 @@ python-multipart==0.0.33
 jinja2==3.1.6
 
 # Markdown rendering for the in-app docs pages (/docs/<page>) — pure-Python.
-markdown>=3.5,<4
+markdown>=3.11.3,<4
 
 # Async file operations
 aiofiles==25.1.0
@@ -53,7 +53,7 @@ python-dotenv==1.2.4
 slowapi==0.1.10
 
 # AWS SDK
-boto3==1.43.126
+boto3==1.44.2
 
 # Azure SDK
 # Upper bounds cap each package at the next major so a fresh build can't float into an
@@ -78,15 +78,15 @@ azure-mgmt-automation>=1.0.0,<2
 mcp>=1.28.1,<2
 
 # Google Cloud SDK
-google-cloud-compute>=1.56.0
-google-cloud-secret-manager>=2.32.0
+google-cloud-compute>=1.58.0
+google-cloud-secret-manager>=2.20.0
 google-cloud-storage>=3.17.1
-google-cloud-run>=0.16.2
+google-cloud-run>=0.16.3
 # google-cloud-build powers the GCP image-export Daisy workflow trigger in
 # services/gcp_service.export_custom_image_to_vhd. Pulled in here rather
 # than added to a runtime install path so it's part of the image's
 # pre-resolved dependency set.
-google-cloud-build>=3.42.0
+google-cloud-build>=3.43.0
 # Cloud cost: query the GCP Cloud Billing BigQuery export (services/cost_service.py).
 google-cloud-bigquery>=3.0.0
 google-auth>=2.62.1
