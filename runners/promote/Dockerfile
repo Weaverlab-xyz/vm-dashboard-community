@@ -15,7 +15,7 @@
 # with argparse exit 2. Keep the base current AND set GOTOOLCHAIN=auto so a
 # future version bump fetches the toolchain go.mod asks for instead of breaking
 # another release.
-FROM golang:1.27-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9 AS gcp-guest-agent
+FROM golang:1.27-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS gcp-guest-agent
 ENV GOTOOLCHAIN=auto
 ARG GUEST_AGENT_VERSION=20260529.00
 RUN apt-get update \
@@ -47,7 +47,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
 # image promotion. Launched as an ECS Fargate task / Azure ACI container
 # / GCP Cloud Run job by the dashboard. Stays slim so cold-start is
 # fast and the runtime footprint is bounded.
-FROM python:3.12-slim@sha256:e695ab189fa2d082b1c61c69a6b888a5adeca61ceeccad107b1ed2a125721a9e
+FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
 
 # libguestfs (virt-customize) offline-edits the disk image so an Azure-target
 # promotion can inject the Azure Linux Agent (waagent) into a foreign Linux
