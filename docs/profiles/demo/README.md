@@ -34,6 +34,7 @@ ticks itself off as you work. It exists for exactly this reader.
 | Page | What's in it |
 |---|---|
 | [Demo hub](demo-hub.md) | The **Demo** page: every demo cell you can see and every page a demo runs from, plus the **Demo Presenter** role that runs cells without general cloud deploy rights. |
+| [Demo Cell architecture and workflow](demo-cell-architecture.md) | One diagram for what builds a demo cell, what wires its resources and what ends it: the shape of the whole thing, and the page to read before explaining it to somebody. |
 | [Workspace](workspace.md) | The **Workspace** page: one landing page per role for the people who do the job — a getting-started checklist ticked by their own jobs, their resources, and the pages the role uses — and how to onboard a Cloud Ops or DevOps user onto it. |
 | [Personas](personas/README.md) | One page per role — what that person owns, the four-layer story in their language, and the use cases to run for them. Estate instances only: a POV instance has no focus axis. |
 | [OT Demo Cell](ot-demo-cell.md) | A simulated OT/ICS plant cell — PLC simulators and a web SCADA/HMI in an egress-less subnet, reached only through a Gateway. The air gap *is* the demo. |

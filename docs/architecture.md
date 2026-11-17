@@ -3,7 +3,8 @@
 > **Audience:** operator · **Profile:** `pov` · **Read this when:** you want the shape of the whole thing at once, or are explaining to somebody else what a POV is made of.
 
 Part of [A POV Instance](profiles/pov/README.md). One page for the shape of the whole thing:
-what builds a POV, what wires it, and what retires it.
+what builds a POV, what wires it, and what retires it. The estate-instance equivalent is
+[Demo Cell architecture and workflow](profiles/demo/demo-cell-architecture.md).
 
 <figure style="margin:2rem 0">
 <div style="overflow-x:auto">
