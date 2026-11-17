@@ -39,7 +39,7 @@ os.environ["AGENT_STATE_DIR"] = tempfile.mkdtemp(prefix="agent-attest-state-")
 try:
     import cryptography  # noqa: F401
     import fastapi  # noqa: F401
-    import jose  # noqa: F401
+    import jwt  # noqa: F401
     import sqlalchemy  # noqa: F401
 except ModuleNotFoundError as exc:  # pragma: no cover — app deps missing
     try:
@@ -54,7 +54,7 @@ from cryptography.hazmat.primitives import serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from jose import jwk, jwt  # noqa: E402
+import jwt  # noqa: E402
 from web_dashboard.database import (Base, RemoteAgent, SessionLocal,  # noqa: E402
                                     SpiffeTrustDomain, engine, get_db)
 from web_dashboard.api import agent as agent_api  # noqa: E402
@@ -110,7 +110,7 @@ _PRIV = _KEY.private_bytes(serialization.Encoding.PEM, serialization.PrivateForm
                            serialization.NoEncryption()).decode()
 _PUB = _KEY.public_key().public_bytes(serialization.Encoding.PEM,
                                       serialization.PublicFormat.SubjectPublicKeyInfo).decode()
-_JWK = jwk.construct(_PUB, "ES256").to_dict()
+_JWK = jwt.algorithms.ECAlgorithm.to_jwk(_KEY.public_key(), as_dict=True)
 _JWK.update(kid="k1", use="jwt-svid")
 _JWK.pop("alg", None)
 _ROGUE = ec.generate_private_key(ec.SECP256R1()).private_bytes(

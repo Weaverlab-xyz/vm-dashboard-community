@@ -23,10 +23,9 @@ pydantic>=2.14.2,<2.15
 pydantic-settings>=2.16.2
 
 # Authentication
-# 3.5.0 still carries GHSA-3qf3-8w2g-rqmx (HS/RS algorithm confusion, no upstream fix);
-# every decode here pins its algorithms, asymmetric-only where the key is public. See
-# .pip-audit-ignore for why it, and its ecdsa dependency, are accepted.
-python-jose[cryptography]==3.5.0
+# PyJWT replaced python-jose (GHSA-3qf3-8w2g-rqmx, no fixed release). Every call goes through
+# services/jwt_util.py; every decode pins its algorithms, asymmetric-only for public keys.
+PyJWT[crypto]>=2.13.0,<3
 bcrypt==4.2.1
 fido2>=2.2.1
 msal>=1.39.0
@@ -150,7 +149,7 @@ beyondtrust-bips-cli
 # developer's host with "not a timezone this system knows". Pure data, no build step.
 tzdata>=2026.6
 
-# Not imported directly: pyasn1 comes in through rsa, pyasn1-modules and python-jose. The
+# Not imported directly: pyasn1 comes in through rsa and pyasn1-modules. The
 # floor is the release that fixes CVE-2026-119194..119197 (HIGH), which the image's Trivy
 # scan blocks on; drop it once those dependants require 0.6.5 themselves.
 pyasn1>=0.6.5

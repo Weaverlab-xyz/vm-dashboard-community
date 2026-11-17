@@ -312,7 +312,7 @@ def _rsa_pem():
 
 def test_okta_private_key_jwt_assertion_and_scopes():
     from urllib.parse import parse_qs
-    from jose import jwt
+    import jwt
     m = _Mock([(lambda r: r.url.path == "/oauth2/v1/token",
                 lambda r: httpx.Response(200, json={"access_token": "OAT", "token_type": "Bearer",
                                                     "expires_in": 3600}))]).install()
@@ -325,7 +325,7 @@ def test_okta_private_key_jwt_assertion_and_scopes():
         assert form["scope"] == ["okta.users.read okta.groups.read"]
         assertion = form["client_assertion"][0]
         assert jwt.get_unverified_header(assertion)["kid"] == "kid1"
-        claims = jwt.get_unverified_claims(assertion)
+        claims = jwt.decode(assertion, options={"verify_signature": False})
         assert claims["iss"] == claims["sub"] == "0oa1"
         assert claims["aud"] == "https://acme.okta.com/oauth2/v1/token"
         w = _conn("okta", endpoint="https://acme.okta.com", auth_mode="private_key_jwt",

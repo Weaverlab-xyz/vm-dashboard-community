@@ -43,7 +43,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-dashboard-identity-test
 try:
     import cryptography  # noqa: F401
     import fastapi  # noqa: F401
-    import jose  # noqa: F401
+    import jwt  # noqa: F401
     import sqlalchemy  # noqa: F401
 except ModuleNotFoundError as exc:  # pragma: no cover — app deps missing
     try:
@@ -58,7 +58,7 @@ from cryptography.hazmat.primitives import serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from jose import jwk, jwt  # noqa: E402
+import jwt  # noqa: E402
 from web_dashboard.database import (Base, SessionLocal, SpiffeTrustDomain,  # noqa: E402
                                     engine)
 from web_dashboard.api import spiffe_oidc  # noqa: E402
@@ -75,9 +75,7 @@ DASH_ID = f"spiffe://{TD}/dashboard"
 _KEY = ec.generate_private_key(ec.SECP256R1())
 _PRIV = _KEY.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                            serialization.NoEncryption()).decode()
-_PUB_JWK = jwk.construct(_KEY.public_key().public_bytes(
-    serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode(),
-    "ES256").to_dict()
+_PUB_JWK = jwt.algorithms.ECAlgorithm.to_jwk(_KEY.public_key(), as_dict=True)
 _PUB_JWK.pop("alg", None)
 _JWT_KEY = dict(_PUB_JWK, kid="jwt-1", use="jwt-svid")
 # Things a bundle may carry that must never be published as a JWT signing key.
@@ -312,7 +310,7 @@ def test_a_minted_token_verifies_against_the_served_keys():
     keys = CLIENT.get("/spiffe/keys").json()["keys"]
     kid = jwt.get_unverified_header(token)["kid"]
     key = next(k for k in keys if k["kid"] == kid)
-    claims = jwt.decode(token, key, algorithms=["ES256"], audience="sts.amazonaws.com",
+    claims = jwt.decode(token, jwt.PyJWK.from_dict(key).key, algorithms=["ES256"], audience="sts.amazonaws.com",
                         issuer=ISSUER)
     assert claims["sub"] == DASH_ID
 

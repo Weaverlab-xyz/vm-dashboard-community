@@ -33,7 +33,7 @@ while IFS= read -r line; do
 done < "$IGNORE_FILE"
 
 args=()
-for id in "${ignores[@]}"; do args+=(--ignore-vuln "$id"); done
+for id in ${ignores[@]+"${ignores[@]}"}; do args+=(--ignore-vuln "$id"); done
 
 # pip-audit itself may live in another environment; PIPAPI_PYTHON_LOCATION points it at the
 # interpreter being audited.
@@ -50,7 +50,7 @@ for p in d["dependencies"]:
     for v in p.get("vulns", []):
         print(v["id"])
         print("\n".join(v.get("aliases", [])))')
-for id in "${ignores[@]}"; do
+for id in ${ignores[@]+"${ignores[@]}"}; do
   if ! grep -qxF "$id" <<<"$present"; then
     echo "::error file=$IGNORE_FILE::$id is ignored but no installed package has it any more; remove the entry"
     bad=1

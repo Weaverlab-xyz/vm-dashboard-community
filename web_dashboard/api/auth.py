@@ -15,12 +15,13 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import User, Fido2Credential, PersonalAccessToken, OAuthGroupMapping, get_db, verify_password, merge_permission_maps
 from ..services import config_service
+from ..services import jwt_util as jwt
+from ..services.jwt_util import JWTError
 from ..models.user import (
     TokenResponse,
     UserResponse,
@@ -121,7 +122,7 @@ def _create_pre_auth_token(user_id: str) -> str:
 def _decode_pre_auth_token(token: str) -> str:
     """Return the user_id from a pre_auth token or raise 401."""
     try:
-        payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+        payload = jwt.decode(token, settings.jwt_secret_key, [settings.jwt_algorithm])
         if payload.get("type") != "pre_auth":
             raise ValueError("wrong token type")
         return payload["sub"]
@@ -202,7 +203,7 @@ def resolve_bearer(token: str, db: Session) -> User:
             raise _unauthorized("External workload token not accepted")
         return user
     try:
-        payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+        payload = jwt.decode(token, settings.jwt_secret_key, [settings.jwt_algorithm])
     except JWTError:
         raise _unauthorized()
     kind = payload.get("type")

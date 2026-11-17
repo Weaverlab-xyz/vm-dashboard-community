@@ -38,7 +38,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-external-workload-tests
 try:
     import cryptography  # noqa: F401
     import fastapi  # noqa: F401
-    import jose  # noqa: F401
+    import jwt  # noqa: F401
 except ModuleNotFoundError as exc:  # pragma: no cover -- app deps missing
     try:
         import pytest
@@ -51,7 +51,7 @@ from cryptography.hazmat.primitives import serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
 from fastapi import Depends, FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from jose import jwk, jwt  # noqa: E402
+import jwt  # noqa: E402
 
 from web_dashboard.database import Base, SessionLocal, User, engine  # noqa: E402
 from web_dashboard.api import mcp_server, users as users_api  # noqa: E402
@@ -83,7 +83,8 @@ _OTHER_PRIV, _ = _keypair()         # a key the IdP never published
 
 
 def _jwk(pub, kid):
-    d = jwk.construct(pub, "RS256").to_dict()
+    d = jwt.algorithms.RSAAlgorithm.to_jwk(
+        serialization.load_pem_public_key(pub.encode()), as_dict=True)
     d.update(kid=kid, use="sig", alg="RS256")
     return d
 
@@ -224,7 +225,7 @@ def test_algorithm_confusion_is_refused():
     the dashboard's own HS256 path as anything but a failure."""
     _reset_idp()
     m = _mapped()
-    # Built by hand: jose refuses to HMAC with a PEM, which is exactly the misuse an
+    # Built by hand: PyJWT refuses to HMAC with a PEM, which is exactly the misuse an
     # attacker does not need a library's permission for.
     def seg(obj):
         return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()

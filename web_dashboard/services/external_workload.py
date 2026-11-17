@@ -28,8 +28,8 @@ import logging
 import time
 from datetime import timedelta
 
-from jose import jwt
-from jose.exceptions import JWTError
+from . import jwt_util as jwt
+from .jwt_util import JWTError
 
 from . import oidc_service
 from ..utils.clock import utcnow
@@ -119,13 +119,13 @@ def verify(token: str) -> dict:
     alg = header.get("alg")
     if alg not in ASYMMETRIC_ALGS:
         raise JWTError(f"algorithm {alg!r} is not accepted for workload tokens")
-    claims = jwt.decode(
+    claims = jwt.decode_with_jwks(
         token,
         _keys_for(header),
         algorithms=[alg],
         issuer=accepted_issuers(),
-        options={"verify_aud": False, "verify_at_hash": False, "leeway": 60,
-                 "require_exp": True, "require_iss": True, "require_sub": True},
+        leeway=60, verify_aud=False,
+        require=("exp", "iss", "sub"),
     )
     aud = claims.get("aud")
     got = set(aud if isinstance(aud, list) else [aud] if aud else [])

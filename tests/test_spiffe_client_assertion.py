@@ -34,7 +34,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-spiffe-assertion-tests"
 try:
     import cryptography  # noqa: F401
     import fastapi  # noqa: F401
-    import jose  # noqa: F401
+    import jwt  # noqa: F401
 except ModuleNotFoundError as exc:  # pragma: no cover -- app deps missing
     try:
         import pytest
@@ -47,7 +47,7 @@ from cryptography.hazmat.primitives import serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402
 from fastapi import Depends, FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from jose import jwk, jwt  # noqa: E402
+import jwt  # noqa: E402
 
 from web_dashboard.database import Base, OAuthClient, SessionLocal, User, engine  # noqa: E402
 from web_dashboard.api import oauth as oauth_api, users as users_api  # noqa: E402
@@ -73,7 +73,8 @@ def _ec():
 
 
 def _jwk(pub, kid, use="jwt-svid"):
-    d = jwk.construct(pub, "ES256").to_dict()
+    d = jwt.algorithms.ECAlgorithm.to_jwk(
+        serialization.load_pem_public_key(pub.encode()), as_dict=True)
     d.update(kid=kid, use=use)
     d.pop("alg", None)
     return d

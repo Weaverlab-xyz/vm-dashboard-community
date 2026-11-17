@@ -39,7 +39,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-k8s-dashboard-spiffe-te
 
 try:
     import cryptography  # noqa: F401
-    import jose  # noqa: F401
+    import jwt  # noqa: F401
     import sqlalchemy  # noqa: F401
     import yaml
 except ModuleNotFoundError as exc:  # pragma: no cover — app deps missing
@@ -53,7 +53,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover — app deps missing
 # First-party imports UNGUARDED: a broken module must fail this file, not skip it.
 from cryptography.hazmat.primitives import serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402
-from jose import jwt  # noqa: E402
+import jwt  # noqa: E402
 from web_dashboard.database import Base, K8sCluster, SessionLocal, engine  # noqa: E402
 from web_dashboard.services import (agent_service, config_service,  # noqa: E402
                                     dashboard_spire, k8s_service)
@@ -142,7 +142,7 @@ def _resolve(cid):
 
 
 def _claims(token):
-    return jwt.get_unverified_claims(token)
+    return jwt.decode(token, options={"verify_signature": False})
 
 
 # ── unchanged unless marked ───────────────────────────────────────────────────
