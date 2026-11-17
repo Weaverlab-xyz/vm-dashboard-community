@@ -423,8 +423,13 @@
            front of you actually is. A plain anchor on purpose: the modal carries no state
            for it, and the docs shell is public, so it needs no token either. #}
         <div class="px-5 py-3 border-t border-gray-200">
+          {% if install_profile == 'pov' %}
           <a href="/docs/architecture" target="_blank" rel="noopener"
              class="text-sm font-medium text-blue-600 hover:text-blue-800 transition-colors">POV architecture and workflow &rarr;</a>
+          {% else %}
+          <a href="/docs/profiles/demo/demo-cell-architecture" target="_blank" rel="noopener"
+             class="text-sm font-medium text-blue-600 hover:text-blue-800 transition-colors">Demo Cell architecture and workflow &rarr;</a>
+          {% endif %}
         </div>
       </div>
     </div>
