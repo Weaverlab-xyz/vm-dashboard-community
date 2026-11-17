@@ -313,7 +313,10 @@ def _forget_spire(agent: RemoteAgent) -> list:
             problems = dashboard_spire.forget_agent(agent.id, agent.spiffe_id)
         except Exception as exc:  # noqa: BLE001 - must never fail the revoke
             logger.warning("SPIRE cleanup for agent %s failed: %s", agent.id, exc)
-            problems = [str(exc)]
+            # Fixed text: this list is returned to the caller, and an exception's own
+            # text is not something to hand back. The detail is in the log line above.
+            problems = ["SPIRE cleanup failed; see the dashboard log and remove the "
+                        "registration by hand."]
     agent.spire_left_behind = problems
     return problems
 
@@ -677,7 +680,9 @@ def _version_at_least(agent: RemoteAgent, minimum: tuple) -> bool:
     One parser for every version gate, because two would drift on the "never reported one"
     case — which must read as *too old*, not as *unknown so allow it*.
     """
-    match = re.match(r"\s*(\d+)\.(\d+)", str(agent.agent_version or ""))
+    # The agent reports this string, so bound it before matching: a long run of
+    # whitespace would otherwise make the leading ``\s*`` backtrack.
+    match = re.match(r"(\d+)\.(\d+)", str(agent.agent_version or "").strip()[:32])
     if not match:
         # Never reported one, so it has never leased under a build that reports one.
         return False
