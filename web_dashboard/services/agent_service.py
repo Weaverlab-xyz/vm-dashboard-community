@@ -33,7 +33,6 @@ import hashlib
 import hmac
 import json
 import logging
-import re
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional
@@ -680,13 +679,26 @@ def _version_at_least(agent: RemoteAgent, minimum: tuple) -> bool:
     One parser for every version gate, because two would drift on the "never reported one"
     case — which must read as *too old*, not as *unknown so allow it*.
     """
-    # The agent reports this string, so bound it before matching: a long run of
-    # whitespace would otherwise make the leading ``\s*`` backtrack.
-    match = re.match(r"(\d+)\.(\d+)", str(agent.agent_version or "").strip()[:32])
-    if not match:
+    # The agent reports this string, so no regex: take the first two dot-separated fields
+    # and read the leading digits of each ("2.13.1", "2.13-rc1" and " 2.13" all read 2.13).
+    parts = str(agent.agent_version or "").strip()[:32].split(".")
+    if len(parts) < 2:
         # Never reported one, so it has never leased under a build that reports one.
         return False
-    return (int(match.group(1)), int(match.group(2))) >= minimum
+    major, minor = (_leading_int(parts[0]), _leading_int(parts[1]))
+    if major is None or minor is None:
+        return False
+    return (major, minor) >= minimum
+
+
+def _leading_int(text: str):
+    """The integer a string starts with, or None. ``"13-rc1"`` -> 13, ``"x"`` -> None."""
+    digits = ""
+    for ch in text:
+        if not ch.isdigit() or not ch.isascii():
+            break
+        digits += ch
+    return int(digits) if digits else None
 
 
 def supports_k8s(agent: RemoteAgent) -> bool:
