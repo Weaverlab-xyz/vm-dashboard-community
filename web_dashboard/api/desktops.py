@@ -434,8 +434,12 @@ def power_pool(
             # Dropped between the list and the queue. A fixed reason: the exception's
             # own text is not something to hand back in a response.
             skipped.append({"seat_id": seat["id"], "reason": "Seat no longer exists."})
-        except VDesktopError as e:
-            skipped.append({"seat_id": seat["id"], "reason": str(e)})
+        except VDesktopError:
+            # The action was validated above, so the only refusals left are the two
+            # "cannot be powered" cases in queue_seat_power. Fixed text for the same
+            # reason as above: no exception text in a response.
+            skipped.append({"seat_id": seat["id"],
+                            "reason": "Seat cannot be powered (not an Azure seat, or no VM yet)."})
     return {"jobs": jobs, "skipped": skipped}
 
 
