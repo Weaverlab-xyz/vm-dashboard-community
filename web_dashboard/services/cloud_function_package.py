@@ -178,7 +178,9 @@ def available_workloads(source_root: str = "") -> tuple:
 
 def workload_source_path(workload: str, source_root: str = "") -> str:
     """Absolute path to a workload module. Raises if it does not exist."""
-    if not workload or "/" in workload or "\\" in workload or workload.startswith("."):
+    # A module name: letters, digits and underscores, so no separator, dot or drive can
+    # reach os.path.join below. isidentifier() also admits non-ASCII letters; refuse those.
+    if not (workload and workload.isascii() and workload.isidentifier()):
         raise CloudFunctionPackageError(f"invalid workload name {workload!r}")
     path = os.path.join(_functions_root(source_root), "fnworkloads", f"{workload}.py")
     if not os.path.isfile(path):
