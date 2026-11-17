@@ -45,7 +45,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-spire-workloads-tests")
 try:
     import cryptography  # noqa: F401
     import fastapi  # noqa: F401
-    import jose  # noqa: F401
+    import jwt  # noqa: F401
     import sqlalchemy  # noqa: F401
 except ModuleNotFoundError as exc:  # pragma: no cover — app deps missing
     try:
@@ -56,11 +56,10 @@ except ModuleNotFoundError as exc:  # pragma: no cover — app deps missing
         sys.exit(0)
 
 # First-party imports UNGUARDED: a broken module must fail this file, not skip it.
-from cryptography.hazmat.primitives import serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from jose import jwk  # noqa: E402
+import jwt  # noqa: E402
 from web_dashboard.database import (AgentCell, AuditLog, Base, OAuthClient,  # noqa: E402
                                     SessionLocal, SpiffeTrustDomain, engine)
 from web_dashboard.utils.clock import utcnow  # noqa: E402
@@ -77,9 +76,7 @@ AUDIENCE = "https://agents.example.com"
 SECRET_TOKEN = "join-" + uuid.uuid4().hex
 
 _KEY = ec.generate_private_key(ec.SECP256R1())
-_JWK = jwk.construct(_KEY.public_key().public_bytes(
-    serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode(),
-    "ES256").to_dict()
+_JWK = jwt.algorithms.ECAlgorithm.to_jwk(_KEY.public_key(), as_dict=True)
 _JWK.update(kid="k1", use="jwt-svid")
 _JWK.pop("alg", None)
 

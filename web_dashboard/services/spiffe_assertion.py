@@ -40,8 +40,8 @@ from datetime import timedelta
 from typing import Optional
 
 import httpx
-from jose import jwt
-from jose.exceptions import JWTError
+from . import jwt_util as jwt
+from .jwt_util import JWTError
 
 from .external_workload import ASYMMETRIC_ALGS
 from ..utils.clock import utcfromtimestamp, utcnow
@@ -265,10 +265,9 @@ def verify(db, assertion: str, audiences, now: Optional[float] = None) -> dict:
     if not keys:
         raise AssertionError_(f"trust domain {td} has no JWT-SVID keys")
     try:
-        claims = jwt.decode(
+        claims = jwt.decode_with_jwks(
             assertion, {"keys": keys}, algorithms=[alg],
-            options={"verify_aud": False, "verify_at_hash": False, "leeway": LEEWAY,
-                     "require_exp": True, "require_sub": True})
+            leeway=LEEWAY, verify_aud=False, require=("exp", "sub"))
     except JWTError as exc:
         raise AssertionError_(f"assertion failed verification: {exc}") from exc
 

@@ -20,20 +20,19 @@ import time
 from urllib.parse import urlencode
 
 import httpx
-from jose import jwt
-from jose.exceptions import JWTError
+from . import jwt_util as jwt
+from .jwt_util import JWTError
 
 logger = logging.getLogger(__name__)
 
 # The signature algorithms an ID token may use: asymmetric only. The keys come from the
 # provider's JWKS, which is public, and an HS* algorithm would let anyone holding those
 # public key bytes use them as an HMAC secret and sign a token for any user (algorithm
-# confusion). Today python-jose refuses an RSA JWK for HS256 on its own, but its fix for
-# the wider class is incomplete (GHSA-3qf3-8w2g-rqmx), so the rule is enforced here
-# rather than left to the library. Discovery documents commonly advertise HS256 (Keycloak
-# and Auth0 do); it is dropped, and an HS* token then fails as a clean OIDCError instead
-# of a JWKError that escaped as a 500. external_workload and spiffe_assertion use this
-# list as well.
+# confusion). PyJWT also refuses an asymmetric key for HS*, but the rule is enforced here
+# rather than left to a library's key-type check. Discovery documents commonly advertise
+# HS256 (Keycloak and Auth0 do); it is dropped, and an HS* token then fails as a clean
+# OIDCError instead of a library error that escaped as a 500. external_workload and
+# spiffe_assertion use this list as well.
 ASYMMETRIC_ALGS = ("RS256", "RS384", "RS512", "PS256", "PS384", "PS512",
                    "ES256", "ES384", "ES512")
 
@@ -196,13 +195,12 @@ def validate_id_token(id_token: str) -> dict:
     """
     doc = discovery()
     try:
-        return jwt.decode(
+        return jwt.decode_with_jwks(
             id_token,
             _jwks(),
             algorithms=_id_token_algs(doc),
             audience=_cfg("oidc_client_id"),
             issuer=doc.get("issuer") or _cfg("oidc_issuer").rstrip("/"),
-            options={"verify_at_hash": False},  # no access-token hash check; we don't use it
         )
     except JWTError as e:
         raise OIDCError(f"ID token failed validation: {e}") from e

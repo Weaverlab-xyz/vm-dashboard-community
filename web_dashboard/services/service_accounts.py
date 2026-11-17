@@ -36,7 +36,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
-from jose import jwt
+from . import jwt_util as jwt
 from sqlalchemy.orm import Session
 from ..utils.clock import utcnow
 

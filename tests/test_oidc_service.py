@@ -17,7 +17,7 @@ if _ROOT not in sys.path:
 
 try:
     from web_dashboard.services import oidc_service as oidc
-except Exception as exc:  # httpx / jose absent
+except Exception as exc:  # httpx / PyJWT absent
     oidc = None
     _IMPORT_ERR = exc
 
@@ -184,13 +184,13 @@ def _signed_setup(advertised):
     """An RSA key, a discovery doc advertising ``advertised`` and the matching JWKS."""
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
-    from jose import jwk
+    import jwt as pyjwt
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     priv = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                              serialization.NoEncryption())
     pub = key.public_key().public_bytes(serialization.Encoding.PEM,
                                         serialization.PublicFormat.SubjectPublicKeyInfo)
-    public_jwk = dict(jwk.construct(pub, "RS256").to_dict(), kid="k1")
+    public_jwk = dict(pyjwt.algorithms.RSAAlgorithm.to_jwk(key.public_key(), as_dict=True), kid="k1")
     _reset(oidc_issuer="https://idp.example.com", oidc_client_id="client-1")
     doc = {"authorization_endpoint": "https://idp.example.com/auth",
            "token_endpoint": "https://idp.example.com/token",
@@ -206,7 +206,7 @@ def _signed_setup(advertised):
 def test_an_advertised_hmac_algorithm_is_never_accepted():
     """Discovery documents list HS256 (Keycloak and Auth0 do). Accepting it would let anyone
     holding the IdP's PUBLIC key sign an ID token for any user (algorithm confusion).
-    python-jose's fix for that class is incomplete, so the dashboard drops HS* itself."""
+    the dashboard drops HS* itself rather than relying on a library's key-type check."""
     assert oidc._id_token_algs({"id_token_signing_alg_values_supported":
                                 ["HS256", "RS256", "HS512", "ES256"]}) == ["RS256", "ES256"]
     assert oidc._id_token_algs({"id_token_signing_alg_values_supported": ["HS256"]}) == ["RS256"]
@@ -214,9 +214,9 @@ def test_an_advertised_hmac_algorithm_is_never_accepted():
 
 
 def test_an_hs256_id_token_is_rejected_and_rs256_still_verifies():
-    """Rejected as an OIDCError the callback handles. Before the allowlist, python-jose's
-    key-type check refused it with a JWKError that escaped validate_id_token as a 500."""
-    from jose import jwt
+    """Rejected as an OIDCError the callback handles. Before the allowlist, the library's
+    key-type check refused it with an error that escaped validate_id_token as a 500."""
+    import jwt
     priv, pub, fetch, claims = _signed_setup(["HS256", "RS256"])
     orig, oidc._fetch = oidc._fetch, fetch
     try:

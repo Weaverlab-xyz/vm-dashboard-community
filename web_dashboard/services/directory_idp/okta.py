@@ -59,7 +59,7 @@ def _id(value: str, what: str) -> str:
 
 
 def _client_assertion(conn: IdPConnection, token_url: str) -> str:
-    from jose import jwt
+    from .. import jwt_util as jwt
     now = int(time.time())
     headers = {"kid": conn.options.get("key_id")} if conn.options.get("key_id") else None
     try:

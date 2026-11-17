@@ -33,7 +33,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-service-account-tests")
 # import must fail this file, not skip it (tests/test_import_guard_narrowness.py).
 try:
     import fastapi  # noqa: F401
-    import jose  # noqa: F401
+    import jwt  # noqa: F401
 except ModuleNotFoundError as exc:  # pragma: no cover -- app deps missing
     try:
         import pytest
@@ -44,7 +44,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- app deps missing
 
 from fastapi import Depends, FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from jose import jwt  # noqa: E402
+import jwt  # noqa: E402
 
 from web_dashboard.config import settings  # noqa: E402
 from web_dashboard.utils.clock import utcnow  # noqa: E402

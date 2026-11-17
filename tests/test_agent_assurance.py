@@ -37,7 +37,7 @@ try:
     from cryptography.hazmat.primitives.asymmetric import ec
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
-    from jose import jwk, jwt
+    import jwt
 except ModuleNotFoundError as exc:  # pragma: no cover
     print(f"SKIP: {exc}")
     sys.exit(0)
@@ -99,7 +99,7 @@ _PRIV = _KEY.private_bytes(serialization.Encoding.PEM, serialization.PrivateForm
                            serialization.NoEncryption()).decode()
 _PUB = _KEY.public_key().public_bytes(serialization.Encoding.PEM,
                                       serialization.PublicFormat.SubjectPublicKeyInfo).decode()
-_JWK = jwk.construct(_PUB, "ES256").to_dict()
+_JWK = jwt.algorithms.ECAlgorithm.to_jwk(_KEY.public_key(), as_dict=True)
 _JWK.update(kid="k1", use="jwt-svid")
 _JWK.pop("alg", None)
 with SessionLocal() as _db:
