@@ -182,8 +182,11 @@ def workload_source_path(workload: str, source_root: str = "") -> str:
     # reach os.path.join below. isidentifier() also admits non-ASCII letters; refuse those.
     if not (workload and workload.isascii() and workload.isidentifier()):
         raise CloudFunctionPackageError(f"invalid workload name {workload!r}")
-    path = os.path.join(_functions_root(source_root), "fnworkloads", f"{workload}.py")
-    if not os.path.isfile(path):
+    workload_dir = os.path.realpath(os.path.join(_functions_root(source_root), "fnworkloads"))
+    path = os.path.realpath(os.path.join(workload_dir, f"{workload}.py"))
+    # Belt and braces behind the name check: whatever the name was, the file must resolve
+    # to somewhere inside the workload directory (a symlink out of it is refused too).
+    if not path.startswith(workload_dir + os.sep) or not os.path.isfile(path):
         raise CloudFunctionPackageError(
             f"unknown workload {workload!r} "
             f"(available: {', '.join(available_workloads(source_root)) or 'none'})")
