@@ -29,9 +29,9 @@ ARG PACKER_SHA256_ARM64=5d7d6de86a49b2d64f3c0eef5766855b580e10a7c45bd6605ba8f1de
 # releases.hashicorp.com, which Packer < 1.14 cannot install from — under 1.11.2 every
 # image quietly stayed on the last GitHub-hosted builds (amazon 1.3.9, azure 2.3.3,
 # googlecompute 1.2.1), whatever the latest release was.
-ARG PACKER_PLUGIN_AMAZON=1.8.3
-ARG PACKER_PLUGIN_AZURE=2.6.4
-ARG PACKER_PLUGIN_GOOGLECOMPUTE=1.2.8
+ARG PACKER_PLUGIN_AMAZON=1.8.4
+ARG PACKER_PLUGIN_AZURE=2.6.5
+ARG PACKER_PLUGIN_GOOGLECOMPUTE=1.2.9
 ARG PACKER_PLUGIN_ORACLE=1.1.2
 
 # Escape hatch for networks whose proxy still mangles trixie-updates /
