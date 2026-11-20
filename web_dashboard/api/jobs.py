@@ -307,7 +307,8 @@ async def get_job_state_lock(
         logger.warning("state-lock inspect for job %s (state %s) failed: %s",
                        job_id, state_job_id, exc)
         return {**out, "can_unlock": False,
-                "reason": f"Could not read the lock from the state backend: {exc}"}
+                "reason": "Could not read the lock from the state backend; the "
+                          "cause is in the dashboard log."}
 
     out.update(live)
     if not live.get("supported"):
