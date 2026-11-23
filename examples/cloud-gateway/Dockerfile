@@ -15,7 +15,7 @@
 #                     (optional; defaults to allowing every address)
 #
 # Build:  docker build -t <registry>/dash-gateway:1 examples/cloud-gateway
-FROM caddy:2-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
+FROM caddy:2-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
 
 COPY Caddyfile /etc/caddy/Caddyfile
 
