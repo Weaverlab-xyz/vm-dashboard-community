@@ -5,4 +5,4 @@
 # it is absent, but naming it keeps the deployed surface explicit and stops a
 # major-version bump from silently changing the request object the adapter
 # duck-types (fnruntime.adapters.from_gcp).
-functions-framework>=3.0,<4
+functions-framework>=3.10.2,<4
