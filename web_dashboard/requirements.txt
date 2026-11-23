@@ -101,7 +101,7 @@ azure-storage-blob>=12.31.1,<13
 # vendoring it is safe on this image's multi-arch build (a wheel with a compiled
 # extension would not be — see _BINARY_SUFFIXES in the packager). Capped below 2.x
 # because the v2 programming model's decorators live in this major version.
-azure-functions>=1.21,<2
+azure-functions>=2.4.0,<3
 
 # Oracle Cloud Infrastructure SDK (fourth cloud provider). Compute VM CRUD +
 # Vault secret + Usage API access in services/oci_service.py; the DB/OKE
